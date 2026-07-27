@@ -14,7 +14,7 @@ from factory.attempts import AttemptManager, IdenticalAttemptError
 from factory.backup import BackupAdapter
 from factory.config import FactoryConfig, load_config
 from factory.context_builder import ContextBuilder
-from factory.deployment import DeploymentGuard
+from factory.deployment import DeploymentError, DeploymentGuard, TransactionalDeployer
 from factory.gateway_commands import GatewayCommandError, parse_command
 from factory.github import GitHubAdapter, GitHubCommandError
 from factory.intake import IntakeRejected, IntakeService
@@ -440,6 +440,54 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertNotIn("RESTIC_PASSWORD", " ".join(backup.argv))
             with patch.dict(os.environ, {"GH_TOKEN": ""}, clear=False), self.assertRaises(ExternalBlocker):
                 GitHubAdapter("brullik", "hermes-software-factory").require_authentication()
+
+    def test_transactional_deployer_promotes_and_retains_previous_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("new\n", encoding="utf-8")
+            (root / "current").mkdir(parents=True)
+            (root / "current" / "VERSION").write_text("old\n", encoding="utf-8")
+
+            deployer = TransactionalDeployer(
+                root,
+                health_probe=lambda current: (current / "VERSION").read_text(encoding="utf-8").strip() == "new",
+            )
+            result = deployer.promote("candidate-1", source)
+
+            self.assertEqual(result.status, "PROMOTED")
+            self.assertEqual((root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "new")
+            self.assertEqual(
+                (root / "backup-candidate-1-previous" / "VERSION").read_text(encoding="utf-8").strip(),
+                "old",
+            )
+
+    def test_transactional_deployer_rolls_back_failed_health_and_keeps_failed_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("bad\n", encoding="utf-8")
+            (root / "current").mkdir(parents=True)
+            (root / "current" / "VERSION").write_text("safe\n", encoding="utf-8")
+
+            deployer = TransactionalDeployer(root, health_probe=lambda _current: False)
+            result = deployer.promote("candidate-2", source)
+
+            self.assertEqual(result.status, "ROLLED_BACK")
+            self.assertEqual((root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "safe")
+            self.assertEqual((root / "failed-candidate-2" / "VERSION").read_text(encoding="utf-8").strip(), "bad")
+
+    def test_transactional_deployer_rejects_existing_backup_before_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (root / "backup-candidate-3-previous").mkdir(parents=True)
+
+            with self.assertRaises(DeploymentError):
+                TransactionalDeployer(root, health_probe=lambda _current: True).promote("candidate-3", source)
 
     def test_github_cli_boundary_is_allowlisted_and_sha_guarded(self) -> None:
         calls: list[list[str]] = []
