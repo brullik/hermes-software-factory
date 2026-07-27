@@ -104,12 +104,14 @@ class GatewayTests(unittest.TestCase):
                 offset_path=Path(directory) / "offset",
             )
 
-            self.assertTrue(gateway.process_update(update(30, 42, "/help")))
+            with self.assertLogs("factory.gateway", level="INFO") as logs:
+                self.assertTrue(gateway.process_update(update(30, 42, "/help")))
             self.assertEqual(
                 api.sent[0][1],
                 "/idea <текст>, /status, /projects, /pause <product>, /resume <product>, /cancel <product>, /owner_action",
             )
             self.assertNotIn("Р", api.sent[0][1])
+            self.assertIn("telegram update processed update_id=30 command=help", "\n".join(logs.output))
             state.close()
 
     def test_api_client_never_exposes_token_in_request_payload(self) -> None:
