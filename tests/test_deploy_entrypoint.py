@@ -13,6 +13,7 @@ class DeployEntrypointTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         loaded = runpy.run_path(str(ENTRYPOINT))
         cls.validate_health_url = loaded["validate_health_url"]
+        cls.health_probe = loaded["health_probe"]
 
     def test_health_url_requires_loopback_http(self) -> None:
         self.assertEqual(
@@ -33,6 +34,12 @@ class DeployEntrypointTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 type(self).validate_health_url(value)
+
+    def test_health_probe_rejects_invalid_retry_parameters(self) -> None:
+        with self.assertRaises(ValueError):
+            type(self).health_probe("http://127.0.0.1:8787/healthz", 0, 1.0)
+        with self.assertRaises(ValueError):
+            type(self).health_probe("http://127.0.0.1:8787/healthz", 1, -1.0)
 
 
 if __name__ == "__main__":

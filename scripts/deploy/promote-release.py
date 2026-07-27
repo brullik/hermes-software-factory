@@ -11,6 +11,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from urllib.error import URLError
@@ -60,14 +61,24 @@ def restart_services() -> None:
     run_checked(["systemctl", "restart", *SERVICES])
 
 
-def health_probe(url: str) -> Callable[[Path], bool]:
+def health_probe(url: str, attempts: int, delay_seconds: float) -> Callable[[Path], bool]:
+    if attempts < 1:
+        raise ValueError("health attempts must be positive")
+    if delay_seconds < 0:
+        raise ValueError("health delay cannot be negative")
+
     def probe(_current: Path) -> bool:
-        try:
-            with urlopen(url, timeout=5) as response:
-                status = getattr(response, "status", None)
-                return isinstance(status, int) and 200 <= status < 400
-        except (OSError, URLError, TimeoutError):
-            return False
+        for attempt in range(attempts):
+            try:
+                with urlopen(url, timeout=5) as response:
+                    status = getattr(response, "status", None)
+                    if isinstance(status, int) and 200 <= status < 400:
+                        return True
+            except (OSError, URLError, TimeoutError):
+                pass
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+        return False
 
     return probe
 
@@ -78,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--install-root", default="/opt/hermes-factory", type=Path)
     parser.add_argument("--health-url", default="http://127.0.0.1:8787/healthz")
+    parser.add_argument("--health-attempts", default=12, type=int)
+    parser.add_argument("--health-delay", default=2.0, type=float)
     return parser
 
 
@@ -90,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         run_checked(["systemctl", "start", "hermes-factory-backup.service"])
         result = TransactionalDeployer(
             args.install_root,
-            health_probe(health_url),
+            health_probe(health_url, args.health_attempts, args.health_delay),
             activate=restart_services,
         ).promote(args.release_id, source)
     except (DeploymentError, OSError, RuntimeError, ValueError) as error:
