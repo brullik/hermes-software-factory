@@ -1,7 +1,7 @@
 {
-  "artifact_id": "acceptance-490a9e89e3dffff4a02d",
+  "artifact_id": "acceptance-97aa97a250756686af09",
   "backup_restore": "PASS",
-  "created_at": "2026-07-27T10:17:18Z",
+  "created_at": "2026-07-27T10:12:07Z",
   "evidence_refs": [
     "evidence/package-validation-report.json",
     "docs/IMPLEMENTATION-LEDGER.md",
@@ -9,7 +9,6 @@
     "evidence/compatibility-report.json",
     "evidence/pilot/github-publication.json",
     "evidence/pilot/black-box-vps-20260727.json",
-    "evidence/pilot/black-box-vps-5cbda13-20260727.json",
     "evidence/pilot/black-box-vps-aff6647-20260727.json",
     "evidence/model-benchmark-economy.json",
     "evidence/model-benchmark-expert.json",
@@ -123,7 +122,7 @@
       "status": "PASS"
     },
     {
-      "evidence_ref": "evidence/pilot/black-box-vps-5cbda13-20260727.json",
+      "evidence_ref": "evidence/pilot/black-box-vps-aff6647-20260727.json",
       "id": "pilot-e2e",
       "status": "BLOCKED_EXTERNAL"
     },
