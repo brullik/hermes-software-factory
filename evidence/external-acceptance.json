@@ -48,7 +48,7 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
-        "Package aff6647 deployed after staging validation; current package manifest verifies 227 files, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and backup-aff6647-previous is retained for rollback",
+        "Package 29b0edc deployed after a pre-deploy encrypted restic snapshot; current package manifest verifies 229 files, transactional deployment/rollback, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and backup-29b0edc-previous is retained for rollback",
         "controller health and restart smoke passed; worker service starts successfully and remains idle with no pending tasks",
         "UFW default deny incoming with SSH allow",
         "SSH password auth and root login disabled",
