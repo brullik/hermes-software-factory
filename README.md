@@ -95,7 +95,13 @@ python3 scripts/secret_scan.py
 python3 scripts/build_sbom.py --check
 ```
 
-`acceptance --full` возвращает `BLOCKED_EXTERNAL`, пока не подключены Ubuntu VPS, Hermes/provider auth, GitHub, Telegram и offsite backup. Это ожидаемый безопасный статус, а не успешная production-приёмка.
+`acceptance --full` возвращает `BLOCKED_EXTERNAL`, пока не закрыты внешние
+условия: независимое approval и squash-merge PR, benchmark-gated Hermes route
+и provider-backed pilot, полноценный pilot PR/Telegram/rollback black-box, а
+также offsite backup. Подключённые VPS, GitHub governance, OAuth, Telegram
+credential/gateway и локальный encrypted-backup probe фиксируются в
+`evidence/external-acceptance.json`. Это ожидаемый безопасный статус, а не
+успешная production-приёмка.
 
 ## Durable role pipeline
 
