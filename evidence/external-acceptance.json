@@ -48,8 +48,8 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
-        "Package fb9c937 deployed after staging validation; current package manifest verifies 210 files and backup-fb9c937 is retained for rollback",
-        "controller health and restart smoke passed",
+        "Package fd88078 deployed after staging validation; current package manifest verifies 216 files, provider-backed worker is enabled and active, and backup-fd88078 is retained for rollback",
+        "controller health and restart smoke passed; worker service starts successfully and remains idle with no pending tasks",
         "UFW default deny incoming with SSH allow",
         "SSH password auth and root login disabled",
         "fail2ban active with sshd jail"
