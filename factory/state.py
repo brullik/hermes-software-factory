@@ -290,6 +290,13 @@ class StateStore:
             )
             self._record_event(product_id, task_id, "task_created", {"title": title})
 
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
     def claim_task(self, *, worker_id: str, lease_seconds: int = 300) -> dict[str, Any] | None:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")

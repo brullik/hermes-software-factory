@@ -111,6 +111,9 @@ install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-gateway.service" \
   /etc/systemd/system/hermes-factory-gateway.service
 install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-worker.service" \
+  /etc/systemd/system/hermes-factory-worker.service
+install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-backup.service" \
   /etc/systemd/system/hermes-factory-backup.service
 install -o root -g root -m 0644 \
@@ -121,6 +124,6 @@ install -o root -g "${SERVICE_USER}" -m 0750 \
   "${INSTALL_ROOT}/bin/factory-rollback"
 
 systemctl daemon-reload
-systemctl enable docker.service fail2ban.service hermes-factory-controller.service hermes-factory-backup.timer
+systemctl enable docker.service fail2ban.service hermes-factory-controller.service hermes-factory-worker.service hermes-factory-backup.timer
 systemctl start fail2ban.service
 printf 'Bootstrap files installed. Credentials, Hermes compatibility, firewall, SSH hardening, and service start require separate evidence-backed steps.\n'
