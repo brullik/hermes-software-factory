@@ -1,7 +1,7 @@
 {
   "artifact_id": "acceptance-9a9b76c47ffda4c3f998",
   "backup_restore": "PASS",
-  "created_at": "2026-07-26T20:06:05Z",
+  "created_at": "2026-07-27T07:33:13Z",
   "evidence_refs": [
     "evidence/package-validation-report.json",
     "docs/IMPLEMENTATION-LEDGER.md",
@@ -105,7 +105,7 @@
     {
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
       "id": "github-governance",
-      "status": "BLOCKED_EXTERNAL"
+      "status": "PASS"
     },
     {
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
@@ -125,7 +125,6 @@
   ],
   "open_items": [
     "hermes-compatibility",
-    "github-governance",
     "pilot-e2e",
     "offsite-backup"
   ],
@@ -151,7 +150,7 @@
   "schema_version": "1.0",
   "security": "PASS",
   "status": "BLOCKED_EXTERNAL",
-  "summary": "Local checks, OAuth health probes, Telegram gateway, and the closed model benchmark ran; remaining external acceptance items and the deferred route change are explicitly recorded.",
+  "summary": "Local checks, OAuth health probes, Telegram gateway, public GitHub governance, and the closed model benchmark ran; remaining external acceptance items and the deferred route change are explicitly recorded.",
   "versions": [
     {
       "component": "python",

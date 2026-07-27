@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "created_at": "2026-07-26T20:06:05Z",
+  "created_at": "2026-07-27T07:33:13Z",
   "host": {
     "address": "191.44.33.92",
     "os": "Ubuntu 24.04 LTS",
@@ -72,10 +72,12 @@
       ]
     },
     "github-governance": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "PASS",
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
       "details": [
-        "GitHub CLI is authenticated as brullik with repo/workflow scopes; target factory repository is not yet present and no repository write was performed"
+        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit 2ad81b93515e6bd93e144cfd19c8bb5d4018cef2",
+        "Hermes main governance ruleset is active: pull request required, one approval, stale-review dismissal, conversation resolution, deletion/force-push blocked, and configured required status contexts",
+        "factory-quality GitHub Actions passed on main and codex/publish-hermes-factory"
       ]
     },
     "telegram-gateway": {
