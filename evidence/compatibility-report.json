@@ -61,11 +61,12 @@
       "status": "BLOCKED_EXTERNAL",
       "command": "provider health and model discovery",
       "evidence_ref": "evidence/external-acceptance.json",
-      "reason": "Owner OAuth and health probes passed for the three ChatGPT tiers; the closed benchmark completed but did not clear the safety-gated route-change threshold, so factory aliases remain fail-closed"
+      "reason": "Pinned Hermes install, profile/state restart probes, owner OAuth, Telegram gateway credential probe, and health probes passed. Runtime aliases remain fail-closed pending the benchmark-gated policy PR and independent review; delegation boundary and incompatible-release negative smoke are still external checks."
     }
   ],
   "evidence_refs": [
     "evidence/hermes-agent-release.txt",
-    "evidence/external-acceptance.json"
+    "evidence/external-acceptance.json",
+    "evidence/hermes-compatibility-observations.json"
   ]
 }

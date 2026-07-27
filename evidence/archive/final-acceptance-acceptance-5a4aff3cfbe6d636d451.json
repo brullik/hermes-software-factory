@@ -1,19 +1,11 @@
 {
-  "artifact_id": "acceptance-95c3ac16d20881bfeff0",
+  "artifact_id": "acceptance-5a4aff3cfbe6d636d451",
   "backup_restore": "PASS",
-  "created_at": "2026-07-27T08:24:20Z",
+  "created_at": "2026-07-27T08:05:15Z",
   "evidence_refs": [
     "evidence/package-validation-report.json",
     "docs/IMPLEMENTATION-LEDGER.md",
-    "evidence/external-acceptance.json",
-    "evidence/compatibility-report.json",
-    "evidence/pilot/github-publication.json",
-    "evidence/model-benchmark-economy.json",
-    "evidence/model-benchmark-expert.json",
-    "evidence/model-benchmark-observations.json",
-    "evidence/model-benchmark-safety-v3.json",
-    "evidence/model-benchmark-standard.json",
-    "evidence/hermes-compatibility-observations.json"
+    "evidence/external-acceptance.json"
   ],
   "host": {
     "admin_publicly_exposed": false,

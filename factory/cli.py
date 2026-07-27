@@ -314,6 +314,21 @@ def acceptance_command(args: argparse.Namespace) -> int:
             pilot_release = "staging-only"
             endpoint = pilot_data.get("endpoint")
             pilot_url = str(endpoint) if isinstance(endpoint, str) else None
+    evidence_refs = ["evidence/package-validation-report.json", "docs/IMPLEMENTATION-LEDGER.md"]
+    if external_path.is_file():
+        evidence_refs.append("evidence/external-acceptance.json")
+    if (ROOT / "evidence" / "compatibility-report.json").is_file():
+        evidence_refs.append("evidence/compatibility-report.json")
+    if (ROOT / "evidence" / "pilot" / "github-publication.json").is_file():
+        evidence_refs.append("evidence/pilot/github-publication.json")
+    evidence_refs.extend(
+        f"evidence/{path.name}"
+        for path in sorted((ROOT / "evidence").glob("model-benchmark-*.json"))
+    )
+    evidence_refs.extend(
+        f"evidence/{path.name}"
+        for path in sorted((ROOT / "evidence").glob("hermes-compatibility-*.json"))
+    )
     artifact = {
         **artifact_metadata(config, "acceptance", artifact_id, "hermes-software-factory"),
         "status": status,
@@ -330,7 +345,7 @@ def acceptance_command(args: argparse.Namespace) -> int:
         "resource_usage": {"max_workers": 2, "oom_events": 0, "disk_cleanup": "PASS"},
         "open_items": open_items,
         "summary": "All local and external checks passed." if status == "PASS" else "Local checks passed; remaining external acceptance items are explicitly recorded." if not local_failed else "One or more local checks failed.",
-        "evidence_refs": ["evidence/package-validation-report.json", "docs/IMPLEMENTATION-LEDGER.md"] + (["evidence/external-acceptance.json"] if external_path.is_file() else []),
+        "evidence_refs": list(dict.fromkeys(evidence_refs)),
     }
     path = _write_latest_acceptance(artifact)
     print(json.dumps({"status": artifact["status"], "evidence": str(path), "checks": checks}, ensure_ascii=False))

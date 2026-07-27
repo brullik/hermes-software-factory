@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "hermes-compatibility-20260727",
+  "created_at": "2026-07-27T08:13:33Z",
+  "subject": {
+    "host": "191.44.33.92",
+    "factory_commit": "6e2f3b695f8464a5286395e55fb2fa4a4d8ed5e3",
+    "hermes_version": "0.19.0",
+    "hermes_tag": "v2026.7.20",
+    "hermes_source_commit": "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
+    "hermes_artifact_sha256": "bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f"
+  },
+  "policy_digest": "8fa83aa61b556c59ccdc3e756c16e51193614ad6d19caadaa39f49f7ac29bc02",
+  "status": "BLOCKED_EXTERNAL",
+  "checks": [
+    {
+      "id": "hermes-version-pin",
+      "status": "PASS",
+      "result": "Hermes Agent v0.19.0, pinned tag, source commit, and artifact digest match the compatibility report."
+    },
+    {
+      "id": "profile-isolation",
+      "status": "PASS",
+      "result": "A temporary no-skills compatprobe profile was created, listed, inspected as a separate profile with zero skills, and deleted."
+    },
+    {
+      "id": "controller-state-after-restart",
+      "status": "PASS",
+      "result": "Controller status and the persisted product record were identical before and after a controlled service restart."
+    },
+    {
+      "id": "telegram-gateway-credential-probe",
+      "status": "PASS",
+      "result": "Installed factory gateway check-only probe passed; allowlist and durable offset evidence are recorded separately."
+    },
+    {
+      "id": "provider-health",
+      "status": "PASS",
+      "result": "OpenAI Codex OAuth health probes for gpt-5.6-luna, gpt-5.6-terra, and gpt-5.6-sol passed; Nous Portal OAuth is logged in with tencent/hy3:free selected."
+    },
+    {
+      "id": "runtime-alias-selection",
+      "status": "BLOCKED_EXTERNAL",
+      "result": "The runtime registry remains intentionally fail-closed with economy, standard, and expert selected=null pending benchmark-gated policy PR and independent review."
+    },
+    {
+      "id": "delegation-boundary-black-box",
+      "status": "BLOCKED_EXTERNAL",
+      "result": "A provider-backed factory delegation run proving depth, child count, and transcript isolation has not been completed."
+    },
+    {
+      "id": "known-incompatible-release-rejection",
+      "status": "BLOCKED_EXTERNAL",
+      "result": "The negative smoke fixture for an intentionally incompatible Hermes release has not been executed on the VPS."
+    }
+  ],
+  "open_items": [
+    "runtime-alias-selection",
+    "delegation-boundary-black-box",
+    "known-incompatible-release-rejection"
+  ],
+  "evidence_refs": [
+    "evidence/compatibility-report.json",
+    "evidence/external-acceptance.json",
+    "evidence/model-benchmark-safety-v3.json",
+    "evidence/hermes-agent-release.txt"
+  ]
+}

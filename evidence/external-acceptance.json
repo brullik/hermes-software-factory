@@ -61,6 +61,7 @@
         "Pinned Hermes CLI v0.19.0 install and CLI smoke passed; exact tag, commit, and wheel digest are recorded",
         "Codex and Nous OAuth are connected; Hermes default model discovery selected tencent/hy3:free via Nous Portal",
         "OAuth health probes for gpt-5.6-luna, gpt-5.6-terra, and gpt-5.6-sol passed",
+        "Profile isolation, controller state persistence after restart, and the installed gateway credential probe passed",
         "Supplemental 20-task safety-gate benchmark completed at 20/20, 18/20, and 20/20 for OpenAI Codex luna/terra/sol versus 9/20 for Nous tencent/hy3:free; safety-gated route change remains deferred and aliases stay fail-closed"
       ]
     },
@@ -93,7 +94,8 @@
       "evidence_ref": "evidence/pilot/staging-smoke.json",
       "details": [
         "Neutral pilot Product Contract, Docker staging, health, and persistence smoke passed",
-        "GitHub PR/review/merge, provider-backed agent, Telegram black-box, and release rollback evidence still require external access"
+        "Neutral pilot repository is now public at https://github.com/brullik/hermes-factory-pilot with latest commit 6a943737be1e7d7af52556e99f44b680da7ba06c; pilot/test CI passed and the active governance ruleset requires one approval",
+        "Pilot PR/review/merge, provider-backed agent, Telegram black-box, and release rollback evidence still require external access"
       ]
     },
     "offsite-backup": {
