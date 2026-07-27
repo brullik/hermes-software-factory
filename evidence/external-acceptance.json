@@ -48,8 +48,8 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
-        "Package 29b0edc deployed after a pre-deploy encrypted restic snapshot; current package manifest verifies 229 files, transactional deployment/rollback, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and backup-29b0edc-previous is retained for rollback",
-        "controller health and restart smoke passed; worker service starts successfully and remains idle with no pending tasks",
+        "Package f660326 deployed through the allowlisted promote-release entrypoint after a pre-deploy encrypted restic snapshot; current package manifest verifies 231 files, transactional deployment/rollback with health retry, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and backup-f660326-previous is retained for rollback",
+        "controller health and restart smoke passed; worker service starts successfully and remains idle with no pending tasks; an earlier single-probe 6303937 attempt rolled back automatically and preserved failed-6303937, then the retry fix promoted f660326 successfully",
         "UFW default deny incoming with SSH allow",
         "SSH password auth and root login disabled",
         "fail2ban active with sshd jail"

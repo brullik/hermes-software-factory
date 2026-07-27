@@ -68,6 +68,8 @@ cp -a "${ROOT_DIR}/." "${INSTALL_ROOT}/current/"
 chown -R root:root "${INSTALL_ROOT}/current"
 find "${INSTALL_ROOT}/current" -type d -exec chmod 0755 {} +
 find "${INSTALL_ROOT}/current" -type f -exec chmod 0644 {} +
+find "${INSTALL_ROOT}/current/scripts" -type f -name '*.sh' -exec chmod 0755 {} +
+chmod 0755 "${INSTALL_ROOT}/current/scripts/deploy/promote-release.py"
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 "${INSTALL_ROOT}/venv"
 "${PYTHON_BIN}" -m venv "${INSTALL_ROOT}/venv"
 "${INSTALL_ROOT}/venv/bin/python" -m pip install --upgrade pip
