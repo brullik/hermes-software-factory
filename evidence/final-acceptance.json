@@ -7,6 +7,7 @@
     "docs/IMPLEMENTATION-LEDGER.md",
     "evidence/external-acceptance.json",
     "evidence/model-benchmark-observations.json",
+    "evidence/model-benchmark-safety-v3.json",
     "evidence/model-benchmark-economy.json",
     "evidence/model-benchmark-standard.json",
     "evidence/model-benchmark-expert.json"
@@ -150,7 +151,7 @@
   "schema_version": "1.0",
   "security": "PASS",
   "status": "BLOCKED_EXTERNAL",
-  "summary": "Local checks, OAuth health probes, Telegram gateway, public GitHub governance, and the closed model benchmark ran; remaining external acceptance items and the deferred route change are explicitly recorded.",
+  "summary": "Local checks, OAuth health probes, Telegram gateway, public GitHub governance, and the supplemental safety-gate model benchmark ran; remaining external acceptance items and the deferred route change are explicitly recorded.",
   "versions": [
     {
       "component": "python",
