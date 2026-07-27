@@ -45,9 +45,15 @@ class TransactionalDeployer:
 
     _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
-    def __init__(self, install_root: Path, health_probe: Callable[[Path], bool]) -> None:
+    def __init__(
+        self,
+        install_root: Path,
+        health_probe: Callable[[Path], bool],
+        activate: Callable[[], None] | None = None,
+    ) -> None:
         self.install_root = install_root.resolve()
         self.health_probe = health_probe
+        self.activate = activate
 
     def _child(self, name: str) -> Path:
         candidate = self.install_root / name
@@ -110,10 +116,12 @@ class TransactionalDeployer:
             raise DeploymentError("release promotion failed") from error
 
         try:
+            if self.activate is not None:
+                self.activate()
             healthy = bool(self.health_probe(current))
-        except Exception as error:  # noqa: BLE001  # health probes are external and must fail closed
+        except Exception as error:  # noqa: BLE001  # activation/health is external and must fail closed
             healthy = False
-            reason = f"health_probe_error:{type(error).__name__}"
+            reason = f"activation_or_health_error:{type(error).__name__}"
         else:
             reason = "health probe passed" if healthy else "health probe failed"
         if healthy:

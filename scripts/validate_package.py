@@ -53,6 +53,7 @@ REQUIRED = [
     "scripts/bootstrap/configure-telegram-owner.sh",
     "scripts/deploy/factory-rollback.sh",
     "scripts/deploy/health-and-rollback.sh",
+    "scripts/deploy/promote-release.py",
     "scripts/pilot_black_box.py",
     "policies/autonomy-policy.yaml",
     "policies/model-routing-policy.yaml",

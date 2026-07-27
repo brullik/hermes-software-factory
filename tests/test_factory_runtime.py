@@ -463,6 +463,23 @@ class FactoryRuntimeTests(unittest.TestCase):
                 "old",
             )
 
+    def test_transactional_deployer_activates_before_health_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (root / "current").mkdir(parents=True)
+            activation_calls: list[str] = []
+
+            result = TransactionalDeployer(
+                root,
+                health_probe=lambda _current: True,
+                activate=lambda: activation_calls.append("restart"),
+            ).promote("candidate-activate", source)
+
+            self.assertEqual(result.status, "PROMOTED")
+            self.assertEqual(activation_calls, ["restart"])
+
     def test_transactional_deployer_rolls_back_failed_health_and_keeps_failed_release(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "install"
