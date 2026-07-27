@@ -96,3 +96,9 @@ python3 scripts/build_sbom.py --check
 ```
 
 `acceptance --full` возвращает `BLOCKED_EXTERNAL`, пока не подключены Ubuntu VPS, Hermes/provider auth, GitHub, Telegram и offsite backup. Это ожидаемый безопасный статус, а не успешная production-приёмка.
+
+## Durable role pipeline
+
+После intake Controller создаёт schema-validated task contract с durable role metadata. Provider-backed worker выполняет роли последовательно: Product Director, Product Analyst, Solution Architect, Task Specifier, параллельные Builder/Test Engineer/Security Reviewer, Independent Reviewer, Staging Release, Product Tester и Production Release. Каждая следующая задача появляется только после принятого результата предыдущей, а SQLite lease проверяет зависимости и конфликтные worktree.
+
+Builder и Test Engineer получают immutable quality-gate list из controller policy. Gates выполняются без shell через allowlist, сохраняют `gate-evidence.schema.json`, а изменение файла вне `allowed_paths` немедленно переводит задачу в `FAILED_SAFE`.

@@ -354,6 +354,20 @@ class FactoryRuntimeTests(unittest.TestCase):
             manager.release(lease)
             self.assertFalse(lease.path.exists())
 
+    def test_worker_workspace_starts_from_source_snapshot_without_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            (source / "src").mkdir(parents=True)
+            (source / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            (source / "state").mkdir()
+            (source / "state" / "controller.db").write_text("runtime\n", encoding="utf-8")
+            manager = WorkspaceManager(root / "worktrees", source_root=source)
+            lease = manager.acquire(product_id="product", task_id="task", worker_id="worker")
+            self.assertTrue((lease.path / "src" / "main.py").is_file())
+            self.assertFalse((lease.path / "state").exists())
+            manager.release(lease)
+
     def test_external_boundaries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = _make_config(Path(directory) / "state")

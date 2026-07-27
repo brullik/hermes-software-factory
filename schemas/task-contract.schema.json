@@ -183,6 +183,14 @@
         "blocked_dependency",
         "needs_replan"
       ]
+    },
+    "quality_gates": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
     }
   }
 }

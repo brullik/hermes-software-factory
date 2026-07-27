@@ -50,6 +50,19 @@ class FakeRunner:
         return HermesRunResult("PASS", self.output, "fake-output-digest", None, str(usage_path) if usage_path else None)
 
 
+class ScopeViolatingRunner(FakeRunner):
+    def run(
+        self,
+        *,
+        selection: Any,
+        prompt: str,
+        cwd: Path,
+        usage_path: Path | None = None,
+    ) -> HermesRunResult:
+        (cwd / "forbidden.txt").write_text("unexpected change\n", encoding="utf-8")
+        return super().run(selection=selection, prompt=prompt, cwd=cwd, usage_path=usage_path)
+
+
 def selected_registry(path: Path, *, selected: str | None) -> Path:
     data = yaml.safe_load((ROOT / "config" / "model-routing" / "model-registry.template.yaml").read_text(encoding="utf-8"))
     for alias in ("economy", "standard", "expert"):
@@ -103,14 +116,20 @@ class WorkerTests(unittest.TestCase):
             product = state.get_product(intake_result.product_id)
             self.assertIsNotNone(product)
             assert product is not None
-            self.assertEqual(product["status"], "CONTRACT_DRAFTED")
+            self.assertEqual(product["status"], "RISK_CLASSIFIED")
             task_files = list(config.evidence_dir.glob("task-T-*.json"))
-            self.assertEqual(len(task_files), 1)
-            task_id = json.loads(task_files[0].read_text(encoding="utf-8"))["task_id"]
+            self.assertEqual(len(task_files), 2)
+            tasks = state.list_tasks(intake_result.product_id)
+            director_tasks = [task for task in tasks if task["role"] == "product-director"]
+            analyst_tasks = [task for task in tasks if task["role"] == "product-analyst"]
+            self.assertEqual(len(director_tasks), 1)
+            self.assertEqual(len(analyst_tasks), 1)
+            task_id = str(director_tasks[0]["task_id"])
             task = state.get_task(task_id)
             self.assertIsNotNone(task)
             assert task is not None
             self.assertEqual(task["status"], "DONE")
+            self.assertEqual(analyst_tasks[0]["status"], "PENDING")
             attempts = state.attempts_for_task(task_id)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0]["status"], "completed")
@@ -150,6 +169,32 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(state.attempts_for_task(str(task["task_id"])), [])
             self.assertIn("not approved", result.reason_code or "")
             self.assertEqual(intake_result.product_id, task["product_id"])
+            state.close()
+
+    def test_workspace_scope_violation_is_failed_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            intake_result = IntakeService(config, state, ArtifactStore(config)).submit(
+                source="cli", owner_id="owner", idea="Build a scoped product"
+            )
+            runner = ScopeViolatingRunner(product_contract(config, intake_result.product_id))
+            worker = AgentWorker(config, state, runner=runner, health_probe=lambda _: True, repository_root=ROOT)
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(result.reason_code, "scope_violation")
+            product = state.get_product(intake_result.product_id)
+            self.assertIsNotNone(product)
+            assert product is not None
+            self.assertEqual(product["status"], "IDEA_RECEIVED")
+            task = next(iter(state.list_tasks(intake_result.product_id)))
+            self.assertEqual(task["status"], "FAILED_SAFE")
             state.close()
 
     def test_malformed_provider_output_is_failed_safe_and_recorded(self) -> None:

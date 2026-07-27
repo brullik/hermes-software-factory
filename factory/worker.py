@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from scripts.model_router import Tier
+from scripts.policy_guard import enforce_changed_paths
 from scripts.prompt_compiler import find_secret_candidates
 
 from .artifacts import ArtifactStore, artifact_metadata
@@ -21,8 +22,10 @@ from .attempts import Attempt, AttemptManager, IdenticalAttemptError
 from .common import new_id, redact_text, sha256_file, sha256_text, stable_json
 from .config import FactoryConfig, load_config
 from .context_builder import ContextBuilder
+from .pipeline import PipelineCoordinator
 from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
+from .quality import QualityGateEngine
 from .registry import SchemaRegistry
 from .state import StateStore
 from .workflow import WorkflowEngine
@@ -177,34 +180,17 @@ class WorkerResult:
     attempt_id: str | None = None
 
 
-def _initial_task_id(product_id: str) -> str:
-    return f"T-{sha256_text(product_id)[:12].upper()}"
-
-
-def create_initial_task_contract(config: FactoryConfig, product_id: str) -> dict[str, Any]:
-    task_id = _initial_task_id(product_id)
-    return {
-        **artifact_metadata(config, "task-specifier", new_id("task_contract"), product_id),
-        "task_id": task_id,
-        "title": "Draft Product Contract",
-        "objective": "Turn the owner's idea into a validated Product Contract.",
-        "dependencies": [],
-        "conflict_keys": [f"product:{product_id}"],
-        "allowed_paths": ["artifacts/**"],
-        "forbidden_paths": ["secrets/**", "production/**", ".github/workflows/**"],
-        "acceptance": [
-            {
-                "criterion_id": "AC-CONTRACT-001",
-                "verification": "Validate the Product Contract against product-contract.schema.json.",
-                "mandatory": True,
-            }
-        ],
-        "risk_tier": "low",
-        "complexity_features": ["external_integration"],
-        "model_floor": "luna",
-        "rollback": "Discard the immutable candidate artifact and leave the product at IDEA_RECEIVED.",
-        "status": "ready",
-    }
+def _workspace_snapshot(root: Path) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    for path in root.rglob("*"):
+        if path.name == ".lease.json":
+            continue
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            snapshot[relative] = f"SYMLINK:{path.resolve()}"
+        elif path.is_file():
+            snapshot[relative] = sha256_file(path)
+    return snapshot
 
 
 def ensure_initial_product_task(
@@ -214,22 +200,7 @@ def ensure_initial_product_task(
     product_id: str,
 ) -> Path:
     """Create the first durable task exactly once for a newly accepted idea."""
-    task = create_initial_task_contract(config, product_id)
-    task_id = str(task["task_id"])
-    existing = state.get_task(task_id)
-    path = config.evidence_dir / f"task-{task_id}.json"
-    if existing is not None:
-        return path
-    artifacts.write("task-contract.schema.json", task, filename=path.name)
-    state.add_task(
-        task_id=task_id,
-        product_id=product_id,
-        title=str(task["title"]),
-        dependencies=list(task["dependencies"]),
-        conflict_keys=list(task["conflict_keys"]),
-        priority=100,
-    )
-    return path
+    return PipelineCoordinator(config, state, artifacts).seed_initial(product_id)
 
 
 class AgentWorker:
@@ -256,7 +227,7 @@ class AgentWorker:
         configured_worktrees = Path(str(config.raw["paths"]["worktrees"]))
         if os.name == "nt" and str(configured_worktrees).replace("\\", "/").startswith("/var/"):
             configured_worktrees = config.state_dir / "worktrees"
-        self.workspace = WorkspaceManager(configured_worktrees)
+        self.workspace = WorkspaceManager(configured_worktrees, source_root=self.repository_root)
         self.artifacts = ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)
         self.registry = ProviderRegistry(config)
@@ -268,6 +239,8 @@ class AgentWorker:
             raise FileNotFoundError("model-routing-policy.yaml")
         self.attempts = AttemptManager(state, routing_policy)
         self.workflow = WorkflowEngine(state)
+        self.pipeline = PipelineCoordinator(config, state, self.artifacts)
+        self.quality = QualityGateEngine(config, self.artifacts)
         self.runner = runner or SubprocessHermesRunner()
         self.health_probe = health_probe or self._live_health_probe
 
@@ -288,8 +261,11 @@ class AgentWorker:
         if not isinstance(contract, dict):
             raise ExternalBlocker(f"Task Contract is not an object for {task_id}")
         self.schemas.validate("task-contract.schema.json", contract)
-        if str(contract.get("title")) != "Draft Product Contract":
-            raise ExternalBlocker(f"No safe role adapter is registered for {task_id}")
+        role = str(task.get("role") or contract.get("producer", {}).get("role", ""))
+        output_schema = str(task.get("output_schema") or "")
+        if not role or not output_schema:
+            raise ExternalBlocker(f"Task role metadata is missing for {task_id}")
+        prompt_role = role.replace("_", "-")
         subject_sha = os.environ.get("FACTORY_SUBJECT_SHA", "")
         if not re.fullmatch(r"[a-f0-9]{7,64}", subject_sha):
             subject_file = self.repository_root / "SHA256SUMS"
@@ -298,12 +274,12 @@ class AgentWorker:
         idea = str(product.get("idea", "redacted owner idea"))
         return TaskExecutionSpec(
             task_contract=contract,
-            role="product-director",
-            output_schema="product-contract.schema.json",
+            role=prompt_role,
+            output_schema=output_schema,
             subject_sha=subject_sha,
             candidates=(
-                ("schemas/product-contract.schema.json", "required output contract"),
-                ("prompts/roles/product-director.md", "role boundary"),
+                (f"schemas/{output_schema}", "required output contract"),
+                (f"prompts/roles/{prompt_role}.md", "role boundary"),
             ),
             evidence=(
                 {
@@ -377,10 +353,25 @@ class AgentWorker:
         command_ref: str | None,
         output_ref: str | None,
         reason_code: str | None,
+        gate_results: list[dict[str, Any]] | None = None,
+        changed_files: list[dict[str, str]] | None = None,
     ) -> Path:
         findings: list[dict[str, str]] = []
         if reason_code:
             findings.append({"code": reason_code, "severity": "medium", "text": summary})
+        test_results = [
+            {
+                "gate_id": "schema-validation",
+                "status": "PASS" if output_ref else "NOT_RUN",
+                "evidence_ref": output_ref,
+            }
+        ]
+        if gate_results:
+            test_results.extend(gate_results)
+        evidence_refs: list[str] = []
+        for ref in (output_ref, command_ref, *(item.get("evidence_ref") for item in test_results)):
+            if ref and ref not in evidence_refs:
+                evidence_refs.append(ref)
         artifact = {
             **artifact_metadata(self.config, spec.role, new_id("attempt-result"), str(spec.task_contract["product_id"])),
             "producer": {
@@ -397,18 +388,12 @@ class AgentWorker:
             "subject_sha_before": subject_sha,
             "status": status,
             "summary": summary,
-            "changed_files": [],
+            "changed_files": changed_files or [],
             "commands": [{"command_id": "hermes-oneshot", "result": command_result, "artifact_ref": command_ref}],
-            "test_results": [
-                {
-                    "gate_id": "schema-validation",
-                    "status": "PASS" if output_ref else "NOT_RUN",
-                    "evidence_ref": output_ref,
-                }
-            ],
+            "test_results": test_results,
             "assumptions": ["The provider route was selected only after the configured health probe."],
             "findings": findings,
-            "evidence_refs": [ref for ref in (output_ref, command_ref) if ref],
+            "evidence_refs": evidence_refs,
         }
         return self.artifacts.write(
             "attempt-result.schema.json",
@@ -448,6 +433,7 @@ class AgentWorker:
             task_id=str(spec.task_contract["task_id"]),
             worker_id=self.worker_id,
         )
+        before_snapshot = _workspace_snapshot(lease.path)
         usage_path = self.config.evidence_dir / f"usage-{attempt.attempt_id}.json"
         try:
             run = self.runner.run(
@@ -479,13 +465,90 @@ class AgentWorker:
             if not isinstance(output, dict):
                 raise TypeError("malformed_transport")
             self.schemas.validate(spec.output_schema, output)
+            after_snapshot = _workspace_snapshot(lease.path)
+            actual_changed_paths = {
+                path
+                for path in set(before_snapshot) | set(after_snapshot)
+                if before_snapshot.get(path) != after_snapshot.get(path)
+            }
+            reported_changed_files = output.get("changed_files", [])
+            reported_changed_paths = {
+                str(item.get("path"))
+                for item in reported_changed_files
+                if isinstance(item, dict) and item.get("path")
+            }
+            scope_violations = enforce_changed_paths(
+                actual_changed_paths | reported_changed_paths,
+                [str(path) for path in spec.task_contract["allowed_paths"]],
+                [str(path) for path in spec.task_contract["forbidden_paths"]],
+            )
+            if scope_violations:
+                self.attempts.finish(attempt, status="failed", reason_code="scope_violation")
+                route_action = self._route(spec, tier, success=False, reason_code="scope_violation")
+                result_path = self._attempt_artifact(
+                    spec,
+                    attempt,
+                    selection,
+                    status="failed_safe",
+                    summary=(
+                        "Workspace scope violation detected for "
+                        f"{', '.join(sorted(scope_violations)[:20])}; routing={route_action}."
+                    ),
+                    prompt_digest=prompt_digest,
+                    subject_sha=spec.subject_sha,
+                    command_result="fail",
+                    command_ref=str(context_path),
+                    output_ref=None,
+                    reason_code="scope_violation",
+                    changed_files=reported_changed_files if isinstance(reported_changed_files, list) else None,
+                )
+                return WorkerResult(
+                    str(spec.task_contract["task_id"]),
+                    "failed_safe",
+                    "scope_violation",
+                    str(result_path),
+                    attempt.attempt_id,
+                )
+            changed_files = reported_changed_files if isinstance(reported_changed_files, list) else None
             output_path = self.artifacts.write(
                 spec.output_schema,
                 output,
                 filename=f"{spec.output_schema.removesuffix('.schema.json')}-{spec.task_contract['product_id']}-{attempt.attempt_id}.json",
             )
+            quality_run = self.quality.run(
+                cwd=lease.path,
+                subject_sha=spec.subject_sha,
+                task_id=str(spec.task_contract["task_id"]),
+                attempt_id=attempt.attempt_id,
+                gate_ids=[str(gate) for gate in spec.task_contract.get("quality_gates", [])],
+            )
+            if not quality_run.mandatory_passed:
+                self.attempts.finish(attempt, status="failed", reason_code="mandatory_gate_failed")
+                route_action = self._route(spec, tier, success=False, reason_code="mandatory_gate_failed")
+                result_path = self._attempt_artifact(
+                    spec,
+                    attempt,
+                    selection,
+                    status="failed_safe",
+                    summary=f"Mandatory quality gate failed; routing={route_action}.",
+                    prompt_digest=prompt_digest,
+                    subject_sha=spec.subject_sha,
+                    command_result="fail",
+                    command_ref=str(context_path),
+                    output_ref=str(output_path),
+                    reason_code="mandatory_gate_failed",
+                    gate_results=list(quality_run.results),
+                    changed_files=changed_files,
+                )
+                return WorkerResult(
+                    str(spec.task_contract["task_id"]),
+                    "failed_safe",
+                    "mandatory_gate_failed",
+                    str(result_path),
+                    attempt.attempt_id,
+                )
             output_status = str(output.get("status"))
-            if output_status != "completed":
+            if output_status not in {"completed", "accepted"}:
                 self.attempts.finish(attempt, status="repair_required", reason_code="model_requested_repair")
                 route_action = self._route(spec, tier, success=False, reason_code="model_requested_repair")
                 result_path = self._attempt_artifact(
@@ -500,6 +563,8 @@ class AgentWorker:
                     command_ref=str(context_path),
                     output_ref=str(output_path),
                     reason_code="model_requested_repair",
+                    gate_results=list(quality_run.results),
+                    changed_files=changed_files,
                 )
                 return WorkerResult(str(spec.task_contract["task_id"]), output_status, "model_requested_repair", str(result_path), attempt.attempt_id)
             self.attempts.finish(attempt, status="completed")
@@ -509,18 +574,20 @@ class AgentWorker:
                 attempt,
                 selection,
                 status="completed",
-                summary="Hermes returned a schema-valid Product Contract candidate.",
+                summary=f"Hermes returned a schema-valid {spec.role} result.",
                 prompt_digest=prompt_digest,
                 subject_sha=spec.subject_sha,
                 command_result="pass",
                 command_ref=str(context_path),
                 output_ref=str(output_path),
                 reason_code=None,
+                gate_results=list(quality_run.results),
+                changed_files=changed_files,
             )
-            if spec.role == "product-director":
-                product = self.state.get_product(str(spec.task_contract["product_id"]))
-                if product and product["status"] == "IDEA_RECEIVED":
-                    self.workflow.transition(str(spec.task_contract["product_id"]), "CONTRACT_DRAFTED")
+            task_row = self.state.get_task(str(spec.task_contract["task_id"]))
+            if task_row is None:
+                raise RuntimeError(f"Durable task disappeared: {spec.task_contract['task_id']}")
+            self.pipeline.advance_after(task_row, output, output_path)
             return WorkerResult(str(spec.task_contract["task_id"]), "completed", None, str(result_path), attempt.attempt_id)
         except (json.JSONDecodeError, TypeError, ValueError) as error:
             reason = str(error) if str(error) in {"secret_exposure", "malformed_transport"} else "malformed_transport"
@@ -556,6 +623,7 @@ class AgentWorker:
             result = WorkerResult(task_id, "failed_safe", "worker_internal_error")
         terminal = {
             "completed": "DONE",
+            "accepted": "DONE",
             "blocked_external": "BLOCKED_EXTERNAL",
             "repair_required": "BLOCKED_EXTERNAL",
             "failed_safe": "FAILED_SAFE",

@@ -61,6 +61,9 @@ class StateStore:
                     task_id TEXT PRIMARY KEY,
                     product_id TEXT NOT NULL REFERENCES products(product_id),
                     title TEXT NOT NULL,
+                    role TEXT,
+                    output_schema TEXT,
+                    contract_ref TEXT,
                     priority INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     dependencies_json TEXT NOT NULL,
@@ -121,6 +124,15 @@ class StateStore:
                 self._connection.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            for column, definition in (
+                ("role", "TEXT"),
+                ("output_schema", "TEXT"),
+                ("contract_ref", "TEXT"),
+            ):
+                try:
+                    self._connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+                except sqlite3.OperationalError:
+                    pass
             try:
                 self._connection.execute("ALTER TABLE outbox ADD COLUMN lease_until TEXT")
             except sqlite3.OperationalError:
@@ -265,6 +277,9 @@ class StateStore:
         task_id: str,
         product_id: str,
         title: str,
+        role: str | None = None,
+        output_schema: str | None = None,
+        contract_ref: str | None = None,
         dependencies: list[str] | None = None,
         conflict_keys: list[str] | None = None,
         priority: int = 0,
@@ -275,12 +290,16 @@ class StateStore:
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO tasks
-                (task_id, product_id, title, priority, status, dependencies_json, conflict_keys_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
+                (task_id, product_id, title, role, output_schema, contract_ref, priority, status,
+                 dependencies_json, conflict_keys_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
                     title,
+                    role,
+                    output_schema,
+                    contract_ref,
                     priority,
                     json.dumps(dependencies or []),
                     json.dumps(conflict_keys or []),
@@ -296,6 +315,19 @@ class StateStore:
                 "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    def list_tasks(self, product_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if product_id is None:
+                rows = self._connection.execute(
+                    "SELECT * FROM tasks ORDER BY created_at"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT * FROM tasks WHERE product_id = ? ORDER BY created_at",
+                    (product_id,),
+                ).fetchall()
+            return [dict(row) for row in rows]
 
     def claim_task(self, *, worker_id: str, lease_seconds: int = 300) -> dict[str, Any] | None:
         with self._lock:
