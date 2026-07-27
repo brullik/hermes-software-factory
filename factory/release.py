@@ -1,8 +1,9 @@
-"""Fail-closed validation for model-reported release operations.
+"""Fail-closed validation for adapter-authoritative release operations.
 
-The release operator may describe an operation, but it cannot turn that
-description into release evidence unless the lifecycle invariants are true.
-Actual GitHub and deployment side effects remain adapter-owned.
+The release operator may propose an operation, but it cannot turn that
+proposal into release evidence unless an injected executor performs the
+side effects and returns an authoritative result whose lifecycle invariants
+are true.
 """
 
 from __future__ import annotations
@@ -10,11 +11,33 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 
 class ReleasePolicyError(ValueError):
     """Raised when a release result violates an immutable lifecycle rule."""
+
+
+class ReleaseExecutor(Protocol):
+    """Side-effect boundary for release operations.
+
+    The model may provide a proposed operation, but only an injected adapter
+    may return the authoritative result after performing the GitHub and/or
+    deployment side effects.  Implementations must fail closed when the
+    required external credential, approval, or target is unavailable.
+    """
+
+    def execute(
+        self,
+        *,
+        stage: str,
+        proposed: Mapping[str, Any],
+        product_id: str,
+        task_contract: Mapping[str, Any],
+        workspace: Path,
+        expected_staging_digest: str | None,
+    ) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True)

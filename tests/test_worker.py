@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from factory.artifacts import ArtifactStore
+from factory.artifacts import ArtifactStore, artifact_metadata
 from factory.config import FactoryConfig
 from factory.intake import IntakeService
+from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
 from factory.providers import ModelSelection
 from factory.state import StateStore
@@ -63,6 +65,34 @@ class ScopeViolatingRunner(FakeRunner):
         return super().run(selection=selection, prompt=prompt, cwd=cwd, usage_path=usage_path)
 
 
+class RecordingReleaseExecutor:
+    def __init__(self, result: dict[str, object]) -> None:
+        self.result = result
+        self.calls: list[dict[str, object]] = []
+
+    def execute(
+        self,
+        *,
+        stage: str,
+        proposed: Mapping[str, Any],
+        product_id: str,
+        task_contract: Mapping[str, Any],
+        workspace: Path,
+        expected_staging_digest: str | None,
+    ) -> Mapping[str, Any]:
+        self.calls.append(
+            {
+                "stage": stage,
+                "proposed": dict(proposed),
+                "product_id": product_id,
+                "task_contract": dict(task_contract),
+                "workspace": workspace,
+                "expected_staging_digest": expected_staging_digest,
+            }
+        )
+        return self.result
+
+
 def selected_registry(path: Path, *, selected: str | None) -> Path:
     data = yaml.safe_load((ROOT / "config" / "model-routing" / "model-registry.template.yaml").read_text(encoding="utf-8"))
     for alias in ("economy", "standard", "expert"):
@@ -87,7 +117,135 @@ def product_contract(config: FactoryConfig, product_id: str) -> str:
     return json.dumps(artifact, ensure_ascii=False)
 
 
+def release_operation(
+    config: FactoryConfig,
+    product_id: str,
+    *,
+    candidate_sha: str,
+    image_digest: str,
+) -> dict[str, object]:
+    return {
+        **artifact_metadata(config, "release-operator", "release-operation-test", product_id),
+        "status": "completed",
+        "repository": "brullik/hermes-software-factory",
+        "candidate_sha": candidate_sha,
+        "merge": {"performed": False, "merge_sha": None},
+        "release": {"version": "0.1.0", "image_digest": image_digest},
+        "staging": "deployed",
+        "production": "not_started",
+        "rollback": "not_tested",
+        "summary": "Adapter-backed staging release fixture.",
+        "findings": [],
+        "evidence_refs": ["evidence/gates.json", "evidence/staging.json"],
+    }
+
+
+def staging_release_task(config: FactoryConfig, state: Any, artifacts: ArtifactStore) -> tuple[str, Path]:
+    product_id = "P-RELEASE-001"
+    state.create_product(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        idea="Build a release-backed product",
+        idempotency_key="release-test-001",
+    )
+    for status in (
+        "CONTRACT_DRAFTED",
+        "CONTRACT_VALIDATED",
+        "RISK_CLASSIFIED",
+        "ARCHITECTED",
+        "BACKLOG_READY",
+        "IMPLEMENTING",
+        "INTEGRATING",
+    ):
+        state.transition_product(product_id, status)
+    return product_id, PipelineCoordinator(config, state, artifacts).create_task(product_id, "release-staging")
+
+
 class WorkerTests(unittest.TestCase):
+    def test_release_task_blocks_before_model_without_side_effect_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            product_id, _ = staging_release_task(config, state, artifacts)
+            runner = FakeRunner(
+                json.dumps(
+                    release_operation(
+                        config,
+                        product_id,
+                        candidate_sha="a" * 40,
+                        image_digest="sha256:" + "b" * 64,
+                    )
+                )
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "blocked_external")
+            self.assertEqual(result.reason_code, "release side-effect adapter is not configured")
+            self.assertEqual(runner.calls, [])
+            task = next(iter(state.list_tasks(product_id)))
+            self.assertEqual(task["status"], "BLOCKED_EXTERNAL")
+            self.assertEqual(state.attempts_for_task(str(task["task_id"])), [])
+            state.close()
+
+    def test_release_task_persists_only_adapter_authoritative_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            product_id, _ = staging_release_task(config, state, artifacts)
+            proposed = release_operation(
+                config,
+                product_id,
+                candidate_sha="a" * 40,
+                image_digest="sha256:" + "b" * 64,
+            )
+            authoritative = release_operation(
+                config,
+                product_id,
+                candidate_sha="c" * 40,
+                image_digest="sha256:" + "d" * 64,
+            )
+            executor = RecordingReleaseExecutor(authoritative)
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(proposed)),
+                release_executor=executor,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(len(executor.calls), 1)
+            self.assertEqual(executor.calls[0]["proposed"], proposed)
+            output_paths = list(config.evidence_dir.glob("release-operation-result-*.json"))
+            self.assertEqual(len(output_paths), 1)
+            persisted = json.loads(output_paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(persisted["candidate_sha"], "c" * 40)
+            self.assertEqual(persisted["release"]["image_digest"], "sha256:" + "d" * 64)
+            self.assertEqual(state.get_product(product_id)["status"], "STAGING_DEPLOYED")
+            state.close()
+
     def test_worker_runs_selected_provider_and_persists_contract_and_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

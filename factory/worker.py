@@ -27,7 +27,7 @@ from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine
 from .registry import SchemaRegistry
-from .release import ReleasePolicyError, validate_release_operation
+from .release import ReleaseExecutor, ReleasePolicyError, validate_release_operation
 from .state import StateStore
 from .workflow import WorkflowEngine
 from .workspace import WorkspaceManager
@@ -215,6 +215,7 @@ class AgentWorker:
         runner: HermesRunner | None = None,
         health_probe: Callable[[ModelSelection], bool] | None = None,
         repository_root: Path | None = None,
+        release_executor: ReleaseExecutor | None = None,
         worker_id: str = "hermes-worker-1",
         poll_seconds: float = 2.0,
     ) -> None:
@@ -225,6 +226,7 @@ class AgentWorker:
         self.worker_id = worker_id
         self.poll_seconds = poll_seconds
         self.repository_root = (repository_root or Path.cwd()).resolve()
+        self.release_executor = release_executor
         configured_worktrees = Path(str(config.raw["paths"]["worktrees"]))
         if os.name == "nt" and str(configured_worktrees).replace("\\", "/").startswith("/var/"):
             configured_worktrees = config.state_dir / "worktrees"
@@ -441,6 +443,8 @@ class AgentWorker:
 
     def execute(self, spec: TaskExecutionSpec) -> WorkerResult:
         self.schemas.validate("task-contract.schema.json", spec.task_contract)
+        if spec.role == "release-operator" and self.release_executor is None:
+            raise ExternalBlocker("release side-effect adapter is not configured")
         tier = Tier(str(spec.task_contract["model_floor"]))
         selection = self._select(tier)
         prompt, prompt_digest, context_path = self._context_and_prompt(spec)
@@ -492,15 +496,76 @@ class AgentWorker:
             self.schemas.validate(spec.output_schema, output)
             if spec.role == "release-operator":
                 stage = "staging" if "staging" in str(spec.task_contract.get("title", "")).lower() else "production"
+                assert self.release_executor is not None
+                expected_staging_digest = (
+                    self._accepted_staging_digest(str(spec.task_contract["product_id"]))
+                    if stage == "production"
+                    else None
+                )
+                try:
+                    authoritative = self.release_executor.execute(
+                        stage=stage,
+                        proposed=output,
+                        product_id=str(spec.task_contract["product_id"]),
+                        task_contract=spec.task_contract,
+                        workspace=lease.path,
+                        expected_staging_digest=expected_staging_digest,
+                    )
+                except ExternalBlocker:
+                    self.attempts.finish(attempt, status="failed", reason_code="release_adapter_blocked")
+                    route_action = self._route(spec, tier, success=False, reason_code="release_adapter_blocked")
+                    result_path = self._attempt_artifact(
+                        spec,
+                        attempt,
+                        selection,
+                        status="blocked_external",
+                        summary=f"Release side-effect adapter blocked the operation; routing={route_action}.",
+                        prompt_digest=prompt_digest,
+                        subject_sha=spec.subject_sha,
+                        command_result="fail",
+                        command_ref=str(context_path),
+                        output_ref=None,
+                        reason_code="release_adapter_blocked",
+                    )
+                    return WorkerResult(
+                        str(spec.task_contract["task_id"]),
+                        "blocked_external",
+                        "release_adapter_blocked",
+                        str(result_path),
+                        attempt.attempt_id,
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    self.attempts.finish(attempt, status="failed", reason_code="release_adapter_error")
+                    route_action = self._route(spec, tier, success=False, reason_code="release_adapter_error")
+                    result_path = self._attempt_artifact(
+                        spec,
+                        attempt,
+                        selection,
+                        status="failed_safe",
+                        summary=f"Release side-effect adapter failed; routing={route_action}.",
+                        prompt_digest=prompt_digest,
+                        subject_sha=spec.subject_sha,
+                        command_result="fail",
+                        command_ref=str(context_path),
+                        output_ref=None,
+                        reason_code="release_adapter_error",
+                    )
+                    return WorkerResult(
+                        str(spec.task_contract["task_id"]),
+                        "failed_safe",
+                        "release_adapter_error",
+                        str(result_path),
+                        attempt.attempt_id,
+                    )
+                if not isinstance(authoritative, Mapping):
+                    raise TypeError("release_adapter_result")
+                output = dict(authoritative)
+                self.schemas.validate(spec.output_schema, output)
                 try:
                     validate_release_operation(
                         output,
                         stage=stage,
-                        expected_staging_digest=(
-                            self._accepted_staging_digest(str(spec.task_contract["product_id"]))
-                            if stage == "production"
-                            else None
-                        ),
+                        expected_staging_digest=expected_staging_digest,
                     )
                 except ReleasePolicyError as error:
                     raise ValueError("release_policy_violation") from error

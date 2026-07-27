@@ -1,7 +1,7 @@
 {
-  "artifact_id": "acceptance-45cd5046cd9281c3a62f",
+  "artifact_id": "acceptance-4f6b86f343673d17b406",
   "backup_restore": "PASS",
-  "created_at": "2026-07-27T11:10:15Z",
+  "created_at": "2026-07-27T10:57:20Z",
   "evidence_refs": [
     "evidence/package-validation-report.json",
     "docs/IMPLEMENTATION-LEDGER.md",
