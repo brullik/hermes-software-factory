@@ -466,6 +466,61 @@ class FactoryRuntimeTests(unittest.TestCase):
         with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(GitHubCommandError):
             adapter.merge_pull_request("17", expected_sha="b" * 40)
 
+    def test_github_governance_gate_requires_approval_and_checks(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str]):
+            calls.append(argv)
+            from subprocess import CompletedProcess
+
+            if "view" in argv:
+                output = json.dumps(
+                    {
+                        "headRefOid": "a" * 40,
+                        "state": "OPEN",
+                        "reviewDecision": "APPROVED",
+                        "mergeStateStatus": "CLEAN",
+                        "statusCheckRollup": [
+                            {"name": "factory/quality", "state": "SUCCESS"},
+                        ],
+                    }
+                )
+            else:
+                output = "merged"
+            return CompletedProcess(argv, 0, output, "")
+
+        adapter = GitHubAdapter("brullik", "hermes-software-factory", runner=runner)
+        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False):
+            gate = adapter.verify_pull_request(
+                "17",
+                expected_sha="a" * 40,
+                required_checks=("factory/quality",),
+            )
+            self.assertTrue(gate.approved)
+            self.assertEqual(adapter.merge_pull_request_checked("17", expected_sha="a" * 40).status, "PASS")
+
+        def blocked_runner(argv: list[str]):
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "headRefOid": "a" * 40,
+                        "state": "OPEN",
+                        "reviewDecision": "REVIEW_REQUIRED",
+                        "mergeStateStatus": "CLEAN",
+                        "statusCheckRollup": [],
+                    }
+                ),
+                "",
+            )
+
+        blocked = GitHubAdapter("brullik", "hermes-software-factory", runner=blocked_runner)
+        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(GitHubCommandError):
+            blocked.merge_pull_request_checked("17", expected_sha="a" * 40)
+
 
 if __name__ == "__main__":
     unittest.main()

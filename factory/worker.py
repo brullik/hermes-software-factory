@@ -27,6 +27,7 @@ from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine
 from .registry import SchemaRegistry
+from .release import ReleasePolicyError, validate_release_operation
 from .state import StateStore
 from .workflow import WorkflowEngine
 from .workspace import WorkspaceManager
@@ -339,6 +340,30 @@ class AgentWorker:
         )
         return prompt.prompt, prompt.digest, context.path
 
+    def _accepted_staging_digest(self, product_id: str) -> str | None:
+        """Read the immutable digest from the durable staging operation artifact."""
+
+        candidates = sorted(
+            self.config.evidence_dir.glob(
+                f"release-operation-result-{product_id}-*.json"
+            ),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for path in candidates:
+            try:
+                artifact = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(artifact, dict) or artifact.get("staging") != "deployed":
+                continue
+            release = artifact.get("release")
+            if isinstance(release, dict):
+                digest = release.get("image_digest")
+                if isinstance(digest, str) and re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+                    return digest
+        return None
+
     def _attempt_artifact(
         self,
         spec: TaskExecutionSpec,
@@ -465,6 +490,20 @@ class AgentWorker:
             if not isinstance(output, dict):
                 raise TypeError("malformed_transport")
             self.schemas.validate(spec.output_schema, output)
+            if spec.role == "release-operator":
+                stage = "staging" if "staging" in str(spec.task_contract.get("title", "")).lower() else "production"
+                try:
+                    validate_release_operation(
+                        output,
+                        stage=stage,
+                        expected_staging_digest=(
+                            self._accepted_staging_digest(str(spec.task_contract["product_id"]))
+                            if stage == "production"
+                            else None
+                        ),
+                    )
+                except ReleasePolicyError as error:
+                    raise ValueError("release_policy_violation") from error
             after_snapshot = _workspace_snapshot(lease.path)
             actual_changed_paths = {
                 path
@@ -590,7 +629,11 @@ class AgentWorker:
             self.pipeline.advance_after(task_row, output, output_path)
             return WorkerResult(str(spec.task_contract["task_id"]), "completed", None, str(result_path), attempt.attempt_id)
         except (json.JSONDecodeError, TypeError, ValueError) as error:
-            reason = str(error) if str(error) in {"secret_exposure", "malformed_transport"} else "malformed_transport"
+            reason = str(error) if str(error) in {
+                "secret_exposure",
+                "malformed_transport",
+                "release_policy_violation",
+            } else "malformed_transport"
             self.attempts.finish(attempt, status="failed", reason_code=reason)
             route_action = self._route(spec, tier, success=False, reason_code=reason)
             result_path = self._attempt_artifact(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -24,6 +25,15 @@ class GitHubStatus:
 class GitHubResult:
     status: str
     output: str
+
+
+@dataclass(frozen=True)
+class PullRequestGate:
+    pull_request: str
+    head_sha: str
+    approved: bool
+    merge_state: str
+    checks: tuple[str, ...]
 
 
 class GitHubCommandError(RuntimeError):
@@ -137,6 +147,84 @@ class GitHubAdapter:
         self._safe(pull_request, "pull request")
         self.require_authentication()
         return self._run(["gh", "pr", "view", pull_request, "--repo", self.slug, "--json", "reviews,latestReviews"])
+
+    def verify_pull_request(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...] = (),
+    ) -> PullRequestGate:
+        """Verify immutable review and CI state before a merge side effect."""
+
+        self._safe(pull_request, "pull request")
+        if len(expected_sha) != 40 or not all(char in "0123456789abcdef" for char in expected_sha.lower()):
+            raise ValueError("expected_sha must be a 40-character commit SHA")
+        self.require_authentication()
+        view = self._run(
+            [
+                "gh",
+                "pr",
+                "view",
+                pull_request,
+                "--repo",
+                self.slug,
+                "--json",
+                "headRefOid,state,reviewDecision,mergeStateStatus,statusCheckRollup",
+            ]
+        )
+        try:
+            payload = json.loads(view.output)
+        except json.JSONDecodeError as error:
+            raise GitHubCommandError("GitHub PR view did not return JSON") from error
+        if not isinstance(payload, dict):
+            raise GitHubCommandError("GitHub PR view returned an invalid object")
+        head_sha = str(payload.get("headRefOid", ""))
+        if head_sha != expected_sha:
+            raise GitHubCommandError("reviewed SHA does not match expected SHA")
+        if payload.get("state") != "OPEN":
+            raise GitHubCommandError("pull request is not open")
+        if payload.get("reviewDecision") != "APPROVED":
+            raise GitHubCommandError("independent approval is missing")
+        merge_state = str(payload.get("mergeStateStatus", ""))
+        if merge_state != "CLEAN":
+            raise GitHubCommandError("pull request is not cleanly mergeable")
+        checks = payload.get("statusCheckRollup", [])
+        if not isinstance(checks, list):
+            raise GitHubCommandError("pull request check rollup is invalid")
+        check_states = {
+            str(item.get("name", item.get("context", ""))): str(item.get("state", item.get("conclusion", "")))
+            for item in checks
+            if isinstance(item, dict)
+        }
+        missing = [name for name in required_checks if check_states.get(name) not in {"SUCCESS", "SKIPPED", "NEUTRAL"}]
+        if missing:
+            raise GitHubCommandError("required checks are not passing: " + ", ".join(missing))
+        return PullRequestGate(
+            pull_request=str(pull_request),
+            head_sha=head_sha,
+            approved=True,
+            merge_state=merge_state,
+            checks=tuple(sorted(name for name in required_checks if name in check_states)),
+        )
+
+    def merge_pull_request_checked(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...] = (),
+    ) -> GitHubResult:
+        """Squash merge only after the independent governance gate passes."""
+
+        self.verify_pull_request(
+            pull_request,
+            expected_sha=expected_sha,
+            required_checks=required_checks,
+        )
+        return self._run(
+            ["gh", "pr", "merge", pull_request, "--repo", self.slug, "--squash", "--delete-branch"]
+        )
 
     def merge_pull_request(self, pull_request: str, *, expected_sha: str) -> GitHubResult:
         self._safe(pull_request, "pull request")
