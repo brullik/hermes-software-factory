@@ -41,7 +41,7 @@
     {
       "id": "runtime-alias-selection",
       "status": "BLOCKED_EXTERNAL",
-      "result": "The runtime registry remains intentionally fail-closed with economy, standard, and expert selected=null pending benchmark-gated policy PR and independent review."
+      "result": "The deployed runtime registry remains intentionally fail-closed with economy, standard, and expert selected=null. A benchmark-gated template route proposal is now versioned in the PR and awaits independent review/merge."
     },
     {
       "id": "delegation-boundary-black-box",
@@ -63,6 +63,9 @@
     "evidence/compatibility-report.json",
     "evidence/external-acceptance.json",
     "evidence/model-benchmark-safety-v3.json",
+    "evidence/model-benchmark-routing-economy-20260727.json",
+    "evidence/model-benchmark-routing-standard-20260727.json",
+    "evidence/model-benchmark-routing-expert-20260727.json",
     "evidence/hermes-agent-release.txt"
   ]
 }

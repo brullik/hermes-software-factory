@@ -26,16 +26,16 @@ providers:
 aliases:
   economy:
     capability_class: luna
-    selected: null
-    candidates: []
+    selected: gpt-5.6-luna
+    candidates: [gpt-5.6-luna]
   standard:
     capability_class: terra
-    selected: null
-    candidates: []
+    selected: gpt-5.6-terra
+    candidates: [gpt-5.6-terra]
   expert:
     capability_class: sol
-    selected: null
-    candidates: []
+    selected: gpt-5.6-sol
+    candidates: [gpt-5.6-sol]
 selection:
   require_health_probe: true
   require_benchmark: true

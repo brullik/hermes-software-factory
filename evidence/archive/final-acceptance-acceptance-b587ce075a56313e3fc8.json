@@ -1,7 +1,7 @@
 {
-  "artifact_id": "acceptance-e48000f356b172977f5b",
+  "artifact_id": "acceptance-b587ce075a56313e3fc8",
   "backup_restore": "PASS",
-  "created_at": "2026-07-27T08:36:35Z",
+  "created_at": "2026-07-27T08:29:50Z",
   "evidence_refs": [
     "evidence/package-validation-report.json",
     "docs/IMPLEMENTATION-LEDGER.md",
@@ -11,9 +11,6 @@
     "evidence/model-benchmark-economy.json",
     "evidence/model-benchmark-expert.json",
     "evidence/model-benchmark-observations.json",
-    "evidence/model-benchmark-routing-economy-20260727.json",
-    "evidence/model-benchmark-routing-expert-20260727.json",
-    "evidence/model-benchmark-routing-standard-20260727.json",
     "evidence/model-benchmark-safety-v3.json",
     "evidence/model-benchmark-standard.json",
     "evidence/hermes-compatibility-observations.json"

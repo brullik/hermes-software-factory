@@ -63,7 +63,8 @@
         "Codex and Nous OAuth are connected; Hermes default model discovery selected tencent/hy3:free via Nous Portal",
         "OAuth health probes for gpt-5.6-luna, gpt-5.6-terra, and gpt-5.6-sol passed",
         "Profile isolation, controller state persistence after restart, and the installed gateway credential probe passed",
-        "Supplemental 20-task safety-gate benchmark completed at 20/20, 18/20, and 20/20 for OpenAI Codex luna/terra/sol versus 9/20 for Nous tencent/hy3:free; safety-gated route change remains deferred and aliases stay fail-closed"
+        "Supplemental 20-task safety-gate benchmark completed at 20/20, 18/20, and 20/20 for OpenAI Codex luna/terra/sol versus 9/20 for Nous tencent/hy3:free; safety-gated route change remains deferred and aliases stay fail-closed",
+        "A 1% canary route proposal for gpt-5.6-luna/terra/sol is versioned in the PR; deployed aliases remain selected=null until independent review and merge"
       ]
     },
     "credentials": {
