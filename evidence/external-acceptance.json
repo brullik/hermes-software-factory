@@ -48,7 +48,7 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
-        "Package a13b0cc deployed after staging validation; current package manifest verifies 223 files, release governance/recovery checks and durable role pipeline are enabled and active, and backup-a13b0cc-previous is retained for rollback",
+        "Package aff6647 deployed after staging validation; current package manifest verifies 227 files, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and backup-aff6647-previous is retained for rollback",
         "controller health and restart smoke passed; worker service starts successfully and remains idle with no pending tasks",
         "UFW default deny incoming with SSH allow",
         "SSH password auth and root login disabled",
@@ -93,7 +93,7 @@
     },
     "pilot-e2e": {
       "status": "BLOCKED_EXTERNAL",
-      "evidence_ref": "evidence/pilot/black-box-vps-20260727.json",
+      "evidence_ref": "evidence/pilot/black-box-vps-aff6647-20260727.json",
       "details": [
         "Neutral pilot Product Contract, Docker staging, health, and persistence smoke passed",
         "VPS black-box runner passed browser surface, live, ready, API status, credentials_required=false, low-risk, Prometheus metrics, and restart persistence (events 4 to 5)",

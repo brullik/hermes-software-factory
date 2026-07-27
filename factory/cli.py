@@ -365,8 +365,10 @@ def acceptance_command(args: argparse.Namespace) -> int:
         evidence_refs.append("evidence/compatibility-report.json")
     if (ROOT / "evidence" / "pilot" / "github-publication.json").is_file():
         evidence_refs.append("evidence/pilot/github-publication.json")
-    if (ROOT / "evidence" / "pilot" / "black-box-vps-20260727.json").is_file():
-        evidence_refs.append("evidence/pilot/black-box-vps-20260727.json")
+    evidence_refs.extend(
+        f"evidence/pilot/{path.name}"
+        for path in sorted((ROOT / "evidence" / "pilot").glob("black-box-vps-*.json"))
+    )
     evidence_refs.extend(
         f"evidence/{path.name}"
         for path in sorted((ROOT / "evidence").glob("model-benchmark-*.json"))
