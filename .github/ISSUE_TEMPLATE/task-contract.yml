@@ -1,0 +1,38 @@
+name: Factory Task Contract
+description: Machine-created executable task. Human free-form tasks are disabled.
+title: "[TASK] "
+labels: ["factory:task"]
+body:
+  - type: markdown
+    attributes:
+      value: "This issue must correspond to a schema-valid Task Contract."
+  - type: input
+    id: product_id
+    attributes:
+      label: Product ID
+    validations:
+      required: true
+  - type: input
+    id: task_id
+    attributes:
+      label: Task ID
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective and acceptance
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Allowed paths and forbidden actions
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Required gates and output schema
+    validations:
+      required: true

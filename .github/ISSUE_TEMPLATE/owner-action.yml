@@ -1,0 +1,32 @@
+name: OWNER_ACTION
+description: One true external blocker with a machine-checkable unblock condition.
+title: "[OWNER_ACTION] "
+labels: ["factory:owner-action"]
+body:
+  - type: markdown
+    attributes:
+      value: "Never paste a password, token, private key or recovery code into this issue."
+  - type: textarea
+    id: blocker
+    attributes:
+      label: What is missing and why progress is impossible
+    validations:
+      required: true
+  - type: textarea
+    id: action
+    attributes:
+      label: One exact owner action
+    validations:
+      required: true
+  - type: textarea
+    id: unblock
+    attributes:
+      label: Machine-checkable unblock condition
+    validations:
+      required: true
+  - type: textarea
+    id: continuing_work
+    attributes:
+      label: Independent work that continues
+    validations:
+      required: true

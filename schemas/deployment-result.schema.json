@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/deployment-result.schema.json",
+  "title": "Deployment Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "created_at",
+    "producer",
+    "policy_digest",
+    "environment",
+    "image_digest",
+    "status",
+    "health",
+    "smoke",
+    "backup_ref",
+    "rollback_ref",
+    "endpoint",
+    "evidence_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "artifact_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "product_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "tier"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "deterministic",
+            "luna",
+            "terra",
+            "sol"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "environment": {
+      "type": "string",
+      "enum": [
+        "staging",
+        "production"
+      ]
+    },
+    "image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "deployed",
+        "failed",
+        "rolled_back",
+        "blocked_policy"
+      ]
+    },
+    "health": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "unhealthy",
+        "unknown"
+      ]
+    },
+    "smoke": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_RUN"
+      ]
+    },
+    "backup_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rollback_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "endpoint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uri"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  }
+}

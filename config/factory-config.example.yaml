@@ -1,0 +1,37 @@
+version: "1.0"
+controller:
+  database_url: sqlite:////var/lib/hermes-factory/controller.db
+  event_retention_days: 90
+  transcript_retention_days: 14
+  max_active_products: 1
+  max_active_workers: 2
+paths:
+  policies: /opt/hermes-factory/current/policies
+  schemas: /opt/hermes-factory/current/schemas
+  prompts: /opt/hermes-factory/current/prompts
+  state: /var/lib/hermes-factory
+  worktrees: /var/lib/hermes-factory/worktrees
+  logs: /var/log/hermes-factory
+github:
+  owner: brullik
+  factory_repository: hermes-software-factory
+telegram:
+  allowed_user_ids: []
+  token_credential_name: telegram-token
+intake:
+  rate_limit_requests: 10
+  rate_limit_window_seconds: 60
+  max_idea_chars: 20000
+  max_attachments: 16
+network:
+  admin_bind: 127.0.0.1
+  admin_port: 8787
+deployment:
+  reverse_proxy: caddy
+  current_vps_high_risk_production: false
+backup:
+  tool: restic
+  offsite_configured: false
+models:
+  registry: /etc/hermes-factory/model-registry.yaml
+  paid_api_fallback: false

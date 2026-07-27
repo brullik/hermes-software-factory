@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.key
+.deployment/
+*.pem
+*.p12
+*.pfx
+*.kubeconfig
+credentials/
+secrets/
+
+# Runtime state, logs and evidence generated outside Git
+state/
+logs/
+worktrees/
+backups/
+artifacts/
+*.log
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build outputs
+build/
+dist/
+*.egg-info/

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/quota-event.schema.json",
+  "title": "Quota Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "created_at",
+    "provider",
+    "model_alias",
+    "event_type",
+    "semantic_attempt_counted",
+    "retry_after_seconds",
+    "task_id",
+    "action"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_alias": {
+      "type": "string",
+      "enum": [
+        "economy",
+        "standard",
+        "expert"
+      ]
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "request",
+        "success",
+        "quota_exhausted",
+        "rate_limited",
+        "transient_error",
+        "health_restored"
+      ]
+    },
+    "semantic_attempt_counted": {
+      "type": "boolean"
+    },
+    "retry_after_seconds": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "continue",
+        "retry_same_tier",
+        "fallback_same_tier",
+        "delay",
+        "resume"
+      ]
+    }
+  }
+}

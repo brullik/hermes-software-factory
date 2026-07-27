@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/final-acceptance.schema.json",
+  "title": "Final Acceptance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "created_at",
+    "producer",
+    "policy_digest",
+    "status",
+    "host",
+    "versions",
+    "mandatory_scenarios",
+    "pilot",
+    "security",
+    "backup_restore",
+    "resource_usage",
+    "open_items",
+    "summary",
+    "evidence_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "artifact_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "product_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "tier"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "deterministic",
+            "luna",
+            "terra",
+            "sol"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED_EXTERNAL"
+      ]
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "service_user",
+        "admin_publicly_exposed"
+      ],
+      "properties": {
+        "os": {
+          "type": "string",
+          "minLength": 1
+        },
+        "service_user": {
+          "const": "hermesfactory"
+        },
+        "admin_publicly_exposed": {
+          "const": false
+        }
+      }
+    },
+    "versions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "component",
+          "version",
+          "digest"
+        ],
+        "properties": {
+          "component": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "digest": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "mandatory_scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "evidence_ref"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "BLOCKED_EXTERNAL"
+            ]
+          },
+          "evidence_ref": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "pilot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "url",
+        "release",
+        "acceptance"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "release": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acceptance": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        }
+      }
+    },
+    "security": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "backup_restore": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED_EXTERNAL"
+      ]
+    },
+    "resource_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_workers",
+        "oom_events",
+        "disk_cleanup"
+      ],
+      "properties": {
+        "max_workers": {
+          "type": "integer",
+          "maximum": 2
+        },
+        "oom_events": {
+          "type": "integer",
+          "const": 0
+        },
+        "disk_cleanup": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        }
+      }
+    },
+    "open_items": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  }
+}

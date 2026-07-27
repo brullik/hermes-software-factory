@@ -1,0 +1,14 @@
+# Logical template. Bootstrap must render this using the installed Hermes version.
+display:
+  interface: cli
+terminal:
+  cwd: /var/lib/hermes-factory/worktrees
+  backend: docker
+delegation:
+  max_spawn_depth: 1
+  max_concurrent_children: 2
+  orchestrator_enabled: false
+clarify:
+  timeout: 60
+# Provider/model are injected by Controller for the leased role/tier.
+# Secret values belong to a root-owned credential store, not this file.

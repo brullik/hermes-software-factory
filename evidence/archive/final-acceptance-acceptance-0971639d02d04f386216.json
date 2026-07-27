@@ -1,0 +1,195 @@
+{
+  "artifact_id": "acceptance-0971639d02d04f386216",
+  "backup_restore": "PASS",
+  "created_at": "2026-07-26T18:24:31Z",
+  "evidence_refs": [
+    "evidence/package-validation-report.json",
+    "docs/IMPLEMENTATION-LEDGER.md",
+    "evidence/external-acceptance.json"
+  ],
+  "host": {
+    "admin_publicly_exposed": false,
+    "os": "Ubuntu 24.04 LTS",
+    "service_user": "hermesfactory"
+  },
+  "mandatory_scenarios": [
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-1",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-2",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-3",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-4",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-5",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-6",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-7",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-8",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-9",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-10",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-11",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-12",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-13",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/package-validation-report.json",
+      "id": "local-14",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/implementation-ledger.jsonl",
+      "id": "vps-bootstrap",
+      "status": "PASS"
+    },
+    {
+      "evidence_ref": "evidence/compatibility-report.json",
+      "id": "hermes-compatibility",
+      "status": "BLOCKED_EXTERNAL"
+    },
+    {
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "id": "credentials",
+      "status": "BLOCKED_EXTERNAL"
+    },
+    {
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "id": "github-governance",
+      "status": "BLOCKED_EXTERNAL"
+    },
+    {
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "id": "telegram-gateway",
+      "status": "BLOCKED_EXTERNAL"
+    },
+    {
+      "evidence_ref": "evidence/pilot/staging-smoke.json",
+      "id": "pilot-e2e",
+      "status": "BLOCKED_EXTERNAL"
+    },
+    {
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "id": "offsite-backup",
+      "status": "BLOCKED_EXTERNAL"
+    }
+  ],
+  "open_items": [
+    "hermes-compatibility",
+    "credentials",
+    "github-governance",
+    "telegram-gateway",
+    "pilot-e2e",
+    "offsite-backup"
+  ],
+  "pilot": {
+    "acceptance": "PASS",
+    "release": "staging-only",
+    "repository": "brullik/hermes-factory-pilot",
+    "url": "http://127.0.0.1:8090"
+  },
+  "policy_digest": "8fa83aa61b556c59ccdc3e756c16e51193614ad6d19caadaa39f49f7ac29bc02",
+  "producer": {
+    "model": null,
+    "provider": null,
+    "role": "acceptance",
+    "tier": "deterministic"
+  },
+  "product_id": "hermes-software-factory",
+  "resource_usage": {
+    "disk_cleanup": "PASS",
+    "max_workers": 2,
+    "oom_events": 0
+  },
+  "schema_version": "1.0",
+  "security": "PASS",
+  "status": "BLOCKED_EXTERNAL",
+  "summary": "Local checks passed; remaining external acceptance items are explicitly recorded.",
+  "versions": [
+    {
+      "component": "python",
+      "digest": "456202baf8dc591c9709af663425c3d5a6607453acc29ac1324333c7a494a705",
+      "version": "3.14.0"
+    },
+    {
+      "component": "package",
+      "digest": "c28fcca53637bc88e124af1725df13cb98c69dedefd62fb3cdbe1cdb6b760624",
+      "version": "2.0.0"
+    },
+    {
+      "component": "python-vps",
+      "digest": "vps-python-3.12.3",
+      "version": "3.12.3"
+    },
+    {
+      "component": "Hermes Agent",
+      "digest": "bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f",
+      "version": "0.19.0"
+    },
+    {
+      "component": "Hermes source",
+      "digest": "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
+      "version": "v2026.7.20"
+    },
+    {
+      "component": "Docker",
+      "digest": "docker-29.1.3-0ubuntu3~24.04.2",
+      "version": "29.1.3"
+    },
+    {
+      "component": "Docker Compose",
+      "digest": "compose-2.40.3+ds1-0ubuntu1~24.04.1",
+      "version": "2.40.3"
+    },
+    {
+      "component": "Caddy",
+      "digest": "caddy-2.6.2-6ubuntu0.24.04.3",
+      "version": "2.6.2"
+    }
+  ]
+}

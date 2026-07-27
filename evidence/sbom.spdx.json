@@ -1,0 +1,205 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "creationInfo": {
+    "created": "2026-07-26T00:00:00Z",
+    "creators": [
+      "Tool: hermes-software-factory/scripts/build_sbom.py"
+    ]
+  },
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.0.0",
+  "name": "hermes-software-factory-2.0.0",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-hermes-software-factory-spec",
+      "downloadLocation": "NOASSERTION",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "hermes-software-factory-spec",
+      "versionInfo": "2.0.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-hermes-agent",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f"
+        }
+      ],
+      "downloadLocation": "https://pypi.org/project/hermes-agent/0.19.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "hermes-agent",
+      "versionInfo": "0.19.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-attrs",
+      "downloadLocation": "https://pypi.org/project/attrs/26.1.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "attrs",
+      "versionInfo": "26.1.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-colorama",
+      "downloadLocation": "https://pypi.org/project/colorama/0.4.6/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "colorama",
+      "versionInfo": "0.4.6"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-iniconfig",
+      "downloadLocation": "https://pypi.org/project/iniconfig/2.3.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "iniconfig",
+      "versionInfo": "2.3.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-jsonschema",
+      "downloadLocation": "https://pypi.org/project/jsonschema/4.26.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "jsonschema",
+      "versionInfo": "4.26.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-jsonschema-specifications",
+      "downloadLocation": "https://pypi.org/project/jsonschema-specifications/2025.9.1/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "jsonschema-specifications",
+      "versionInfo": "2025.9.1"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-librt",
+      "downloadLocation": "https://pypi.org/project/librt/0.13.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "librt",
+      "versionInfo": "0.13.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-mypy",
+      "downloadLocation": "https://pypi.org/project/mypy/1.20.2/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "mypy",
+      "versionInfo": "1.20.2"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-mypy-extensions",
+      "downloadLocation": "https://pypi.org/project/mypy-extensions/1.1.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "mypy-extensions",
+      "versionInfo": "1.1.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-packaging",
+      "downloadLocation": "https://pypi.org/project/packaging/26.2/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "packaging",
+      "versionInfo": "26.2"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-pathspec",
+      "downloadLocation": "https://pypi.org/project/pathspec/1.1.1/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pathspec",
+      "versionInfo": "1.1.1"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-pluggy",
+      "downloadLocation": "https://pypi.org/project/pluggy/1.6.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pluggy",
+      "versionInfo": "1.6.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Pygments",
+      "downloadLocation": "https://pypi.org/project/Pygments/2.20.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "Pygments",
+      "versionInfo": "2.20.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-pytest",
+      "downloadLocation": "https://pypi.org/project/pytest/8.4.2/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pytest",
+      "versionInfo": "8.4.2"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-PyYAML",
+      "downloadLocation": "https://pypi.org/project/PyYAML/6.0.3/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "PyYAML",
+      "versionInfo": "6.0.3"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-referencing",
+      "downloadLocation": "https://pypi.org/project/referencing/0.37.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "referencing",
+      "versionInfo": "0.37.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-rpds-py",
+      "downloadLocation": "https://pypi.org/project/rpds-py/2026.6.3/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "rpds-py",
+      "versionInfo": "2026.6.3"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-ruff",
+      "downloadLocation": "https://pypi.org/project/ruff/0.16.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "ruff",
+      "versionInfo": "0.16.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-setuptools",
+      "downloadLocation": "https://pypi.org/project/setuptools/83.0.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "setuptools",
+      "versionInfo": "83.0.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-types-jsonschema",
+      "downloadLocation": "https://pypi.org/project/types-jsonschema/4.26.0.20260518/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "types-jsonschema",
+      "versionInfo": "4.26.0.20260518"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-types-PyYAML",
+      "downloadLocation": "https://pypi.org/project/types-PyYAML/6.0.12.20260724/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "types-PyYAML",
+      "versionInfo": "6.0.12.20260724"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-typing-extensions",
+      "downloadLocation": "https://pypi.org/project/typing_extensions/4.16.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "typing_extensions",
+      "versionInfo": "4.16.0"
+    }
+  ],
+  "spdxVersion": "SPDX-2.3"
+}

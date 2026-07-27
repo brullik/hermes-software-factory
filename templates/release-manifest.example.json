@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "artifact-release-0001",
+  "product_id": "product-pilot-0001",
+  "created_at": "2026-07-26T12:00:00+00:00",
+  "producer": {
+    "role": "release_operator",
+    "tier": "deterministic",
+    "provider": null,
+    "model": null
+  },
+  "policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "version": "1.0.0",
+  "repository": "brullik/hermes-factory-pilot",
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "gate_evidence": [
+    "evidence/unit-tests.json",
+    "evidence/security.json"
+  ],
+  "review_artifacts": [
+    "evidence/review.json"
+  ],
+  "sbom_ref": "evidence/sbom.cdx.json",
+  "changelog_ref": "CHANGELOG.md",
+  "migration": {
+    "required": true,
+    "plan": "Apply versioned migration in staging then production.",
+    "rollback": "Run verified downgrade."
+  },
+  "rollback": "Redeploy previous image digest and restore database only if migration rollback requires it.",
+  "risk_tier": "medium",
+  "approved_for": [
+    "staging",
+    "production"
+  ]
+}

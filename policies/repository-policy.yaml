@@ -1,0 +1,43 @@
+version: "1.0"
+policy_id: repository
+owner: brullik
+factory_repository:
+  name: hermes-software-factory
+  visibility: public
+  secrets_allowed: false
+product_repository:
+  strategy: one_repository_per_product
+  default_visibility: public
+  automatic_force_private_markers:
+    - personal_data
+    - confidential_data
+    - real_money
+    - payment
+    - medical
+    - legal
+    - privileged_infrastructure
+    - proprietary_customer_integration
+    - security_sensitive_material
+    - restrictive_license
+  public_does_not_change_model_quota: true
+license:
+  default_for_public_repo: no_license_all_rights_reserved
+  open_source_license_requires_product_contract_decision: true
+naming:
+  lowercase_kebab_case: true
+  collision_suffix: short_product_id
+required_files:
+  - README.md
+  - SECURITY.md
+  - .gitignore
+  - .editorconfig
+  - LICENSE-DECISION.md
+  - docs/architecture.md
+  - docs/operations.md
+  - docs/user-guide.md
+  - .github/pull_request_template.md
+forbidden:
+  - credentials
+  - real_customer_data
+  - unredacted_logs
+  - generated_secret_files

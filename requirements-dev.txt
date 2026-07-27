@@ -1,0 +1,7 @@
+jsonschema>=4.23,<5
+PyYAML>=6.0,<7
+pytest>=8,<9
+ruff>=0.12,<1
+mypy>=1.16,<2
+types-jsonschema>=4.23,<5
+types-PyYAML>=6.0,<7

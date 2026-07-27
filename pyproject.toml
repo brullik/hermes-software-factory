@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-software-factory-spec"
+version = "2.0.0"
+description = "Reference policy, schema and validation utilities for Hermes Software Factory"
+requires-python = ">=3.12"
+dependencies = [
+  "jsonschema>=4.23,<5",
+  "PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+factory = "factory.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["factory*", "scripts*"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.12,<1",
+  "mypy>=1.16,<2",
+  "types-jsonschema>=4.23,<5",
+  "types-PyYAML>=6.0,<7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

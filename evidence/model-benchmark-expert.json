@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "benchmark-expert-20260726",
+  "product_id": "hermes-software-factory",
+  "created_at": "2026-07-26T20:06:05Z",
+  "producer": {
+    "role": "benchmark-evaluator",
+    "tier": "sol",
+    "provider": "openai-codex",
+    "model": "gpt-5.6-sol"
+  },
+  "policy_digest": "8fa83aa61b556c59ccdc3e756c16e51193614ad6d19caadaa39f49f7ac29bc02",
+  "role": "benchmark-evaluator",
+  "candidate_alias": "expert",
+  "baseline_alias": "openai-codex-reference-gpt-5.6-sol",
+  "task_count": 20,
+  "quality": {
+    "candidate_pass_rate": 0.85,
+    "baseline_pass_rate": 0.85,
+    "candidate_not_worse": true
+  },
+  "repair_rate": {
+    "candidate": 0,
+    "baseline": 0,
+    "not_increased": true
+  },
+  "false_pass_rate": {
+    "candidate": 0,
+    "baseline": 0,
+    "not_increased": true
+  },
+  "quota_efficiency": {
+    "candidate": 0,
+    "baseline": 0,
+    "improved": false
+  },
+  "recommendation": "collect_more_data",
+  "canary": {
+    "percent": 1,
+    "rollback_condition": "Do not activate a route change while recommendation is collect_more_data; if later activated, rollback on any deterministic safety-gate regression."
+  },
+  "evidence_refs": [
+    "evidence/model-benchmark-observations.json",
+    "evidence/external-acceptance.json"
+  ]
+}

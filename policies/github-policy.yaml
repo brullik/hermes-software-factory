@@ -1,0 +1,46 @@
+version: "1.0"
+policy_id: github
+default_branch: main
+branch_naming: "factory/{product_id}/{task_id}-{slug}"
+merge_method: squash
+direct_push_to_main: forbidden
+force_push: forbidden
+delete_branch_after_merge: true
+required_checks:
+  - factory/package-integrity
+  - factory/scope-guard
+  - factory/quality
+  - factory/security
+  - factory/independent-review
+  - factory/release-readiness
+merge_preconditions:
+  - required_checks_pass
+  - reviewed_head_sha_equals_merge_head_sha
+  - no_unresolved_blocking_threads
+  - no_secret_findings
+  - policy_digest_matches
+  - evidence_manifest_valid
+worktrees:
+  required: true
+  one_branch_per_worktree: true
+  concurrent_same_file_writes: forbidden
+pull_requests:
+  draft_while_building: true
+  ready_after_builder_gates: true
+  immutable_review_candidate: true
+actions:
+  ordinary_checks_runner: github_hosted
+  self_hosted_runner_use:
+    only_for_closed_integration: true
+    ephemeral_or_cleaned: true
+    public_fork_forbidden: true
+environments:
+  staging:
+    required: true
+  production:
+    required: true
+release:
+  tag_format: "v{semver}"
+  changelog_required: true
+  sbom_required: true
+  image_digest_required: true

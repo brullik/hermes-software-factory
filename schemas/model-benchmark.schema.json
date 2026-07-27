@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/model-benchmark.schema.json",
+  "title": "Model Benchmark",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "created_at",
+    "producer",
+    "policy_digest",
+    "role",
+    "candidate_alias",
+    "baseline_alias",
+    "task_count",
+    "quality",
+    "repair_rate",
+    "false_pass_rate",
+    "quota_efficiency",
+    "recommendation",
+    "canary",
+    "evidence_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "artifact_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "product_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "tier"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "deterministic",
+            "luna",
+            "terra",
+            "sol"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_alias": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_alias": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_count": {
+      "type": "integer",
+      "minimum": 20
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_pass_rate",
+        "baseline_pass_rate",
+        "candidate_not_worse"
+      ],
+      "properties": {
+        "candidate_pass_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "baseline_pass_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "candidate_not_worse": {
+          "type": "boolean"
+        }
+      }
+    },
+    "repair_rate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate",
+        "baseline",
+        "not_increased"
+      ],
+      "properties": {
+        "candidate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "baseline": {
+          "type": "number",
+          "minimum": 0
+        },
+        "not_increased": {
+          "type": "boolean"
+        }
+      }
+    },
+    "false_pass_rate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate",
+        "baseline",
+        "not_increased"
+      ],
+      "properties": {
+        "candidate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "baseline": {
+          "type": "number",
+          "minimum": 0
+        },
+        "not_increased": {
+          "type": "boolean"
+        }
+      }
+    },
+    "quota_efficiency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate",
+        "baseline",
+        "improved"
+      ],
+      "properties": {
+        "candidate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "baseline": {
+          "type": "number",
+          "minimum": 0
+        },
+        "improved": {
+          "type": "boolean"
+        }
+      }
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": [
+        "approve_route_change",
+        "reject",
+        "collect_more_data"
+      ]
+    },
+    "canary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "percent",
+        "rollback_condition"
+      ],
+      "properties": {
+        "percent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "rollback_condition": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  }
+}

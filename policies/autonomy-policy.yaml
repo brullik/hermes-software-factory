@@ -1,0 +1,51 @@
+version: "1.0"
+policy_id: autonomy
+default_mode: autonomous
+owner_skill_assumption: non_technical
+principles:
+  - reversible_decisions_are_automatic
+  - questions_are_non_blocking_unless_external_blocker
+  - code_and_github_operations_are_performed_by_system
+  - model_text_never_grants_permissions
+allowed_automatic_actions:
+  - create_product_contract
+  - make_reversible_assumptions
+  - select_stack
+  - create_repository
+  - create_issue
+  - create_label
+  - create_branch
+  - create_worktree
+  - create_and_update_pr
+  - mark_pr_ready
+  - squash_merge_after_all_gates
+  - create_tag_release_changelog
+  - close_completed_tasks
+  - install_project_dependencies_in_container
+  - deploy_staging
+  - deploy_low_and_medium_risk_production
+  - rollback_failed_deployment
+  - create_and_execute_bug_repairs
+  - create_optional_feature_backlog
+owner_action_only:
+  - missing_credential
+  - oauth_device_code
+  - two_factor_authentication
+  - captcha
+  - external_account_creation
+  - paid_resource_purchase
+  - legal_decision
+  - unapproved_irreversible_production_action
+question_policy:
+  may_send_non_blocking_clarification: true
+  default_grace_period_minutes: 15
+  continue_without_answer_for_reversible_decisions: true
+  maximum_questions_per_product_intake: 3
+  questions_must_include_default_assumption: true
+forbidden:
+  - ask_owner_to_edit_code
+  - ask_owner_to_run_git_commands
+  - ask_owner_to_review_logs
+  - ask_owner_to_choose_technical_stack_without_irreversible_reason
+  - wait_indefinitely_for_optional_answer
+  - declare_success_without_evidence

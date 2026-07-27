@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/gate-evidence.schema.json",
+  "title": "Gate Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "gate_id",
+    "status",
+    "subject_sha",
+    "command_digest",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "artifact_digest",
+    "summary",
+    "mandatory"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "gate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "ERROR",
+        "NOT_APPLICABLE_POLICY"
+      ]
+    },
+    "subject_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,64}$"
+    },
+    "command_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "artifact_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 4000
+    },
+    "mandatory": {
+      "type": "boolean"
+    }
+  }
+}

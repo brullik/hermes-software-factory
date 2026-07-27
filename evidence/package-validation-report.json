@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "package": "hermes-software-factory",
+  "package_version": "2.0.0",
+  "generated_at_utc": "2026-07-26T18:23:40Z",
+  "status": "PASS",
+  "checks": {
+    "static_package_validation": {
+      "command": "python3 scripts/validate_package.py",
+      "status": "PASS"
+    },
+    "manifest": {
+      "command": "python3 scripts/verify_manifest.py",
+      "status": "PASS",
+      "files": 201
+    },
+    "unit_tests": {
+      "command": "python3 -m pytest",
+      "status": "PASS",
+      "passed": 50,
+      "failed": 0
+    },
+    "pilot_tests": {
+      "command": "python3 -m unittest pilot.tests.test_pilot -v",
+      "status": "PASS",
+      "passed": 2,
+      "failed": 0
+    },
+    "json_schemas": {
+      "status": "PASS",
+      "valid": 23,
+      "invalid": 0,
+      "draft": "2020-12"
+    },
+    "python_compile": {
+      "command": "python3 -m compileall -q scripts tests factory pilot",
+      "status": "PASS"
+    },
+    "lint": {
+      "command": "python3 -m ruff check factory scripts tests pilot",
+      "status": "PASS"
+    },
+    "typecheck": {
+      "command": "python3 -m mypy factory scripts pilot",
+      "status": "PASS",
+      "files": 42
+    },
+    "secret_scan": {
+      "command": "python3 scripts/secret_scan.py",
+      "status": "PASS"
+    },
+    "sbom": {
+      "command": "python3 scripts/build_sbom.py --check",
+      "status": "PASS",
+      "format": "SPDX-2.3"
+    }
+  },
+  "scope_note": "This report validates the source package and deterministic local gates. VPS/provider/GitHub/Telegram/offsite acceptance is recorded separately in evidence/final-acceptance.json."
+}

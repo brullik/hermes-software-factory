@@ -1,0 +1,29 @@
+version: "1.0"
+features:
+  component_count_over_2: 1
+  estimated_files_over_8: 1
+  cross_service_contract: 2
+  data_migration: 2
+  concurrency: 2
+  auth_or_permissions: 2
+  external_integration: 1
+  unfamiliar_stack: 1
+  prior_semantic_failure: 2
+thresholds:
+  luna_max: 3
+  terra_max: 6
+  sol_min: 7
+risk_floor:
+  low: luna
+  medium: luna
+  high: terra
+role_overrides:
+  solution_architect:
+    medium: terra
+    high: sol
+  independent_reviewer:
+    medium: terra
+    high: sol
+  security_reviewer:
+    medium: terra
+    high: sol

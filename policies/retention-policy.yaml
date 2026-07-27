@@ -1,0 +1,20 @@
+version: "1.0"
+policy_id: retention
+git_history: indefinite
+release_manifests: indefinite
+audit_metrics_days: 90
+compact_attempt_summaries_days: 90
+full_agent_transcripts_days: 14
+raw_logs_days: 30
+security_findings_days: 365
+backup:
+  daily: 7
+  weekly: 4
+  monthly: 6
+privacy:
+  secrets_retained_in_logs: false
+  personal_data_in_agent_transcripts: false
+  redact_before_persist: true
+cleanup:
+  scheduled_daily: true
+  preserve_open_incident_evidence: true

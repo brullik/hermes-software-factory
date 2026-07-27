@@ -1,0 +1,33 @@
+version: "1.0"
+owner: brullik
+default_branch: main
+merge_method: squash
+delete_branch_on_merge: true
+visibility:
+  safe_default: public
+  force_private_from_policy: true
+ruleset:
+  require_pull_request: true
+  required_approvals_from_independent_agent: 1
+  dismiss_stale_approvals: true
+  require_conversation_resolution: true
+  block_force_push: true
+  block_deletion: true
+  required_status_checks:
+    - factory/package-integrity
+    - factory/scope-guard
+    - factory/quality
+    - factory/security
+    - factory/independent-review
+    - factory/release-readiness
+actions:
+  default_permissions:
+    contents: read
+  pin_actions_to_full_sha: true
+  fork_secrets: false
+  fork_self_hosted_runner: false
+environments:
+  staging:
+    prevent_self_review: true
+  production:
+    prevent_self_review: true

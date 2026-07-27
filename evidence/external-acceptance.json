@@ -1,0 +1,106 @@
+{
+  "schema_version": "1.0",
+  "created_at": "2026-07-26T20:06:05Z",
+  "host": {
+    "address": "191.44.33.92",
+    "os": "Ubuntu 24.04 LTS",
+    "service_user": "hermesfactory",
+    "admin_publicly_exposed": false
+  },
+  "versions": [
+    {
+      "component": "python-vps",
+      "version": "3.12.3",
+      "digest": "vps-python-3.12.3"
+    },
+    {
+      "component": "Hermes Agent",
+      "version": "0.19.0",
+      "digest": "bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f"
+    },
+    {
+      "component": "Hermes source",
+      "version": "v2026.7.20",
+      "digest": "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+    },
+    {
+      "component": "Docker",
+      "version": "29.1.3",
+      "digest": "docker-29.1.3-0ubuntu3~24.04.2"
+    },
+    {
+      "component": "Docker Compose",
+      "version": "2.40.3",
+      "digest": "compose-2.40.3+ds1-0ubuntu1~24.04.1"
+    },
+    {
+      "component": "Caddy",
+      "version": "2.6.2",
+      "digest": "caddy-2.6.2-6ubuntu0.24.04.3"
+    }
+  ],
+  "backup_restore": "PASS",
+  "checks": {
+    "vps-bootstrap": {
+      "status": "PASS",
+      "evidence_ref": "evidence/implementation-ledger.jsonl",
+      "details": [
+        "Ubuntu 24.04 preflight passed",
+        "Docker and Compose active",
+        "hermesfactory service user and controller active",
+        "controller health and restart smoke passed",
+        "UFW default deny incoming with SSH allow",
+        "SSH password auth and root login disabled",
+        "fail2ban active with sshd jail"
+      ]
+    },
+    "hermes-compatibility": {
+      "status": "BLOCKED_EXTERNAL",
+      "evidence_ref": "evidence/compatibility-report.json",
+      "details": [
+        "Pinned Hermes CLI v0.19.0 install and CLI smoke passed; exact tag, commit, and wheel digest are recorded",
+        "Codex and Nous OAuth are connected; Hermes default model discovery selected tencent/hy3:free via Nous Portal",
+        "OAuth health probes for gpt-5.6-luna, gpt-5.6-terra, and gpt-5.6-sol passed",
+        "Closed 20-task benchmark completed at 18/20, 17/20, and 17/20; safety-gated route change remains deferred and aliases stay fail-closed"
+      ]
+    },
+    "credentials": {
+      "status": "PASS",
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "details": [
+        "openai-codex and nous OAuth are connected and auth status probes pass; no paid API key fallback is configured"
+      ]
+    },
+    "github-governance": {
+      "status": "BLOCKED_EXTERNAL",
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "details": [
+        "GitHub CLI is authenticated as brullik with repo/workflow scopes; target factory repository is not yet present and no repository write was performed"
+      ]
+    },
+    "telegram-gateway": {
+      "status": "PASS",
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "details": [
+        "Telegram token and owner user ID 518104905 are connected; token probe, private-chat update capture, outbound sendMessage, allowlist, and offset persistence passed",
+        "Gateway systemd unit now loads /etc/hermes-factory/telegram.env and the service is active"
+      ]
+    },
+    "pilot-e2e": {
+      "status": "BLOCKED_EXTERNAL",
+      "evidence_ref": "evidence/pilot/staging-smoke.json",
+      "details": [
+        "Neutral pilot Product Contract, Docker staging, health, and persistence smoke passed",
+        "GitHub PR/review/merge, provider-backed agent, Telegram black-box, and release rollback evidence still require external access"
+      ]
+    },
+    "offsite-backup": {
+      "status": "BLOCKED_EXTERNAL",
+      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "details": [
+        "Encrypted local restic backup, repository check, and restore passed",
+        "External offsite repository is not connected"
+      ]
+    }
+  }
+}

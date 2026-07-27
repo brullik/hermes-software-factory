@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "artifact-risk-0001",
+  "product_id": "product-pilot-0001",
+  "created_at": "2026-07-26T12:00:00+00:00",
+  "producer": {
+    "role": "policy_controller",
+    "tier": "deterministic",
+    "provider": null,
+    "model": null
+  },
+  "policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "tier": "medium",
+  "markers": [
+    "authentication"
+  ],
+  "data_classification": "public",
+  "required_controls": [
+    "staging",
+    "independent_review",
+    "security_scan"
+  ],
+  "repository_visibility": "public",
+  "production_policy": "auto_if_capacity",
+  "summary": "Medium risk due to authentication; synthetic public data only.",
+  "evidence_refs": [
+    "templates/product-contract.example.json"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "gate_id": "unit-tests",
+  "status": "PASS",
+  "subject_sha": "abcdef1",
+  "command_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "started_at": "2026-07-26T12:00:00+00:00",
+  "finished_at": "2026-07-26T12:01:00+00:00",
+  "exit_code": 0,
+  "artifact_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "summary": "42 tests passed",
+  "mandatory": true
+}

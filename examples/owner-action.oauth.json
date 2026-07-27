@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "action_id": "OA-20260726-001",
+  "reason": "oauth_device_code",
+  "title": "Подключите Codex к подписке ChatGPT",
+  "why_blocked": "Система не может подтвердить вход в ваш аккаунт без одноразового действия владельца.",
+  "single_action": "Откройте указанную страницу входа и подтвердите device code, показанный локальным Codex.",
+  "safe_instruction": [
+    "Откройте официальный адрес входа, который показан в терминале или защищённом интерфейсе.",
+    "Введите device code.",
+    "Подтвердите доступ. Не отправляйте код, пароль или токен в Telegram."
+  ],
+  "unblock_condition": {
+    "probe": "codex auth status --json",
+    "expected": "authenticated=true"
+  },
+  "independent_work_continues": [
+    "Настройка Docker",
+    "Создание service user",
+    "Проверка GitHub repository policies"
+  ],
+  "secret_warning": "Не отправляйте пароль, токен или private key в Telegram или чат.",
+  "created_at": "2026-07-26T12:00:00+00:00",
+  "deduplication_key": "codex-oauth-primary"
+}

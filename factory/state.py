@@ -1,0 +1,552 @@
+"""Small durable SQLite state store for single-node controller deployments."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from .common import utc_now
+
+
+class ProductCapacityError(ValueError):
+    """Raised when the configured active-product quota is exhausted."""
+
+
+class IntakeRateLimitError(ValueError):
+    """Raised when an intake source exceeds its durable request budget."""
+
+
+class StateStore:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        max_active_workers: int = 2,
+        max_active_products: int = 1,
+    ) -> None:
+        if max_active_workers < 1 or max_active_workers > 2:
+            raise ValueError("max_active_workers must be between 1 and 2")
+        if max_active_products < 1:
+            raise ValueError("max_active_products must be positive")
+        self.database_path = database_path
+        self.max_active_workers = max_active_workers
+        self.max_active_products = max_active_products
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(self.database_path, check_same_thread=False)
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA foreign_keys=ON")
+        self._initialize()
+
+    def _initialize(self) -> None:
+        with self._connection:
+            self._connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS products (
+                    product_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    idea TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    product_id TEXT NOT NULL REFERENCES products(product_id),
+                    title TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    dependencies_json TEXT NOT NULL,
+                    conflict_keys_json TEXT NOT NULL,
+                    lease_owner TEXT,
+                    lease_until TEXT,
+                    heartbeat_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id TEXT,
+                    task_id TEXT,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    tier TEXT NOT NULL,
+                    attempt_kind TEXT NOT NULL,
+                    prompt_digest TEXT NOT NULL,
+                    reason_code TEXT,
+                    status TEXT NOT NULL,
+                    semantic_counted INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(task_id, prompt_digest)
+                );
+                CREATE TABLE IF NOT EXISTS outbox (
+                    outbox_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    lease_owner TEXT,
+                    lease_until TEXT,
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS intake_requests (
+                    request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    created_at_epoch INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+                CREATE INDEX IF NOT EXISTS idx_events_product ON events(product_id, event_id);
+                CREATE INDEX IF NOT EXISTS idx_attempts_task ON attempts(task_id, tier);
+                CREATE INDEX IF NOT EXISTS idx_intake_requests_owner
+                    ON intake_requests(source, owner_id, created_at_epoch);
+                """
+            )
+            try:
+                self._connection.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._connection.execute("ALTER TABLE outbox ADD COLUMN lease_until TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
+    def health(self) -> bool:
+        with self._lock:
+            return bool(self._connection.execute("SELECT 1").fetchone()[0] == 1)
+
+    def create_product(
+        self,
+        *,
+        product_id: str,
+        owner_id: str,
+        source: str,
+        idea: str,
+        idempotency_key: str,
+        rate_limit: tuple[int, int] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        now = utc_now()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._connection.execute(
+                    "SELECT * FROM products WHERE idempotency_key = ?", (idempotency_key,)
+                ).fetchone()
+                if existing:
+                    self._connection.commit()
+                    return dict(existing), False
+                active_count = int(
+                    self._connection.execute(
+                        "SELECT COUNT(*) FROM products WHERE status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED_SAFE')"
+                    ).fetchone()[0]
+                )
+                if active_count >= self.max_active_products:
+                    raise ProductCapacityError("active product capacity is exhausted")
+                if rate_limit is not None:
+                    limit, window_seconds = rate_limit
+                    if limit < 1 or window_seconds < 1:
+                        raise ValueError("intake rate limit must be positive")
+                    now_epoch = int(time.time())
+                    self._connection.execute(
+                        "DELETE FROM intake_requests WHERE created_at_epoch < ?",
+                        (now_epoch - window_seconds,),
+                    )
+                    recent = int(
+                        self._connection.execute(
+                            "SELECT COUNT(*) FROM intake_requests "
+                            "WHERE source=? AND owner_id=? AND created_at_epoch >= ?",
+                            (source, owner_id, now_epoch - window_seconds),
+                        ).fetchone()[0]
+                    )
+                    if recent >= limit:
+                        raise IntakeRateLimitError("intake rate limit exceeded")
+                    self._connection.execute(
+                        "INSERT INTO intake_requests "
+                        "(source, owner_id, idempotency_key, created_at_epoch) VALUES (?, ?, ?, ?)",
+                        (source, owner_id, idempotency_key, now_epoch),
+                    )
+                self._connection.execute(
+                    """INSERT INTO products
+                    (product_id, status, owner_id, source, idea, idempotency_key, created_at, updated_at)
+                    VALUES (?, 'IDEA_RECEIVED', ?, ?, ?, ?, ?, ?)""",
+                    (product_id, owner_id, source, idea, idempotency_key, now, now),
+                )
+                self._record_event(product_id, None, "product_created", {"source": source})
+                row = self._connection.execute(
+                    "SELECT * FROM products WHERE product_id = ?", (product_id,)
+                ).fetchone()
+                assert row is not None
+                self._connection.commit()
+                return dict(row), True
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def get_product(self, product_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM products WHERE product_id = ?", (product_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_products(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM products ORDER BY created_at").fetchall()
+            return [dict(row) for row in rows]
+
+    def transition_product(self, product_id: str, status: str) -> dict[str, Any]:
+        allowed = {
+            "IDEA_RECEIVED": {"CONTRACT_DRAFTED", "CANCELLED"},
+            "CONTRACT_DRAFTED": {"CONTRACT_VALIDATED", "PAUSED", "CANCELLED"},
+            "CONTRACT_VALIDATED": {"RISK_CLASSIFIED", "PAUSED", "CANCELLED"},
+            "RISK_CLASSIFIED": {"ARCHITECTED", "PAUSED", "CANCELLED"},
+            "ARCHITECTED": {"BACKLOG_READY", "PAUSED", "CANCELLED"},
+            "BACKLOG_READY": {"IMPLEMENTING", "PAUSED", "CANCELLED"},
+            "IMPLEMENTING": {"INTEGRATING", "REPAIRING", "DELAYED_QUOTA", "PAUSED", "CANCELLED"},
+            "INTEGRATING": {"STAGING_DEPLOYED", "REPAIRING", "PAUSED", "CANCELLED"},
+            "STAGING_DEPLOYED": {"PRODUCT_ACCEPTANCE", "ROLLING_BACK", "PAUSED", "CANCELLED"},
+            "PRODUCT_ACCEPTANCE": {"RELEASE_READY", "REPAIRING", "PAUSED", "CANCELLED"},
+            "RELEASE_READY": {"PRODUCTION_DEPLOYED", "STAGING_DEPLOYED", "PAUSED", "CANCELLED"},
+            "PRODUCTION_DEPLOYED": {"OBSERVATION", "ROLLING_BACK", "PAUSED", "CANCELLED"},
+            "OBSERVATION": {"COMPLETED", "REPAIRING", "ROLLING_BACK", "PAUSED", "CANCELLED"},
+            "REPAIRING": {"IMPLEMENTING", "INTEGRATING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
+            "DELAYED_QUOTA": {"IMPLEMENTING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
+            "BLOCKED_OWNER": {"IMPLEMENTING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
+            "ROLLING_BACK": {"ROLLED_BACK", "FAILED_SAFE"},
+            "ROLLED_BACK": {"IMPLEMENTING", "STAGING_DEPLOYED", "FAILED_SAFE"},
+            "PAUSED": {"IDEA_RECEIVED", "CONTRACT_DRAFTED", "CONTRACT_VALIDATED", "RISK_CLASSIFIED", "ARCHITECTED", "BACKLOG_READY", "IMPLEMENTING", "INTEGRATING", "STAGING_DEPLOYED", "PRODUCT_ACCEPTANCE", "RELEASE_READY", "PRODUCTION_DEPLOYED", "OBSERVATION", "CANCELLED"},
+            "CANCELLED": set(),
+            "COMPLETED": set(),
+            "FAILED_SAFE": set(),
+        }
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM products WHERE product_id = ?", (product_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(product_id)
+            current = str(row["status"])
+            if status not in allowed.get(current, set()):
+                raise ValueError(f"Invalid product transition {current} -> {status}")
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status = ?, updated_at = ? WHERE product_id = ?",
+                (status, now, product_id),
+            )
+            self._record_event(product_id, None, "product_transition", {"from": current, "to": status})
+            updated = self._connection.execute(
+                "SELECT * FROM products WHERE product_id = ?", (product_id,)
+            ).fetchone()
+            assert updated is not None
+            return dict(updated)
+
+    def add_task(
+        self,
+        *,
+        task_id: str,
+        product_id: str,
+        title: str,
+        dependencies: list[str] | None = None,
+        conflict_keys: list[str] | None = None,
+        priority: int = 0,
+    ) -> None:
+        if priority < 0:
+            raise ValueError("priority cannot be negative")
+        now = utc_now()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO tasks
+                (task_id, product_id, title, priority, status, dependencies_json, conflict_keys_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    product_id,
+                    title,
+                    priority,
+                    json.dumps(dependencies or []),
+                    json.dumps(conflict_keys or []),
+                    now,
+                    now,
+                ),
+            )
+            self._record_event(product_id, task_id, "task_created", {"title": title})
+
+    def claim_task(self, *, worker_id: str, lease_seconds: int = 300) -> dict[str, Any] | None:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "UPDATE tasks SET status='PENDING', lease_owner=NULL, lease_until=NULL "
+                    "WHERE status='CLAIMED' AND lease_until < ?",
+                    (utc_now(),),
+                )
+                rows = self._connection.execute(
+                    "SELECT * FROM tasks WHERE status='PENDING' ORDER BY priority DESC, created_at"
+                ).fetchall()
+                claimed_rows = self._connection.execute(
+                    "SELECT lease_owner, conflict_keys_json FROM tasks WHERE status='CLAIMED'"
+                ).fetchall()
+                active_workers = {
+                    str(active_row["lease_owner"])
+                    for active_row in claimed_rows
+                    if active_row["lease_owner"]
+                }
+                if worker_id in active_workers or len(active_workers) >= self.max_active_workers:
+                    self._connection.commit()
+                    return None
+                claimed_conflicts = {
+                    conflict_key
+                    for active_row in claimed_rows
+                    for conflict_key in json.loads(active_row["conflict_keys_json"])
+                }
+                chosen = None
+                for row in rows:
+                    dependencies = json.loads(row["dependencies_json"])
+                    dependency_statuses = [
+                        self._connection.execute(
+                            "SELECT status FROM tasks WHERE task_id = ?", (dependency,)
+                        ).fetchone()
+                        for dependency in dependencies
+                    ]
+                    if not all(status is not None and status[0] == "DONE" for status in dependency_statuses):
+                        continue
+                    conflict_keys = set(json.loads(row["conflict_keys_json"]))
+                    if conflict_keys & claimed_conflicts:
+                        continue
+                    chosen = row
+                    break
+                if chosen is None:
+                    self._connection.commit()
+                    return None
+                now = utc_now()
+                lease_until = utc_now_from_seconds(lease_seconds)
+                self._connection.execute(
+                    "UPDATE tasks SET status='CLAIMED', lease_owner=?, lease_until=?, heartbeat_at=?, "
+                    "attempts=attempts+1, updated_at=? WHERE task_id=?",
+                    (worker_id, lease_until, now, now, chosen["task_id"]),
+                )
+                self._record_event(chosen["product_id"], chosen["task_id"], "task_claimed", {"worker": worker_id})
+                self._connection.commit()
+                result = dict(chosen)
+                result.update({"status": "CLAIMED", "lease_owner": worker_id, "lease_until": lease_until})
+                return result
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def heartbeat(self, task_id: str, worker_id: str, lease_seconds: int = 300) -> None:
+        with self._lock, self._connection:
+            updated = self._connection.execute(
+                "UPDATE tasks SET heartbeat_at=?, lease_until=?, updated_at=? "
+                "WHERE task_id=? AND status='CLAIMED' AND lease_owner=?",
+                (utc_now(), utc_now_from_seconds(lease_seconds), utc_now(), task_id, worker_id),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("Task lease is missing or owned by another worker")
+
+    def complete_task(self, task_id: str, worker_id: str, status: str = "DONE") -> None:
+        if status not in {"DONE", "FAILED_SAFE", "BLOCKED_EXTERNAL"}:
+            raise ValueError(f"Unsupported terminal task status: {status}")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT product_id FROM tasks WHERE task_id=? AND status='CLAIMED' AND lease_owner=?",
+                (task_id, worker_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Task lease is missing or owned by another worker")
+            self._connection.execute(
+                "UPDATE tasks SET status=?, lease_owner=NULL, lease_until=NULL, updated_at=? WHERE task_id=?",
+                (status, utc_now(), task_id),
+            )
+            self._record_event(row["product_id"], task_id, "task_completed", {"status": status})
+
+    def events(self, product_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if product_id:
+                rows = self._connection.execute(
+                    "SELECT * FROM events WHERE product_id=? ORDER BY event_id", (product_id,)
+                ).fetchall()
+            else:
+                rows = self._connection.execute("SELECT * FROM events ORDER BY event_id").fetchall()
+            return [dict(row) for row in rows]
+
+    def record_attempt(
+        self,
+        *,
+        attempt_id: str,
+        task_id: str,
+        tier: str,
+        attempt_kind: str,
+        prompt_digest: str,
+        status: str,
+        semantic_counted: bool,
+        reason_code: str | None = None,
+    ) -> bool:
+        """Persist an attempt once; identical prompt digests are never duplicated."""
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT attempt_id FROM attempts WHERE task_id=? AND prompt_digest=?",
+                (task_id, prompt_digest),
+            ).fetchone()
+            if existing is not None:
+                return False
+            self._connection.execute(
+                """INSERT INTO attempts
+                (attempt_id, task_id, tier, attempt_kind, prompt_digest, reason_code, status,
+                 semantic_counted, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    attempt_id,
+                    task_id,
+                    tier,
+                    attempt_kind,
+                    prompt_digest,
+                    reason_code,
+                    status,
+                    int(semantic_counted),
+                    utc_now(),
+                ),
+            )
+            return True
+
+    def attempts_for_task(self, task_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM attempts WHERE task_id=? ORDER BY created_at", (task_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_attempt(self, attempt_id: str, *, status: str, reason_code: str | None = None) -> None:
+        with self._lock, self._connection:
+            updated = self._connection.execute(
+                "UPDATE attempts SET status=?, reason_code=? WHERE attempt_id=?",
+                (status, reason_code, attempt_id),
+            ).rowcount
+            if updated != 1:
+                raise KeyError(attempt_id)
+
+    def attempt_counts(self, task_id: str, tier: str) -> tuple[int, int]:
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT
+                    COALESCE(SUM(CASE WHEN semantic_counted=1 THEN 1 ELSE 0 END), 0) AS semantic,
+                    COALESCE(SUM(CASE WHEN semantic_counted=0 AND attempt_kind='transient_retry' THEN 1 ELSE 0 END), 0) AS transient
+                FROM attempts WHERE task_id=? AND tier=?""",
+                (task_id, tier),
+            ).fetchone()
+            assert row is not None
+            return int(row["semantic"]), int(row["transient"])
+
+    def _record_event(self, product_id: str | None, task_id: str | None, event_type: str, payload: dict[str, Any]) -> None:
+        self._connection.execute(
+            "INSERT INTO events(product_id, task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (product_id, task_id, event_type, json.dumps(payload, ensure_ascii=False), utc_now()),
+        )
+
+    def backup_to(self, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            destination = sqlite3.connect(target)
+            try:
+                self._connection.backup(destination)
+            finally:
+                destination.close()
+
+    def recover_expired_leases(self) -> int:
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                "SELECT task_id, product_id FROM tasks WHERE status='CLAIMED' AND lease_until < ?",
+                (utc_now(),),
+            ).fetchall()
+            for row in rows:
+                self._connection.execute(
+                    "UPDATE tasks SET status='PENDING', lease_owner=NULL, lease_until=NULL, updated_at=? WHERE task_id=?",
+                    (utc_now(), row["task_id"]),
+                )
+                self._record_event(row["product_id"], row["task_id"], "lease_recovered", {})
+            return len(rows)
+
+    def enqueue_outbox(self, *, outbox_id: str, idempotency_key: str, event_type: str, payload: dict[str, Any]) -> bool:
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT outbox_id FROM outbox WHERE idempotency_key=?", (idempotency_key,)
+            ).fetchone()
+            if existing is not None:
+                return False
+            self._connection.execute(
+                """INSERT INTO outbox
+                (outbox_id, idempotency_key, event_type, payload_json, status, created_at)
+                VALUES (?, ?, ?, ?, 'PENDING', ?)""",
+                (outbox_id, idempotency_key, event_type, json.dumps(payload, ensure_ascii=False), utc_now()),
+            )
+            return True
+
+    def claim_outbox(self, worker_id: str, limit: int = 10, lease_seconds: int = 300) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                now = utc_now()
+                self._connection.execute(
+                    "UPDATE outbox SET status='PENDING', lease_owner=NULL, lease_until=NULL "
+                    "WHERE status='CLAIMED' AND lease_until IS NOT NULL AND lease_until < ?",
+                    (now,),
+                )
+                rows = self._connection.execute(
+                    "SELECT * FROM outbox WHERE status='PENDING' ORDER BY created_at LIMIT ?", (limit,)
+                ).fetchall()
+                lease_until = utc_now_from_seconds(lease_seconds)
+                result = []
+                for row in rows:
+                    self._connection.execute(
+                        "UPDATE outbox SET status='CLAIMED', lease_owner=?, lease_until=? WHERE outbox_id=?",
+                        (worker_id, lease_until, row["outbox_id"]),
+                    )
+                    item = dict(row)
+                    item.update({"status": "CLAIMED", "lease_owner": worker_id, "lease_until": lease_until})
+                    result.append(item)
+                self._connection.commit()
+                return result
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def mark_outbox_done(self, outbox_id: str, worker_id: str) -> None:
+        with self._lock, self._connection:
+            updated = self._connection.execute(
+                "UPDATE outbox SET status='DONE', delivered_at=?, lease_owner=NULL, lease_until=NULL "
+                "WHERE outbox_id=? AND status='CLAIMED' AND lease_owner=?",
+                (utc_now(), outbox_id, worker_id),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("Outbox item is missing or owned by another worker")
+
+
+def utc_now_from_seconds(seconds: int) -> str:
+    import datetime
+
+    return (datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=seconds)).replace(
+        microsecond=0
+    ).isoformat().replace("+00:00", "Z")

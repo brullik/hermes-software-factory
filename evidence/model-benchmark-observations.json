@@ -1,0 +1,39 @@
+{
+  "suite_id": "hermes-closed-routing-v2",
+  "created_at": "2026-07-26T20:06:05Z",
+  "task_count": 20,
+  "methodology": "Closed deterministic prompts with explicit policy rules, exact-output assertions, and no provider identity in the task text.",
+  "v1_status": "DISCARDED_METHODOLOGY",
+  "v1_reason": "Several prompts omitted the policy rule needed to answer them deterministically; v1 was not used for routing.",
+  "runs": [
+    {
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "tier": "luna",
+      "passed": 18,
+      "pass_rate": 0.9,
+      "failed_task_ids": ["17", "18"],
+      "failed_outputs": ["Understood", "ACCEPT"]
+    },
+    {
+      "provider": "openai-codex",
+      "model": "gpt-5.6-terra",
+      "tier": "terra",
+      "passed": 17,
+      "pass_rate": 0.85,
+      "failed_task_ids": ["15", "18", "19"],
+      "failed_outputs": ["Understood", "Understood", "Acknowledged"]
+    },
+    {
+      "provider": "openai-codex",
+      "model": "gpt-5.6-sol",
+      "tier": "sol",
+      "passed": 17,
+      "pass_rate": 0.85,
+      "failed_task_ids": ["15", "17", "18"],
+      "failed_outputs": ["Acknowledged", "Understood", "Understood"]
+    }
+  ],
+  "routing_decision": "COLLECT_MORE_DATA",
+  "routing_decision_reason": "Live OAuth health passed, but the 20-task suite did not provide sufficient safety-gate coverage for an automatic route change; runtime aliases remain fail-closed and unselected."
+}

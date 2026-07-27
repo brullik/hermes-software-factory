@@ -1,0 +1,50 @@
+version: "1.0"
+policy_id: risk
+tiers:
+  low:
+    examples:
+      - static_public_site
+      - local_cli_without_secrets
+      - synthetic_data_automation
+    production_auto: true
+  medium:
+    examples:
+      - authenticated_web_application
+      - telegram_bot
+      - internal_database_application
+      - external_api_integration_without_sensitive_data
+    production_auto: true
+  high:
+    markers:
+      - real_money_trading
+      - payments_or_billing
+      - personal_or_confidential_data
+      - medical_function
+      - legally_significant_action
+      - cybersecurity_active_tooling
+      - production_infrastructure_control
+      - destructive_data_operation
+      - privileged_identity_management
+    staging_auto: true
+    production_auto: only_with_domain_policy
+    separate_vps_required: true
+    minimum_architect_tier: sol
+    minimum_security_review_tier: sol
+    private_repository_required: true
+classification:
+  deterministic_first: true
+  model_may_raise_risk: true
+  model_may_lower_risk: false
+  lowering_requires:
+    - deterministic_evidence
+    - independent_review
+irreversible_decisions:
+  require_product_contract_authorization: true
+  examples:
+    - publish_confidential_source
+    - delete_production_data
+    - execute_real_money_transaction
+    - purchase_service
+    - accept_legal_terms
+default_data_classification: public
+personal_data_default: forbidden

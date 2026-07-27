@@ -1,0 +1,46 @@
+version: "1.0"
+policy_id: deployment
+current_vps:
+  roles:
+    - control_plane
+    - staging
+    - low_risk_production
+    - medium_risk_production_when_capacity_allows
+  high_risk_production: forbidden
+admin_access:
+  public: forbidden
+  allowed:
+    - ssh_tunnel
+    - vpn
+user_products:
+  https_required: true
+  separate_domain_or_subdomain: true
+artifact_promotion:
+  rebuild_between_staging_and_production: forbidden
+  same_image_digest_required: true
+pre_deploy:
+  - verify_release_manifest
+  - verify_image_digest
+  - backup_if_stateful
+  - migration_dry_run
+  - capacity_check
+post_deploy:
+  - liveness
+  - readiness
+  - critical_smoke
+  - version_digest_check
+automatic_rollback:
+  enabled: true
+  triggers:
+    - readiness_timeout
+    - critical_smoke_failure
+    - error_rate_threshold
+    - migration_postcheck_failure
+rollback_must_be_rehearsed_in_staging: true
+stateful_production:
+  offsite_encrypted_backup_required: true
+  block_without_offsite_backup: true
+high_risk:
+  separate_vps_required: true
+  domain_policy_required: true
+  sol_security_review_required: true

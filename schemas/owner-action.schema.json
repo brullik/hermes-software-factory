@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/owner-action.schema.json",
+  "title": "Owner Action",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "action_id",
+    "reason",
+    "title",
+    "why_blocked",
+    "single_action",
+    "safe_instruction",
+    "unblock_condition",
+    "independent_work_continues",
+    "secret_warning",
+    "created_at",
+    "deduplication_key"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "missing_credential",
+        "oauth_device_code",
+        "two_factor_authentication",
+        "captcha",
+        "external_account_creation",
+        "paid_resource_purchase",
+        "dns_action_without_access",
+        "legal_decision",
+        "unapproved_irreversible_production_action"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "why_blocked": {
+      "type": "string",
+      "minLength": 1
+    },
+    "single_action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "safe_instruction": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "unblock_condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe",
+        "expected"
+      ],
+      "properties": {
+        "probe": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "independent_work_continues": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "secret_warning": {
+      "type": "string",
+      "const": "Не отправляйте пароль, токен или private key в Telegram или чат."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "deduplication_key": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

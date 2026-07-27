@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/idea-intake.schema.json",
+  "title": "Idea Intake",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "created_at",
+    "source",
+    "owner_id",
+    "idea",
+    "idempotency_key",
+    "correlation_id",
+    "attachments",
+    "redactions"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "artifact_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "product_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "telegram",
+        "github",
+        "cli"
+      ]
+    },
+    "owner_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "idea": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 20000
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16
+    },
+    "correlation_id": {
+      "type": "string",
+      "pattern": "^corr-[a-f0-9]{16}$"
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "digest"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "media_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "redactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "count"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "language": {
+      "type": "string",
+      "default": "ru"
+    }
+  }
+}

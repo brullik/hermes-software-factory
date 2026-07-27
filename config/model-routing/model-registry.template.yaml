@@ -1,0 +1,44 @@
+version: "1.0"
+discovery_required: true
+billing:
+  paid_api_fallback: false
+providers:
+  openai_codex_subscription:
+    auth: chatgpt_device_code_or_existing_oauth
+    priority: 1
+    permitted_aliases: [economy, standard, expert]
+    usage_source: codex_subscription
+  nous_portal:
+    auth: portal_oauth
+    priority: 2
+    permitted_aliases: [economy, standard, expert]
+    usage_source: subscription
+  kimi:
+    auth: existing_hermes_supported_access
+    priority: 3
+    permitted_aliases: [economy, standard]
+    usage_source: existing_access_only
+  deepseek:
+    auth: existing_hermes_supported_access
+    priority: 4
+    permitted_aliases: [economy, standard]
+    usage_source: existing_access_only
+aliases:
+  economy:
+    capability_class: luna
+    selected: null
+    candidates: []
+  standard:
+    capability_class: terra
+    selected: null
+    candidates: []
+  expert:
+    capability_class: sol
+    selected: null
+    candidates: []
+selection:
+  require_health_probe: true
+  require_benchmark: true
+  same_tier_fallback_only: true
+  forbid_unmetered_assumption: true
+  forbid_automatic_api_key_billing: true

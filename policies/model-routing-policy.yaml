@@ -1,0 +1,123 @@
+version: "1.0"
+policy_id: model-routing
+aliases:
+  deterministic:
+    class: none
+  economy:
+    class: luna
+  standard:
+    class: terra
+  expert:
+    class: sol
+global:
+  semantic_attempts_per_tier:
+    luna: 2
+    terra: 2
+    sol: 1
+  optional_third_attempt:
+    enabled_for:
+      - visual_flaky
+      - external_nondeterminism
+    requires_new_evidence: true
+  transient_retries:
+    max: 3
+    backoff_seconds: [15, 60, 180]
+    count_as_semantic_attempt: false
+  forbid_identical_prompt_retry: true
+  max_spawn_depth: 1
+  max_concurrent_children: 2
+  max_active_workers: 2
+  paid_api_fallback: forbidden
+role_floors:
+  product_director:
+    low: luna
+    medium: terra
+    high: sol
+  product_analyst:
+    low: luna
+    medium: terra
+    high: terra
+  solution_architect:
+    low: luna
+    medium: terra
+    high: sol
+  task_specifier:
+    low: luna
+    medium: luna
+    high: terra
+  builder:
+    low: luna
+    medium: luna
+    high: terra
+  test_engineer:
+    low: luna
+    medium: luna
+    high: terra
+  independent_reviewer:
+    low: luna
+    medium: terra
+    high: sol
+  security_reviewer:
+    low: luna
+    medium: terra
+    high: sol
+  release_operator:
+    low: deterministic
+    medium: deterministic
+    high: terra
+  product_tester:
+    low: luna
+    medium: luna
+    high: terra
+  incident_recovery:
+    low: terra
+    medium: terra
+    high: sol
+complexity:
+  luna_max_score: 3
+  terra_max_score: 6
+  sol_min_score: 7
+  weights:
+    component_count_over_2: 1
+    estimated_files_over_8: 1
+    cross_service_contract: 2
+    data_migration: 2
+    concurrency: 2
+    auth_or_permissions: 2
+    external_integration: 1
+    unfamiliar_stack: 1
+    prior_semantic_failure: 2
+escalate_on:
+  - exhausted_semantic_attempts
+  - repeated_same_gate_failure
+  - scope_violation
+  - product_contract_conflict
+  - false_pass_detected
+  - risk_tier_increase
+do_not_escalate_on:
+  - http_429
+  - provider_5xx
+  - network_timeout
+  - process_crash_before_result
+  - malformed_transport
+provider_selection:
+  requires_live_capability_probe: true
+  permitted_existing_access:
+    - openai_chatgpt_codex_subscription
+    - nous_portal
+    - kimi
+    - deepseek
+  source_data_allowed: true
+  forbidden_payloads:
+    - secrets
+    - production_database_dump
+    - unredacted_personal_data
+    - private_keys
+benchmark_gate:
+  required_before_route_change: true
+  minimum_tasks: 20
+  recommended_tasks: 50
+  quality_tolerance_percent: 0
+  repair_rate_must_not_increase: true
+  false_pass_rate_must_not_increase: true
+  route_change_via_pull_request: true

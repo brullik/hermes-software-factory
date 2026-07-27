@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hermes Factory Pilot</title>
+    <style>
+      :root { color-scheme: light; font-family: system-ui, sans-serif; }
+      body { max-width: 960px; margin: 0 auto; padding: 32px; color: #172033; background: #f5f7fb; }
+      header, section { background: white; border: 1px solid #dfe5ef; border-radius: 14px; padding: 24px; margin-bottom: 16px; }
+      h1 { margin: 0 0 8px; } h2 { margin-top: 0; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+      .card { padding: 16px; border-radius: 10px; background: #f0f5ff; }
+      .value { display: block; font-size: 1.35rem; font-weight: 700; margin-top: 4px; }
+      code { background: #eef1f6; padding: 2px 5px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Hermes Factory Pilot</h1>
+      <p>A credential-free, low-risk staging product for black-box deployment checks.</p>
+    </header>
+    <section>
+      <h2>Runtime status</h2>
+      <div class="grid">
+        <div class="card">Live<span id="live" class="value">checking…</span></div>
+        <div class="card">Ready<span id="ready" class="value">checking…</span></div>
+        <div class="card">Database<span id="database" class="value">checking…</span></div>
+        <div class="card">Risk<span class="value">low</span></div>
+      </div>
+    </section>
+    <section>
+      <h2>Acceptance surface</h2>
+      <p>Health endpoints are local-only in the staging deployment. No credentials, customer data, payments, or external integrations are used.</p>
+      <p>API: <code>/health/live</code>, <code>/health/ready</code>, <code>/api/status</code></p>
+    </section>
+    <script>
+      async function probe(path, element, field) {
+        try {
+          const response = await fetch(path, { cache: "no-store" });
+          const data = await response.json();
+          document.getElementById(element).textContent = data[field] || data.status;
+        } catch (_) { document.getElementById(element).textContent = "FAIL"; }
+      }
+      probe("/health/live", "live", "status");
+      probe("/health/ready", "ready", "status");
+      probe("/api/status", "database", "database");
+    </script>
+  </body>
+</html>

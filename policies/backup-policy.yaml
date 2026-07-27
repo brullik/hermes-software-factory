@@ -1,0 +1,28 @@
+version: "1.0"
+policy_id: backup
+tool: restic
+encryption: mandatory
+targets:
+  - controller_database
+  - kanban_state
+  - product_databases
+  - configuration_without_secret_values
+  - release_manifests
+schedule:
+  controller_state: daily
+  stateful_product_database: daily
+  pre_deployment: mandatory
+  pre_migration: mandatory
+offsite:
+  required_for_stateful_production: true
+  provider: owner_selected_when_needed
+  missing_behavior:
+    staging: allow
+    production: block_with_owner_action
+verification:
+  repository_check: weekly
+  restore_drill: quarterly
+  restore_drill_before_first_stateful_production: true
+logs:
+  store_data_contents: false
+  store_digest_and_result_only: true

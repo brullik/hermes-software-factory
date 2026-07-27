@@ -1,0 +1,31 @@
+[Unit]
+Description=Hermes Software Factory Controller
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=hermesfactory
+Group=hermesfactory
+WorkingDirectory=/opt/hermes-factory/current
+Environment=FACTORY_CONFIG=/etc/hermes-factory/config.yaml
+Environment=PYTHONUNBUFFERED=1
+RuntimeDirectory=hermes-factory
+ExecStart=/opt/hermes-factory/venv/bin/python -m factory.controller
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory /var/log/hermes-factory /run/hermes-factory
+ReadOnlyPaths=/etc/hermes-factory
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=1200M
+TasksMax=512
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

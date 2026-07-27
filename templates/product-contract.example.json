@@ -1,0 +1,104 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "artifact-product-0001",
+  "product_id": "product-pilot-0001",
+  "created_at": "2026-07-26T12:00:00+00:00",
+  "producer": {
+    "role": "product_director",
+    "tier": "luna",
+    "provider": null,
+    "model": null
+  },
+  "policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "status": "completed",
+  "summary": "Безопасное пилотное веб-приложение для проверки полного автономного конвейера.",
+  "problem": "Нужно доказать, что фабрика способна создать и эксплуатировать типовое веб-приложение.",
+  "outcome": "Работающее HTTPS-приложение с API, базой данных, Telegram-уведомлениями и полным evidence.",
+  "personas": [
+    {
+      "id": "owner",
+      "description": "Нетехнический владелец, управляющий продуктом через Telegram."
+    }
+  ],
+  "critical_journeys": [
+    {
+      "id": "J-001",
+      "actor": "owner",
+      "trigger": "Открывает веб-приложение",
+      "steps": [
+        "Входит в систему",
+        "Создаёт запись",
+        "Получает уведомление"
+      ],
+      "success": "Запись сохранена и уведомление доставлено."
+    }
+  ],
+  "scope": [
+    "React UI",
+    "REST API",
+    "PostgreSQL",
+    "Telegram notifications",
+    "Authentication",
+    "CI/CD",
+    "Monitoring",
+    "Rollback"
+  ],
+  "out_of_scope": [
+    "Платежи",
+    "Реальные персональные данные",
+    "Финансовые операции"
+  ],
+  "functional_requirements": [
+    {
+      "id": "FR-001",
+      "text": "Владелец может войти и создать тестовую запись.",
+      "journey_ids": [
+        "J-001"
+      ]
+    },
+    {
+      "id": "FR-002",
+      "text": "Система отправляет Telegram-уведомление после создания записи.",
+      "journey_ids": [
+        "J-001"
+      ]
+    }
+  ],
+  "nonfunctional_requirements": [
+    {
+      "id": "NFR-001",
+      "text": "Приложение доступно по HTTPS и имеет readiness endpoint.",
+      "verification": "Automated HTTPS and readiness smoke test."
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-001",
+      "given": "Владелец аутентифицирован",
+      "when": "Он создаёт валидную запись",
+      "then": "Запись появляется в UI и API, а Telegram получает уведомление.",
+      "requirement_ids": [
+        "FR-001",
+        "FR-002"
+      ],
+      "critical": true
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A-001",
+      "text": "Для пилота используются только синтетические данные.",
+      "reversible": true,
+      "expiry_condition": "До отдельного Product Contract для персональных данных."
+    }
+  ],
+  "irreversible_decisions": [],
+  "risk_markers": [],
+  "data_classification": "public",
+  "repository_visibility": "public",
+  "non_blocking_questions": [],
+  "findings": [],
+  "evidence_refs": [
+    "evidence/idea-intake.json"
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "artifact-task-0001",
+  "product_id": "product-pilot-0001",
+  "created_at": "2026-07-26T12:00:00+00:00",
+  "producer": {
+    "role": "task_specifier",
+    "tier": "luna",
+    "provider": null,
+    "model": null
+  },
+  "policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "task_id": "T-PILOT-API-001",
+  "title": "Добавить создание записи через REST API",
+  "objective": "Реализовать защищённый API endpoint создания тестовой записи с сохранением в PostgreSQL.",
+  "dependencies": [],
+  "conflict_keys": [
+    "backend-api",
+    "database-schema"
+  ],
+  "allowed_paths": [
+    "backend/app/**",
+    "backend/tests/**",
+    "backend/migrations/**"
+  ],
+  "forbidden_paths": [
+    ".github/**",
+    "policies/**",
+    "deploy/production/**"
+  ],
+  "acceptance": [
+    {
+      "criterion_id": "AC-001",
+      "verification": "pytest backend/tests -q",
+      "mandatory": true
+    },
+    {
+      "criterion_id": "SEC-AUTH-001",
+      "verification": "Unauthenticated request returns 401.",
+      "mandatory": true
+    }
+  ],
+  "risk_tier": "medium",
+  "complexity_features": [
+    "auth_or_permissions",
+    "data_migration"
+  ],
+  "model_floor": "luna",
+  "rollback": "Revert squash commit and run migration downgrade in staging.",
+  "status": "ready"
+}

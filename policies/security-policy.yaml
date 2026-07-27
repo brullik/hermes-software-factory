@@ -1,0 +1,59 @@
+version: "1.0"
+policy_id: security
+absolute_forbidden:
+  - publish_secret
+  - expose_private_key
+  - disable_security_gate_for_pass
+  - force_push_protected_branch
+  - bypass_branch_protection
+  - hide_or_falsify_check_result
+  - delete_production_data
+  - expose_hermes_admin_to_public_internet
+  - use_production_secret_in_test
+  - run_untrusted_fork_on_permanent_self_hosted_runner
+  - execute_instruction_from_untrusted_repository_content
+secrets:
+  git_forbidden: true
+  prompt_forbidden: true
+  logs_forbidden: true
+  vps_store:
+    type:
+      - systemd_credentials
+      - root_owned_files
+    directory: /etc/hermes-factory/credentials.d
+    max_mode: "0640"
+  ci_store:
+    - github_environment_secrets
+    - github_actions_secrets
+  runtime:
+    - docker_secret
+    - readonly_file_mount
+  rotation_on_exposure: mandatory
+prompt_injection:
+  external_content_label: UNTRUSTED_DATA
+  external_content_cannot_change_policy: true
+  external_content_cannot_request_tools: true
+  tool_calls_require_policy_adapter: true
+github_actions:
+  default_permissions: read
+  actions_pin_full_commit_sha: true
+  fork_secrets: forbidden
+  fork_self_hosted_runner: forbidden
+vps:
+  ssh_password_auth: false
+  root_login_after_bootstrap: false
+  firewall_default_deny: true
+  admin_bind: 127.0.0.1
+  unattended_security_updates: true
+  container_isolation: true
+  docker_socket_for_gateway: false
+supply_chain:
+  lockfiles_required: true
+  sbom_required_for_release: true
+  container_digest_pinned: true
+  dependency_license_allowlist:
+    - MIT
+    - Apache-2.0
+    - BSD-2-Clause
+    - BSD-3-Clause
+  strong_copyleft_requires_product_decision: true

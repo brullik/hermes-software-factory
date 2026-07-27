@@ -1,0 +1,187 @@
+version: '1.0'
+base_path: /var/lib/hermes-factory/profiles
+profiles:
+- name: gateway-luna
+  lane: gateway
+  role_prompts:
+  - owner-action-writer
+  model_alias: economy
+  persistent: true
+  tools:
+  - telegram
+  - controller_status
+  write_scope: []
+- name: planning-luna
+  lane: planning
+  role_prompts:
+  - product-director
+  - product-analyst
+  - solution-architect
+  - task-specifier
+  - product-selector
+  model_alias: economy
+  persistent: false
+  tools:
+  - repo_read
+  - artifact_write
+  - search
+  write_scope:
+  - artifacts/**
+- name: planning-terra
+  lane: planning
+  role_prompts:
+  - product-director
+  - product-analyst
+  - solution-architect
+  - task-specifier
+  model_alias: standard
+  persistent: false
+  tools:
+  - repo_read
+  - artifact_write
+  - search
+  write_scope:
+  - artifacts/**
+- name: planning-sol
+  lane: planning
+  role_prompts:
+  - product-director
+  - solution-architect
+  model_alias: expert
+  persistent: false
+  tools:
+  - repo_read
+  - artifact_write
+  - search
+  write_scope:
+  - artifacts/**
+- name: builder-luna
+  lane: build
+  role_prompts:
+  - builder
+  - test-engineer
+  model_alias: economy
+  persistent: false
+  tools:
+  - scoped_terminal
+  - repo_read_write
+  - tests
+  write_scope:
+  - lease.allowed_paths
+- name: builder-terra
+  lane: build
+  role_prompts:
+  - builder
+  - test-engineer
+  model_alias: standard
+  persistent: false
+  tools:
+  - scoped_terminal
+  - repo_read_write
+  - tests
+  write_scope:
+  - lease.allowed_paths
+- name: builder-sol
+  lane: build
+  role_prompts:
+  - builder
+  - test-engineer
+  model_alias: expert
+  persistent: false
+  tools:
+  - scoped_terminal
+  - repo_read_write
+  - tests
+  write_scope:
+  - lease.allowed_paths
+- name: assurance-luna
+  lane: assurance
+  role_prompts:
+  - independent-reviewer
+  - security-reviewer
+  - product-tester
+  model_alias: economy
+  persistent: false
+  tools:
+  - repo_read
+  - isolated_tests
+  - browser_read
+  write_scope:
+  - artifacts/**
+- name: assurance-terra
+  lane: assurance
+  role_prompts:
+  - independent-reviewer
+  - security-reviewer
+  - product-tester
+  - benchmark-evaluator
+  model_alias: standard
+  persistent: false
+  tools:
+  - repo_read
+  - isolated_tests
+  - browser_read
+  write_scope:
+  - artifacts/**
+- name: assurance-sol
+  lane: assurance
+  role_prompts:
+  - independent-reviewer
+  - security-reviewer
+  - product-tester
+  model_alias: expert
+  persistent: false
+  tools:
+  - repo_read
+  - isolated_tests
+  - browser_read
+  write_scope:
+  - artifacts/**
+- name: release-luna
+  lane: release
+  role_prompts:
+  - release-operator
+  model_alias: economy
+  persistent: false
+  tools:
+  - release_notes
+  write_scope:
+  - release-artifacts/**
+- name: release-terra
+  lane: release
+  role_prompts:
+  - release-operator
+  model_alias: standard
+  persistent: false
+  tools:
+  - github_release_adapter
+  - deployment_adapter
+  write_scope:
+  - release-artifacts/**
+- name: recovery-terra
+  lane: recovery
+  role_prompts:
+  - incident-recovery
+  model_alias: standard
+  persistent: false
+  tools:
+  - observability_read
+  - allowlisted_recovery
+  write_scope:
+  - incident-artifacts/**
+- name: recovery-sol
+  lane: recovery
+  role_prompts:
+  - incident-recovery
+  model_alias: expert
+  persistent: false
+  tools:
+  - observability_read
+  - allowlisted_recovery
+  write_scope:
+  - incident-artifacts/**
+global:
+  max_active_workers: 2
+  max_spawn_depth: 1
+  max_concurrent_children: 2
+  orchestrator_enabled: false

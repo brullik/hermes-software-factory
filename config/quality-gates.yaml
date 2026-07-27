@@ -1,0 +1,47 @@
+version: "1.0"
+gates:
+  - id: package-integrity
+    command: python3 scripts/validate_package.py
+    allowlist_prefixes: ["python3 scripts/validate_package.py"]
+    timeout_seconds: 120
+    mandatory: true
+  - id: unit-tests
+    command: python3 -m unittest discover -s tests -v
+    allowlist_prefixes: ["python3 -m unittest"]
+    timeout_seconds: 300
+    mandatory: true
+  - id: python-compile
+    command: python3 -m compileall -q scripts tests factory pilot
+    allowlist_prefixes: ["python3 -m compileall"]
+    timeout_seconds: 120
+    mandatory: true
+  - id: pilot-tests
+    command: python3 -m unittest pilot.tests.test_pilot -v
+    allowlist_prefixes: ["python3 -m unittest"]
+    timeout_seconds: 300
+    mandatory: true
+  - id: lint
+    command: python3 -m ruff check factory scripts tests pilot
+    allowlist_prefixes: ["python3 -m ruff check"]
+    timeout_seconds: 300
+    mandatory: true
+  - id: typecheck
+    command: python3 -m mypy factory scripts pilot
+    allowlist_prefixes: ["python3 -m mypy"]
+    timeout_seconds: 300
+    mandatory: true
+  - id: secret-scan
+    command: python3 scripts/secret_scan.py
+    allowlist_prefixes: ["python3 scripts/secret_scan.py"]
+    timeout_seconds: 120
+    mandatory: true
+  - id: manifest
+    command: python3 scripts/verify_manifest.py
+    allowlist_prefixes: ["python3 scripts/verify_manifest.py"]
+    timeout_seconds: 120
+    mandatory: true
+  - id: sbom
+    command: python3 scripts/build_sbom.py --check
+    allowlist_prefixes: ["python3 scripts/build_sbom.py --check"]
+    timeout_seconds: 120
+    mandatory: true

@@ -1,0 +1,12 @@
+version: "1.0"
+labels:
+  - {name: "factory:product", description: "Product lifecycle item"}
+  - {name: "factory:task", description: "Executable Task Contract"}
+  - {name: "factory:repair", description: "Evidence-driven repair"}
+  - {name: "factory:owner-action", description: "True external blocker"}
+  - {name: "risk:low", description: "Low risk"}
+  - {name: "risk:medium", description: "Medium risk"}
+  - {name: "risk:high", description: "High risk"}
+  - {name: "state:delayed-quota", description: "Paused by subscription quota"}
+  - {name: "state:failed-safe", description: "Stopped without unsafe workaround"}
+  - {name: "optional:backlog", description: "Non-mandatory improvement"}

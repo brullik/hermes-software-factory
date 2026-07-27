@@ -1,0 +1,73 @@
+version: "1.0"
+policy_id: quality
+definition_of_done:
+  required:
+    - source_code
+    - reproducible_build
+    - unit_tests
+    - integration_tests
+    - critical_e2e_scenarios
+    - continuous_integration
+    - user_documentation
+    - administrator_documentation
+    - containerization
+    - staging_configuration
+    - production_configuration_or_policy_approved_staging_only
+    - monitoring
+    - health_checks
+    - backup
+    - verified_restore
+    - verified_rollback
+    - security_report
+    - release_notes
+    - black_box_user_acceptance
+coverage:
+  changed_lines_min_percent: 80
+  critical_scenarios_percent: 100
+  allow_not_applicable_with_reason: true
+mandatory_gates:
+  universal:
+    - package_integrity
+    - scope_guard
+    - formatting
+    - lint
+    - typecheck
+    - unit_tests
+    - secret_scan
+    - dependency_scan
+    - sast
+    - license_check
+    - documentation_check
+  when_applicable:
+    - integration_tests
+    - contract_tests
+    - e2e_tests
+    - accessibility
+    - dast_baseline
+    - container_scan
+    - sbom
+    - migration_up_down
+    - backup_restore
+    - rollback_rehearsal
+    - install_smoke
+gate_rules:
+  cannot_be_disabled_by_task_branch: true
+  cannot_be_reclassified_optional_after_failure: true
+  command_allowlist_required: true
+  subject_sha_required: true
+  artifact_digest_required: true
+  complete_logs_stored_outside_model_context: true
+tests:
+  existing_coverage_may_not_decrease_without_adr: true
+  deleting_or_weakening_test_to_pass: forbidden
+  flaky_test_quarantine_requires_issue_and_expiry: true
+repair:
+  product_post_release_cycles_max: 3
+  task_semantic_attempts_by_tier:
+    luna: 2
+    terra: 2
+    sol: 1
+review:
+  builder_self_acceptance: forbidden
+  unresolved_blocking_threads_block_merge: true
+  changes_after_approval_invalidate_approval: true

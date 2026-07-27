@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Hermes Software Factory backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

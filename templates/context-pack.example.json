@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "product_id": "product-pilot-0001",
+  "task_id": "T-PILOT-API-001",
+  "subject_sha": "abcdef1",
+  "objective": "Реализовать защищённый API endpoint создания тестовой записи с сохранением в PostgreSQL.",
+  "acceptance": [
+    "AC-001",
+    "SEC-AUTH-001"
+  ],
+  "constraints": {
+    "allowed_paths": [
+      "backend/app/**",
+      "backend/tests/**",
+      "backend/migrations/**"
+    ],
+    "forbidden_actions": [
+      "change policy",
+      "force push",
+      "read secrets"
+    ]
+  },
+  "selected_files": [
+    {
+      "path": "backend/app/api.py",
+      "reason": "Target endpoint module",
+      "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "evidence": [],
+  "decisions": [
+    "ADR-001: FastAPI and PostgreSQL"
+  ],
+  "output_schema": "schemas/attempt-result.schema.json",
+  "redaction_count": 0
+}

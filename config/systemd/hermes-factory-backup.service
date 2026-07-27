@@ -1,0 +1,13 @@
+[Unit]
+Description=Hermes Software Factory encrypted backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/hermes-factory/backup.env
+ExecStart=/usr/bin/env bash /opt/hermes-factory/current/scripts/backup/run-backup.sh
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true

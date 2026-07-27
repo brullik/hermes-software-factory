@@ -1,0 +1,32 @@
+version: "1.0"
+policy_id: owner-action
+allowed_reasons:
+  - missing_credential
+  - oauth_device_code
+  - two_factor_authentication
+  - captcha
+  - external_account_creation
+  - paid_resource_purchase
+  - dns_action_without_access
+  - legal_decision
+  - unapproved_irreversible_production_action
+forbidden_reasons:
+  - technical_stack_choice
+  - code_review
+  - run_tests
+  - inspect_logs
+  - choose_library
+  - merge_pull_request
+  - routine_deployment
+  - retry_failed_task
+format:
+  schema: schemas/owner-action.schema.json
+  exactly_one_action: true
+  safe_instruction_required: true
+  unblock_condition_required: true
+  independent_work_list_required: true
+behavior:
+  continue_independent_work: true
+  duplicate_suppression_hours: 24
+  auto_resume_when_unblock_condition_true: true
+  never_request_secret_in_chat: true

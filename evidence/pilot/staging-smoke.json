@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "pilot-staging-smoke-001",
+  "created_at": "2026-07-26T17:07:00Z",
+  "subject": "191.44.33.92",
+  "status": "PASS",
+  "image": "hermes-factory-pilot:0.1.0",
+  "image_manifest_digest": "sha256:cb30f59021be8354591167a52c25e68189b8498da47c74ff1e05c8b61eee8",
+  "endpoint": "http://127.0.0.1:8090",
+  "checks": [
+    {
+      "id": "live",
+      "status": "PASS",
+      "result": "HTTP 200 /health/live"
+    },
+    {
+      "id": "ready",
+      "status": "PASS",
+      "result": "HTTP 200 /health/ready with SQLite integrity ok"
+    },
+    {
+      "id": "api-status",
+      "status": "PASS",
+      "result": "HTTP 200 /api/status with credentials_required=false"
+    },
+    {
+      "id": "restart-persistence",
+      "status": "PASS",
+      "result": "SQLite events increased from 1 to 2 after container restart"
+    },
+    {
+      "id": "container-hardening",
+      "status": "PASS",
+      "result": "Non-root image, read-only filesystem, dropped capabilities, no-new-privileges, 256MiB limit"
+    }
+  ],
+  "rollback": "NOT_TESTED_EXTERNAL_RELEASE",
+  "open_items": [
+    "GitHub PR/review/merge",
+    "provider-backed agent acceptance",
+    "Telegram black-box acceptance",
+    "offsite backup"
+  ]
+}

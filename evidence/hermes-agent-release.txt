@@ -1,0 +1,5 @@
+component=Hermes Agent
+version=0.19.0
+source_commit=3ef6bbd201263d354fd83ec55b3c306ded2eb72a
+wheel_sha256=bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f
+source=PyPI trusted publishing (NousResearch/hermes-agent)

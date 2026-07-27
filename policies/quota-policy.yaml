@@ -1,0 +1,47 @@
+version: "1.0"
+policy_id: quota
+budget_type: subscription_quota
+money_spend:
+  automatic_paid_api: forbidden
+  automatic_credit_purchase: forbidden
+  automatic_subscription_change: forbidden
+measure:
+  - provider_requests
+  - model_requests_by_alias
+  - semantic_attempts
+  - transient_retries
+  - tool_rounds
+  - input_tokens_when_available
+  - output_tokens_when_available
+  - cache_tokens_when_available
+  - wall_clock_seconds
+  - quota_errors
+  - concurrent_workers
+soft_limits:
+  product_semantic_attempts: 150
+  task_semantic_attempts: 5
+  max_tool_rounds_per_attempt: 40
+  max_parallel_workers: 2
+hard_limits:
+  task_tier_path:
+    - luna
+    - terra
+    - sol
+  no_cycle_after_sol_failure: true
+  max_active_product: 1
+on_pressure:
+  - stop_optional_model_reviews
+  - reduce_parallel_workers_to_one
+  - prefer_deterministic_routes
+  - compact_context
+  - use_benchmarked_same_tier_provider
+  - checkpoint_and_delay_noncritical_work
+on_exhaustion:
+  state: DELAYED_QUOTA
+  automatically_probe_and_resume: true
+  owner_action_required: false
+  mandatory_security_gates_remain_enabled: true
+notifications:
+  daily_compact_summary: true
+  notify_on_first_delay: true
+  suppress_repeated_quota_notifications_hours: 24
