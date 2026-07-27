@@ -83,7 +83,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run secret scan
-        run: python scripts/secret_scan.py
+        run: PYTHONPATH=. python scripts/secret_scan.py
 
   independent-review:
     name: factory/independent-review
