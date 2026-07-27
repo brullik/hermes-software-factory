@@ -93,9 +93,10 @@
     },
     "pilot-e2e": {
       "status": "BLOCKED_EXTERNAL",
-      "evidence_ref": "evidence/pilot/staging-smoke.json",
+      "evidence_ref": "evidence/pilot/black-box-vps-20260727.json",
       "details": [
         "Neutral pilot Product Contract, Docker staging, health, and persistence smoke passed",
+        "VPS black-box runner passed browser surface, live, ready, API status, credentials_required=false, low-risk, Prometheus metrics, and restart persistence (events 4 to 5)",
         "Neutral pilot repository is now public at https://github.com/brullik/hermes-factory-pilot with latest commit 6a943737be1e7d7af52556e99f44b680da7ba06c; pilot/test CI passed and the active governance ruleset requires one approval",
         "Pilot PR/review/merge, provider-backed agent, Telegram black-box, and release rollback evidence still require external access"
       ]
