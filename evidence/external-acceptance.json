@@ -48,6 +48,7 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
+        "Package fb9c937 deployed after staging validation; current package manifest verifies 210 files and backup-fb9c937 is retained for rollback",
         "controller health and restart smoke passed",
         "UFW default deny incoming with SSH allow",
         "SSH password auth and root login disabled",
