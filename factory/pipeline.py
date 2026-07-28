@@ -93,7 +93,16 @@ class PipelineCoordinator:
                 "sbom",
             )
         )
-        security_gates = ("target-secret-scan",) if external_repository else ("secret-scan",)
+        security_gates = (
+            (
+                "target-sast",
+                "target-dependency-audit",
+                "target-license-check",
+                "target-secret-scan",
+            )
+            if external_repository
+            else ("secret-scan",)
+        )
         definitions = {
             "product-director": StageDefinition(
                 "product-director",

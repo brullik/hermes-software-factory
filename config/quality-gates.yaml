@@ -65,6 +65,27 @@ gates:
     allowlist_prefixes: ["python3 -m ruff check"]
     timeout_seconds: 300
     mandatory: false
+  - id: target-sast
+    adapter: target_changed_sast
+    command: controller:target-changed-sast
+    allowlist_prefixes: ["controller:target-changed-sast"]
+    success_exit_codes: [0]
+    timeout_seconds: 300
+    mandatory: true
+  - id: target-dependency-audit
+    adapter: target_dependency_audit
+    command: controller:target-dependency-audit
+    allowlist_prefixes: ["controller:target-dependency-audit"]
+    success_exit_codes: [0]
+    timeout_seconds: 300
+    mandatory: true
+  - id: target-license-check
+    adapter: target_license_check
+    command: controller:target-license-check
+    allowlist_prefixes: ["controller:target-license-check"]
+    success_exit_codes: [0]
+    timeout_seconds: 120
+    mandatory: true
   - id: target-secret-scan
     adapter: target_changed_secret_scan
     command: controller:target-changed-secret-scan

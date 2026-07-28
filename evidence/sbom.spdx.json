@@ -41,12 +41,76 @@
       "versionInfo": "26.1.0"
     },
     {
+      "SPDXID": "SPDXRef-Package-boolean-py",
+      "downloadLocation": "https://pypi.org/project/boolean.py/5.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "boolean.py",
+      "versionInfo": "5.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-CacheControl",
+      "downloadLocation": "https://pypi.org/project/CacheControl/0.14.4/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "CacheControl",
+      "versionInfo": "0.14.4"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-certifi",
+      "downloadLocation": "https://pypi.org/project/certifi/2026.7.22/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "certifi",
+      "versionInfo": "2026.7.22"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-charset-normalizer",
+      "downloadLocation": "https://pypi.org/project/charset-normalizer/3.4.9/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "charset-normalizer",
+      "versionInfo": "3.4.9"
+    },
+    {
       "SPDXID": "SPDXRef-Package-colorama",
       "downloadLocation": "https://pypi.org/project/colorama/0.4.6/",
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "colorama",
       "versionInfo": "0.4.6"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-cyclonedx-python-lib",
+      "downloadLocation": "https://pypi.org/project/cyclonedx-python-lib/11.11.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "cyclonedx-python-lib",
+      "versionInfo": "11.11.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-defusedxml",
+      "downloadLocation": "https://pypi.org/project/defusedxml/0.7.1/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "defusedxml",
+      "versionInfo": "0.7.1"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-filelock",
+      "downloadLocation": "https://pypi.org/project/filelock/3.32.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "filelock",
+      "versionInfo": "3.32.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-idna",
+      "downloadLocation": "https://pypi.org/project/idna/3.18/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "idna",
+      "versionInfo": "3.18"
     },
     {
       "SPDXID": "SPDXRef-Package-iniconfig",
@@ -81,6 +145,38 @@
       "versionInfo": "0.13.0"
     },
     {
+      "SPDXID": "SPDXRef-Package-license-expression",
+      "downloadLocation": "https://pypi.org/project/license-expression/30.4.4/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "license-expression",
+      "versionInfo": "30.4.4"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-markdown-it-py",
+      "downloadLocation": "https://pypi.org/project/markdown-it-py/4.2.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "markdown-it-py",
+      "versionInfo": "4.2.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-mdurl",
+      "downloadLocation": "https://pypi.org/project/mdurl/0.1.2/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "mdurl",
+      "versionInfo": "0.1.2"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-msgpack",
+      "downloadLocation": "https://pypi.org/project/msgpack/1.2.1/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "msgpack",
+      "versionInfo": "1.2.1"
+    },
+    {
       "SPDXID": "SPDXRef-Package-mypy",
       "downloadLocation": "https://pypi.org/project/mypy/1.20.2/",
       "licenseConcluded": "NOASSERTION",
@@ -95,6 +191,14 @@
       "licenseDeclared": "NOASSERTION",
       "name": "mypy-extensions",
       "versionInfo": "1.1.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-packageurl-python",
+      "downloadLocation": "https://pypi.org/project/packageurl-python/0.17.6/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "packageurl-python",
+      "versionInfo": "0.17.6"
     },
     {
       "SPDXID": "SPDXRef-Package-packaging",
@@ -113,6 +217,38 @@
       "versionInfo": "1.1.1"
     },
     {
+      "SPDXID": "SPDXRef-Package-pip-api",
+      "downloadLocation": "https://pypi.org/project/pip-api/0.0.34/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pip-api",
+      "versionInfo": "0.0.34"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-pip-audit",
+      "downloadLocation": "https://pypi.org/project/pip-audit/2.10.1/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pip-audit",
+      "versionInfo": "2.10.1"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-pip-requirements-parser",
+      "downloadLocation": "https://pypi.org/project/pip-requirements-parser/32.0.1/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pip-requirements-parser",
+      "versionInfo": "32.0.1"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-platformdirs",
+      "downloadLocation": "https://pypi.org/project/platformdirs/4.11.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "platformdirs",
+      "versionInfo": "4.11.0"
+    },
+    {
       "SPDXID": "SPDXRef-Package-pluggy",
       "downloadLocation": "https://pypi.org/project/pluggy/1.6.0/",
       "licenseConcluded": "NOASSERTION",
@@ -121,12 +257,28 @@
       "versionInfo": "1.6.0"
     },
     {
+      "SPDXID": "SPDXRef-Package-py-serializable",
+      "downloadLocation": "https://pypi.org/project/py-serializable/2.1.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "py-serializable",
+      "versionInfo": "2.1.0"
+    },
+    {
       "SPDXID": "SPDXRef-Package-Pygments",
       "downloadLocation": "https://pypi.org/project/Pygments/2.20.0/",
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "Pygments",
       "versionInfo": "2.20.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-pyparsing",
+      "downloadLocation": "https://pypi.org/project/pyparsing/3.3.2/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pyparsing",
+      "versionInfo": "3.3.2"
     },
     {
       "SPDXID": "SPDXRef-Package-pytest",
@@ -153,6 +305,22 @@
       "versionInfo": "0.37.0"
     },
     {
+      "SPDXID": "SPDXRef-Package-requests",
+      "downloadLocation": "https://pypi.org/project/requests/2.34.2/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "requests",
+      "versionInfo": "2.34.2"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-rich",
+      "downloadLocation": "https://pypi.org/project/rich/15.0.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "rich",
+      "versionInfo": "15.0.0"
+    },
+    {
       "SPDXID": "SPDXRef-Package-rpds-py",
       "downloadLocation": "https://pypi.org/project/rpds-py/2026.6.3/",
       "licenseConcluded": "NOASSERTION",
@@ -177,6 +345,30 @@
       "versionInfo": "83.0.0"
     },
     {
+      "SPDXID": "SPDXRef-Package-sortedcontainers",
+      "downloadLocation": "https://pypi.org/project/sortedcontainers/2.4.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "sortedcontainers",
+      "versionInfo": "2.4.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-tomli",
+      "downloadLocation": "https://pypi.org/project/tomli/2.4.1/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "tomli",
+      "versionInfo": "2.4.1"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-tomli-w",
+      "downloadLocation": "https://pypi.org/project/tomli-w/1.2.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "tomli-w",
+      "versionInfo": "1.2.0"
+    },
+    {
       "SPDXID": "SPDXRef-Package-types-jsonschema",
       "downloadLocation": "https://pypi.org/project/types-jsonschema/4.26.0.20260518/",
       "licenseConcluded": "NOASSERTION",
@@ -199,6 +391,14 @@
       "licenseDeclared": "NOASSERTION",
       "name": "typing_extensions",
       "versionInfo": "4.16.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-urllib3",
+      "downloadLocation": "https://pypi.org/project/urllib3/2.7.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "urllib3",
+      "versionInfo": "2.7.0"
     }
   ],
   "spdxVersion": "SPDX-2.3"
