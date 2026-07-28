@@ -534,7 +534,12 @@ class PipelineCoordinator:
         self._restore_external_base_for_repair(product_id, failed_task)
         if str(product["status"]) != "REPAIRING":
             self.workflow.transition(product_id, "REPAIRING")
-        task_path = self.create_task(product_id, "builder-core", cycle=cycle)
+        task_path = self.create_task(
+            product_id,
+            "builder-core",
+            cycle=cycle,
+            available_at="9999-12-31T23:59:59Z",
+        )
         contract = json.loads(task_path.read_text(encoding="utf-8"))
         task_id = str(contract["task_id"])
         tier = str(contract["model_floor"])
@@ -572,16 +577,24 @@ class PipelineCoordinator:
                 dict.fromkeys(value for value in evidence_refs if value)
             ),
         }
-        brief_path = self.artifacts.write(
-            "repair-brief.schema.json",
-            brief,
-            filename=f"repair-brief-{task_id}-{brief['attempt_id']}.json",
-        )
-        self.state.prepare_pending_repair(
-            task_id,
-            next_tier=tier,
-            repair_context_ref=f"evidence/{brief_path.name}",
-        )
+        try:
+            brief_path = self.artifacts.write(
+                "repair-brief.schema.json",
+                brief,
+                filename=f"repair-brief-{task_id}-{brief['attempt_id']}.json",
+            )
+            self.state.prepare_pending_repair(
+                task_id,
+                next_tier=tier,
+                repair_context_ref=f"evidence/{brief_path.name}",
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            self.state.fail_waiting_task(
+                task_id,
+                reason_code="repair_brief_preparation_failed",
+                detail="Repair task could not be activated with validated evidence.",
+            )
+            raise
         self.state.record_event(
             product_id=product_id,
             task_id=task_id,

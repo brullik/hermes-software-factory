@@ -157,6 +157,8 @@ class PipelineReconciler:
             reason = str(attempts[-1].get("reason_code") or "").strip()
         if not reason:
             reason = "internal_blocker"
+        if not detail:
+            detail = reason
         result_ref = str(task.get("result_ref") or "")
         if result_ref:
             candidate = Path(result_ref)

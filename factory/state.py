@@ -612,15 +612,15 @@ class StateStore:
             raise ValueError("pending repair tier is invalid")
         with self._lock, self._connection:
             row = self._connection.execute(
-                "SELECT product_id FROM tasks WHERE task_id=? AND status='PENDING'",
+                "SELECT product_id FROM tasks WHERE task_id=? AND status='WAITING'",
                 (task_id,),
             ).fetchone()
             if row is None:
-                raise ValueError("pending repair task is missing")
+                raise ValueError("waiting repair task is missing")
             self._connection.execute(
                 """UPDATE tasks
-                   SET next_tier=?, next_attempt_kind='repair',
-                       repair_context_ref=?, updated_at=?
+                   SET status='PENDING', available_at=NULL, next_tier=?,
+                       next_attempt_kind='repair', repair_context_ref=?, updated_at=?
                    WHERE task_id=?""",
                 (next_tier, repair_context_ref, utc_now(), task_id),
             )
@@ -632,6 +632,38 @@ class StateStore:
                     "next_tier": next_tier,
                     "repair_context_ref": repair_context_ref,
                 },
+            )
+
+    def fail_waiting_task(
+        self,
+        task_id: str,
+        *,
+        reason_code: str,
+        detail: str,
+    ) -> None:
+        """Fail closed if trusted repair evidence cannot be attached."""
+
+        safe_detail = detail.strip()[:4000] or reason_code
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT product_id FROM tasks WHERE task_id=? AND status='WAITING'",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='FAILED_SAFE', available_at=NULL,
+                       terminal_reason=?, terminal_detail=?,
+                       failure_kind='semantic', updated_at=?
+                   WHERE task_id=? AND status='WAITING'""",
+                (reason_code, safe_detail, utc_now(), task_id),
+            )
+            self._record_event(
+                row["product_id"],
+                task_id,
+                "task_preparation_failed",
+                {"reason_code": reason_code, "detail": safe_detail},
             )
 
     def requeue_terminal_task(
