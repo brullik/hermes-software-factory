@@ -18,6 +18,12 @@ from .config import FactoryConfig
 from .owner_actions import OwnerActionService
 from .pipeline import PipelineCoordinator
 from .policy import load_policies, owner_action_allowed
+from .repair_brief import (
+    builder_result_is_locally_complete,
+    normalized_repair_findings,
+    repair_finding_detail,
+    repair_requirements,
+)
 from .state import StateStore
 from .workflow import WorkflowEngine
 
@@ -195,24 +201,11 @@ class PipelineReconciler:
 
     @staticmethod
     def _blocking_finding_detail(output: dict[str, Any]) -> str | None:
-        findings = output.get("findings", [])
-        if not isinstance(findings, list):
-            return None
-        details: list[str] = []
-        for item in findings:
-            if not isinstance(item, dict) or str(item.get("severity")) == "info":
-                continue
-            finding_id = str(item.get("id") or "unnamed-finding")
-            severity = str(item.get("severity") or "unknown")
-            description = str(item.get("description") or "repair required")
-            required_fix = str(
-                item.get("required_fix") or "apply the required repair"
-            )
-            details.append(
-                f"{finding_id} [{severity}]: {description}; "
-                f"required fix: {required_fix}"
-            )
-        return ("blocking findings: " + " | ".join(details))[:4000] if details else None
+        return (
+            repair_finding_detail(output)
+            if normalized_repair_findings(output)
+            else None
+        )
 
     def _task_reason(self, task: dict[str, Any]) -> tuple[str, str]:
         reason = str(task.get("terminal_reason") or "").strip()
@@ -325,6 +318,22 @@ class PipelineReconciler:
             )
             if value
         ]
+        attempt_payload = self._read_evidence_payload(
+            str(task.get("result_ref") or "")
+        )
+        output = (
+            self._validated_output_payload(attempt_payload)
+            if attempt_payload is not None
+            else None
+        )
+        failed_gate_ids, required_fixes = repair_requirements(
+            output=output,
+            reason_code=reason,
+            detail=detail,
+            failed_gate_ids=(
+                ["pm-acceptance"] if "pm_acceptance" in reason else []
+            ),
+        )
         brief = {
             **artifact_metadata(
                 self.config,
@@ -341,7 +350,9 @@ class PipelineReconciler:
             "task_id": task_id,
             "attempt_id": attempt_id,
             "failure_class": reason,
-            "failed_gate_ids": ["pm-acceptance"] if "pm_acceptance" in reason else [],
+            "failed_gate_ids": failed_gate_ids,
+            "required_fixes": required_fixes,
+            "allowed_paths": [str(item) for item in contract["allowed_paths"]],
             "relevant_log_fragment": detail[:4000],
             "expected_vs_actual": {
                 "expected": "the task satisfies every mandatory acceptance criterion",
@@ -530,6 +541,63 @@ class PipelineReconciler:
                 return previous or None
         return None
 
+    def _recover_builder_downstream_gate(self, product: dict[str, Any]) -> bool:
+        """Do not charge Builder for a GitHub check owned by a later stage."""
+
+        product_id = str(product["product_id"])
+        task = self.state.latest_task(product_id)
+        if (
+            task is None
+            or str(task.get("status")) != "BLOCKED_EXTERNAL"
+            or str(task.get("role")) != "builder"
+            or str(task.get("stage_key")) != "builder-core"
+        ):
+            return False
+        attempt_payload = self._read_evidence_payload(
+            str(task.get("result_ref") or "")
+        )
+        if attempt_payload is None:
+            return False
+        controller_results = attempt_payload.get("test_results", [])
+        if (
+            not isinstance(controller_results, list)
+            or any(
+                not isinstance(item, dict) or item.get("status") == "FAIL"
+                for item in controller_results
+            )
+        ):
+            return False
+        output = self._validated_output_payload(attempt_payload)
+        if output is None or not builder_result_is_locally_complete(output):
+            return False
+        resume_status = self._previous_status_before_failed_safe(product_id)
+        if resume_status is None:
+            return False
+        recovered = self.state.recover_deferred_builder_gate(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            resume_status=resume_status,
+        )
+        if not recovered:
+            return False
+        self._enqueue_notification(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            kind="automatic_recovery",
+            discriminator=f"builder-downstream-gate:{task['task_id']}",
+            text=(
+                "✅ Hermes автоматически продолжил проект после исправления "
+                "внутренней границы ролей.\n"
+                f"Проект: {product_id}\n"
+                "Builder завершил реализацию и локальные проверки. GitHub "
+                "pm-acceptance перенесён на этап immutable candidate, где он и "
+                "должен выполняться.\n"
+                "Следующий шаг: Test Engineer.\n"
+                "Действие владельца: не требуется."
+            ),
+        )
+        return True
+
     def _recover_interrupted_product(self, product: dict[str, Any]) -> bool:
         product_id = str(product["product_id"])
         task = self.state.latest_task(product_id)
@@ -704,6 +772,17 @@ class PipelineReconciler:
         }
         for product in self.state.list_products():
             status = str(product["status"])
+            if status == "FAILED_SAFE" and self._recover_builder_downstream_gate(product):
+                counts["inspected"] += 1
+                refreshed = self.state.get_product(str(product["product_id"]))
+                if refreshed is None:
+                    continue
+                action = self.reconcile_product(refreshed)
+                if action == "successor":
+                    counts["recovered_successors"] += 1
+                elif action == "repaired":
+                    counts["repaired"] += 1
+                continue
             if status == "FAILED_SAFE" and self._recover_interrupted_product(product):
                 counts["inspected"] += 1
                 counts["repaired"] += 1

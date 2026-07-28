@@ -170,6 +170,8 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
             path in "\n".join(item["verification"] for item in contract["acceptance"])
             for path in required
         )
+        assert "frozen local PM acceptance suite" in contract["objective"]
+        assert "runs later against the immutable candidate" in contract["objective"]
         brief = json.loads(
             (config.evidence_dir / Path(repair["repair_context_ref"]).name).read_text(
                 encoding="utf-8"
@@ -180,6 +182,8 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
             "target-lint",
             "target-tests",
         ]
+        assert brief["required_fixes"]
+        assert brief["allowed_paths"] == required
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         assert any(item["status"] == "PENDING" for item in state.list_outbox())
         state.close()
@@ -562,6 +566,10 @@ def test_expanded_bounded_budget_reopens_exact_security_repair() -> None:
         assert brief["failed_gate_ids"] == [
             "SEC-WF-ASSIGNED-BOUNDARY-FAIL-OPEN"
         ]
+        assert brief["required_fixes"] == [
+            "Reject every assigned row that crosses its role end."
+        ]
+        assert brief["allowed_paths"]
         assert "Reject every assigned row" in brief["relevant_log_fragment"]
         assert any(
             event["event_type"] == "repair_budget_reopened"
@@ -645,5 +653,136 @@ def test_interrupted_started_attempt_is_recovered_without_owner_action() -> None
         payloads = [json.loads(item["payload_json"]) for item in state.list_outbox()]
         recovered = next(item for item in payloads if item["kind"] == "automatic_recovery")
         assert "Действие владельца: не требуется" in recovered["text"]
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        state.close()
+
+
+def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "builder-downstream-gate-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/bybit-grid-research",
+            idempotency_key="builder-downstream-gate-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+            "REPAIRING",
+        ):
+            state.transition_product(product_id, status)
+        pipeline = PipelineCoordinator(config, state)
+        builder_path = pipeline.create_task(product_id, "builder-core", cycle=3)
+        task_id = json.loads(builder_path.read_text(encoding="utf-8"))["task_id"]
+        output_path = config.evidence_dir / "builder-deferred-output.json"
+        output_path.write_text(
+            json.dumps(
+                {
+                    "status": "blocked_external",
+                    "summary": "Implementation and local PM acceptance are complete.",
+                    "changed_files": [
+                        {"path": "src/product.py", "change": "Applied the repair."}
+                    ],
+                    "test_results": [
+                        {
+                            "gate_id": "target-tests",
+                            "status": "PASS",
+                            "evidence_ref": "pytest: 715 passed",
+                        },
+                        {
+                            "gate_id": "local-pm-acceptance",
+                            "status": "PASS",
+                            "evidence_ref": "frozen suite: 32 passed",
+                        },
+                        {
+                            "gate_id": "AC-PM-SCOPE-GITHUB",
+                            "status": "NOT_RUN",
+                            "evidence_ref": None,
+                        },
+                    ],
+                    "findings": [
+                        {
+                            "code": "GITHUB_REQUIRED_CHECK_NOT_RUN",
+                            "severity": "medium",
+                            "text": "The immutable candidate check belongs to release staging.",
+                        },
+                        {
+                            "code": "OUT_OF_SCOPE_RUFF_BASELINE",
+                            "severity": "low",
+                            "text": "Unrelated repository baseline remains out of scope.",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        attempt_path = config.evidence_dir / "attempt-builder-deferred.json"
+        attempt_path.write_text(
+            json.dumps(
+                {
+                    "summary": "Provider reported a downstream-only blocker.",
+                    "test_results": [
+                        {
+                            "gate_id": "schema-validation",
+                            "status": "PASS",
+                            "evidence_ref": str(output_path),
+                        },
+                        {"gate_id": "target-tests", "status": "PASS"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert state.claim_task(worker_id="builder-worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-builder-deferred",
+            task_id=task_id,
+            tier="sol",
+            attempt_kind="repair",
+            prompt_digest="f" * 64,
+            status="repair_required",
+            semantic_counted=True,
+            reason_code="model_requested_repair",
+        )
+        state.complete_task(
+            task_id,
+            "builder-worker",
+            "BLOCKED_EXTERNAL",
+            reason_code="model_requested_repair",
+            detail="GitHub required check was not run.",
+            result_ref=str(attempt_path),
+            failure_kind="semantic",
+        )
+        state.transition_product(product_id, "FAILED_SAFE")
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.recovered_successors == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "REPAIRING"
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["stage_key"] == "test-engineer"
+        assert any(
+            event["event_type"] == "builder_downstream_gate_deferred"
+            for event in state.events(product_id)
+        )
+        notifications = [
+            json.loads(item["payload_json"]) for item in state.list_outbox()
+        ]
+        assert any(
+            "Следующий шаг: Test Engineer" in item["text"]
+            and "Действие владельца: не требуется" in item["text"]
+            for item in notifications
+        )
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         state.close()

@@ -346,6 +346,9 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(brief_paths), 1)
             brief = json.loads(brief_paths[0].read_text(encoding="utf-8"))
             self.assertEqual(brief["failure_class"], "model_requested_repair")
+            self.assertTrue(brief["failed_gate_ids"])
+            self.assertTrue(brief["required_fixes"])
+            self.assertEqual(brief["allowed_paths"], ["artifacts/**"])
 
             second = worker.run_once()
 
@@ -357,6 +360,94 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("repair-brief-", runner.prompts[1])
             self.assertIn("UNTRUSTED_DATA targeted repair brief", runner.prompts[1])
             self.assertIn("model_requested_repair", runner.prompts[1])
+            state.close()
+
+    def test_partial_repair_brief_fails_internally_before_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(
+                root / "registry.yaml", selected="gpt-5.6-luna"
+            )
+            config = make_config(root, registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Reject an incomplete internal repair brief",
+            )
+            task = state.claim_task(worker_id="failed-worker")
+            self.assertIsNotNone(task)
+            assert task is not None
+            state.complete_task(
+                str(task["task_id"]),
+                "failed-worker",
+                "FAILED_SAFE",
+                reason_code="worker_internal_error",
+                detail="repair preparation failed",
+                failure_kind="semantic",
+            )
+            bad_brief = {
+                **artifact_metadata(
+                    config,
+                    "repair-coordinator",
+                    "repair-brief-partial-test",
+                    intake_result.product_id,
+                ),
+                "producer": {
+                    "role": "repair-coordinator",
+                    "tier": "deterministic",
+                    "provider": None,
+                    "model": None,
+                },
+                "task_id": str(task["task_id"]),
+                "attempt_id": "attempt-partial-brief",
+                "failure_class": "worker_internal_error",
+                "failed_gate_ids": ["repair-brief-validation"],
+                "required_fixes": ["Attach the exact allowed paths."],
+                "relevant_log_fragment": "allowed_paths is missing",
+                "expected_vs_actual": {
+                    "expected": "a complete actionable brief",
+                    "actual": "allowed_paths is missing",
+                },
+                "changed_files": [],
+                "forbidden_actions": [],
+                "previous_attempt_summary": "Repair preparation failed.",
+                "definition_of_done": ["The brief passes schema validation."],
+                "evidence_refs": [f"evidence/task-{task['task_id']}.json"],
+            }
+            brief_path = config.evidence_dir / (
+                f"repair-brief-{task['task_id']}-partial.json"
+            )
+            brief_path.write_text(json.dumps(bad_brief), encoding="utf-8")
+            state.requeue_terminal_task(
+                str(task["task_id"]),
+                next_tier="luna",
+                repair_context_ref=f"evidence/{brief_path.name}",
+            )
+            runner = FakeRunner(product_contract(config, intake_result.product_id))
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(result.reason_code, "worker_internal_error")
+            self.assertEqual(runner.calls, [])
+            durable = state.get_task(str(task["task_id"]))
+            self.assertIsNotNone(durable)
+            assert durable is not None
+            self.assertEqual(durable["status"], "FAILED_SAFE")
             state.close()
 
     def test_malformed_transport_is_requeued_at_same_tier_and_can_resume(self) -> None:

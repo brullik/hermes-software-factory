@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.7 - 2026-07-28
+
+- Builder repair task активируется только с actionable brief: blocker IDs, точные required fixes, allowed paths и проверяемый DoD обязательны.
+- Findings из reviewer- и attempt-схем нормализуются без потери `id/code`, описания и требуемого исправления.
+- Локально завершённый Builder больше не блокируется на GitHub `pm-acceptance`: этот gate выполняется позже для immutable candidate.
+- Reconciler автоматически восстанавливает ранее ошибочно остановленный Builder и продолжает с Test Engineer без нового repair cycle.
+- Product Director обязан трассировать цели к требованиям, acceptance и evidence; Product Tester не может принять продукт без PASS/evidence по каждой critical journey.
+
 ## 2.0.4 - 2026-07-28
 
 - Failed mandatory gate IDs сохраняются в task detail, repair brief и русском exhaustion-уведомлении.

@@ -913,6 +913,87 @@ class StateStore:
             )
             return True
 
+    def recover_deferred_builder_gate(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+        resume_status: str,
+    ) -> bool:
+        """Accept a completed Builder whose only blocker belongs to a later stage."""
+
+        if resume_status not in _RECOVERABLE_PRODUCT_STATUSES:
+            raise ValueError("deferred Builder gate resume status is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT products.status AS product_status,
+                          tasks.status AS task_status,
+                          tasks.role,
+                          tasks.stage_key,
+                          tasks.terminal_reason
+                   FROM tasks
+                   JOIN products ON products.product_id=tasks.product_id
+                   WHERE tasks.task_id=? AND tasks.product_id=?
+                     AND tasks.rowid=(
+                         SELECT MAX(latest.rowid)
+                         FROM tasks AS latest
+                         WHERE latest.product_id=tasks.product_id
+                     )""",
+                (task_id, product_id),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["product_status"]) != "FAILED_SAFE"
+                or str(row["task_status"]) != "BLOCKED_EXTERNAL"
+                or str(row["role"]) != "builder"
+                or str(row["stage_key"]) != "builder-core"
+                or str(row["terminal_reason"]) != "model_requested_repair"
+            ):
+                return False
+            already_recovered = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='builder_downstream_gate_deferred'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            if already_recovered is not None:
+                return False
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                (resume_status, now, product_id),
+            )
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='DONE', lease_owner=NULL, lease_until=NULL,
+                       heartbeat_at=NULL, terminal_reason=NULL,
+                       terminal_detail=NULL, failure_kind=NULL, updated_at=?
+                   WHERE task_id=?""",
+                (now, task_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": resume_status,
+                    "reason": "builder_downstream_gate_deferred",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "builder_downstream_gate_deferred",
+                {
+                    "resume_status": resume_status,
+                    "deferred_gate": "pm-acceptance",
+                    "next_stage": "test-engineer",
+                },
+            )
+            return True
+
     def recover_exhausted_product_budget(
         self,
         *,

@@ -15,6 +15,8 @@
     "attempt_id",
     "failure_class",
     "failed_gate_ids",
+    "required_fixes",
+    "allowed_paths",
     "relevant_log_fragment",
     "expected_vs_actual",
     "changed_files",
@@ -43,7 +45,24 @@
     "task_id": {"type": "string", "minLength": 1},
     "attempt_id": {"type": "string", "minLength": 1},
     "failure_class": {"type": "string", "minLength": 1},
-    "failed_gate_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "failed_gate_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "required_fixes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "allowed_paths": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1,
+      "uniqueItems": true
+    },
     "relevant_log_fragment": {"type": "string", "minLength": 1, "maxLength": 4000},
     "expected_vs_actual": {
       "type": "object",

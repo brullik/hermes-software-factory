@@ -13,6 +13,7 @@ from .artifacts import ArtifactStore, artifact_metadata
 from .common import new_id, sha256_text
 from .config import FactoryConfig
 from .registry import SchemaRegistry
+from .repair_brief import normalized_repair_findings, repair_requirements
 from .state import StateStore
 from .workflow import WorkflowEngine
 
@@ -422,14 +423,16 @@ class PipelineCoordinator:
                     objective = (
                         f"Complete active repository PM task {pm_task['task_id']} exactly. "
                         "Modify every required path, preserve all forbidden paths, and make "
-                        "the repository pm-acceptance check pass."
+                        "the frozen local PM acceptance suite pass. The GitHub required check "
+                        "runs later against the immutable candidate."
                     )
                     acceptance = [
                         {
                             "criterion_id": "AC-PM-SCOPE",
                             "verification": (
-                                f"GitHub required check pm-acceptance passes for active task "
-                                f"{pm_task['task_id']}."
+                                f"The frozen local PM acceptance suite passes for active task "
+                                f"{pm_task['task_id']}; downstream GitHub pm-acceptance remains "
+                                "the release-stage authority."
                             ),
                             "mandatory": True,
                         },
@@ -513,12 +516,14 @@ class PipelineCoordinator:
             + 1
         )
 
-    def _failed_gate_ids(
+    def _repair_requirements(
         self,
         reason_code: str,
         evidence_refs: list[str],
-    ) -> list[str]:
+        summary: str,
+    ) -> tuple[list[str], list[str]]:
         failed = ["pm-acceptance"] if "pm_acceptance" in reason_code else []
+        required_fixes: list[str] = []
         evidence_root = self.config.evidence_dir.resolve()
         pending_refs = list(evidence_refs)
         inspected_refs: set[str] = set()
@@ -546,20 +551,10 @@ class PipelineCoordinator:
                 continue
             if not isinstance(payload, dict):
                 continue
-            findings = payload.get("findings", [])
-            if (
-                payload.get("status") == "repair_required"
-                and isinstance(findings, list)
-            ):
-                failed.extend(
-                    str(item["id"])
-                    for item in findings
-                    if (
-                        isinstance(item, dict)
-                        and item.get("id")
-                        and item.get("severity") != "info"
-                    )
-                )
+            if payload.get("status") in {"repair_required", "blocked_external"}:
+                findings = normalized_repair_findings(payload)
+                failed.extend(item.finding_id for item in findings)
+                required_fixes.extend(item.required_fix for item in findings)
             test_results = payload.get("test_results", [])
             if not isinstance(test_results, list):
                 continue
@@ -577,7 +572,15 @@ class PipelineCoordinator:
                     and item.get("evidence_ref")
                 ):
                     pending_refs.append(str(item["evidence_ref"]))
-        return sorted(set(failed))
+        failed, fallback_fixes = repair_requirements(
+            output=None,
+            reason_code=reason_code,
+            detail=summary,
+            failed_gate_ids=failed,
+        )
+        return sorted(set(failed)), list(
+            dict.fromkeys(required_fixes or fallback_fixes)
+        )
 
     def begin_repair_cycle(
         self,
@@ -609,6 +612,11 @@ class PipelineCoordinator:
         contract = json.loads(task_path.read_text(encoding="utf-8"))
         task_id = str(contract["task_id"])
         tier = str(contract["model_floor"])
+        failed_gate_ids, required_fixes = self._repair_requirements(
+            reason_code,
+            evidence_refs,
+            summary,
+        )
         brief = {
             **artifact_metadata(
                 self.config,
@@ -625,7 +633,9 @@ class PipelineCoordinator:
             "task_id": task_id,
             "attempt_id": attempt_id or new_id("reconcile"),
             "failure_class": reason_code,
-            "failed_gate_ids": self._failed_gate_ids(reason_code, evidence_refs),
+            "failed_gate_ids": failed_gate_ids,
+            "required_fixes": required_fixes,
+            "allowed_paths": [str(value) for value in contract["allowed_paths"]],
             "relevant_log_fragment": summary[:4000],
             "expected_vs_actual": {
                 "expected": "all mandatory product and repository acceptance checks pass",
