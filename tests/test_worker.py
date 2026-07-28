@@ -884,7 +884,7 @@ class WorkerTests(unittest.TestCase):
                 "attempt_kind": "repair",
                 "prompt_digest": "a" * 64,
                 "subject_sha_before": "b" * 64,
-                "status": "repair_required",
+                "status": "blocked_external",
                 "summary": "Provider reported a downstream-only blocker.",
                 "changed_files": changed_files,
                 "commands": [
@@ -984,7 +984,7 @@ class WorkerTests(unittest.TestCase):
 
             self.assertEqual(result_path, output_path)
             self.assertEqual(result_payload["status"], "blocked_external")
-            self.assertEqual(controller_payload["status"], "repair_required")
+            self.assertEqual(controller_payload["status"], "blocked_external")
             dependency = next(
                 item
                 for item in spec.evidence
