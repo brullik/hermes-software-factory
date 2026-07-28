@@ -1,7 +1,7 @@
 {
-  "artifact_id": "acceptance-9e5e08a186d26364f455",
+  "artifact_id": "acceptance-657a93288c1fa75e440e",
   "backup_restore": "PASS",
-  "created_at": "2026-07-28T06:24:33Z",
+  "created_at": "2026-07-28T07:18:17Z",
   "evidence_refs": [
     "evidence/package-validation-report.json",
     "docs/IMPLEMENTATION-LEDGER.md",
@@ -131,14 +131,12 @@
       "status": "PASS"
     },
     {
-      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "evidence_ref": "evidence/offsite-backup-20260728.json",
       "id": "offsite-backup",
-      "status": "BLOCKED_EXTERNAL"
+      "status": "PASS"
     }
   ],
-  "open_items": [
-    "offsite-backup"
-  ],
+  "open_items": [],
   "pilot": {
     "acceptance": "PASS",
     "release": "staging-only",
@@ -160,8 +158,8 @@
   },
   "schema_version": "1.0",
   "security": "PASS",
-  "status": "BLOCKED_EXTERNAL",
-  "summary": "Local checks passed; remaining external acceptance items are explicitly recorded.",
+  "status": "PASS",
+  "summary": "All local and external checks passed.",
   "versions": [
     {
       "component": "python",

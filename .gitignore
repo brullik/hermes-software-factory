@@ -22,6 +22,7 @@ credentials/
 secrets/
 
 # Runtime state, logs and evidence generated outside Git
+evidence/archive/
 state/
 logs/
 worktrees/

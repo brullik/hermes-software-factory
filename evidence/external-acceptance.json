@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "created_at": "2026-07-27T07:33:13Z",
+  "created_at": "2026-07-28T07:16:58Z",
   "host": {
     "address": "redacted-production-target",
     "os": "Ubuntu 24.04 LTS",
@@ -48,7 +48,7 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
-        "Package ded954a deployed through the allowlisted promote-release entrypoint after a pre-deploy encrypted restic snapshot; current package manifest verifies the published release, transactional deployment/rollback with health retry, executable bootstrap mode restoration, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and the previous release is retained for rollback",
+        "Package 4a81bb8 deployed through the allowlisted promote-release entrypoint after a pre-deploy encrypted restic snapshot; current package manifest verifies the published release, transactional deployment/rollback with health retry, executable bootstrap mode restoration, release governance/recovery checks, pilot black-box runner, durable role pipeline, and the fail-closed live release boundary are enabled and active",
         "Release 04dad3c was promoted through the allowlisted promote-release entrypoint at 2026-07-27T13:33:12Z after a user-authorized encrypted restic snapshot; the backup completed with 10 snapshots and no restic check errors, the 231-file package validated, health/readiness passed, all three services are active, and backup-04dad3c-previous is retained for rollback",
         "Release single-owner-20260727 was promoted at 2026-07-27T20:04:17Z after a pre-deploy encrypted snapshot; health/readiness passed, all three services were active, the production target is redacted in this public artifact, and backup-single-owner-20260727-previous was retained",
         "Release single-owner-20260728-cli was promoted after a pre-deploy encrypted snapshot; the active-source CLI wrapper, intake-to-task persistence, service health/readiness, and active backup timer passed. Evidence: evidence/vps-cli-wrapper-acceptance-20260728.json",
@@ -83,7 +83,7 @@
       "status": "PASS",
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
       "details": [
-        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit ded954a218c228ff518ea0f79c9e1298ecd59fd1",
+        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit 4a81bb89287d8ba1dd4139477555878f1d1eb33c",
         "Hermes main governance ruleset is active: pull request required, single-owner mode does not require a second approver, stale-review dismissal, conversation resolution, deletion/force-push blocked, and configured required status contexts",
         "factory-quality GitHub Actions passed on main and codex/publish-hermes-factory"
       ]
@@ -108,11 +108,12 @@
       ]
     },
     "offsite-backup": {
-      "status": "BLOCKED_EXTERNAL",
-      "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
+      "status": "PASS",
+      "evidence_ref": "evidence/offsite-backup-20260728.json",
       "details": [
-        "Encrypted local restic backup, repository check, and restore passed",
-        "External offsite repository is not connected"
+        "Owner-controlled separate workstation offsite Restic repository received 23 encrypted snapshots from the VPS repository",
+        "Repository check and verified restore of controller.db passed",
+        "A daily 03:30 local user-owned Windows scheduled task runs the sync; paths and credentials are excluded from public evidence"
       ]
     }
   }
