@@ -66,8 +66,9 @@ gates:
     timeout_seconds: 300
     mandatory: false
   - id: target-secret-scan
-    command: git grep -I -l -E (ghp_|github_pat_|sk-[A-Za-z0-9_-]{20,}|BEGIN[[:space:]]+(RSA[[:space:]]+|EC[[:space:]]+|OPENSSH[[:space:]]+)?PRIVATE[[:space:]]+KEY) -- .
-    allowlist_prefixes: ["git grep"]
-    success_exit_codes: [1]
+    adapter: target_changed_secret_scan
+    command: controller:target-changed-secret-scan
+    allowlist_prefixes: ["controller:target-changed-secret-scan"]
+    success_exit_codes: [0]
     timeout_seconds: 120
     mandatory: true
