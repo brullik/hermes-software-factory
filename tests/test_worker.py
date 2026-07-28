@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
@@ -21,6 +22,7 @@ from factory.worker import (
     AgentWorker,
     HermesRunResult,
     SubprocessHermesRunner,
+    _workspace_snapshot,
     public_github_repository_url,
 )
 
@@ -648,6 +650,31 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(planning_argv[planning_argv.index("--toolsets") + 1], "vision")
         self.assertIn("--ignore-rules", coding_argv)
         self.assertIn("--ignore-rules", planning_argv)
+
+    def test_git_workspace_snapshot_ignores_generated_files_but_tracks_source_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+            (repository / ".gitignore").write_text(".pytest_cache/\n", encoding="utf-8")
+            source = repository / "source.py"
+            source.write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repository), "add", ".gitignore", "source.py"],
+                check=True,
+            )
+            baseline = _workspace_snapshot(repository)
+
+            ignored = repository / ".pytest_cache" / "cache"
+            ignored.parent.mkdir()
+            ignored.write_text("generated\n", encoding="utf-8")
+            self.assertEqual(_workspace_snapshot(repository), baseline)
+
+            source.write_text("value = 2\n", encoding="utf-8")
+            changed = _workspace_snapshot(repository)
+            self.assertNotEqual(changed["source.py"], baseline["source.py"])
+            untracked = repository / "new.py"
+            untracked.write_text("new = True\n", encoding="utf-8")
+            self.assertIn("new.py", _workspace_snapshot(repository))
 
 
 if __name__ == "__main__":
