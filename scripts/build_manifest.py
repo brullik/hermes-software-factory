@@ -49,7 +49,7 @@ def main() -> int:
         and is_manifest_file(path)
     )
     lines = [f"{sha256(path)}  {path.relative_to(ROOT).as_posix()}" for path in files]
-    OUTPUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    OUTPUT.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     print(f"Wrote {len(lines)} entries to {OUTPUT}")
     return 0
 

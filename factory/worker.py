@@ -17,11 +17,11 @@ from scripts.model_router import Tier, next_tier
 from scripts.policy_guard import enforce_changed_paths
 from scripts.prompt_compiler import find_secret_candidates
 
-from .artifacts import ArtifactStore, artifact_metadata
+from .artifacts import ArtifactConflictError, ArtifactStore, artifact_metadata
 from .attempts import Attempt, AttemptManager, IdenticalAttemptError
 from .common import new_id, redact_text, sha256_file, sha256_text, stable_json
 from .config import FactoryConfig, load_config
-from .context_builder import ContextBuilder
+from .context_builder import ContextBuilder, ContextPackResult
 from .pipeline import PipelineCoordinator
 from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
@@ -438,20 +438,41 @@ class AgentWorker:
                 f"context-{task['task_id']}-repair-"
                 f"{sha256_text(spec.repair_context_ref)[:12]}.json"
             )
-        context = ContextBuilder(self.config, self.repository_root, self.artifacts).build(
-            product_id=str(task["product_id"]),
-            task_id=str(task["task_id"]),
-            subject_sha=spec.subject_sha,
-            objective=str(task["objective"]),
-            acceptance=acceptance,
-            candidates=spec.candidates,
-            allowed_paths=[str(path) for path in task["allowed_paths"]],
-            forbidden_actions=[str(path) for path in task["forbidden_paths"]],
-            output_schema=spec.output_schema,
-            evidence=spec.evidence,
-            decisions=list(spec.decisions),
-            filename=context_filename,
-        )
+        context_builder = ContextBuilder(self.config, self.repository_root, self.artifacts)
+
+        def build_context(filename: str) -> ContextPackResult:
+            return context_builder.build(
+                product_id=str(task["product_id"]),
+                task_id=str(task["task_id"]),
+                subject_sha=spec.subject_sha,
+                objective=str(task["objective"]),
+                acceptance=acceptance,
+                candidates=spec.candidates,
+                allowed_paths=[str(path) for path in task["allowed_paths"]],
+                forbidden_actions=[str(path) for path in task["forbidden_paths"]],
+                output_schema=spec.output_schema,
+                evidence=spec.evidence,
+                decisions=list(spec.decisions),
+                filename=filename,
+            )
+
+        try:
+            context = build_context(context_filename)
+        except ArtifactConflictError:
+            variant = sha256_text(
+                stable_json(
+                    {
+                        "task_contract": task,
+                        "subject_sha": spec.subject_sha,
+                        "candidates": spec.candidates,
+                        "evidence": spec.evidence,
+                        "decisions": spec.decisions,
+                        "repair_context_ref": spec.repair_context_ref,
+                    }
+                )
+            )[:12]
+            context_filename = f"context-{task['task_id']}-{variant}.json"
+            context = build_context(context_filename)
         prompt_context = {
             "task_contract": task,
             "context_pack": context.artifact,
