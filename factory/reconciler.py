@@ -912,7 +912,14 @@ class PipelineReconciler:
     def _recover_extended_repair_budget(self, product: dict[str, Any]) -> bool:
         product_id = str(product["product_id"])
         task = self.state.latest_task(product_id)
-        if task is None or int(task.get("cycle") or 0) >= self.config.max_repair_cycles:
+        maximum_product_cycle = max(
+            (
+                int(item.get("cycle") or 0)
+                for item in self.state.list_tasks(product_id)
+            ),
+            default=0,
+        )
+        if task is None or maximum_product_cycle >= self.config.max_repair_cycles:
             return False
         reason, detail = self._task_reason(task)
         if owner_action_allowed(self.config, reason):
@@ -953,7 +960,14 @@ class PipelineReconciler:
 
         product_id = str(product["product_id"])
         task = self.state.latest_task(product_id)
-        if task is None or int(task.get("cycle") or 0) < 3:
+        maximum_product_cycle = max(
+            (
+                int(item.get("cycle") or 0)
+                for item in self.state.list_tasks(product_id)
+            ),
+            default=0,
+        )
+        if task is None or maximum_product_cycle < 3:
             return False
         task_id = str(task["task_id"])
         if not any(

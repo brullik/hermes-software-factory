@@ -563,7 +563,11 @@ class PipelineCoordinator:
                         f"Make controller gate {gate_id} pass. "
                         f"Observed failure: {gate_summary[:2500]}"
                     )
-            if payload.get("status") in {"repair_required", "blocked_external"}:
+            if payload.get("status") in {
+                "repair_required",
+                "needs_replan",
+                "blocked_external",
+            }:
                 findings = normalized_repair_findings(payload)
                 failed.extend(item.finding_id for item in findings)
                 required_fixes.extend(item.required_fix for item in findings)
