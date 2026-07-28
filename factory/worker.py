@@ -6,12 +6,14 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from scripts.model_router import Tier, next_tier
 from scripts.policy_guard import enforce_changed_paths
@@ -48,6 +50,30 @@ _PLANNING_ROLES = {
     "solution-architect",
     "task-specifier",
 }
+_REPOSITORY_CONTEXT_CANDIDATES = (
+    ("README.md", "target repository overview"),
+    ("pyproject.toml", "Python project contract"),
+    ("requirements.txt", "Python dependency contract"),
+    ("package.json", "JavaScript project contract"),
+    ("Cargo.toml", "Rust project contract"),
+    ("go.mod", "Go project contract"),
+    ("Makefile", "repository validation entrypoints"),
+    ("compose.yaml", "local service topology"),
+    ("docker-compose.yml", "local service topology"),
+)
+_REPOSITORY_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+_WORKSPACE_COPY_IGNORES = (
+    ".git",
+    ".deployment",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "build",
+    "dist",
+    "state",
+    "__pycache__",
+)
 
 
 @dataclass(frozen=True)
@@ -108,7 +134,7 @@ class SubprocessHermesRunner:
             argv.extend(["--usage-file", str(usage_path)])
         return argv
 
-    def _environment(self) -> dict[str, str]:
+    def _environment(self, cwd: Path | None = None) -> dict[str, str]:
         if self.environment is not None:
             return dict(self.environment)
         allowed = {
@@ -123,7 +149,20 @@ class SubprocessHermesRunner:
             "NO_COLOR",
             "PYTHONUNBUFFERED",
         }
-        return {key: value for key, value in os.environ.items() if key in allowed}
+        environment = {key: value for key, value in os.environ.items() if key in allowed}
+        if cwd is not None:
+            venv = cwd.parent / "venv"
+            binary_directory = venv / ("Scripts" if os.name == "nt" else "bin")
+            python = binary_directory / ("python.exe" if os.name == "nt" else "python")
+            if python.is_file():
+                existing_path = environment.get("PATH", "")
+                environment["PATH"] = (
+                    str(binary_directory)
+                    if not existing_path
+                    else str(binary_directory) + os.pathsep + existing_path
+                )
+                environment["VIRTUAL_ENV"] = str(venv)
+        return environment
 
     def run(
         self,
@@ -146,7 +185,7 @@ class SubprocessHermesRunner:
             completed = subprocess.run(
                 argv,
                 cwd=cwd,
-                env=self._environment(),
+                env=self._environment(cwd),
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
@@ -202,11 +241,40 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
         if path.name == ".lease.json":
             continue
         relative = path.relative_to(root).as_posix()
+        if ".git" in Path(relative).parts:
+            continue
         if path.is_symlink():
             snapshot[relative] = f"SYMLINK:{path.resolve()}"
         elif path.is_file():
             snapshot[relative] = sha256_file(path)
     return snapshot
+
+
+def public_github_repository_url(value: str) -> str | None:
+    parsed = urlparse(value.strip())
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or parsed.username
+        or parsed.password
+        or parsed.port
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        return None
+    owner, repository = parts
+    repository = repository.removesuffix(".git")
+    if (
+        not owner
+        or not repository
+        or not _REPOSITORY_NAME.fullmatch(owner)
+        or not _REPOSITORY_NAME.fullmatch(repository)
+    ):
+        return None
+    return f"https://github.com/{owner}/{repository}.git"
 
 
 def ensure_initial_product_task(
@@ -245,7 +313,11 @@ class AgentWorker:
         configured_worktrees = Path(str(config.raw["paths"]["worktrees"]))
         if os.name == "nt" and str(configured_worktrees).replace("\\", "/").startswith("/var/"):
             configured_worktrees = config.state_dir / "worktrees"
-        self.workspace = WorkspaceManager(configured_worktrees, source_root=self.repository_root)
+        self.workspace = WorkspaceManager(
+            configured_worktrees,
+            persistent=True,
+            initializer=self._initialize_product_workspace,
+        )
         self.artifacts = ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)
         self.registry = ProviderRegistry(config)
@@ -261,6 +333,64 @@ class AgentWorker:
         self.quality = QualityGateEngine(config, self.artifacts)
         self.runner = runner or SubprocessHermesRunner()
         self.health_probe = health_probe or self._live_health_probe
+
+    def _initialize_product_workspace(self, product_id: str, destination: Path) -> None:
+        product = self.state.get_product(product_id)
+        if product is None:
+            raise ExternalBlocker(f"Product is missing for workspace {product_id}")
+        repository_url = public_github_repository_url(str(product.get("idea", "")))
+        if repository_url is None:
+            shutil.copytree(
+                self.repository_root,
+                destination,
+                ignore=shutil.ignore_patterns(*_WORKSPACE_COPY_IGNORES),
+            )
+            return
+        git_home = self.config.state_dir / "git-home"
+        git_home.mkdir(parents=True, exist_ok=True)
+        environment = {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "Never",
+            "HOME": str(git_home),
+            "PATH": os.environ.get("PATH", ""),
+        }
+        try:
+            completed = subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--single-branch",
+                    "--no-tags",
+                    repository_url,
+                    str(destination),
+                ],
+                cwd=destination.parent,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ExternalBlocker(f"Target repository clone failed for {product_id}") from error
+        if completed.returncode != 0:
+            raise ExternalBlocker(f"Target repository clone failed for {product_id}")
+        if any(path.is_symlink() for path in destination.rglob("*")):
+            raise ExternalBlocker(f"Target repository contains unsupported symlinks for {product_id}")
+        revision = subprocess.run(
+            ["git", "-C", str(destination), "rev-parse", "--verify", "HEAD"],
+            cwd=destination.parent,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if revision.returncode != 0 or not re.fullmatch(r"[a-f0-9]{40}", revision.stdout.strip()):
+            raise ExternalBlocker(f"Target repository revision is invalid for {product_id}")
 
     def _live_health_probe(self, selection: ModelSelection) -> bool:
         probe = self.runner.run(
@@ -327,6 +457,7 @@ class AgentWorker:
             candidates=(
                 (f"schemas/{output_schema}", "required output contract"),
                 (f"prompts/roles/{prompt_role}.md", "role boundary"),
+                *_REPOSITORY_CONTEXT_CANDIDATES,
             ),
             evidence=tuple(evidence),
             decisions=tuple(decisions),
@@ -478,6 +609,8 @@ class AgentWorker:
         selected = self.registry.selected_model(alias)
         if not selected:
             raise ExternalBlocker(f"Model route for alias {alias} is not approved")
+        if self.registry.healthy_providers(alias):
+            return self.registry.select(alias, tier=tier.value)
         for provider in self.registry.providers_for(alias):
             candidate = ModelSelection(
                 provider,
@@ -492,7 +625,12 @@ class AgentWorker:
             self.registry.set_health(provider, False)
         return self.registry.select(alias, tier=tier.value)
 
-    def _context_and_prompt(self, spec: TaskExecutionSpec) -> tuple[str, str, Path]:
+    def _context_and_prompt(
+        self,
+        spec: TaskExecutionSpec,
+        *,
+        repository_root: Path | None = None,
+    ) -> tuple[str, str, Path]:
         task = spec.task_contract
         acceptance = [str(item["verification"]) for item in task["acceptance"]]
         context_filename = f"context-{task['task_id']}.json"
@@ -501,7 +639,11 @@ class AgentWorker:
                 f"context-{task['task_id']}-repair-"
                 f"{sha256_text(spec.repair_context_ref)[:12]}.json"
             )
-        context_builder = ContextBuilder(self.config, self.repository_root, self.artifacts)
+        context_builder = ContextBuilder(
+            self.config,
+            repository_root or self.repository_root,
+            self.artifacts,
+        )
 
         def build_context(filename: str) -> ContextPackResult:
             return context_builder.build(
@@ -866,22 +1008,33 @@ class AgentWorker:
         if spec.role == "release-operator" and self.release_executor is None:
             raise ExternalBlocker("release side-effect adapter is not configured")
         tier = spec.requested_tier or Tier(str(spec.task_contract["model_floor"]))
-        selection = self._select(tier)
-        prompt, prompt_digest, context_path = self._context_and_prompt(spec)
-        try:
-            attempt = self.attempts.begin(
-                task_id=str(spec.task_contract["task_id"]),
-                tier=tier,
-                attempt_kind=spec.attempt_kind,
-                prompt_digest=prompt_digest,
-            )
-        except IdenticalAttemptError as error:
-            raise ExternalBlocker(str(error)) from error
         lease = self.workspace.acquire(
             product_id=str(spec.task_contract["product_id"]),
             task_id=str(spec.task_contract["task_id"]),
             worker_id=self.worker_id,
         )
+        try:
+            spec = replace(
+                spec,
+                subject_sha=sha256_text(stable_json(_workspace_snapshot(lease.path))),
+            )
+            selection = self._select(tier)
+            prompt, prompt_digest, context_path = self._context_and_prompt(
+                spec,
+                repository_root=lease.path,
+            )
+            try:
+                attempt = self.attempts.begin(
+                    task_id=str(spec.task_contract["task_id"]),
+                    tier=tier,
+                    attempt_kind=spec.attempt_kind,
+                    prompt_digest=prompt_digest,
+                )
+            except IdenticalAttemptError as error:
+                raise ExternalBlocker(str(error)) from error
+        except Exception:
+            self.workspace.release(lease)
+            raise
         before_snapshot = _workspace_snapshot(lease.path)
         usage_path = self.config.evidence_dir / f"usage-{attempt.attempt_id}.json"
         try:

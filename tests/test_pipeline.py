@@ -14,6 +14,45 @@ from factory.state import StateStore
 
 
 class PipelineTests(unittest.TestCase):
+    def test_external_repository_uses_portable_target_gates_and_shared_workspace_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+            )
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            product = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="https://github.com/brullik/bybit-grid-research",
+            )
+            pipeline = PipelineCoordinator(config, state, artifacts)
+
+            builder_path = pipeline.create_task(product.product_id, "builder-core")
+            tester_path = pipeline.create_task(product.product_id, "test-engineer")
+            security_path = pipeline.create_task(product.product_id, "security-reviewer")
+
+            builder = json.loads(builder_path.read_text(encoding="utf-8"))
+            tester = json.loads(tester_path.read_text(encoding="utf-8"))
+            security = json.loads(security_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                builder["quality_gates"],
+                [
+                    "target-environment",
+                    "target-tests",
+                    "target-compile",
+                    "target-lint",
+                    "target-secret-scan",
+                ],
+            )
+            self.assertEqual(tester["quality_gates"], builder["quality_gates"])
+            self.assertEqual(security["quality_gates"], ["target-secret-scan"])
+            self.assertEqual(builder["conflict_keys"], tester["conflict_keys"])
+            self.assertEqual(tester["conflict_keys"], security["conflict_keys"])
+            state.close()
+
     def test_role_dag_reaches_observation_with_durable_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

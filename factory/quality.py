@@ -28,7 +28,18 @@ class QualityGateEngine:
     def __init__(self, config: FactoryConfig, artifacts: ArtifactStore | None = None) -> None:
         self.config = config
         self.artifacts = artifacts or ArtifactStore(config)
-        self.catalog_path = config.source.parent / "quality-gates.yaml"
+        packaged_catalog = Path(__file__).resolve().parents[1] / "config" / "quality-gates.yaml"
+        configured = config.raw.get("paths", {}).get("quality_gates")
+        self.catalog_path = Path(str(configured)) if configured else packaged_catalog
+
+    @staticmethod
+    def _python_executable(cwd: Path) -> str:
+        candidates = (
+            cwd.parent / "venv" / "bin" / "python",
+            cwd.parent / "venv" / "Scripts" / "python.exe",
+        )
+        selected = next((path for path in candidates if path.is_file()), None)
+        return str(selected) if selected is not None else sys.executable
 
     def run(
         self,
@@ -61,7 +72,7 @@ class QualityGateEngine:
                 gate,
                 cwd,
                 subject_sha,
-                python_executable=sys.executable,
+                python_executable=self._python_executable(cwd),
             )
             filename = f"gate-{task_id}-{attempt_id}-{gate_id}.json"
             evidence_path = self.artifacts.write("gate-evidence.schema.json", evidence, filename=filename)

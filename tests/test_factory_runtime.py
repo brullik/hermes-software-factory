@@ -297,6 +297,51 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertEqual(created["product_id"], "second-product")
             state.close()
 
+    def test_cancel_stops_queued_and_leased_product_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "controller.db")
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="cli",
+                idea="idea",
+                idempotency_key="cancel-product-key",
+            )
+            state.add_task(task_id="claimed", product_id="product", title="Claimed")
+            state.add_task(task_id="queued", product_id="product", title="Queued")
+            claimed = state.claim_task(worker_id="worker")
+            self.assertIsNotNone(claimed)
+
+            WorkflowEngine(state).cancel("product")
+
+            self.assertEqual(state.get_product("product")["status"], "CANCELLED")
+            for task_id in ("claimed", "queued"):
+                task = state.get_task(task_id)
+                self.assertEqual(task["status"], "FAILED_SAFE")
+                self.assertIsNone(task["lease_owner"])
+                self.assertIsNone(task["lease_until"])
+            self.assertIsNone(state.claim_task(worker_id="other"))
+            cancelled_events = [
+                event for event in state.events("product") if event["event_type"] == "task_cancelled"
+            ]
+            self.assertEqual(len(cancelled_events), 2)
+            state.close()
+
+    def test_claim_skips_tasks_for_terminal_products(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "controller.db")
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="cli",
+                idea="idea",
+                idempotency_key="terminal-product-key",
+            )
+            state.add_task(task_id="queued", product_id="product", title="Queued")
+            state.transition_product("product", "CANCELLED")
+            self.assertIsNone(state.claim_task(worker_id="worker"))
+            state.close()
+
     def test_registry_context_prompt_and_attempt_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -402,6 +447,31 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertTrue((lease.path / "src" / "main.py").is_file())
             self.assertFalse((lease.path / "state").exists())
             manager.release(lease)
+
+    def test_persistent_product_workspace_preserves_changes_between_task_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def initialize(_product_id: str, destination: Path) -> None:
+                destination.mkdir(parents=True)
+                (destination / "README.md").write_text("target repository\n", encoding="utf-8")
+
+            manager = WorkspaceManager(
+                root / "worktrees",
+                persistent=True,
+                initializer=initialize,
+            )
+            first = manager.acquire(product_id="product", task_id="builder", worker_id="worker")
+            (first.path / "src.py").write_text("value = 1\n", encoding="utf-8")
+            manager.release(first)
+
+            second = manager.acquire(product_id="product", task_id="tests", worker_id="worker")
+
+            self.assertEqual(second.path, first.path)
+            self.assertEqual((second.path / "src.py").read_text(encoding="utf-8"), "value = 1\n")
+            manager.release(second)
+            self.assertTrue(second.path.is_dir())
+            self.assertFalse((second.path / ".lease.json").exists())
 
     def test_external_boundaries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

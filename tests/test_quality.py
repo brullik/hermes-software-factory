@@ -39,6 +39,14 @@ class QualityGateTests(unittest.TestCase):
                                 "timeout_seconds": 10,
                                 "mandatory": False,
                             },
+                            {
+                                "id": "expected-nonzero",
+                                "command": "python3 -c \"raise SystemExit(3)\"",
+                                "allowlist_prefixes": ["python3 -c"],
+                                "success_exit_codes": [3],
+                                "timeout_seconds": 10,
+                                "mandatory": True,
+                            },
                         ],
                     },
                     sort_keys=False,
@@ -46,6 +54,7 @@ class QualityGateTests(unittest.TestCase):
                 encoding="utf-8",
             )
             config = FactoryConfig(base_config.raw, config_root / "factory.yaml")
+            config.raw["paths"]["quality_gates"] = str(config_root / "quality-gates.yaml")
             engine = QualityGateEngine(config, ArtifactStore(config))
 
             run = engine.run(
@@ -53,12 +62,15 @@ class QualityGateTests(unittest.TestCase):
                 subject_sha="a" * 64,
                 task_id="T-QUALITY-001",
                 attempt_id="attempt-quality-001",
-                gate_ids=["pass-gate", "optional-fail"],
+                gate_ids=["pass-gate", "optional-fail", "expected-nonzero"],
             )
 
             self.assertTrue(run.mandatory_passed)
-            self.assertEqual([result["status"] for result in run.results], ["PASS", "FAIL"])
-            self.assertEqual(len(run.evidence_paths), 2)
+            self.assertEqual(
+                [result["status"] for result in run.results],
+                ["PASS", "FAIL", "PASS"],
+            )
+            self.assertEqual(len(run.evidence_paths), 3)
             for path in run.evidence_paths:
                 self.assertEqual(ArtifactStore(config).validate("gate-evidence.schema.json", yaml.safe_load(path.read_text(encoding="utf-8"))), [])
             with self.assertRaises(ValueError):

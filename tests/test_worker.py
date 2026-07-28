@@ -17,7 +17,12 @@ from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
 from factory.providers import ModelSelection
 from factory.state import StateStore
-from factory.worker import AgentWorker, HermesRunResult, SubprocessHermesRunner
+from factory.worker import (
+    AgentWorker,
+    HermesRunResult,
+    SubprocessHermesRunner,
+    public_github_repository_url,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -475,11 +480,17 @@ class WorkerTests(unittest.TestCase):
                     requirements_package(config, intake_result.product_id),
                 ]
             )
+            health_checks: list[str] = []
+
+            def health_probe(selection: Any) -> bool:
+                health_checks.append(selection.provider)
+                return True
+
             worker = AgentWorker(
                 config,
                 state,
                 runner=runner,
-                health_probe=lambda _: True,
+                health_probe=health_probe,
                 repository_root=ROOT,
             )
 
@@ -509,7 +520,24 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(completed_task["status"], "DONE")
             context_paths = list(config.evidence_dir.glob(f"context-{analyst_task['task_id']}*.json"))
             self.assertEqual(len(context_paths), 2)
+            self.assertEqual(len(health_checks), 1)
             state.close()
+
+    def test_public_github_repository_url_accepts_only_exact_repository_urls(self) -> None:
+        self.assertEqual(
+            public_github_repository_url("https://github.com/brullik/bybit-grid-research"),
+            "https://github.com/brullik/bybit-grid-research.git",
+        )
+        self.assertEqual(
+            public_github_repository_url("https://github.com/brullik/bybit-grid-research.git/"),
+            "https://github.com/brullik/bybit-grid-research.git",
+        )
+        self.assertIsNone(
+            public_github_repository_url(
+                "https://github.com/brullik/bybit-grid-research?token=not-allowed"
+            )
+        )
+        self.assertIsNone(public_github_repository_url("https://example.com/brullik/repository"))
 
     def test_unselected_route_blocks_before_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

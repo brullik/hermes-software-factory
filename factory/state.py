@@ -332,6 +332,36 @@ class StateStore:
                 ).fetchall()
             return [dict(row) for row in rows]
 
+    def cancel_active_tasks(self, product_id: str) -> list[str]:
+        """Stop queued or leased work after an owner cancels a product."""
+
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                """SELECT task_id, status FROM tasks
+                   WHERE product_id=? AND status IN ('PENDING', 'CLAIMED')
+                   ORDER BY created_at""",
+                (product_id,),
+            ).fetchall()
+            task_ids = [str(row["task_id"]) for row in rows]
+            now = utc_now()
+            for row in rows:
+                task_id = str(row["task_id"])
+                previous_status = str(row["status"])
+                self._connection.execute(
+                    """UPDATE tasks
+                       SET status='FAILED_SAFE', lease_owner=NULL, lease_until=NULL,
+                           heartbeat_at=NULL, updated_at=?
+                       WHERE task_id=? AND product_id=? AND status=?""",
+                    (now, task_id, product_id, previous_status),
+                )
+                self._record_event(
+                    product_id,
+                    task_id,
+                    "task_cancelled",
+                    {"previous_status": previous_status, "reason": "product_cancelled"},
+                )
+            return task_ids
+
     def claim_task(self, *, worker_id: str, lease_seconds: int = 300) -> dict[str, Any] | None:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -342,7 +372,11 @@ class StateStore:
                     (utc_now(),),
                 )
                 rows = self._connection.execute(
-                    "SELECT * FROM tasks WHERE status='PENDING' ORDER BY priority DESC, created_at"
+                    """SELECT tasks.* FROM tasks
+                       JOIN products ON products.product_id = tasks.product_id
+                       WHERE tasks.status='PENDING'
+                         AND products.status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED_SAFE', 'PAUSED')
+                       ORDER BY tasks.priority DESC, tasks.created_at"""
                 ).fetchall()
                 claimed_rows = self._connection.execute(
                     "SELECT lease_owner, conflict_keys_json FROM tasks WHERE status='CLAIMED'"
