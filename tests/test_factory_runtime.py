@@ -297,6 +297,51 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertEqual(created["product_id"], "second-product")
             state.close()
 
+    def test_cancel_stops_queued_and_leased_product_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "controller.db")
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="cli",
+                idea="idea",
+                idempotency_key="cancel-product-key",
+            )
+            state.add_task(task_id="claimed", product_id="product", title="Claimed")
+            state.add_task(task_id="queued", product_id="product", title="Queued")
+            claimed = state.claim_task(worker_id="worker")
+            self.assertIsNotNone(claimed)
+
+            WorkflowEngine(state).cancel("product")
+
+            self.assertEqual(state.get_product("product")["status"], "CANCELLED")
+            for task_id in ("claimed", "queued"):
+                task = state.get_task(task_id)
+                self.assertEqual(task["status"], "FAILED_SAFE")
+                self.assertIsNone(task["lease_owner"])
+                self.assertIsNone(task["lease_until"])
+            self.assertIsNone(state.claim_task(worker_id="other"))
+            cancelled_events = [
+                event for event in state.events("product") if event["event_type"] == "task_cancelled"
+            ]
+            self.assertEqual(len(cancelled_events), 2)
+            state.close()
+
+    def test_claim_skips_tasks_for_terminal_products(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "controller.db")
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="cli",
+                idea="idea",
+                idempotency_key="terminal-product-key",
+            )
+            state.add_task(task_id="queued", product_id="product", title="Queued")
+            state.transition_product("product", "CANCELLED")
+            self.assertIsNone(state.claim_task(worker_id="worker"))
+            state.close()
+
     def test_registry_context_prompt_and_attempt_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

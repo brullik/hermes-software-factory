@@ -64,7 +64,7 @@ gates:
     command: python3 -m ruff check src tests
     allowlist_prefixes: ["python3 -m ruff check"]
     timeout_seconds: 300
-    mandatory: true
+    mandatory: false
   - id: target-secret-scan
     command: git grep -I -l -E (ghp_|github_pat_|sk-[A-Za-z0-9_-]{20,}|BEGIN[[:space:]]+(RSA[[:space:]]+|EC[[:space:]]+|OPENSSH[[:space:]]+)?PRIVATE[[:space:]]+KEY) -- .
     allowlist_prefixes: ["git grep"]

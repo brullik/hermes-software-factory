@@ -42,7 +42,9 @@ class WorkflowEngine:
         return product
 
     def cancel(self, product_id: str) -> dict[str, object]:
-        return self.transition(product_id, "CANCELLED")
+        product = self.transition(product_id, "CANCELLED")
+        self.state.cancel_active_tasks(product_id)
+        return product
 
     def add_task(
         self,
