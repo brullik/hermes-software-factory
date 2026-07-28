@@ -1,0 +1,31 @@
+[Unit]
+Description=Hermes Software Factory provider-backed worker
+After=network-online.target hermes-factory-controller.service
+Wants=network-online.target
+Requires=hermes-factory-controller.service
+
+[Service]
+Type=simple
+User=hermesfactory
+Group=hermesfactory
+WorkingDirectory=/opt/hermes-factory/current
+Environment=FACTORY_CONFIG=/etc/hermes-factory/config.yaml
+Environment=HOME=/var/lib/hermes-factory
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/hermes-factory/venv/bin/python -m factory.worker --worker-id hermes-worker-1
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory /var/log/hermes-factory /run/hermes-factory
+ReadOnlyPaths=/etc/hermes-factory
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=1200M
+TasksMax=256
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import time
 from pathlib import Path
@@ -15,6 +16,8 @@ from .intake import IntakeService
 from .state import StateStore
 from .telegram import TelegramApi, TelegramApiError
 from .workflow import WorkflowEngine
+
+LOGGER = logging.getLogger(__name__)
 
 
 def credential_path(name: str) -> Path | None:
@@ -146,14 +149,18 @@ class TelegramGateway:
             return False
         owner_id, chat_id, raw_text = message
         if str(owner_id) not in self.config.allowed_telegram_user_ids:
+            LOGGER.warning("telegram update rejected update_id=%s reason=allowlist", update_id)
             return False
         command_text = raw_text if raw_text.lstrip().startswith("/") else f"/idea {raw_text}"
+        command_name = "rejected"
         try:
             parsed = parse_command(command_text)
+            command_name = parsed.name
             response = self._dispatch(parsed.name, parsed.argument, owner_id, update_id)
         except (GatewayCommandError, ValueError, KeyError) as error:
             response = f"Команда отклонена: {error}"
         self.api.send_message(chat_id, response)
+        LOGGER.info("telegram update processed update_id=%s command=%s", update_id, command_name)
         return True
 
     def poll_once(self) -> int:
@@ -180,6 +187,7 @@ class TelegramGateway:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="Hermes Software Factory Telegram gateway")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--check-only", action="store_true")

@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "hermes-compatibility-live-probes-20260727",
+  "created_at": "2026-07-27T20:12:00Z",
+  "subject": {
+    "host": "redacted-production-target",
+    "hermes_version": "0.19.0",
+    "hermes_tag": "v2026.7.20",
+    "route": "openai-codex-oauth"
+  },
+  "privacy": {
+    "raw_prompts_recorded": false,
+    "raw_responses_recorded": false,
+    "credential_values_recorded": false
+  },
+  "probes": [
+    {
+      "alias": "economy",
+      "model": "gpt-5.6-luna",
+      "provider": "openai-codex",
+      "status": "PASS",
+      "process_exit_code": 0,
+      "cost_status": "included",
+      "api_calls": 1,
+      "response_classification": "completed_nonexact"
+    },
+    {
+      "alias": "standard",
+      "model": "gpt-5.6-terra",
+      "provider": "openai-codex",
+      "status": "PASS",
+      "process_exit_code": 0,
+      "cost_status": "included",
+      "api_calls": 1,
+      "response_classification": "exact_pass"
+    },
+    {
+      "alias": "expert",
+      "model": "gpt-5.6-sol",
+      "provider": "openai-codex",
+      "status": "PASS",
+      "process_exit_code": 0,
+      "cost_status": "included",
+      "api_calls": 1,
+      "response_classification": "exact_pass"
+    }
+  ],
+  "notes": [
+    "The probes used the owner-authorized Codex OAuth route and did not fall back to a paid API key.",
+    "Provider-backed worker smoke completed product-director with DONE and recorded malformed analyst transport as FAILED_SAFE; this is not a claim that the full pilot DAG completed."
+  ]
+}

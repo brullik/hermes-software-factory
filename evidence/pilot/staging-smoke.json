@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "artifact_id": "pilot-staging-smoke-001",
   "created_at": "2026-07-26T17:07:00Z",
-  "subject": "191.44.33.92",
+  "subject": "redacted-production-target",
   "status": "PASS",
   "image": "hermes-factory-pilot:0.1.0",
   "image_manifest_digest": "sha256:cb30f59021be8354591167a52c25e68189b8498da47c74ff1e05c8b61eee8",

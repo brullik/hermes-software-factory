@@ -6,16 +6,23 @@ merge_method: squash
 direct_push_to_main: forbidden
 force_push: forbidden
 delete_branch_after_merge: true
+governance:
+  mode: single_owner
+  owner_override:
+    enabled: true
+    reason_required: true
+    audit_evidence_required: true
+    independent_review_claim: forbidden
 required_checks:
   - factory/package-integrity
   - factory/scope-guard
   - factory/quality
   - factory/security
-  - factory/independent-review
   - factory/release-readiness
 merge_preconditions:
   - required_checks_pass
-  - reviewed_head_sha_equals_merge_head_sha
+  - head_sha_equals_expected_sha
+  - governance_gate_satisfied
   - no_unresolved_blocking_threads
   - no_secret_findings
   - policy_digest_matches

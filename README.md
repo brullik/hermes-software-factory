@@ -95,4 +95,27 @@ python3 scripts/secret_scan.py
 python3 scripts/build_sbom.py --check
 ```
 
-`acceptance --full` возвращает `BLOCKED_EXTERNAL`, пока не подключены Ubuntu VPS, Hermes/provider auth, GitHub, Telegram и offsite backup. Это ожидаемый безопасный статус, а не успешная production-приёмка.
+На VPS для ручных команд используйте установленный wrapper `factory`. Он
+всегда подключает активный исходный релиз из `/opt/hermes-factory/current`,
+поэтому CLI не запускается из устаревшей копии virtualenv после транзакционной
+замены релиза:
+
+```bash
+factory intake --config /etc/hermes-factory/config.yaml --owner-id owner --idea "Build a safe internal tool"
+```
+
+`acceptance --full` возвращает `BLOCKED_EXTERNAL`, пока не закрыты внешние
+условия: benchmark-gated Hermes route, provider-backed pilot, полноценный pilot
+PR и offsite backup. Для этой установки владелец явно включил single-owner
+governance: независимый reviewer не имитируется, а owner override записывается
+как отдельный режим с причиной. Production target настраивается вне публичного
+репозитория; адрес production-хоста в публичных артефактах скрыт.
+Подключённые VPS, GitHub governance, OAuth, Telegram credential/gateway и
+локальный encrypted-backup probe фиксируются в `evidence/external-acceptance.json`.
+Offsite backup остаётся отдельным внешним условием.
+
+## Durable role pipeline
+
+После intake Controller создаёт schema-validated task contract с durable role metadata. Provider-backed worker выполняет роли последовательно: Product Director, Product Analyst, Solution Architect, Task Specifier, параллельные Builder/Test Engineer/Security Reviewer, Independent Reviewer, Staging Release, Product Tester и Production Release. Каждая следующая задача появляется только после принятого результата предыдущей, а SQLite lease проверяет зависимости и конфликтные worktree.
+
+Builder и Test Engineer получают immutable quality-gate list из controller policy. Gates выполняются без shell через allowlist, сохраняют `gate-evidence.schema.json`, а изменение файла вне `allowed_paths` немедленно переводит задачу в `FAILED_SAFE`.

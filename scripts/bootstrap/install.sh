@@ -68,6 +68,8 @@ cp -a "${ROOT_DIR}/." "${INSTALL_ROOT}/current/"
 chown -R root:root "${INSTALL_ROOT}/current"
 find "${INSTALL_ROOT}/current" -type d -exec chmod 0755 {} +
 find "${INSTALL_ROOT}/current" -type f -exec chmod 0644 {} +
+find "${INSTALL_ROOT}/current/scripts" -type f -name '*.sh' -exec chmod 0755 {} +
+chmod 0755 "${INSTALL_ROOT}/current/scripts/deploy/promote-release.py"
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 "${INSTALL_ROOT}/venv"
 "${PYTHON_BIN}" -m venv "${INSTALL_ROOT}/venv"
 "${INSTALL_ROOT}/venv/bin/python" -m pip install --upgrade pip
@@ -102,7 +104,10 @@ if [[ -e /usr/local/bin/hermes && ! -L /usr/local/bin/hermes ]]; then
   exit 78
 fi
 ln -sfn "${INSTALL_ROOT}/venv/bin/hermes" /usr/local/bin/hermes
-ln -sfn "${INSTALL_ROOT}/venv/bin/factory" /usr/local/bin/factory
+install -o root -g root -m 0755 \
+  "${INSTALL_ROOT}/current/scripts/bootstrap/factory-cli.sh" \
+  "${INSTALL_ROOT}/bin/factory-cli"
+ln -sfn "${INSTALL_ROOT}/bin/factory-cli" /usr/local/bin/factory
 
 install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-controller.service" \
@@ -110,6 +115,9 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-gateway.service" \
   /etc/systemd/system/hermes-factory-gateway.service
+install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-worker.service" \
+  /etc/systemd/system/hermes-factory-worker.service
 install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-backup.service" \
   /etc/systemd/system/hermes-factory-backup.service
@@ -121,6 +129,6 @@ install -o root -g "${SERVICE_USER}" -m 0750 \
   "${INSTALL_ROOT}/bin/factory-rollback"
 
 systemctl daemon-reload
-systemctl enable docker.service fail2ban.service hermes-factory-controller.service hermes-factory-backup.timer
+systemctl enable docker.service fail2ban.service hermes-factory-controller.service hermes-factory-worker.service hermes-factory-backup.timer
 systemctl start fail2ban.service
 printf 'Bootstrap files installed. Credentials, Hermes compatibility, firewall, SSH hardening, and service start require separate evidence-backed steps.\n'

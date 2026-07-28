@@ -71,3 +71,8 @@ review:
   builder_self_acceptance: forbidden
   unresolved_blocking_threads_block_merge: true
   changes_after_approval_invalidate_approval: true
+owner_override:
+  mode: single_owner
+  reason_required: true
+  audit_evidence_required: true
+  independent_review_claim: forbidden

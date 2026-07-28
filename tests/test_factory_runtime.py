@@ -14,7 +14,7 @@ from factory.attempts import AttemptManager, IdenticalAttemptError
 from factory.backup import BackupAdapter
 from factory.config import FactoryConfig, load_config
 from factory.context_builder import ContextBuilder
-from factory.deployment import DeploymentGuard
+from factory.deployment import DeploymentError, DeploymentGuard, TransactionalDeployer
 from factory.gateway_commands import GatewayCommandError, parse_command
 from factory.github import GitHubAdapter, GitHubCommandError
 from factory.intake import IntakeRejected, IntakeService
@@ -354,6 +354,20 @@ class FactoryRuntimeTests(unittest.TestCase):
             manager.release(lease)
             self.assertFalse(lease.path.exists())
 
+    def test_worker_workspace_starts_from_source_snapshot_without_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            (source / "src").mkdir(parents=True)
+            (source / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            (source / "state").mkdir()
+            (source / "state" / "controller.db").write_text("runtime\n", encoding="utf-8")
+            manager = WorkspaceManager(root / "worktrees", source_root=source)
+            lease = manager.acquire(product_id="product", task_id="task", worker_id="worker")
+            self.assertTrue((lease.path / "src" / "main.py").is_file())
+            self.assertFalse((lease.path / "state").exists())
+            manager.release(lease)
+
     def test_external_boundaries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = _make_config(Path(directory) / "state")
@@ -427,6 +441,71 @@ class FactoryRuntimeTests(unittest.TestCase):
             with patch.dict(os.environ, {"GH_TOKEN": ""}, clear=False), self.assertRaises(ExternalBlocker):
                 GitHubAdapter("brullik", "hermes-software-factory").require_authentication()
 
+    def test_transactional_deployer_promotes_and_retains_previous_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("new\n", encoding="utf-8")
+            (root / "current").mkdir(parents=True)
+            (root / "current" / "VERSION").write_text("old\n", encoding="utf-8")
+
+            deployer = TransactionalDeployer(
+                root,
+                health_probe=lambda current: (current / "VERSION").read_text(encoding="utf-8").strip() == "new",
+            )
+            result = deployer.promote("candidate-1", source)
+
+            self.assertEqual(result.status, "PROMOTED")
+            self.assertEqual((root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "new")
+            self.assertEqual(
+                (root / "backup-candidate-1-previous" / "VERSION").read_text(encoding="utf-8").strip(),
+                "old",
+            )
+
+    def test_transactional_deployer_activates_before_health_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (root / "current").mkdir(parents=True)
+            activation_calls: list[str] = []
+
+            result = TransactionalDeployer(
+                root,
+                health_probe=lambda _current: True,
+                activate=lambda: activation_calls.append("restart"),
+            ).promote("candidate-activate", source)
+
+            self.assertEqual(result.status, "PROMOTED")
+            self.assertEqual(activation_calls, ["restart"])
+
+    def test_transactional_deployer_rolls_back_failed_health_and_keeps_failed_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("bad\n", encoding="utf-8")
+            (root / "current").mkdir(parents=True)
+            (root / "current" / "VERSION").write_text("safe\n", encoding="utf-8")
+
+            deployer = TransactionalDeployer(root, health_probe=lambda _current: False)
+            result = deployer.promote("candidate-2", source)
+
+            self.assertEqual(result.status, "ROLLED_BACK")
+            self.assertEqual((root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "safe")
+            self.assertEqual((root / "failed-candidate-2" / "VERSION").read_text(encoding="utf-8").strip(), "bad")
+
+    def test_transactional_deployer_rejects_existing_backup_before_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (root / "backup-candidate-3-previous").mkdir(parents=True)
+
+            with self.assertRaises(DeploymentError):
+                TransactionalDeployer(root, health_probe=lambda _current: True).promote("candidate-3", source)
+
     def test_github_cli_boundary_is_allowlisted_and_sha_guarded(self) -> None:
         calls: list[list[str]] = []
 
@@ -451,6 +530,125 @@ class FactoryRuntimeTests(unittest.TestCase):
         self.assertTrue(all("token-is-not-used-in-argv" not in str(call) for call in calls))
         with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(GitHubCommandError):
             adapter.merge_pull_request("17", expected_sha="b" * 40)
+
+    def test_github_governance_gate_requires_approval_and_checks(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str]):
+            calls.append(argv)
+            from subprocess import CompletedProcess
+
+            if "view" in argv:
+                output = json.dumps(
+                    {
+                        "headRefOid": "a" * 40,
+                        "state": "OPEN",
+                        "reviewDecision": "APPROVED",
+                        "mergeStateStatus": "CLEAN",
+                        "statusCheckRollup": [
+                            {"name": "factory/quality", "state": "SUCCESS"},
+                        ],
+                    }
+                )
+            else:
+                output = "merged"
+            return CompletedProcess(argv, 0, output, "")
+
+        adapter = GitHubAdapter("brullik", "hermes-software-factory", runner=runner)
+        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False):
+            gate = adapter.verify_pull_request(
+                "17",
+                expected_sha="a" * 40,
+                required_checks=("factory/quality",),
+            )
+            self.assertTrue(gate.approved)
+            self.assertEqual(gate.approval_mode, "independent")
+            self.assertEqual(adapter.merge_pull_request_checked("17", expected_sha="a" * 40).status, "PASS")
+
+        def blocked_runner(argv: list[str]):
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "headRefOid": "a" * 40,
+                        "state": "OPEN",
+                        "reviewDecision": "REVIEW_REQUIRED",
+                        "mergeStateStatus": "CLEAN",
+                        "statusCheckRollup": [],
+                    }
+                ),
+                "",
+            )
+
+        blocked = GitHubAdapter("brullik", "hermes-software-factory", runner=blocked_runner)
+        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(GitHubCommandError):
+            blocked.merge_pull_request_checked("17", expected_sha="a" * 40)
+
+    def test_single_owner_override_is_explicit_and_audited(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str]):
+            calls.append(argv)
+            from subprocess import CompletedProcess
+
+            if "view" in argv:
+                output = json.dumps(
+                    {
+                        "headRefOid": "a" * 40,
+                        "state": "OPEN",
+                        "reviewDecision": "REVIEW_REQUIRED",
+                        "mergeStateStatus": "CLEAN",
+                        "statusCheckRollup": [
+                            {"name": "factory/quality", "state": "SUCCESS"},
+                        ],
+                    }
+                )
+            else:
+                output = "merged"
+            return CompletedProcess(argv, 0, output, "")
+
+        reason = "Owner explicitly enabled single-owner release for this VPS"
+        normal = GitHubAdapter("brullik", "hermes-software-factory", runner=runner)
+        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(
+            GitHubCommandError
+        ):
+            normal.merge_pull_request_checked(
+                "17",
+                expected_sha="a" * 40,
+                owner_override=True,
+                owner_override_reason=reason,
+            )
+
+        calls.clear()
+        single_owner = GitHubAdapter(
+            "brullik",
+            "hermes-software-factory",
+            runner=runner,
+            single_owner_mode=True,
+        )
+        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False):
+            gate = single_owner.verify_pull_request(
+                "17",
+                expected_sha="a" * 40,
+                required_checks=("factory/quality",),
+                owner_override=True,
+                owner_override_reason=reason,
+            )
+            self.assertFalse(gate.approved)
+            self.assertEqual(gate.approval_mode, "owner_override")
+            self.assertEqual(gate.owner_override_reason, reason)
+            result = single_owner.merge_pull_request_checked(
+                "17",
+                expected_sha="a" * 40,
+                owner_override=True,
+                owner_override_reason=reason,
+            )
+            self.assertEqual(result.status, "PASS")
+            self.assertIn("approval_mode=owner_override", result.output)
+        self.assertTrue(any("--admin" in call for call in calls))
 
 
 if __name__ == "__main__":

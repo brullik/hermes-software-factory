@@ -26,19 +26,27 @@ providers:
 aliases:
   economy:
     capability_class: luna
-    selected: null
-    candidates: []
+    selected: gpt-5.6-luna
+    candidates: [gpt-5.6-luna]
   standard:
     capability_class: terra
-    selected: null
-    candidates: []
+    selected: gpt-5.6-terra
+    candidates: [gpt-5.6-terra]
   expert:
     capability_class: sol
-    selected: null
-    candidates: []
+    selected: gpt-5.6-sol
+    candidates: [gpt-5.6-sol]
 selection:
   require_health_probe: true
   require_benchmark: true
   same_tier_fallback_only: true
   forbid_unmetered_assumption: true
   forbid_automatic_api_key_billing: true
+  route_change:
+    mode: single_owner
+    owner_override: true
+    reason: "Owner authorized Codex OAuth route activation for the current VPS"
+    benchmark_evidence:
+      - evidence/model-benchmark-routing-economy-20260727.json
+      - evidence/model-benchmark-routing-standard-20260727.json
+      - evidence/model-benchmark-routing-expert-20260727.json

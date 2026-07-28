@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "vps-cli-wrapper-acceptance-20260728",
+  "created_at": "2026-07-28T04:12:00Z",
+  "subject": {
+    "host": "redacted-production-target",
+    "release_id": "single-owner-20260728-cli",
+    "install_root": "/opt/hermes-factory"
+  },
+  "checks": [
+    {
+      "id": "active-source-import",
+      "status": "PASS",
+      "result": "The factory wrapper executed from /tmp and validated /etc/hermes-factory/config.yaml using /opt/hermes-factory/current rather than the stale virtualenv package."
+    },
+    {
+      "id": "intake-task-persistence",
+      "status": "PASS",
+      "result": "A wrapper-launched intake created product hermescliwrapperacceptance-e93624d3 and durable task T-856492CB2264 before the test product was cancelled."
+    },
+    {
+      "id": "runtime-health",
+      "status": "PASS",
+      "result": "Controller, gateway, and worker are active; /healthz and /readyz both returned PASS."
+    },
+    {
+      "id": "backup-schedule",
+      "status": "PASS",
+      "result": "The encrypted local Restic backup timer is active; offsite configuration remains separately blocked."
+    }
+  ],
+  "privacy": {
+    "credential_values_recorded": false,
+    "raw_provider_output_recorded": false
+  }
+}

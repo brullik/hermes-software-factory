@@ -8,7 +8,12 @@ import unittest
 from http.client import HTTPConnection
 from pathlib import Path
 
-from pilot.app import create_server
+try:
+    from pilot.app import create_server
+except ModuleNotFoundError:
+    # The pilot is also published as a standalone repository whose app.py
+    # lives at repository root rather than under a pilot/ package.
+    from app import create_server  # type: ignore[import-not-found,no-redef]
 
 
 class PilotTests(unittest.TestCase):

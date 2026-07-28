@@ -21,6 +21,7 @@ class ModelSelection:
     alias: str
     model: str
     tier: str
+    cli_provider: str | None = None
 
 
 class ProviderRegistry:
@@ -41,6 +42,46 @@ class ProviderRegistry:
     def set_health(self, provider: str, healthy: bool) -> None:
         self._health[provider] = healthy
 
+    def selected_model(self, alias: str) -> str | None:
+        if alias not in self.aliases():
+            raise ValueError(f"Unknown model alias: {alias}")
+        selected = self.data["aliases"][alias].get("selected")
+        return str(selected) if selected else None
+
+    def candidate_models(self, alias: str) -> list[str]:
+        if alias not in self.aliases():
+            raise ValueError(f"Unknown model alias: {alias}")
+        configured = self.data["aliases"][alias].get("candidates", [])
+        if not isinstance(configured, list):
+            raise TypeError(f"Candidates for alias {alias} must be a list")
+        return [str(model) for model in configured if str(model).strip()]
+
+    def providers_for(self, alias: str) -> list[str]:
+        if alias not in self.aliases():
+            raise ValueError(f"Unknown model alias: {alias}")
+        providers = self.data.get("providers", {})
+        return sorted(
+            (
+                str(provider)
+                for provider, details in providers.items()
+                if alias in details.get("permitted_aliases", [])
+            ),
+            key=lambda name: int(providers[name].get("priority", 999)),
+        )
+
+    def cli_provider_name(self, provider: str) -> str:
+        providers = self.data.get("providers", {})
+        details = providers.get(provider, {})
+        configured = details.get("cli_provider")
+        if configured:
+            return str(configured)
+        # The registry names are policy identities. Hermes uses its auth
+        # provider identifiers at the CLI boundary.
+        return {
+            "openai_codex_subscription": "openai-codex",
+            "nous_portal": "nous",
+        }.get(provider, provider)
+
     def healthy_providers(self, alias: str) -> list[str]:
         providers = self.data.get("providers", {})
         result = []
@@ -56,7 +97,7 @@ class ProviderRegistry:
         if not healthy:
             raise ExternalBlocker(f"No healthy provider is available for alias {alias}")
         provider = healthy[0]
-        selected = self.data["aliases"][alias].get("selected")
+        selected = self.selected_model(alias)
         if not selected:
             raise ExternalBlocker(f"Provider discovery has not selected a model for alias {alias}")
-        return ModelSelection(provider, alias, str(selected), tier)
+        return ModelSelection(provider, alias, selected, tier, self.cli_provider_name(provider))

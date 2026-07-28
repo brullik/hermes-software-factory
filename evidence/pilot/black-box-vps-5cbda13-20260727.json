@@ -1,0 +1,55 @@
+{
+  "artifact_id": "pilot-black-box-068a52dcbfbbbabbb105",
+  "checks": [
+    {
+      "id": "browser-surface",
+      "result": "HTTP 200 static pilot surface contains the expected acceptance UI",
+      "status": "PASS"
+    },
+    {
+      "id": "live",
+      "result": "HTTP 200 /health/live status=PASS",
+      "status": "PASS"
+    },
+    {
+      "id": "ready",
+      "result": "HTTP 200 /health/ready database=True",
+      "status": "PASS"
+    },
+    {
+      "id": "api-status",
+      "result": "HTTP 200 credentials_required=False risk=low",
+      "status": "PASS"
+    },
+    {
+      "id": "restart-persistence",
+      "result": "events=5 minimum=5 against the runner installed in release 5cbda13",
+      "status": "PASS"
+    },
+    {
+      "id": "metrics",
+      "result": "HTTP 200 Prometheus pilot metric present=True",
+      "status": "PASS"
+    }
+  ],
+  "created_at": "2026-07-27T10:14:07Z",
+  "endpoint": "http://127.0.0.1:8090",
+  "evidence_refs": [
+    "pilot/README.md",
+    "pilot/docs/ARCHITECTURE.md",
+    "http://127.0.0.1:8090"
+  ],
+  "policy_digest": "8fa83aa61b556c59ccdc3e756c16e51193614ad6d19caadaa39f49f7ac29bc02",
+  "producer": {
+    "model": null,
+    "provider": null,
+    "role": "product-tester",
+    "tier": "deterministic"
+  },
+  "product_id": "hermes-factory-pilot",
+  "restart_persistence": "PASS",
+  "rollback": "NOT_TESTED_EXTERNAL",
+  "schema_version": "1.0",
+  "status": "PASS",
+  "summary": "All neutral pilot black-box checks passed against the runner installed in release 5cbda13."
+}

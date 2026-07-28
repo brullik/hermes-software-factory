@@ -42,6 +42,7 @@ class ContextBuilder:
         decisions: list[str] | None = None,
         max_files: int = 20,
         max_chars: int = 100_000,
+        filename: str | None = None,
     ) -> ContextPackResult:
         if len(subject_sha) != 64 or any(char not in "0123456789abcdef" for char in subject_sha):
             raise ValueError("subject_sha must be a lowercase SHA-256 digest")
@@ -86,5 +87,9 @@ class ContextBuilder:
             "output_schema": output_schema,
             "redaction_count": redaction_count,
         }
-        path = self.artifacts.write("context-pack.schema.json", artifact, filename=f"context-{task_id}.json")
+        path = self.artifacts.write(
+            "context-pack.schema.json",
+            artifact,
+            filename=filename or f"context-{task_id}.json",
+        )
         return ContextPackResult(artifact, path)

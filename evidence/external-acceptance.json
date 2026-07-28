@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0",
-  "created_at": "2026-07-26T20:06:05Z",
+  "created_at": "2026-07-27T07:33:13Z",
   "host": {
-    "address": "191.44.33.92",
+    "address": "redacted-production-target",
     "os": "Ubuntu 24.04 LTS",
     "service_user": "hermesfactory",
     "admin_publicly_exposed": false
@@ -48,7 +48,12 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
-        "controller health and restart smoke passed",
+        "Package 08673aa deployed through the allowlisted promote-release entrypoint after a pre-deploy encrypted restic snapshot; current package manifest verifies 231 files, transactional deployment/rollback with health retry, executable bootstrap mode restoration, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and backup-08673aa-previous is retained for rollback",
+        "Release 04dad3c was promoted through the allowlisted promote-release entrypoint at 2026-07-27T13:33:12Z after a user-authorized encrypted restic snapshot; the backup completed with 10 snapshots and no restic check errors, the 231-file package validated, health/readiness passed, all three services are active, and backup-04dad3c-previous is retained for rollback",
+        "Release single-owner-20260727 was promoted at 2026-07-27T20:04:17Z after a pre-deploy encrypted snapshot; health/readiness passed, all three services were active, the production target is redacted in this public artifact, and backup-single-owner-20260727-previous was retained",
+        "Release single-owner-20260728-cli was promoted after a pre-deploy encrypted snapshot; the active-source CLI wrapper, intake-to-task persistence, service health/readiness, and active backup timer passed. Evidence: evidence/vps-cli-wrapper-acceptance-20260728.json",
+        "Owner-authorized single-owner governance and Codex route activation are installed; the previous model registry is retained as model-registry.yaml.pre-single-owner-20260727",
+        "controller health and restart smoke passed; worker service starts successfully and remains idle with no pending tasks; an earlier single-probe 6303937 attempt rolled back automatically and preserved failed-6303937, then the retry fix promoted f660326 successfully",
         "UFW default deny incoming with SSH allow",
         "SSH password auth and root login disabled",
         "fail2ban active with sshd jail"
@@ -61,7 +66,10 @@
         "Pinned Hermes CLI v0.19.0 install and CLI smoke passed; exact tag, commit, and wheel digest are recorded",
         "Codex and Nous OAuth are connected; Hermes default model discovery selected tencent/hy3:free via Nous Portal",
         "OAuth health probes for gpt-5.6-luna, gpt-5.6-terra, and gpt-5.6-sol passed",
-        "Closed 20-task benchmark completed at 18/20, 17/20, and 17/20; safety-gated route change remains deferred and aliases stay fail-closed"
+        "Profile isolation, controller state persistence after restart, and the installed gateway credential probe passed",
+        "Supplemental 20-task safety-gate benchmark completed at 20/20, 18/20, and 20/20 for OpenAI Codex luna/terra/sol versus 9/20 for Nous tencent/hy3:free; safety-gated route change remains deferred and aliases stay fail-closed",
+        "Benchmark-gated route evidence recommends gpt-5.6-luna/terra/sol; owner-authorized single-owner activation selected all three aliases on the VPS after live Codex OAuth probes with cost_status=included. The incompatible-release negative smoke passed; the remaining compatibility check is the delegation-boundary black-box"
+        ,"Evidence is summarized without raw prompts or responses in evidence/hermes-compatibility-live-probes.json"
       ]
     },
     "credentials": {
@@ -72,26 +80,31 @@
       ]
     },
     "github-governance": {
-      "status": "BLOCKED_EXTERNAL",
+      "status": "PASS",
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
       "details": [
-        "GitHub CLI is authenticated as brullik with repo/workflow scopes; target factory repository is not yet present and no repository write was performed"
+        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit 2ad81b93515e6bd93e144cfd19c8bb5d4018cef2",
+        "Hermes main governance ruleset is active: pull request required, single-owner mode does not require a second approver, stale-review dismissal, conversation resolution, deletion/force-push blocked, and configured required status contexts",
+        "factory-quality GitHub Actions passed on main and codex/publish-hermes-factory"
       ]
     },
     "telegram-gateway": {
       "status": "PASS",
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
       "details": [
-        "Telegram token and owner user ID 518104905 are connected; token probe, private-chat update capture, outbound sendMessage, allowlist, and offset persistence passed",
-        "Gateway systemd unit now loads /etc/hermes-factory/telegram.env and the service is active"
+        "Telegram token and owner allowlist are connected; token probe, private-chat update capture, outbound sendMessage, allowlist, and offset persistence passed (the owner identifier is redacted)",
+        "Gateway systemd unit now loads /etc/hermes-factory/telegram.env and the service is active",
+        "Release 04dad3c with UTF-8 regression coverage and safe journald update logging is active; owner-sent /help was processed as command=help at 2026-07-27T14:02:02Z, Telegram sendMessage completed before the safe journal event, and the durable offset advanced"
       ]
     },
     "pilot-e2e": {
       "status": "BLOCKED_EXTERNAL",
-      "evidence_ref": "evidence/pilot/staging-smoke.json",
+      "evidence_ref": "evidence/pilot/black-box-vps-5cbda13-20260727.json",
       "details": [
         "Neutral pilot Product Contract, Docker staging, health, and persistence smoke passed",
-        "GitHub PR/review/merge, provider-backed agent, Telegram black-box, and release rollback evidence still require external access"
+        "VPS black-box runner from release 5cbda13 passed browser surface, live, ready, API status, credentials_required=false, low-risk, Prometheus metrics, and restart threshold (events=5)",
+        "Neutral pilot repository is now public at https://github.com/brullik/hermes-factory-pilot with latest commit 6a943737be1e7d7af52556e99f44b680da7ba06c; pilot/test CI passed and the active governance ruleset requires one approval",
+        "Pilot PR/review/merge still require GitHub write/bypass access; a real provider-backed VPS probe ran through Codex OAuth with product-director DONE, while the next analyst task was correctly FAILED_SAFE on malformed model transport. The deployed Telegram gateway /help black-box passed with a safe command=help journal event and offset advancement, and the user-authorized VPS rollback drill at 2026-07-27T14:49:30Z returned ROLLED_BACK, retained failed-rollback-drill-04dad3c, restored current, and passed post-rollback health/readiness"
       ]
     },
     "offsite-backup": {

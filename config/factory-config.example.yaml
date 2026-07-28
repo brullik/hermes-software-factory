@@ -15,6 +15,10 @@ paths:
 github:
   owner: brullik
   factory_repository: hermes-software-factory
+  governance:
+    mode: single_owner
+    owner_override_enabled: true
+    owner_override_reason_required: true
 telegram:
   allowed_user_ids: []
   token_credential_name: telegram-token
@@ -29,6 +33,11 @@ network:
 deployment:
   reverse_proxy: caddy
   current_vps_high_risk_production: false
+  production_target:
+    mode: current_vps
+    host: current-vps.example.invalid
+    install_root: /opt/hermes-factory
+    entrypoint: scripts/deploy/promote-release.py
 backup:
   tool: restic
   offsite_configured: false
