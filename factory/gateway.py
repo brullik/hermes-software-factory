@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import time
@@ -66,6 +67,7 @@ class TelegramGateway:
         self.api = api
         self.offset_path = offset_path or (config.state_dir / "telegram-offset")
         self.offset_path.parent.mkdir(parents=True, exist_ok=True)
+        self.outbox_worker_id = "telegram-gateway"
 
     def _read_offset(self) -> int | None:
         if not self.offset_path.is_file():
@@ -166,7 +168,51 @@ class TelegramGateway:
         LOGGER.info("telegram update processed update_id=%s command=%s", update_id, command_name)
         return True
 
+    def deliver_outbox(self, limit: int = 10) -> int:
+        delivered = 0
+        recipients = sorted(self.config.allowed_telegram_user_ids)
+        for _ in range(max(0, limit)):
+            claimed = self.state.claim_outbox(self.outbox_worker_id, limit=1, lease_seconds=60)
+            if not claimed:
+                break
+            item = claimed[0]
+            outbox_id = str(item["outbox_id"])
+            try:
+                if str(item.get("event_type")) != "telegram.owner_notification":
+                    raise ValueError("unsupported_outbox_event")
+                payload = json.loads(str(item["payload_json"]))
+                if not isinstance(payload, dict):
+                    raise TypeError("invalid_outbox_payload")
+                text = payload.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("invalid_outbox_message")
+                if not recipients:
+                    raise ValueError("telegram_owner_allowlist_empty")
+                for chat_id in recipients:
+                    self.api.send_message(chat_id, text)
+                self.state.mark_outbox_done(outbox_id, self.outbox_worker_id)
+                LOGGER.info(
+                    "telegram outbox delivered outbox_id=%s kind=%s",
+                    outbox_id,
+                    str(payload.get("kind", "notification"))[:80],
+                )
+                delivered += 1
+            except (TelegramApiError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                self.state.mark_outbox_failed(
+                    outbox_id,
+                    self.outbox_worker_id,
+                    type(error).__name__,
+                )
+                LOGGER.warning(
+                    "telegram outbox delivery failed outbox_id=%s reason=%s",
+                    outbox_id,
+                    type(error).__name__,
+                )
+                break
+        return delivered
+
     def poll_once(self) -> int:
+        self.deliver_outbox()
         offset = self._read_offset()
         processed = 0
         for update in self.api.get_updates(offset):

@@ -9,9 +9,13 @@ from typing import Any
 import yaml
 
 from factory.config import FactoryConfig
-from factory.github import GitHubCommandError
+from factory.github import GitHubCommandError, RequiredChecksStatus
 from factory.providers import ExternalBlocker
-from factory.release_executor import ConfiguredReleaseExecutor, _release_digest
+from factory.release_executor import (
+    CandidateChecksFailed,
+    ConfiguredReleaseExecutor,
+    _release_digest,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,6 +39,26 @@ class FakeGitHub:
 
     def verify_pull_request(self, *args: Any, **kwargs: Any) -> None:
         self.calls.append(("verify", (args, kwargs)))
+
+    def required_checks_status(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...],
+    ) -> RequiredChecksStatus:
+        self.calls.append(("checks", (pull_request, expected_sha, required_checks)))
+        return RequiredChecksStatus(
+            pull_request,
+            expected_sha,
+            tuple((name, "SUCCESS") for name in required_checks),
+            required_checks,
+            (),
+            (),
+        )
+
+    def close_pull_request(self, pull_request: str) -> None:
+        self.calls.append(("close", pull_request))
 
     def merge_pull_request_checked(self, *args: Any, **kwargs: Any) -> None:
         self.calls.append(("merge", (args, kwargs)))
@@ -61,6 +85,25 @@ class AllowlistedRunner:
             capture_output=True,
             check=False,
             timeout=30,
+        )
+
+
+class FailingCheckGitHub(FakeGitHub):
+    def required_checks_status(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...],
+    ) -> RequiredChecksStatus:
+        self.calls.append(("checks", (pull_request, expected_sha, required_checks)))
+        return RequiredChecksStatus(
+            pull_request,
+            expected_sha,
+            tuple((name, "FAILURE") for name in required_checks),
+            (),
+            (),
+            required_checks,
         )
 
 
@@ -200,6 +243,41 @@ def test_staging_publishes_controller_owned_candidate_and_excludes_runtime_artif
         audit = list(config.evidence_dir.glob("release-adapter-staging-*.json"))
         assert len(audit) == 1
         assert json.loads(audit[0].read_text(encoding="utf-8"))["pull_request"] == "17"
+
+
+def test_failed_pm_acceptance_closes_candidate_and_restores_main_for_repair() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(root)
+        config.state_dir.mkdir(parents=True)
+        github = FailingCheckGitHub()
+        runner = AllowlistedRunner()
+        executor = make_executor(config, github, runner)
+        source = workspace(root)
+
+        try:
+            executor.execute(
+                stage="staging",
+                proposed=proposal(),
+                product_id="P-RELEASE-001",
+                task_contract={"risk_tier": "medium"},
+                workspace=source,
+                expected_staging_digest=None,
+            )
+        except CandidateChecksFailed as error:
+            assert error.reason_code == "pm_acceptance_failed"
+            evidence = config.evidence_dir / Path(error.evidence_ref).name
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+            assert payload["failed"] == ["pm-acceptance"]
+            assert "pm-acceptance" in payload["summary"]
+        else:
+            raise AssertionError("failed pm-acceptance must schedule code repair")
+
+        assert ("close", "17") in github.calls
+        assert run_git(source, "branch", "--show-current") == "main"
+        assert (source / "README.md").read_text(encoding="utf-8") == "baseline\n"
+        assert not (source / "tests" / "test_product.py").exists()
+        assert not (source / "artifacts").exists()
 
 
 def test_candidate_publisher_rejects_workflow_changes() -> None:

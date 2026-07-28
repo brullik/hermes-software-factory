@@ -75,5 +75,23 @@ class WorkflowEngine:
     def heartbeat(self, task_id: str, worker_id: str, lease_seconds: int = 300) -> None:
         self.state.heartbeat(task_id, worker_id, lease_seconds)
 
-    def complete(self, task_id: str, worker_id: str, status: str = "DONE") -> None:
-        self.state.complete_task(task_id, worker_id, status)
+    def complete(
+        self,
+        task_id: str,
+        worker_id: str,
+        status: str = "DONE",
+        *,
+        reason_code: str | None = None,
+        detail: str | None = None,
+        result_ref: str | None = None,
+        failure_kind: str | None = None,
+    ) -> None:
+        self.state.complete_task(
+            task_id,
+            worker_id,
+            status,
+            reason_code=reason_code,
+            detail=detail,
+            result_ref=result_ref,
+            failure_kind=failure_kind,
+        )

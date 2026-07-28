@@ -12,7 +12,16 @@ from .config import FactoryConfig
 
 
 class ExternalBlocker(RuntimeError):
-    """Raised when an external credential or service probe is required."""
+    """A typed execution blocker.
+
+    Only reason codes allowed by the OWNER_ACTION policy may be surfaced as a
+    human action. Untyped blockers remain internal and must be repaired or
+    exhausted by the autonomous pipeline.
+    """
+
+    def __init__(self, message: str, *, reason_code: str = "internal_blocker") -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True)
@@ -95,9 +104,15 @@ class ProviderRegistry:
             raise ValueError(f"Unknown model alias: {alias}")
         healthy = self.healthy_providers(alias)
         if not healthy:
-            raise ExternalBlocker(f"No healthy provider is available for alias {alias}")
+            raise ExternalBlocker(
+                f"No healthy provider is available for alias {alias}",
+                reason_code="provider_unavailable",
+            )
         provider = healthy[0]
         selected = self.selected_model(alias)
         if not selected:
-            raise ExternalBlocker(f"Provider discovery has not selected a model for alias {alias}")
+            raise ExternalBlocker(
+                f"Provider discovery has not selected a model for alias {alias}",
+                reason_code="model_route_unapproved",
+            )
         return ModelSelection(provider, alias, selected, tier, self.cli_provider_name(provider))

@@ -48,6 +48,7 @@ REQUIRED = [
     "config/quality-gates.yaml",
     "factory/pipeline.py",
     "factory/quality.py",
+    "factory/reconciler.py",
     "factory/telegram.py",
     "scripts/bootstrap/install-telegram-credential.sh",
     "scripts/bootstrap/configure-telegram-owner.sh",

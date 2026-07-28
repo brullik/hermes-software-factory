@@ -38,6 +38,16 @@ class PullRequestGate:
     owner_override_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class RequiredChecksStatus:
+    pull_request: str
+    head_sha: str
+    states: tuple[tuple[str, str], ...]
+    passed: tuple[str, ...]
+    pending: tuple[str, ...]
+    failed: tuple[str, ...]
+
+
 class GitHubCommandError(RuntimeError):
     """Raised when an allowlisted gh operation fails."""
 
@@ -98,7 +108,10 @@ class GitHubAdapter:
     def require_authentication(self) -> GitHubStatus:
         status = self.status()
         if not status.authenticated:
-            raise ExternalBlocker("GitHub credential is not connected")
+            raise ExternalBlocker(
+                "GitHub credential is not connected",
+                reason_code="missing_credential",
+            )
         return status
 
     def repository_view(self) -> GitHubResult:
@@ -227,6 +240,100 @@ class GitHubAdapter:
         if not isinstance(sha, str) or len(sha) != 40 or not all(char in "0123456789abcdef" for char in sha.lower()):
             raise GitHubCommandError("merged pull request lacks an immutable merge SHA")
         return sha
+
+    def required_checks_status(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...],
+    ) -> RequiredChecksStatus:
+        self._safe(pull_request, "pull request")
+        if len(expected_sha) != 40 or not all(
+            char in "0123456789abcdef" for char in expected_sha.lower()
+        ):
+            raise ValueError("expected_sha must be a 40-character commit SHA")
+        self.require_authentication()
+        view = self._run(
+            [
+                "gh",
+                "pr",
+                "view",
+                pull_request,
+                "--repo",
+                self.slug,
+                "--json",
+                "headRefOid,state,statusCheckRollup",
+            ]
+        )
+        try:
+            payload = json.loads(view.output)
+        except json.JSONDecodeError as error:
+            raise GitHubCommandError("GitHub PR checks did not return JSON") from error
+        if (
+            not isinstance(payload, dict)
+            or str(payload.get("headRefOid", "")) != expected_sha
+            or payload.get("state") != "OPEN"
+        ):
+            raise GitHubCommandError("candidate pull request identity is invalid")
+        rollup = payload.get("statusCheckRollup", [])
+        if not isinstance(rollup, list):
+            raise GitHubCommandError("candidate check rollup is invalid")
+        observed: dict[str, str] = {}
+        for item in rollup:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("context") or "")
+            if not name:
+                continue
+            state = str(
+                item.get("conclusion")
+                or item.get("state")
+                or item.get("status")
+                or "PENDING"
+            ).upper()
+            observed[name] = state
+        success_states = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+        failure_states = {
+            "FAILURE",
+            "ERROR",
+            "CANCELLED",
+            "TIMED_OUT",
+            "ACTION_REQUIRED",
+            "STARTUP_FAILURE",
+        }
+        passed = tuple(
+            name for name in required_checks if observed.get(name) in success_states
+        )
+        failed = tuple(
+            name for name in required_checks if observed.get(name) in failure_states
+        )
+        pending = tuple(
+            name for name in required_checks if name not in set(passed) | set(failed)
+        )
+        return RequiredChecksStatus(
+            pull_request=pull_request,
+            head_sha=expected_sha,
+            states=tuple((name, observed.get(name, "MISSING")) for name in required_checks),
+            passed=passed,
+            pending=pending,
+            failed=failed,
+        )
+
+    def close_pull_request(self, pull_request: str) -> GitHubResult:
+        self._safe(pull_request, "pull request")
+        self.require_authentication()
+        return self._run(
+            [
+                "gh",
+                "pr",
+                "close",
+                pull_request,
+                "--repo",
+                self.slug,
+                "--delete-branch",
+            ]
+        )
 
     def verify_pull_request(
         self,
