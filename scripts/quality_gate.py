@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import shlex
 import subprocess
 import sys
@@ -20,6 +22,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.policy_guard import command_allowed
+
+_TARGET_SECRET_ADAPTER = "target_changed_secret_scan"
+_TARGET_SECRET_COMMAND = "controller:target-changed-secret-scan"
+_TARGET_SECRET_PATTERN = re.compile(
+    rb"(?:ghp_|github_pat_|sk-[A-Za-z0-9_-]{20,}|"
+    rb"BEGIN\s+(?:(?:RSA|EC|OPENSSH)\s+)?PRIVATE\s+KEY)"
+)
 
 
 def utc_now() -> str:
@@ -37,6 +46,94 @@ def load_catalog(path: Path) -> dict[str, Any]:
     return data
 
 
+def _git_changed_paths(cwd: Path) -> list[str]:
+    commands = (
+        ["git", "diff", "--name-only", "-z", "--diff-filter=ACMR", "HEAD", "--"],
+        ["git", "ls-files", "-z", "--others", "--exclude-standard"],
+    )
+    paths: set[str] = set()
+    for argv in commands:
+        completed = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("git could not enumerate changed target files")
+        paths.update(
+            os.fsdecode(raw_path)
+            for raw_path in completed.stdout.split(b"\0")
+            if raw_path
+        )
+    return sorted(paths)
+
+
+def _file_contains_secret(path: Path) -> bool:
+    overlap = b""
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            content = overlap + chunk
+            if _TARGET_SECRET_PATTERN.search(content):
+                return True
+            overlap = content[-256:]
+    return False
+
+
+def _changed_file_secret_scan(gate: dict[str, Any], cwd: Path, subject_sha: str) -> dict[str, Any]:
+    command = str(gate.get("command", ""))
+    prefixes = gate.get("allowlist_prefixes", [])
+    allowed, reason = command_allowed(command, prefixes)
+    started = utc_now()
+    exit_code: int | None = None
+    if (
+        gate.get("adapter") != _TARGET_SECRET_ADAPTER
+        or command != _TARGET_SECRET_COMMAND
+        or not allowed
+    ):
+        output = f"target secret adapter rejected: {reason or 'invalid adapter configuration'}"
+        status = "ERROR"
+    else:
+        try:
+            root = cwd.resolve()
+            matches: list[str] = []
+            for relative_path in _git_changed_paths(root):
+                unresolved = root / relative_path
+                if unresolved.is_symlink():
+                    raise RuntimeError("changed target path is a symbolic link")
+                candidate = unresolved.resolve()
+                candidate.relative_to(root)
+                if not candidate.is_file():
+                    continue
+                if _file_contains_secret(candidate):
+                    matches.append(relative_path)
+            if matches:
+                output = "secret-like content detected in changed target file(s): " + ", ".join(matches)
+                exit_code = 1
+                status = "FAIL"
+            else:
+                output = "no secret-like content detected in changed target files"
+                exit_code = 0
+                status = "PASS"
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            output = f"target secret scan failed closed: {error}"
+            status = "ERROR"
+    return {
+        "schema_version": "1.0",
+        "gate_id": gate["id"],
+        "status": status,
+        "subject_sha": subject_sha,
+        "command_digest": digest_text(command),
+        "started_at": started,
+        "finished_at": utc_now(),
+        "exit_code": exit_code,
+        "artifact_digest": digest_text(output),
+        "summary": output[:4000],
+        "mandatory": bool(gate.get("mandatory", True)),
+    }
+
+
 def run_gate(
     gate: dict[str, Any],
     cwd: Path,
@@ -44,6 +141,8 @@ def run_gate(
     *,
     python_executable: str | None = None,
 ) -> dict[str, Any]:
+    if "adapter" in gate:
+        return _changed_file_secret_scan(gate, cwd, subject_sha)
     command = str(gate["command"])
     prefixes = gate.get("allowlist_prefixes", [])
     allowed, reason = command_allowed(command, prefixes)
