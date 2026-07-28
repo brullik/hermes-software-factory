@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -481,6 +482,15 @@ class WorkerTests(unittest.TestCase):
             )
 
             first = worker.run_once()
+            analyst_task = state.list_tasks(intake_result.product_id)[1]
+            current_spec = worker.default_spec(analyst_task)
+            stale_spec = replace(
+                current_spec,
+                evidence=tuple(
+                    item for item in current_spec.evidence if item.get("type") != "dependency-result"
+                ),
+            )
+            worker._context_and_prompt(stale_spec)
             second = worker.run_once()
 
             self.assertIsNotNone(first)
@@ -490,7 +500,12 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(runner.prompts), 2)
             self.assertIn("UNTRUSTED_DATA accepted output for dependency", runner.prompts[1])
             self.assertIn("product-contract-worker-test", runner.prompts[1])
-            self.assertEqual(state.list_tasks(intake_result.product_id)[1]["status"], "DONE")
+            completed_task = state.get_task(str(analyst_task["task_id"]))
+            self.assertIsNotNone(completed_task)
+            assert completed_task is not None
+            self.assertEqual(completed_task["status"], "DONE")
+            context_paths = list(config.evidence_dir.glob(f"context-{analyst_task['task_id']}*.json"))
+            self.assertEqual(len(context_paths), 2)
             state.close()
 
     def test_unselected_route_blocks_before_provider_call(self) -> None:
