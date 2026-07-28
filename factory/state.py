@@ -131,15 +131,27 @@ class StateStore:
                 ("next_tier", "TEXT"),
                 ("next_attempt_kind", "TEXT NOT NULL DEFAULT 'initial'"),
                 ("repair_context_ref", "TEXT"),
+                ("stage_key", "TEXT"),
+                ("cycle", "INTEGER NOT NULL DEFAULT 0"),
+                ("terminal_reason", "TEXT"),
+                ("terminal_detail", "TEXT"),
+                ("result_ref", "TEXT"),
+                ("failure_kind", "TEXT"),
+                ("available_at", "TEXT"),
             ):
                 try:
                     self._connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
                 except sqlite3.OperationalError:
                     pass
-            try:
-                self._connection.execute("ALTER TABLE outbox ADD COLUMN lease_until TEXT")
-            except sqlite3.OperationalError:
-                pass
+            for column, definition in (
+                ("lease_until", "TEXT"),
+                ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_error", "TEXT"),
+            ):
+                try:
+                    self._connection.execute(f"ALTER TABLE outbox ADD COLUMN {column} {definition}")
+                except sqlite3.OperationalError:
+                    pass
 
     def close(self) -> None:
         with self._lock:
@@ -253,6 +265,10 @@ class StateStore:
             "COMPLETED": set(),
             "FAILED_SAFE": set(),
         }
+        for current in set(allowed) - {"CANCELLED", "COMPLETED", "FAILED_SAFE"}:
+            allowed[current].update({"BLOCKED_OWNER", "FAILED_SAFE"})
+        for current in ("STAGING_DEPLOYED", "RELEASE_READY", "PRODUCTION_DEPLOYED"):
+            allowed[current].add("REPAIRING")
         with self._lock, self._connection:
             row = self._connection.execute(
                 "SELECT * FROM products WHERE product_id = ?", (product_id,)
@@ -283,19 +299,26 @@ class StateStore:
         role: str | None = None,
         output_schema: str | None = None,
         contract_ref: str | None = None,
+        stage_key: str | None = None,
+        cycle: int = 0,
+        available_at: str | None = None,
         dependencies: list[str] | None = None,
         conflict_keys: list[str] | None = None,
         priority: int = 0,
     ) -> None:
         if priority < 0:
             raise ValueError("priority cannot be negative")
+        if cycle < 0:
+            raise ValueError("cycle cannot be negative")
         now = utc_now()
+        initial_status = "WAITING" if available_at is not None and available_at > now else "PENDING"
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO tasks
-                (task_id, product_id, title, role, output_schema, contract_ref, priority, status,
-                 dependencies_json, conflict_keys_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
+                (task_id, product_id, title, role, output_schema, contract_ref, stage_key, cycle,
+                 priority, status, available_at, dependencies_json, conflict_keys_json,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
@@ -303,7 +326,11 @@ class StateStore:
                     role,
                     output_schema,
                     contract_ref,
+                    stage_key,
+                    cycle,
                     priority,
+                    initial_status,
+                    available_at,
                     json.dumps(dependencies or []),
                     json.dumps(conflict_keys or []),
                     now,
@@ -332,13 +359,45 @@ class StateStore:
                 ).fetchall()
             return [dict(row) for row in rows]
 
+    def active_tasks(self, product_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT * FROM tasks
+                   WHERE product_id=? AND status IN ('PENDING', 'CLAIMED', 'WAITING')
+                   ORDER BY priority DESC, created_at""",
+                (product_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def latest_task(self, product_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tasks WHERE product_id=? ORDER BY rowid DESC LIMIT 1",
+                (product_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def orphaned_product_count(self) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT COUNT(*) FROM products
+                   WHERE status NOT IN
+                       ('CANCELLED', 'COMPLETED', 'FAILED_SAFE', 'PAUSED', 'BLOCKED_OWNER')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM tasks
+                         WHERE tasks.product_id=products.product_id
+                           AND tasks.status IN ('PENDING', 'CLAIMED', 'WAITING')
+                     )"""
+            ).fetchone()
+            return int(row[0]) if row else 0
+
     def cancel_active_tasks(self, product_id: str) -> list[str]:
         """Stop queued or leased work after an owner cancels a product."""
 
         with self._lock, self._connection:
             rows = self._connection.execute(
                 """SELECT task_id, status FROM tasks
-                   WHERE product_id=? AND status IN ('PENDING', 'CLAIMED')
+                   WHERE product_id=? AND status IN ('PENDING', 'CLAIMED', 'WAITING')
                    ORDER BY created_at""",
                 (product_id,),
             ).fetchall()
@@ -370,6 +429,11 @@ class StateStore:
                     "UPDATE tasks SET status='PENDING', lease_owner=NULL, lease_until=NULL "
                     "WHERE status='CLAIMED' AND lease_until < ?",
                     (utc_now(),),
+                )
+                self._connection.execute(
+                    """UPDATE tasks SET status='PENDING', updated_at=?
+                       WHERE status='WAITING' AND available_at IS NOT NULL AND available_at <= ?""",
+                    (utc_now(), utc_now()),
                 )
                 rows = self._connection.execute(
                     """SELECT tasks.* FROM tasks
@@ -439,9 +503,24 @@ class StateStore:
             if updated != 1:
                 raise ValueError("Task lease is missing or owned by another worker")
 
-    def complete_task(self, task_id: str, worker_id: str, status: str = "DONE") -> None:
+    def complete_task(
+        self,
+        task_id: str,
+        worker_id: str,
+        status: str = "DONE",
+        *,
+        reason_code: str | None = None,
+        detail: str | None = None,
+        result_ref: str | None = None,
+        failure_kind: str | None = None,
+    ) -> None:
         if status not in {"DONE", "FAILED_SAFE", "BLOCKED_EXTERNAL"}:
             raise ValueError(f"Unsupported terminal task status: {status}")
+        if status == "DONE" and (
+            reason_code is not None or detail is not None or failure_kind is not None
+        ):
+            raise ValueError("completed task cannot have a terminal failure")
+        safe_detail = detail.strip()[:4000] if detail else None
         with self._lock, self._connection:
             row = self._connection.execute(
                 "SELECT product_id FROM tasks WHERE task_id=? AND status='CLAIMED' AND lease_owner=?",
@@ -450,10 +529,33 @@ class StateStore:
             if row is None:
                 raise ValueError("Task lease is missing or owned by another worker")
             self._connection.execute(
-                "UPDATE tasks SET status=?, lease_owner=NULL, lease_until=NULL, updated_at=? WHERE task_id=?",
-                (status, utc_now(), task_id),
+                """UPDATE tasks
+                   SET status=?, lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
+                       terminal_reason=?, terminal_detail=?, result_ref=?,
+                       failure_kind=?, updated_at=?
+                   WHERE task_id=?""",
+                (
+                    status,
+                    reason_code,
+                    safe_detail,
+                    result_ref,
+                    failure_kind,
+                    utc_now(),
+                    task_id,
+                ),
             )
-            self._record_event(row["product_id"], task_id, "task_completed", {"status": status})
+            self._record_event(
+                row["product_id"],
+                task_id,
+                "task_completed",
+                {
+                    "status": status,
+                    "reason_code": reason_code,
+                    "detail": safe_detail,
+                    "result_ref": result_ref,
+                    "failure_kind": failure_kind,
+                },
+            )
 
     def requeue_task(
         self,
@@ -481,7 +583,8 @@ class StateStore:
                 """UPDATE tasks
                    SET status='PENDING', lease_owner=NULL, lease_until=NULL,
                        heartbeat_at=NULL, next_tier=?, next_attempt_kind=?,
-                       repair_context_ref=?, updated_at=?
+                       repair_context_ref=?, terminal_reason=NULL, terminal_detail=NULL,
+                       result_ref=NULL, failure_kind=NULL, updated_at=?
                  WHERE task_id=?""",
                 (next_tier, attempt_kind, repair_context_ref, utc_now(), task_id),
             )
@@ -493,6 +596,83 @@ class StateStore:
                     "next_tier": next_tier,
                     "attempt_kind": attempt_kind,
                     "repair_context_ref": repair_context_ref,
+                },
+            )
+
+    def prepare_pending_repair(
+        self,
+        task_id: str,
+        *,
+        next_tier: str,
+        repair_context_ref: str,
+    ) -> None:
+        """Attach trusted repair evidence to a newly created pending task."""
+
+        if next_tier not in {"luna", "terra", "sol"}:
+            raise ValueError("pending repair tier is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT product_id FROM tasks WHERE task_id=? AND status='PENDING'",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("pending repair task is missing")
+            self._connection.execute(
+                """UPDATE tasks
+                   SET next_tier=?, next_attempt_kind='repair',
+                       repair_context_ref=?, updated_at=?
+                   WHERE task_id=?""",
+                (next_tier, repair_context_ref, utc_now(), task_id),
+            )
+            self._record_event(
+                row["product_id"],
+                task_id,
+                "task_repair_prepared",
+                {
+                    "next_tier": next_tier,
+                    "repair_context_ref": repair_context_ref,
+                },
+            )
+
+    def requeue_terminal_task(
+        self,
+        task_id: str,
+        *,
+        next_tier: str,
+        repair_context_ref: str,
+    ) -> None:
+        """Reconcile an internally failed task back into the durable queue."""
+
+        if next_tier not in {"luna", "terra", "sol"}:
+            raise ValueError("terminal repair tier is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT product_id, status FROM tasks
+                   WHERE task_id=? AND status IN ('FAILED_SAFE', 'BLOCKED_EXTERNAL')""",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("terminal repair task is missing")
+            previous_status = str(row["status"])
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='PENDING', lease_owner=NULL, lease_until=NULL,
+                       heartbeat_at=NULL, next_tier=?, next_attempt_kind='repair',
+                       repair_context_ref=?, terminal_reason=NULL, terminal_detail=NULL,
+                       result_ref=NULL, failure_kind=NULL, updated_at=?
+                   WHERE task_id=?""",
+                (next_tier, repair_context_ref, utc_now(), task_id),
+            )
+            self._record_event(
+                row["product_id"],
+                task_id,
+                "task_requeued",
+                {
+                    "next_tier": next_tier,
+                    "attempt_kind": "repair",
+                    "repair_context_ref": repair_context_ref,
+                    "previous_status": previous_status,
+                    "reason": "automatic_reconcile",
                 },
             )
 
@@ -520,7 +700,8 @@ class StateStore:
                     """UPDATE tasks
                        SET status='PENDING', lease_owner=NULL, lease_until=NULL,
                            heartbeat_at=NULL, next_tier=NULL, next_attempt_kind='initial',
-                           repair_context_ref=NULL, updated_at=?
+                           repair_context_ref=NULL, terminal_reason=NULL, terminal_detail=NULL,
+                           result_ref=NULL, failure_kind=NULL, updated_at=?
                        WHERE task_id=? AND product_id=? AND status=?""",
                     (now, task_id, product_id, previous_status),
                 )
@@ -545,6 +726,17 @@ class StateStore:
             else:
                 rows = self._connection.execute("SELECT * FROM events ORDER BY event_id").fetchall()
             return [dict(row) for row in rows]
+
+    def record_event(
+        self,
+        *,
+        product_id: str | None,
+        task_id: str | None,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        with self._lock, self._connection:
+            self._record_event(product_id, task_id, event_type, payload)
 
     def record_attempt(
         self,
@@ -699,6 +891,26 @@ class StateStore:
             ).rowcount
             if updated != 1:
                 raise ValueError("Outbox item is missing or owned by another worker")
+
+    def mark_outbox_failed(self, outbox_id: str, worker_id: str, reason: str) -> None:
+        safe_reason = reason.strip()[:240] or "delivery_failed"
+        with self._lock, self._connection:
+            updated = self._connection.execute(
+                """UPDATE outbox
+                   SET status='PENDING', lease_owner=NULL, lease_until=NULL,
+                       attempts=attempts+1, last_error=?
+                   WHERE outbox_id=? AND status='CLAIMED' AND lease_owner=?""",
+                (safe_reason, outbox_id, worker_id),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("Outbox item is missing or owned by another worker")
+
+    def list_outbox(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM outbox ORDER BY created_at, outbox_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
 
 
 def utc_now_from_seconds(seconds: int) -> str:

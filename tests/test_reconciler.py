@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+import json
+import tempfile
+from pathlib import Path
+
+import yaml
+
+from factory.artifacts import ArtifactStore
+from factory.config import FactoryConfig
+from factory.pipeline import PipelineCoordinator
+from factory.reconciler import PipelineReconciler
+from factory.state import StateStore
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def make_config(root: Path) -> FactoryConfig:
+    raw = yaml.safe_load(
+        (ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8")
+    )
+    raw["paths"]["state"] = str(root)
+    raw["paths"]["policies"] = str(ROOT / "policies")
+    raw["paths"]["schemas"] = str(ROOT / "schemas")
+    raw["paths"]["prompts"] = str(ROOT / "prompts")
+    raw["paths"]["worktrees"] = str(root / "worktrees")
+    raw["paths"]["logs"] = str(root / "logs")
+    raw["controller"]["database_url"] = f"sqlite:///{(root / 'controller.db').as_posix()}"
+    raw["telegram"]["allowed_user_ids"] = [42]
+    return FactoryConfig(raw, ROOT / "config" / "factory-config.example.yaml")
+
+
+def product_at_staging(state: StateStore, product_id: str) -> None:
+    for status in (
+        "CONTRACT_DRAFTED",
+        "CONTRACT_VALIDATED",
+        "RISK_CLASSIFIED",
+        "ARCHITECTED",
+        "BACKLOG_READY",
+        "IMPLEMENTING",
+        "INTEGRATING",
+        "STAGING_DEPLOYED",
+    ):
+        state.transition_product(product_id, status)
+
+
+def write_pm_task(config: FactoryConfig, product_id: str) -> list[str]:
+    required = [
+        "src/product/core.py",
+        "scripts/check_product.py",
+        "tests/test_product.py",
+    ]
+    path = config.worktrees_dir / product_id / "repository" / "pm_acceptance"
+    path.mkdir(parents=True)
+    (path / "active_task.json").write_text(
+        json.dumps(
+            {
+                "schema": "pm_active_task_v1",
+                "task_id": "p0-active-product-task",
+                "allowed_paths": required,
+                "required_paths": required,
+                "forbidden_paths": [
+                    "pm_acceptance/**",
+                    ".github/workflows/**",
+                    "pyproject.toml",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    repository = path.parent
+    for relative in required:
+        candidate = repository / relative
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("# baseline\n", encoding="utf-8")
+    return required
+
+
+def test_orphaned_product_is_seeded_and_watchdog_is_durable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        state.create_product(
+            product_id="orphan-product",
+            owner_id="owner",
+            source="cli",
+            idea="Build an orphan recovery fixture",
+            idempotency_key="orphan-product-key",
+        )
+
+        assert state.orphaned_product_count() == 1
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.repaired == 1
+        assert state.orphaned_product_count() == 0
+        tasks = state.active_tasks("orphan-product")
+        assert len(tasks) == 1
+        assert tasks[0]["stage_key"] == "product-director"
+        assert any(
+            event["event_type"] == "watchdog_incident"
+            for event in state.events("orphan-product")
+        )
+        state.close()
+
+
+def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "external-product-repair"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/bybit-grid-research",
+            idempotency_key="external-product-repair-key",
+        )
+        product_at_staging(state, product_id)
+        required = write_pm_task(config, product_id)
+        pipeline = PipelineCoordinator(config, state, ArtifactStore(config))
+        task_path = pipeline.create_task(product_id, "product-tester")
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        claimed = state.claim_task(worker_id="tester")
+        assert claimed is not None
+        state.complete_task(
+            task_id,
+            "tester",
+            "FAILED_SAFE",
+            reason_code="pm_acceptance_failed",
+            detail="required_path_missing and out_of_scope_path",
+            failure_kind="semantic",
+        )
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.repaired == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "REPAIRING"
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        repair = active[0]
+        assert repair["stage_key"] == "builder-core"
+        assert repair["cycle"] == 1
+        assert repair["next_tier"] == "terra"
+        contract = json.loads(
+            (config.evidence_dir / f"task-{repair['task_id']}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert contract["allowed_paths"] == required
+        assert "pm_acceptance/**" in contract["forbidden_paths"]
+        assert all(
+            path in "\n".join(item["verification"] for item in contract["acceptance"])
+            for path in required
+        )
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        assert any(item["status"] == "PENDING" for item in state.list_outbox())
+        state.close()
+
+
+def test_repair_cycle_resumes_from_staging_without_restarting_planning() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "staging-resume-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/bybit-grid-research",
+            idempotency_key="staging-resume-key",
+        )
+        product_at_staging(state, product_id)
+        write_pm_task(config, product_id)
+        pipeline = PipelineCoordinator(config, state, ArtifactStore(config))
+        failed_path = pipeline.create_task(product_id, "product-tester")
+        failed_id = json.loads(failed_path.read_text(encoding="utf-8"))["task_id"]
+        assert state.claim_task(worker_id="failed-tester") is not None
+        state.complete_task(
+            failed_id,
+            "failed-tester",
+            "FAILED_SAFE",
+            reason_code="pm_acceptance_failed",
+            detail="required paths were missing",
+            failure_kind="semantic",
+        )
+        PipelineReconciler(config, state).reconcile_once()
+
+        worker_number = 0
+
+        def accept(role: str, output: dict[str, object] | None = None) -> dict[str, object]:
+            nonlocal worker_number
+            worker_number += 1
+            worker_id = f"repair-worker-{worker_number}"
+            task = state.claim_task(worker_id=worker_id)
+            assert task is not None
+            assert task["role"] == role
+            pipeline.advance_after(
+                task,
+                output or {"status": "completed"},
+                Path("unused.json"),
+            )
+            state.complete_task(str(task["task_id"]), worker_id)
+            return task
+
+        builder = accept("builder")
+        accept("test-engineer")
+        accept("security-reviewer")
+        accept("independent-reviewer")
+        staging = accept("release-operator")
+
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "STAGING_DEPLOYED"
+        assert builder["cycle"] == 1
+        assert staging["stage_key"] == "release-staging"
+        assert staging["cycle"] == 1
+        roles_in_cycle = [
+            task["role"] for task in state.list_tasks(product_id) if task["cycle"] == 1
+        ]
+        assert roles_in_cycle == [
+            "builder",
+            "test-engineer",
+            "security-reviewer",
+            "independent-reviewer",
+            "release-operator",
+            "product-tester",
+        ]
+        assert not any(
+            role in roles_in_cycle
+            for role in (
+                "product-director",
+                "product-analyst",
+                "solution-architect",
+                "task-specifier",
+            )
+        )
+        state.close()
+
+
+def test_completed_but_blocked_product_acceptance_starts_repair() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "acceptance-blocked-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/bybit-grid-research",
+            idempotency_key="acceptance-blocked-key",
+        )
+        product_at_staging(state, product_id)
+        write_pm_task(config, product_id)
+        pipeline = PipelineCoordinator(config, state)
+        task_path = pipeline.create_task(product_id, "product-tester")
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        assert state.claim_task(worker_id="tester") is not None
+        state.complete_task(
+            task_id,
+            "tester",
+            "DONE",
+            result_ref="evidence/product-test-blocked.json",
+        )
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.repaired == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "REPAIRING"
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["stage_key"] == "builder-core"
+        assert active[0]["cycle"] == 1
+        state.close()
+
+
+def test_external_credential_block_creates_owner_action_but_internal_failure_does_not() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "credential-blocked-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="Build a credential fixture",
+            idempotency_key="credential-product-key",
+        )
+        task_path = PipelineCoordinator(config, state).seed_initial(product_id)
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        assert state.claim_task(worker_id="worker") is not None
+        state.complete_task(
+            task_id,
+            "worker",
+            "BLOCKED_EXTERNAL",
+            reason_code="missing_credential",
+            detail="GitHub credential is not connected",
+            failure_kind="external",
+        )
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.owner_actions == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "BLOCKED_OWNER"
+        actions = list(config.evidence_dir.glob("owner-action-*.json"))
+        assert len(actions) == 1
+        action = json.loads(actions[0].read_text(encoding="utf-8"))
+        assert action["reason"] == "missing_credential"
+        assert "GitHub credential" in action["why_blocked"]
+        state.close()
+
+
+def test_repair_budget_exhaustion_is_terminal_and_notified_in_russian() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "repair-budget-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="Build a repair budget fixture",
+            idempotency_key="repair-budget-key",
+        )
+        product_at_staging(state, product_id)
+        pipeline = PipelineCoordinator(config, state)
+        builder_path = pipeline.create_task(product_id, "builder-core", cycle=2)
+        builder_id = json.loads(builder_path.read_text(encoding="utf-8"))["task_id"]
+        assert state.claim_task(worker_id="builder") is not None
+        state.complete_task(builder_id, "builder")
+        task_path = pipeline.create_task(product_id, "product-tester", cycle=2)
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        claimed = state.claim_task(worker_id="tester")
+        assert claimed is not None
+        assert claimed["task_id"] == task_id
+        state.complete_task(
+            task_id,
+            "tester",
+            "FAILED_SAFE",
+            reason_code="pm_acceptance_failed",
+            detail="required_path_missing: tests/test_product.py",
+            failure_kind="semantic",
+        )
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.exhausted == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "FAILED_SAFE"
+        payloads = [json.loads(item["payload_json"]) for item in state.list_outbox()]
+        exhausted = next(item for item in payloads if item["kind"] == "repair_exhausted")
+        assert "исчерпал автоматические попытки" in exhausted["text"]
+        assert "required_path_missing: tests/test_product.py" in exhausted["text"]
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        state.close()

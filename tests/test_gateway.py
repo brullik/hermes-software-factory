@@ -165,6 +165,49 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual([method for method, _ in calls], ["getUpdates", "sendMessage"])
         self.assertNotIn("secret-token", repr(calls))
 
+    def test_durable_outbox_is_delivered_to_owner_in_russian(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = make_config(Path(directory))
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            state.enqueue_outbox(
+                outbox_id="outbox-russian-owner",
+                idempotency_key="outbox-russian-owner-key",
+                event_type="telegram.owner_notification",
+                payload={
+                    "kind": "repair_exhausted",
+                    "product_id": "product-notification",
+                    "task_id": "T-NOTIFY",
+                    "text": "Hermes самостоятельно исправляет ошибку. Действие владельца не требуется.",
+                },
+            )
+            api = FakeTelegramApi()
+            gateway = TelegramGateway(
+                config,
+                state,
+                ArtifactStore(config),
+                api,  # type: ignore[arg-type]
+                offset_path=Path(directory) / "offset",
+            )
+
+            self.assertEqual(gateway.deliver_outbox(), 1)
+
+            self.assertEqual(
+                api.sent,
+                [
+                    (
+                        "42",
+                        (
+                            "Hermes самостоятельно исправляет ошибку. "
+                            "Действие владельца не требуется."
+                        ),
+                    )
+                ],
+            )
+            outbox = state.list_outbox()
+            self.assertEqual(outbox[0]["status"], "DONE")
+            self.assertIsNotNone(outbox[0]["delivered_at"])
+            state.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from scripts.model_router import Tier, next_tier
+from scripts.model_router import Tier, classify_failure, next_tier
 from scripts.policy_guard import enforce_changed_paths
 from scripts.prompt_compiler import find_secret_candidates
 
@@ -30,7 +30,11 @@ from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine, QualityGateRun
 from .registry import SchemaRegistry
 from .release import ReleaseExecutor, ReleasePolicyError, validate_release_operation
-from .release_executor import build_release_executor
+from .release_executor import (
+    CandidateChecksFailed,
+    CandidateChecksPending,
+    build_release_executor,
+)
 from .state import StateStore
 from .workflow import WorkflowEngine
 from .workspace import WorkspaceManager
@@ -249,6 +253,7 @@ class WorkerResult:
     next_tier: Tier | None = None
     next_attempt_kind: str | None = None
     repair_context_ref: str | None = None
+    detail: str | None = None
 
 
 def _workspace_snapshot(root: Path) -> dict[str, str]:
@@ -544,6 +549,11 @@ class AgentWorker:
         if repair_context_ref:
             evidence.append(self._repair_evidence(task, repair_context_ref))
             decisions.append("This is a repair attempt; address only the recorded failure and preserve scope.")
+        scoped_candidates = tuple(
+            (str(path), "file inside the exact task write scope")
+            for path in contract.get("allowed_paths", [])
+            if isinstance(path, str) and "*" not in path
+        )
         return TaskExecutionSpec(
             task_contract=contract,
             role=prompt_role,
@@ -552,6 +562,8 @@ class AgentWorker:
             candidates=(
                 (f"schemas/{output_schema}", "required output contract"),
                 (f"prompts/roles/{prompt_role}.md", "role boundary"),
+                ("pm_acceptance/active_task.json", "active repository PM acceptance contract"),
+                *scoped_candidates,
                 *_REPOSITORY_CONTEXT_CANDIDATES,
             ),
             evidence=tuple(evidence),
@@ -1018,10 +1030,16 @@ class AgentWorker:
     def _select(self, tier: Tier) -> ModelSelection:
         alias = _ALIAS_BY_TIER.get(tier)
         if alias is None:
-            raise ExternalBlocker("deterministic tasks do not use the provider worker")
+            raise ExternalBlocker(
+                "deterministic tasks do not use the provider worker",
+                reason_code="internal_task_route",
+            )
         selected = self.registry.selected_model(alias)
         if not selected:
-            raise ExternalBlocker(f"Model route for alias {alias} is not approved")
+            raise ExternalBlocker(
+                f"Model route for alias {alias} is not approved",
+                reason_code="model_route_unapproved",
+            )
         if self.registry.healthy_providers(alias):
             return self.registry.select(alias, tier=tier.value)
         for provider in self.registry.providers_for(alias):
@@ -1419,7 +1437,10 @@ class AgentWorker:
     def execute(self, spec: TaskExecutionSpec) -> WorkerResult:
         self.schemas.validate("task-contract.schema.json", spec.task_contract)
         if spec.role == "release-operator" and self.release_executor is None:
-            raise ExternalBlocker("release side-effect adapter is not configured")
+            raise ExternalBlocker(
+                "release side-effect adapter is not configured",
+                reason_code="release_adapter_missing",
+            )
         tier = spec.requested_tier or Tier(str(spec.task_contract["model_floor"]))
         lease = self.workspace.acquire(
             product_id=str(spec.task_contract["product_id"]),
@@ -1592,28 +1613,127 @@ class AgentWorker:
                         workspace=lease.path,
                         expected_staging_digest=expected_staging_digest,
                     )
-                except ExternalBlocker:
-                    self.attempts.finish(attempt, status="failed", reason_code="release_adapter_blocked")
-                    route_action = self._route(spec, tier, success=False, reason_code="release_adapter_blocked", attempt=attempt)
+                except CandidateChecksFailed as error:
+                    self.attempts.finish(
+                        attempt,
+                        status="failed",
+                        reason_code=error.reason_code,
+                    )
+                    route_action = self._route(
+                        spec,
+                        tier,
+                        success=False,
+                        reason_code=error.reason_code,
+                        new_evidence=True,
+                        attempt=attempt,
+                    )
                     result_path = self._attempt_artifact(
                         spec,
                         attempt,
                         selection,
-                        status="blocked_external",
-                        summary=f"Release side-effect adapter blocked the operation; routing={route_action}.",
+                        status="repair_required",
+                        summary=(
+                            f"Mandatory candidate check failed: {error}; "
+                            f"routing={route_action}."
+                        ),
                         prompt_digest=prompt_digest,
                         subject_sha=spec.subject_sha,
                         command_result="fail",
                         command_ref=str(context_path),
                         output_ref=None,
-                        reason_code="release_adapter_blocked",
+                        reason_code=error.reason_code,
+                        extra_evidence_refs=[error.evidence_ref],
+                    )
+                    return WorkerResult(
+                        str(spec.task_contract["task_id"]),
+                        "repair_handoff",
+                        error.reason_code,
+                        str(result_path),
+                        attempt.attempt_id,
+                        detail=str(error),
+                    )
+                except CandidateChecksPending as error:
+                    self.attempts.finish(
+                        attempt,
+                        status="failed",
+                        reason_code=error.reason_code,
+                    )
+                    route_action = self._route(
+                        spec,
+                        tier,
+                        success=False,
+                        reason_code=error.reason_code,
+                        attempt=attempt,
+                    )
+                    scheduled = self._schedule_transient_retry(
+                        spec,
+                        attempt,
+                        selection,
+                        tier=tier,
+                        route_action=route_action,
+                        context_path=context_path,
+                        reason_code=error.reason_code,
+                    )
+                    if scheduled is not None:
+                        return scheduled
+                    result_path = self._attempt_artifact(
+                        spec,
+                        attempt,
+                        selection,
+                        status="failed_safe",
+                        summary=f"GitHub checks remained pending; routing={route_action}.",
+                        prompt_digest=prompt_digest,
+                        subject_sha=spec.subject_sha,
+                        command_result="fail",
+                        command_ref=str(context_path),
+                        output_ref=None,
+                        reason_code=error.reason_code,
+                    )
+                    return WorkerResult(
+                        str(spec.task_contract["task_id"]),
+                        "failed_safe",
+                        error.reason_code,
+                        str(result_path),
+                        attempt.attempt_id,
+                        detail=str(error),
+                    )
+                except ExternalBlocker as error:
+                    reason_code = error.reason_code
+                    self.attempts.finish(
+                        attempt,
+                        status="failed",
+                        reason_code=reason_code,
+                    )
+                    route_action = self._route(
+                        spec,
+                        tier,
+                        success=False,
+                        reason_code=reason_code,
+                        attempt=attempt,
+                    )
+                    result_path = self._attempt_artifact(
+                        spec,
+                        attempt,
+                        selection,
+                        status="blocked_external",
+                        summary=(
+                            f"Release side-effect adapter blocked the operation: {error}; "
+                            f"routing={route_action}."
+                        ),
+                        prompt_digest=prompt_digest,
+                        subject_sha=spec.subject_sha,
+                        command_result="fail",
+                        command_ref=str(context_path),
+                        output_ref=None,
+                        reason_code=reason_code,
                     )
                     return WorkerResult(
                         str(spec.task_contract["task_id"]),
                         "blocked_external",
-                        "release_adapter_blocked",
+                        reason_code,
                         str(result_path),
                         attempt.attempt_id,
+                        detail=str(error),
                     )
                 except (OSError, RuntimeError, ValueError):
                     self.attempts.finish(attempt, status="failed", reason_code="release_adapter_error")
@@ -1878,9 +1998,19 @@ class AgentWorker:
         try:
             result = self.execute(self.default_spec(task))
         except ExternalBlocker as error:
-            result = WorkerResult(task_id, "blocked_external", str(error))
+            result = WorkerResult(
+                task_id,
+                "blocked_external",
+                error.reason_code,
+                detail=str(error),
+            )
         except (OSError, RuntimeError, TypeError, ValueError):
-            result = WorkerResult(task_id, "failed_safe", "worker_internal_error")
+            result = WorkerResult(
+                task_id,
+                "failed_safe",
+                "worker_internal_error",
+                detail="worker raised an internal exception",
+            )
         if result.status == "repair_scheduled":
             if result.next_tier is None or result.next_attempt_kind is None or result.repair_context_ref is None:
                 result = WorkerResult(task_id, "failed_safe", "repair_schedule_incomplete")
@@ -1902,9 +2032,23 @@ class AgentWorker:
             "accepted": "DONE",
             "blocked_external": "BLOCKED_EXTERNAL",
             "repair_required": "BLOCKED_EXTERNAL",
+            "repair_handoff": "FAILED_SAFE",
             "failed_safe": "FAILED_SAFE",
         }.get(result.status, "FAILED_SAFE")
-        self.workflow.complete(task_id, self.worker_id, terminal)
+        failure_kind = (
+            None
+            if terminal == "DONE"
+            else classify_failure(result.reason_code).value
+        )
+        self.workflow.complete(
+            task_id,
+            self.worker_id,
+            terminal,
+            reason_code=result.reason_code if terminal != "DONE" else None,
+            detail=result.detail if terminal != "DONE" else None,
+            result_ref=result.artifact_ref,
+            failure_kind=failure_kind,
+        )
         return result
 
     def run_forever(self) -> None:

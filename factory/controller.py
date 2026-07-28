@@ -18,6 +18,7 @@ from .artifacts import ArtifactStore
 from .config import FactoryConfig, load_config
 from .intake import IntakeRejected, IntakeService
 from .kanban import KANBAN_HTML, build_kanban_snapshot
+from .reconciler import PipelineReconciler, ReconcilerLoop
 from .state import IntakeRateLimitError, ProductCapacityError, StateStore
 from .workflow import WorkflowEngine
 
@@ -36,6 +37,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
         if path == "/metrics":
             database_ready = int(self.server.state.health())
             product_count = len(self.server.state.list_products())
+            orphaned_count = self.server.state.orphaned_product_count()
             body = (
                 "# HELP hermes_factory_database_ready Whether the controller database is ready.\n"
                 "# TYPE hermes_factory_database_ready gauge\n"
@@ -43,6 +45,9 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 "# HELP hermes_factory_products_total Number of products in durable state.\n"
                 "# TYPE hermes_factory_products_total gauge\n"
                 f"hermes_factory_products_total {product_count}\n"
+                "# HELP hermes_factory_orphaned_products Products without durable next work.\n"
+                "# TYPE hermes_factory_orphaned_products gauge\n"
+                f"hermes_factory_orphaned_products {orphaned_count}\n"
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -159,9 +164,15 @@ def serve(config: FactoryConfig) -> None:
     if bind != "127.0.0.1":
         raise RuntimeError("Controller refuses to bind outside localhost")
     server = ControllerHttpServer((bind, port), state, config)
+    reconciler = ReconcilerLoop(
+        PipelineReconciler(config, state, ArtifactStore(config)),
+        config.reconcile_interval_seconds,
+    )
+    reconciler.start()
     try:
         server.serve_forever()
     finally:
+        reconciler.stop()
         server.server_close()
         state.close()
 

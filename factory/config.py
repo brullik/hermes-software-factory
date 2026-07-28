@@ -35,6 +35,11 @@ class FactoryConfig:
         return self.state_dir / "evidence"
 
     @property
+    def worktrees_dir(self) -> Path:
+        configured = self.raw.get("paths", {}).get("worktrees")
+        return self._local_or_configured_path(configured, self.state_dir / "worktrees")
+
+    @property
     def database_path(self) -> Path:
         database_url = str(self.controller.get("database_url", ""))
         if database_url.startswith("sqlite:///"):
@@ -61,6 +66,26 @@ class FactoryConfig:
     @property
     def max_active_products(self) -> int:
         return int(self.controller.get("max_active_products", 1))
+
+    @property
+    def reconcile_interval_seconds(self) -> float:
+        return float(self.controller.get("reconcile_interval_seconds", 2.0))
+
+    @property
+    def max_repair_cycles(self) -> int:
+        return int(self.controller.get("max_repair_cycles", 2))
+
+    @property
+    def github_check_timeout_seconds(self) -> int:
+        return int(self.controller.get("github_check_timeout_seconds", 300))
+
+    @property
+    def github_check_poll_seconds(self) -> float:
+        return float(self.controller.get("github_check_poll_seconds", 5.0))
+
+    @property
+    def observation_seconds(self) -> int:
+        return int(self.controller.get("observation_seconds", 14 * 24 * 60 * 60))
 
     @property
     def allowed_telegram_user_ids(self) -> set[str]:
@@ -138,6 +163,18 @@ def validate_config(config: FactoryConfig) -> list[str]:
         errors.append("max_active_workers must be positive")
     if int(controller.get("max_active_workers", 2)) > 2:
         errors.append("max_active_workers must not exceed 2")
+    if float(controller.get("reconcile_interval_seconds", 2.0)) < 0.2:
+        errors.append("reconcile_interval_seconds must be at least 0.2")
+    if int(controller.get("max_repair_cycles", 2)) < 1:
+        errors.append("max_repair_cycles must be positive")
+    if int(controller.get("max_repair_cycles", 2)) > 3:
+        errors.append("max_repair_cycles must not exceed 3")
+    if int(controller.get("github_check_timeout_seconds", 300)) < 30:
+        errors.append("github_check_timeout_seconds must be at least 30")
+    if float(controller.get("github_check_poll_seconds", 5.0)) < 1.0:
+        errors.append("github_check_poll_seconds must be at least 1")
+    if int(controller.get("observation_seconds", 14 * 24 * 60 * 60)) < 0:
+        errors.append("observation_seconds cannot be negative")
     if config.raw.get("network", {}).get("admin_bind", "127.0.0.1") != "127.0.0.1":
         errors.append("admin_bind must be localhost")
     if models.get("paid_api_fallback", False) is not False:

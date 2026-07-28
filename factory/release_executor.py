@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ from typing import Any, Protocol
 
 from .config import FactoryConfig
 from .deployment import DeploymentGuard, TransactionalDeployer, TransactionResult
-from .github import GitHubAdapter, GitHubCommandError
+from .github import GitHubAdapter, GitHubCommandError, RequiredChecksStatus
 from .providers import ExternalBlocker
 from .release import ReleaseExecutor
 
@@ -46,6 +47,26 @@ class ReleaseAdapterError(RuntimeError):
     """Raised when a release side effect cannot be completed safely."""
 
 
+class CandidateChecksPending(ExternalBlocker):
+    """Required checks did not finish within the bounded polling window."""
+
+    def __init__(self, checks: tuple[str, ...]) -> None:
+        super().__init__(
+            "GitHub required checks are still pending: " + ", ".join(checks),
+            reason_code="github_checks_pending",
+        )
+        self.checks = checks
+
+
+class CandidateChecksFailed(RuntimeError):
+    """A candidate failed a mandatory repository check and needs code repair."""
+
+    def __init__(self, detail: str, evidence_ref: str) -> None:
+        super().__init__(detail)
+        self.reason_code = "pm_acceptance_failed"
+        self.evidence_ref = evidence_ref
+
+
 CommandRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
 AssuranceRunner = Callable[[Path, str], Mapping[str, Mapping[str, Any]]]
 
@@ -54,6 +75,16 @@ class ReleaseGitHub(Protocol):
     def create_pull_request(self, *, head: str, base: str, title: str, body: str) -> Any: ...
 
     def pull_request_for_head_sha(self, expected_sha: str) -> str: ...
+
+    def required_checks_status(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...],
+    ) -> RequiredChecksStatus: ...
+
+    def close_pull_request(self, pull_request: str) -> Any: ...
 
     def verify_pull_request(
         self,
@@ -167,6 +198,8 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             for item in governance.get("external_required_checks", [])
             if str(item).strip()
         )
+        self.github_check_timeout_seconds = config.github_check_timeout_seconds
+        self.github_check_poll_seconds = config.github_check_poll_seconds
 
     def _github_for_repository(self, repository: str) -> ReleaseGitHub:
         if repository == self.repository:
@@ -572,6 +605,109 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 raise ReleaseAdapterError("release adapter audit conflict")
         return f"evidence/{path.name}"
 
+    def _candidate_check_evidence(
+        self,
+        product_id: str,
+        candidate: PublishedCandidate,
+        status: RequiredChecksStatus,
+    ) -> str:
+        path = (
+            self.config.evidence_dir
+            / f"candidate-check-{product_id}-{candidate.candidate_sha[:12]}.json"
+        )
+        payload = {
+            "schema_version": "1.0",
+            "product_id": product_id,
+            "repository": candidate.repository,
+            "pull_request": candidate.pull_request,
+            "candidate_sha": candidate.candidate_sha,
+            "required_checks": list(status.states),
+            "passed": list(status.passed),
+            "pending": list(status.pending),
+            "failed": list(status.failed),
+            "summary": (
+                (
+                    "Mandatory GitHub candidate checks failed: "
+                    + ", ".join(status.failed)
+                )
+                if status.failed
+                else "All mandatory GitHub candidate checks passed."
+            ),
+        }
+        content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        self.config.evidence_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError:
+            if path.read_text(encoding="utf-8") != content:
+                raise ReleaseAdapterError("candidate check evidence conflict")
+        return f"evidence/{path.name}"
+
+    def _discard_failed_candidate(
+        self,
+        candidate: PublishedCandidate,
+        workspace: Path,
+        github: ReleaseGitHub,
+    ) -> None:
+        github.close_pull_request(candidate.pull_request)
+        self._command(["git", "switch", candidate.base_branch], workspace)
+        self._command(
+            ["git", "reset", "--hard", f"origin/{candidate.base_branch}"],
+            workspace,
+        )
+        self._command(
+            ["git", "clean", "-fd", "--", "artifacts", "release-artifacts"],
+            workspace,
+        )
+        self._command(
+            ["git", "branch", "-D", candidate.branch],
+            workspace,
+            allowed_returncodes=(0, 1),
+        )
+
+    def _wait_for_candidate_checks(
+        self,
+        *,
+        product_id: str,
+        candidate: PublishedCandidate,
+        workspace: Path,
+        github: ReleaseGitHub,
+        required_checks: tuple[str, ...],
+    ) -> str | None:
+        if not required_checks:
+            return None
+        deadline = time.monotonic() + self.github_check_timeout_seconds
+        latest: RequiredChecksStatus | None = None
+        while True:
+            latest = github.required_checks_status(
+                candidate.pull_request,
+                expected_sha=candidate.candidate_sha,
+                required_checks=required_checks,
+            )
+            if latest.failed:
+                evidence_ref = self._candidate_check_evidence(
+                    product_id,
+                    candidate,
+                    latest,
+                )
+                self._discard_failed_candidate(candidate, workspace, github)
+                raise CandidateChecksFailed(
+                    "mandatory GitHub checks failed: " + ", ".join(latest.failed),
+                    evidence_ref,
+                )
+            if not latest.pending:
+                return self._candidate_check_evidence(
+                    product_id,
+                    candidate,
+                    latest,
+                )
+            if time.monotonic() >= deadline:
+                raise CandidateChecksPending(latest.pending)
+            time.sleep(self.github_check_poll_seconds)
+
     def _stage(
         self,
         product_id: str,
@@ -732,6 +868,18 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             except GitHubCommandError as error:
                 raise ExternalBlocker(str(error)) from error
             try:
+                required_checks = (
+                    self.required_checks
+                    if repository == self.repository
+                    else self.external_required_checks
+                )
+                candidate_check_ref = self._wait_for_candidate_checks(
+                    product_id=product_id,
+                    candidate=candidate,
+                    workspace=workspace,
+                    github=github,
+                    required_checks=required_checks,
+                )
                 assurance_ref = self._run_release_assurance(
                     product_id,
                     workspace,
@@ -786,7 +934,11 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                         "and promoted its Git archive to local staging."
                     ),
                     "findings": [],
-                    "evidence_refs": [assurance_ref, evidence_ref],
+                    "evidence_refs": [
+                        value
+                        for value in (candidate_check_ref, assurance_ref, evidence_ref)
+                        if value
+                    ],
                 },
             )
 

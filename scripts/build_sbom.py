@@ -23,11 +23,12 @@ def locked_packages() -> list[tuple[str, str]]:
 
 
 def build() -> dict[str, object]:
+    factory_version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     packages: list[dict[str, object]] = [
         {
             "SPDXID": "SPDXRef-Package-hermes-software-factory-spec",
             "name": "hermes-software-factory-spec",
-            "versionInfo": (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+            "versionInfo": factory_version,
             "downloadLocation": "NOASSERTION",
             "licenseConcluded": "NOASSERTION",
             "licenseDeclared": "NOASSERTION",
@@ -58,10 +59,12 @@ def build() -> dict[str, object]:
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
-        "name": "hermes-software-factory-2.0.0",
-        "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.0.0",
+        "name": f"hermes-software-factory-{factory_version}",
+        "documentNamespace": (
+            f"https://brullik.github.io/hermes-software-factory/sbom/{factory_version}"
+        ),
         "creationInfo": {
-            "created": "2026-07-26T00:00:00Z",
+            "created": "2026-07-28T00:00:00Z",
             "creators": ["Tool: hermes-software-factory/scripts/build_sbom.py"],
         },
         "packages": packages,

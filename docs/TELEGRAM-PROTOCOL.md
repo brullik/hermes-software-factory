@@ -22,10 +22,16 @@
 - PR/release/deployment;
 - quota delay;
 - rollback/incident;
+- automatic repair started/resumed;
+- repair attempts exhausted with an exact Russian reason;
 - OWNER_ACTION;
 - completed.
 
 Repeated low-level failures группируются.
+
+Reconciler notifications are read from a durable outbox. Delivery failure does
+not lose a message: the gateway stores the error, releases the lease, and
+retries later. Internal failures never masquerade as `OWNER_ACTION`.
 
 ## Runtime implementation
 

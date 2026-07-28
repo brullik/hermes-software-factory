@@ -34,6 +34,7 @@ _TRANSIENT_CODES = {
     "network_timeout",
     "process_crash_before_result",
     "malformed_transport",
+    "github_checks_pending",
 }
 _EXTERNAL_CODES = {
     "missing_credential",

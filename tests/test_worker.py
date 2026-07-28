@@ -382,7 +382,8 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(result)
             assert result is not None
             self.assertEqual(result.status, "blocked_external")
-            self.assertEqual(result.reason_code, "release side-effect adapter is not configured")
+            self.assertEqual(result.reason_code, "release_adapter_missing")
+            self.assertEqual(result.detail, "release side-effect adapter is not configured")
             self.assertEqual(runner.calls, [])
             task = next(iter(state.list_tasks(product_id)))
             self.assertEqual(task["status"], "BLOCKED_EXTERNAL")
@@ -622,7 +623,8 @@ class WorkerTests(unittest.TestCase):
             assert task is not None
             self.assertEqual(task["status"], "BLOCKED_EXTERNAL")
             self.assertEqual(state.attempts_for_task(str(task["task_id"])), [])
-            self.assertIn("not approved", result.reason_code or "")
+            self.assertEqual(result.reason_code, "model_route_unapproved")
+            self.assertIn("not approved", result.detail or "")
             self.assertEqual(intake_result.product_id, task["product_id"])
             state.close()
 

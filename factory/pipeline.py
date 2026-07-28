@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .artifacts import ArtifactStore, artifact_metadata
@@ -32,8 +33,9 @@ class StageDefinition:
     quality_gates: tuple[str, ...] = ()
 
 
-def _task_id(product_id: str, stage: str) -> str:
-    return f"T-{sha256_text(f'{product_id}:{stage}')[:12].upper()}"
+def _task_id(product_id: str, stage: str, cycle: int = 0) -> str:
+    suffix = stage if cycle == 0 else f"{stage}:repair:{cycle}"
+    return f"T-{sha256_text(f'{product_id}:{suffix}')[:12].upper()}"
 
 
 def _external_github_repository(value: str) -> bool:
@@ -54,6 +56,110 @@ class PipelineCoordinator:
         self.artifacts = artifacts or ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)
         self.workflow = WorkflowEngine(state)
+
+    @staticmethod
+    def _safe_repository_path(value: object) -> str:
+        text = str(value)
+        path = PurePosixPath(text)
+        if (
+            not text
+            or "\\" in text
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("PM task contains an unsafe repository path")
+        return text
+
+    def _pm_active_task(self, product_id: str) -> dict[str, Any] | None:
+        product = self.state.get_product(product_id) or {}
+        if not _external_github_repository(str(product.get("idea", ""))):
+            return None
+        workspace = (self.config.worktrees_dir / product_id / "repository").resolve()
+        expected_parent = (self.config.worktrees_dir / product_id).resolve()
+        if workspace.parent != expected_parent:
+            raise ValueError("product workspace escaped the configured worktree root")
+        path = workspace / "pm_acceptance" / "active_task.json"
+        if not path.is_file() or path.is_symlink():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("schema") != "pm_active_task_v1":
+            raise ValueError("active PM task has an unsupported schema")
+        task_id = str(payload.get("task_id", ""))
+        if not re.fullmatch(r"[A-Za-z0-9._-]{4,160}", task_id):
+            raise ValueError("active PM task id is invalid")
+
+        normalized: dict[str, list[str]] = {}
+        for field in ("allowed_paths", "forbidden_paths", "required_paths"):
+            values = payload.get(field)
+            if (
+                not isinstance(values, list)
+                or (field != "forbidden_paths" and not values)
+                or len(values) > 200
+            ):
+                raise ValueError(f"active PM task {field} is invalid")
+            normalized[field] = list(
+                dict.fromkeys(self._safe_repository_path(value) for value in values)
+            )
+        if not set(normalized["required_paths"]).issubset(normalized["allowed_paths"]):
+            raise ValueError("active PM required paths are outside its allowed scope")
+        return {"task_id": task_id, **normalized}
+
+    def _restore_external_base_for_repair(
+        self,
+        product_id: str,
+        failed_task: dict[str, Any],
+    ) -> None:
+        """Discard a failed published candidate before a new scoped repair."""
+
+        product = self.state.get_product(product_id) or {}
+        if not _external_github_repository(str(product.get("idea", ""))):
+            return
+        role = str(failed_task.get("role") or "")
+        if role not in {"release-operator", "product-tester"}:
+            return
+        workspace = (self.config.worktrees_dir / product_id / "repository").resolve()
+        expected_parent = (self.config.worktrees_dir / product_id).resolve()
+        if workspace.parent != expected_parent:
+            raise RuntimeError("external repair workspace is unavailable")
+        if not (workspace / ".git").is_dir():
+            return
+
+        def run(argv: list[str], *, allowed: tuple[int, ...] = (0,)) -> str:
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(workspace), *argv],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=120,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                raise RuntimeError("external repair git operation is unavailable") from error
+            if result.returncode not in allowed:
+                raise RuntimeError("external repair git operation failed")
+            return result.stdout.strip()
+
+        run(["fetch", "--prune", "--no-tags", "origin"])
+        symbolic = run(
+            ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+            allowed=(0, 1),
+        )
+        base_branch = symbolic.removeprefix("origin/") if symbolic.startswith("origin/") else "main"
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", base_branch):
+            raise RuntimeError("external repair base branch is invalid")
+        run(["switch", "--force", "-C", base_branch, f"origin/{base_branch}"])
+        run(["reset", "--hard", f"origin/{base_branch}"])
+        run(["clean", "-fd", "--", "artifacts", "release-artifacts"])
+        branches = run(["branch", "--list", "codex/hermes-*", "--format=%(refname:short)"])
+        for branch in branches.splitlines():
+            if re.fullmatch(r"codex/hermes-[A-Za-z0-9._/-]+", branch):
+                run(["branch", "-D", branch], allowed=(0, 1))
+        self.state.record_event(
+            product_id=product_id,
+            task_id=str(failed_task["task_id"]),
+            event_type="failed_candidate_discarded",
+            payload={"base_branch": base_branch},
+        )
 
     def _definition(self, product_id: str, stage: str) -> StageDefinition:
         workspace_conflict = f"product:{product_id}:workspace"
@@ -250,6 +356,19 @@ class PipelineCoordinator:
                 workspace_conflict,
                 30,
             ),
+            "observation": StageDefinition(
+                "observation",
+                "Complete Production Observation",
+                "product-tester",
+                "product-test-result.schema.json",
+                "terra",
+                "medium",
+                "Verify production health after the configured observation interval.",
+                "Confirm critical production journeys remain healthy and no rollback is required.",
+                ("artifacts/**",),
+                workspace_conflict,
+                20,
+            ),
         }
         try:
             return definitions[stage]
@@ -262,9 +381,13 @@ class PipelineCoordinator:
         stage: str,
         *,
         dependencies: tuple[str, ...] = (),
+        cycle: int = 0,
+        available_at: str | None = None,
     ) -> Path:
         definition = self._definition(product_id, stage)
-        task_id = _task_id(product_id, stage)
+        if cycle < 0:
+            raise ValueError("repair cycle cannot be negative")
+        task_id = _task_id(product_id, stage, cycle)
         filename = f"task-{task_id}.json"
         path = self.config.evidence_dir / filename
         existing = self.state.get_task(task_id)
@@ -277,25 +400,83 @@ class PipelineCoordinator:
             if not isinstance(contract, dict):
                 raise ValueError(f"Task contract is not an object: {path}")
         else:
+            title = definition.title
+            objective = definition.objective
+            allowed_paths = list(definition.allowed_paths)
+            forbidden_paths = ["secrets/**", "production/**", ".github/workflows/**"]
+            acceptance = [
+                {
+                    "criterion_id": f"AC-{stage.upper().replace('-', '_')}-001",
+                    "verification": definition.acceptance,
+                    "mandatory": True,
+                }
+            ]
+            complexity_features = (
+                ["external_integration"] if definition.model_floor != "luna" else []
+            )
+            model_floor = definition.model_floor
+            pm_task = self._pm_active_task(product_id)
+            if pm_task is not None and stage in {"builder-core", "test-engineer"}:
+                if stage == "builder-core":
+                    allowed_paths = list(pm_task["allowed_paths"])
+                    objective = (
+                        f"Complete active repository PM task {pm_task['task_id']} exactly. "
+                        "Modify every required path, preserve all forbidden paths, and make "
+                        "the repository pm-acceptance check pass."
+                    )
+                    acceptance = [
+                        {
+                            "criterion_id": "AC-PM-SCOPE",
+                            "verification": (
+                                f"GitHub required check pm-acceptance passes for active task "
+                                f"{pm_task['task_id']}."
+                            ),
+                            "mandatory": True,
+                        },
+                        *[
+                            {
+                                "criterion_id": f"AC-PM-REQUIRED-{index:03d}",
+                                "verification": f"Required path is included and correct: {required}",
+                                "mandatory": True,
+                            }
+                            for index, required in enumerate(
+                                pm_task["required_paths"],
+                                start=1,
+                            )
+                        ],
+                    ]
+                else:
+                    test_paths = [
+                        item for item in pm_task["allowed_paths"] if item.startswith("tests/")
+                    ]
+                    allowed_paths = test_paths or list(pm_task["allowed_paths"])
+                    objective = (
+                        f"Validate and complete tests for active repository PM task "
+                        f"{pm_task['task_id']} without leaving its exact allowed scope."
+                    )
+                forbidden_paths = list(
+                    dict.fromkeys([*forbidden_paths, *pm_task["forbidden_paths"]])
+                )
+                complexity_features = ["external_integration", "prior_semantic_failure"]
+            if cycle > 0:
+                title = f"{definition.title} (repair cycle {cycle})"
+                model_floor = "terra" if cycle == 1 else "sol"
+                complexity_features = list(
+                    dict.fromkeys([*complexity_features, "prior_semantic_failure"])
+                )
             contract = {
                 **artifact_metadata(self.config, "task-specifier", new_id("task_contract"), product_id),
                 "task_id": task_id,
-                "title": definition.title,
-                "objective": definition.objective,
+                "title": title,
+                "objective": objective,
                 "dependencies": list(dependencies),
                 "conflict_keys": [definition.conflict_key],
-                "allowed_paths": list(definition.allowed_paths),
-                "forbidden_paths": ["secrets/**", "production/**", ".github/workflows/**"],
-                "acceptance": [
-                    {
-                        "criterion_id": f"AC-{stage.upper().replace('-', '_')}-001",
-                        "verification": definition.acceptance,
-                        "mandatory": True,
-                    }
-                ],
+                "allowed_paths": allowed_paths,
+                "forbidden_paths": forbidden_paths,
+                "acceptance": acceptance,
                 "risk_tier": definition.risk_tier,
-                "complexity_features": ["external_integration"] if definition.model_floor != "luna" else [],
-                "model_floor": definition.model_floor,
+                "complexity_features": complexity_features,
+                "model_floor": model_floor,
                 "rollback": "Discard the immutable candidate and return the product to the previous safe lifecycle state.",
                 "status": "ready",
             }
@@ -311,6 +492,9 @@ class PipelineCoordinator:
             role=definition.role,
             output_schema=definition.output_schema,
             contract_ref=f"evidence/{filename}",
+            stage_key=stage,
+            cycle=cycle,
+            available_at=available_at,
             dependencies=list(dependencies),
             conflict_keys=[definition.conflict_key],
             priority=definition.priority,
@@ -319,6 +503,96 @@ class PipelineCoordinator:
 
     def seed_initial(self, product_id: str) -> Path:
         return self.create_task(product_id, "product-director")
+
+    def next_repair_cycle(self, product_id: str) -> int:
+        return (
+            max(
+                (int(task.get("cycle") or 0) for task in self.state.list_tasks(product_id)),
+                default=0,
+            )
+            + 1
+        )
+
+    def begin_repair_cycle(
+        self,
+        failed_task: dict[str, Any],
+        *,
+        reason_code: str,
+        summary: str,
+        evidence_refs: list[str],
+        attempt_id: str | None = None,
+    ) -> Path | None:
+        """Start a bounded build-to-staging repair cycle from the current state."""
+
+        product_id = str(failed_task["product_id"])
+        cycle = self.next_repair_cycle(product_id)
+        if cycle > self.config.max_repair_cycles:
+            return None
+        product = self.state.get_product(product_id)
+        if product is None:
+            raise KeyError(product_id)
+        self._restore_external_base_for_repair(product_id, failed_task)
+        if str(product["status"]) != "REPAIRING":
+            self.workflow.transition(product_id, "REPAIRING")
+        task_path = self.create_task(product_id, "builder-core", cycle=cycle)
+        contract = json.loads(task_path.read_text(encoding="utf-8"))
+        task_id = str(contract["task_id"])
+        tier = str(contract["model_floor"])
+        brief = {
+            **artifact_metadata(
+                self.config,
+                "repair-coordinator",
+                new_id("repair-brief"),
+                product_id,
+            ),
+            "producer": {
+                "role": "repair-coordinator",
+                "tier": "deterministic",
+                "provider": None,
+                "model": None,
+            },
+            "task_id": task_id,
+            "attempt_id": attempt_id or new_id("reconcile"),
+            "failure_class": reason_code,
+            "failed_gate_ids": (
+                ["pm-acceptance"] if "pm_acceptance" in reason_code else []
+            ),
+            "relevant_log_fragment": summary[:4000],
+            "expected_vs_actual": {
+                "expected": "all mandatory product and repository acceptance checks pass",
+                "actual": summary[:1000],
+            },
+            "changed_files": [],
+            "forbidden_actions": [str(value) for value in contract["forbidden_paths"]],
+            "previous_attempt_summary": summary[:2000],
+            "definition_of_done": [
+                str(item["verification"]) for item in contract["acceptance"]
+            ],
+            "evidence_refs": list(
+                dict.fromkeys(value for value in evidence_refs if value)
+            ),
+        }
+        brief_path = self.artifacts.write(
+            "repair-brief.schema.json",
+            brief,
+            filename=f"repair-brief-{task_id}-{brief['attempt_id']}.json",
+        )
+        self.state.prepare_pending_repair(
+            task_id,
+            next_tier=tier,
+            repair_context_ref=f"evidence/{brief_path.name}",
+        )
+        self.state.record_event(
+            product_id=product_id,
+            task_id=task_id,
+            event_type="repair_cycle_started",
+            payload={
+                "cycle": cycle,
+                "reason_code": reason_code,
+                "failed_task_id": failed_task["task_id"],
+            },
+        )
+        return task_path
 
     def _transition_if(self, product_id: str, current: str, target: str) -> None:
         product = self.state.get_product(product_id)
@@ -369,6 +643,8 @@ class PipelineCoordinator:
         product_id = str(task["product_id"])
         role = str(task.get("role") or "")
         task_id = str(task["task_id"])
+        stage_key = str(task.get("stage_key") or "")
+        cycle = int(task.get("cycle") or 0)
         if role == "product-director":
             self._transition_if(product_id, "IDEA_RECEIVED", "CONTRACT_DRAFTED")
             self._transition_if(product_id, "CONTRACT_DRAFTED", "CONTRACT_VALIDATED")
@@ -384,25 +660,89 @@ class PipelineCoordinator:
             self._transition_if(product_id, "ARCHITECTED", "BACKLOG_READY")
             return [self.create_task(product_id, "builder-core", dependencies=(task_id,))]
         if role == "builder":
-            self._transition_if(product_id, "BACKLOG_READY", "IMPLEMENTING")
-            return [self.create_task(product_id, "test-engineer", dependencies=(task_id,))]
+            if cycle > 0:
+                self._transition_if(product_id, "REPAIRING", "IMPLEMENTING")
+            else:
+                self._transition_if(product_id, "BACKLOG_READY", "IMPLEMENTING")
+            return [
+                self.create_task(
+                    product_id,
+                    "test-engineer",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                )
+            ]
         if role == "test-engineer":
-            return [self.create_task(product_id, "security-reviewer", dependencies=(task_id,))]
+            return [
+                self.create_task(
+                    product_id,
+                    "security-reviewer",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                )
+            ]
         if role == "security-reviewer":
-            return [self.create_task(product_id, "independent-reviewer", dependencies=(task_id,))]
+            return [
+                self.create_task(
+                    product_id,
+                    "independent-reviewer",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                )
+            ]
         if role == "independent-reviewer":
             self._transition_if(product_id, "IMPLEMENTING", "INTEGRATING")
-            return [self.create_task(product_id, "release-staging", dependencies=(task_id,))]
+            return [
+                self.create_task(
+                    product_id,
+                    "release-staging",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                )
+            ]
         if role == "release-operator" and str(task.get("title")) == "Prepare Staging Release":
             self._transition_if(product_id, "INTEGRATING", "STAGING_DEPLOYED")
-            return [self.create_task(product_id, "product-tester", dependencies=(task_id,))]
+            return [
+                self.create_task(
+                    product_id,
+                    "product-tester",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                )
+            ]
+        if stage_key == "release-staging":
+            self._transition_if(product_id, "INTEGRATING", "STAGING_DEPLOYED")
+            return [
+                self.create_task(
+                    product_id,
+                    "product-tester",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                )
+            ]
         if role == "product-tester":
+            if stage_key == "observation":
+                self._transition_if(product_id, "OBSERVATION", "COMPLETED")
+                return []
             if bool(output.get("release_blocked")):
                 return []
             self._transition_if(product_id, "STAGING_DEPLOYED", "PRODUCT_ACCEPTANCE")
             self._transition_if(product_id, "PRODUCT_ACCEPTANCE", "RELEASE_READY")
-            return [self.create_task(product_id, "release-production", dependencies=(task_id,))]
-        if role == "release-operator" and str(task.get("title")) == "Promote Approved Release":
+            return [
+                self.create_task(
+                    product_id,
+                    "release-production",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                )
+            ]
+        if (
+            role == "release-operator"
+            and (
+                str(task.get("title")) == "Promote Approved Release"
+                or stage_key == "release-production"
+            )
+        ):
             self._transition_if(product_id, "RELEASE_READY", "PRODUCTION_DEPLOYED")
             self._transition_if(product_id, "PRODUCTION_DEPLOYED", "OBSERVATION")
         return []
