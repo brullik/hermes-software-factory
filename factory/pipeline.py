@@ -513,6 +513,45 @@ class PipelineCoordinator:
             + 1
         )
 
+    def _failed_gate_ids(
+        self,
+        reason_code: str,
+        evidence_refs: list[str],
+    ) -> list[str]:
+        failed = ["pm-acceptance"] if "pm_acceptance" in reason_code else []
+        evidence_root = self.config.evidence_dir.resolve()
+        for reference in evidence_refs:
+            candidate = Path(reference)
+            if not candidate.is_absolute():
+                candidate = evidence_root / candidate.name
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if (
+                resolved.parent != evidence_root
+                or not resolved.is_file()
+                or resolved.is_symlink()
+            ):
+                continue
+            try:
+                payload = json.loads(resolved.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            test_results = payload.get("test_results", []) if isinstance(payload, dict) else []
+            if not isinstance(test_results, list):
+                continue
+            failed.extend(
+                str(item["gate_id"])
+                for item in test_results
+                if (
+                    isinstance(item, dict)
+                    and item.get("gate_id")
+                    and item.get("status") not in {"PASS", "NOT_RUN"}
+                )
+            )
+        return sorted(set(failed))
+
     def begin_repair_cycle(
         self,
         failed_task: dict[str, Any],
@@ -559,9 +598,7 @@ class PipelineCoordinator:
             "task_id": task_id,
             "attempt_id": attempt_id or new_id("reconcile"),
             "failure_class": reason_code,
-            "failed_gate_ids": (
-                ["pm-acceptance"] if "pm_acceptance" in reason_code else []
-            ),
+            "failed_gate_ids": self._failed_gate_ids(reason_code, evidence_refs),
             "relevant_log_fragment": summary[:4000],
             "expected_vs_actual": {
                 "expected": "all mandatory product and repository acceptance checks pass",

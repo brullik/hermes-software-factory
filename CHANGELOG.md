@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.4 - 2026-07-28
+
+- Failed mandatory gate IDs сохраняются в task detail, repair brief и русском exhaustion-уведомлении.
+- Legacy attempt evidence автоматически восстанавливает точные gate IDs при reconciliation.
+
 ## 2.0.3 - 2026-07-28
 
 - Worker продлевает durable task lease во время длительного model/release execution.
