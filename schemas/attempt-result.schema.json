@@ -104,6 +104,7 @@
       "enum": [
         "initial",
         "repair",
+        "transient_retry",
         "arbitration"
       ]
     },

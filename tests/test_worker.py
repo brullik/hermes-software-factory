@@ -231,6 +231,49 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("repair-brief-", runner.prompts[1])
             state.close()
 
+    def test_malformed_transport_is_requeued_at_same_tier_and_can_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli", owner_id="owner", idea="Resume after transient provider failure"
+            )
+            runner = SequenceRunner(["not-json", product_contract(config, intake_result.product_id)])
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            first = worker.run_once()
+
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertEqual(first.status, "repair_scheduled")
+            self.assertEqual(first.reason_code, "malformed_transport")
+            task = next(iter(state.list_tasks(intake_result.product_id)))
+            self.assertEqual(task["status"], "PENDING")
+            attempts = state.attempts_for_task(str(task["task_id"]))
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0]["attempt_kind"], "initial")
+
+            second = worker.run_once()
+
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertEqual(second.status, "completed")
+            attempts = state.attempts_for_task(str(task["task_id"]))
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(attempts[1]["attempt_kind"], "transient_retry")
+            self.assertNotEqual(attempts[0]["prompt_digest"], attempts[1]["prompt_digest"])
+            self.assertIn("repair-brief-", runner.prompts[1])
+            state.close()
+
     def test_release_task_blocks_before_model_without_side_effect_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -423,7 +466,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(task["status"], "FAILED_SAFE")
             state.close()
 
-    def test_malformed_provider_output_is_failed_safe_and_recorded(self) -> None:
+    def test_malformed_provider_output_is_requeued_and_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
@@ -439,11 +482,12 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(result.status, "repair_scheduled")
             self.assertEqual(result.reason_code, "malformed_transport")
             task_file = next(config.evidence_dir.glob("task-T-*.json"))
             task_id = str(json.loads(task_file.read_text(encoding="utf-8"))["task_id"])
             self.assertEqual(len(state.attempts_for_task(task_id)), 1)
+            self.assertEqual(state.list_tasks(intake_result.product_id)[0]["status"], "PENDING")
             product = state.get_product(intake_result.product_id)
             self.assertIsNotNone(product)
             assert product is not None

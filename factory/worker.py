@@ -597,6 +597,62 @@ class AgentWorker:
             f"evidence/{repair_path.name}",
         )
 
+    def _schedule_transient_retry(
+        self,
+        spec: TaskExecutionSpec,
+        attempt: Attempt,
+        selection: ModelSelection,
+        *,
+        tier: Tier,
+        route_action: str,
+        context_path: Path,
+        reason_code: str,
+        output: Mapping[str, Any] | None = None,
+    ) -> WorkerResult | None:
+        """Persist a transient failure and return the task to the durable queue.
+
+        A transient retry is deliberately not a semantic repair and never
+        changes model tier.  The repair brief is still persisted as fresh,
+        compact evidence so the next prompt has a different digest and the
+        task can resume after a worker/provider restart.
+        """
+
+        if route_action != "retry_same_tier":
+            return None
+        repair_path = self._write_repair_brief(
+            spec,
+            attempt,
+            selection,
+            reason_code=reason_code,
+            context_path=context_path,
+            output_path=None,
+            output=output,
+        )
+        result_path = self._attempt_artifact(
+            spec,
+            attempt,
+            selection,
+            status="repair_required",
+            summary=f"Transient provider failure; retrying at the same tier ({reason_code}).",
+            prompt_digest=attempt.prompt_digest,
+            subject_sha=spec.subject_sha,
+            command_result="fail",
+            command_ref=str(context_path),
+            output_ref=None,
+            reason_code=reason_code,
+            extra_evidence_refs=[f"evidence/{repair_path.name}"],
+        )
+        return WorkerResult(
+            str(spec.task_contract["task_id"]),
+            "repair_scheduled",
+            reason_code,
+            str(result_path),
+            attempt.attempt_id,
+            tier,
+            "transient_retry",
+            f"evidence/{repair_path.name}",
+        )
+
     def _route(
         self,
         spec: TaskExecutionSpec,
@@ -651,28 +707,46 @@ class AgentWorker:
                 usage_path=usage_path,
             )
             if run.status != "PASS":
+                reason_code = run.reason_code or "process_crash_before_result"
                 self.attempts.finish(attempt, status="failed", reason_code=run.reason_code)
-                route_action = self._route(spec, tier, success=False, reason_code=run.reason_code, attempt=attempt)
+                route_action = self._route(spec, tier, success=False, reason_code=reason_code, attempt=attempt)
+                scheduled = self._schedule_transient_retry(
+                    spec,
+                    attempt,
+                    selection,
+                    tier=tier,
+                    route_action=route_action,
+                    context_path=context_path,
+                    reason_code=reason_code,
+                )
+                if scheduled is not None:
+                    return scheduled
                 result_path = self._attempt_artifact(
                     spec,
                     attempt,
                     selection,
-                    status="blocked_external" if run.reason_code == "missing_credential" else "failed_safe",
+                    status="blocked_external" if reason_code == "missing_credential" else "failed_safe",
                     summary=f"Hermes did not return a usable result; routing={route_action}.",
                     prompt_digest=prompt_digest,
                     subject_sha=spec.subject_sha,
                     command_result="fail",
                     command_ref=str(context_path),
                     output_ref=None,
-                    reason_code=run.reason_code,
+                    reason_code=reason_code,
                 )
-                return WorkerResult(str(spec.task_contract["task_id"]), "failed_safe", run.reason_code, str(result_path), attempt.attempt_id)
+                return WorkerResult(str(spec.task_contract["task_id"]), "failed_safe", reason_code, str(result_path), attempt.attempt_id)
             if find_secret_candidates(run.output):
                 raise ValueError("secret_exposure")
-            output = json.loads(run.output)
+            try:
+                output = json.loads(run.output)
+            except (json.JSONDecodeError, TypeError) as error:
+                raise ValueError("malformed_transport") from error
             if not isinstance(output, dict):
                 raise TypeError("malformed_transport")
-            self.schemas.validate(spec.output_schema, output)
+            try:
+                self.schemas.validate(spec.output_schema, output)
+            except (TypeError, ValueError) as error:
+                raise ValueError("schema_validation") from error
             if spec.role == "release-operator":
                 stage = "staging" if "staging" in str(spec.task_contract.get("title", "")).lower() else "production"
                 assert self.release_executor is not None
@@ -737,9 +811,12 @@ class AgentWorker:
                         attempt.attempt_id,
                     )
                 if not isinstance(authoritative, Mapping):
-                    raise TypeError("release_adapter_result")
+                    raise ValueError("release_policy_violation")
                 output = dict(authoritative)
-                self.schemas.validate(spec.output_schema, output)
+                try:
+                    self.schemas.validate(spec.output_schema, output)
+                except (TypeError, ValueError) as error:
+                    raise ValueError("release_policy_violation") from error
                 try:
                     validate_release_operation(
                         output,
@@ -899,10 +976,44 @@ class AgentWorker:
             reason = str(error) if str(error) in {
                 "secret_exposure",
                 "malformed_transport",
+                "schema_validation",
                 "release_policy_violation",
             } else "malformed_transport"
             self.attempts.finish(attempt, status="failed", reason_code=reason)
-            route_action = self._route(spec, tier, success=False, reason_code=reason, attempt=attempt)
+            route_action = self._route(
+                spec,
+                tier,
+                success=False,
+                reason_code=reason,
+                new_evidence=reason == "schema_validation",
+                attempt=attempt,
+            )
+            if reason == "malformed_transport":
+                scheduled = self._schedule_transient_retry(
+                    spec,
+                    attempt,
+                    selection,
+                    tier=tier,
+                    route_action=route_action,
+                    context_path=context_path,
+                    reason_code=reason,
+                )
+                if scheduled is not None:
+                    return scheduled
+            if reason == "schema_validation":
+                scheduled = self._schedule_repair(
+                    spec,
+                    attempt,
+                    selection,
+                    tier=tier,
+                    route_action=route_action,
+                    context_path=context_path,
+                    output_path=None,
+                    output=None,
+                    reason_code=reason,
+                )
+                if scheduled is not None:
+                    return scheduled
             result_path = self._attempt_artifact(
                 spec,
                 attempt,
