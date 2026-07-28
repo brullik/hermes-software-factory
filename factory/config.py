@@ -73,7 +73,7 @@ class FactoryConfig:
 
     @property
     def max_repair_cycles(self) -> int:
-        return int(self.controller.get("max_repair_cycles", 2))
+        return int(self.controller.get("max_repair_cycles", 3))
 
     @property
     def github_check_timeout_seconds(self) -> int:
@@ -165,9 +165,9 @@ def validate_config(config: FactoryConfig) -> list[str]:
         errors.append("max_active_workers must not exceed 2")
     if float(controller.get("reconcile_interval_seconds", 2.0)) < 0.2:
         errors.append("reconcile_interval_seconds must be at least 0.2")
-    if int(controller.get("max_repair_cycles", 2)) < 1:
+    if int(controller.get("max_repair_cycles", 3)) < 1:
         errors.append("max_repair_cycles must be positive")
-    if int(controller.get("max_repair_cycles", 2)) > 3:
+    if int(controller.get("max_repair_cycles", 3)) > 3:
         errors.append("max_repair_cycles must not exceed 3")
     if int(controller.get("github_check_timeout_seconds", 300)) < 30:
         errors.append("github_check_timeout_seconds must be at least 30")

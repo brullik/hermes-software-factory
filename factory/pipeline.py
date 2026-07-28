@@ -520,7 +520,13 @@ class PipelineCoordinator:
     ) -> list[str]:
         failed = ["pm-acceptance"] if "pm_acceptance" in reason_code else []
         evidence_root = self.config.evidence_dir.resolve()
-        for reference in evidence_refs:
+        pending_refs = list(evidence_refs)
+        inspected_refs: set[str] = set()
+        while pending_refs and len(inspected_refs) < 50:
+            reference = pending_refs.pop(0)
+            if reference in inspected_refs:
+                continue
+            inspected_refs.add(reference)
             candidate = Path(reference)
             if not candidate.is_absolute():
                 candidate = evidence_root / candidate.name
@@ -538,18 +544,39 @@ class PipelineCoordinator:
                 payload = json.loads(resolved.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
-            test_results = payload.get("test_results", []) if isinstance(payload, dict) else []
+            if not isinstance(payload, dict):
+                continue
+            findings = payload.get("findings", [])
+            if (
+                payload.get("status") == "repair_required"
+                and isinstance(findings, list)
+            ):
+                failed.extend(
+                    str(item["id"])
+                    for item in findings
+                    if (
+                        isinstance(item, dict)
+                        and item.get("id")
+                        and item.get("severity") != "info"
+                    )
+                )
+            test_results = payload.get("test_results", [])
             if not isinstance(test_results, list):
                 continue
-            failed.extend(
-                str(item["gate_id"])
-                for item in test_results
+            for item in test_results:
+                if not isinstance(item, dict):
+                    continue
                 if (
-                    isinstance(item, dict)
-                    and item.get("gate_id")
+                    item.get("gate_id")
                     and item.get("status") not in {"PASS", "NOT_RUN"}
-                )
-            )
+                ):
+                    failed.append(str(item["gate_id"]))
+                if (
+                    item.get("gate_id") == "schema-validation"
+                    and item.get("status") == "PASS"
+                    and item.get("evidence_ref")
+                ):
+                    pending_refs.append(str(item["evidence_ref"]))
         return sorted(set(failed))
 
     def begin_repair_cycle(
