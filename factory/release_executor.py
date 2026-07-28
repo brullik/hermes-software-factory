@@ -103,7 +103,12 @@ def _release_digest(root: Path) -> str:
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix()
         parts = Path(relative).parts
-        if (parts and parts[0] == ".git") or relative == ".lease.json":
+        if (
+            (parts and parts[0] == ".git")
+            or "__pycache__" in parts
+            or path.suffix in {".pyc", ".pyo"}
+            or relative == ".lease.json"
+        ):
             continue
         if path.is_symlink():
             raise ReleaseAdapterError("release source contains a symlink")
@@ -354,7 +359,12 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 continue
             path = self._candidate_path(raw)
             root = path.parts[0]
-            if root in {"artifacts", "release-artifacts"} or raw == ".lease.json":
+            if (
+                root in {"artifacts", "release-artifacts"}
+                or "__pycache__" in path.parts
+                or path.suffix in {".pyc", ".pyo"}
+                or raw == ".lease.json"
+            ):
                 continue
             if (
                 root in _PROTECTED_CANDIDATE_ROOTS
