@@ -6,6 +6,7 @@ set -euo pipefail
 
 STATE_DIR="/var/lib/hermes-factory"
 ETC_DIR="/etc/hermes-factory"
+PRODUCTS_DIR="/opt/hermes-factory-products"
 PILOT_DATA_DIR="${PILOT_DATA_DIR:-/var/lib/docker/volumes/pilot_pilot-data/_data}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -22,6 +23,9 @@ BACKUP_PATHS=(
 )
 if [ -d "$PILOT_DATA_DIR" ]; then
   BACKUP_PATHS+=("$PILOT_DATA_DIR")
+fi
+if [ -d "$PRODUCTS_DIR" ]; then
+  BACKUP_PATHS+=("$PRODUCTS_DIR")
 fi
 
 restic backup "${BACKUP_PATHS[@]}" \

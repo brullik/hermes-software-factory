@@ -30,6 +30,7 @@ CONFIG_PATH = Path("/etc/hermes-factory/config.yaml")
 _SHA = re.compile(r"^[a-f0-9]{40}$")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_PRODUCT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -68,7 +69,7 @@ def _config() -> dict[str, Any]:
     return data
 
 
-def _allowed_repository(data: dict[str, Any]) -> str:
+def _factory_repository(data: dict[str, Any]) -> str:
     github = data.get("github", {})
     if not isinstance(github, dict):
         raise SubmitError("GitHub configuration is invalid")
@@ -78,7 +79,22 @@ def _allowed_repository(data: dict[str, Any]) -> str:
     return repository
 
 
-def _install_root(data: dict[str, Any]) -> Path:
+def _configured_owner(data: dict[str, Any]) -> str:
+    repository = _factory_repository(data)
+    return repository.split("/", 1)[0]
+
+
+def _install_root(data: dict[str, Any], repository: str, product_id: str) -> Path:
+    if repository != _factory_repository(data):
+        if repository.split("/", 1)[0] != _configured_owner(data):
+            raise SubmitError("product repository owner is not allowlisted")
+        if not _PRODUCT_ID.fullmatch(product_id):
+            raise SubmitError("external product id is invalid")
+        products_root = Path("/opt/hermes-factory-products").resolve()
+        install_root = (products_root / product_id).resolve()
+        if install_root.parent != products_root:
+            raise SubmitError("external product install root escaped its boundary")
+        return install_root
     deployment = data.get("deployment", {})
     target = deployment.get("production_target", {}) if isinstance(deployment, dict) else {}
     configured = target.get("install_root") if isinstance(target, dict) else None
@@ -86,6 +102,63 @@ def _install_root(data: dict[str, Any]) -> Path:
     if install_root != Path("/opt/hermes-factory"):
         raise SubmitError("only the configured Hermes install root is permitted")
     return install_root
+
+
+def _write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
+    content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        if path.read_text(encoding="utf-8") != content:
+            raise SubmitError(f"immutable metadata conflict: {path.name}") from None
+
+
+def _bind_external_product(install_root: Path, product_id: str, repository: str) -> None:
+    install_root.mkdir(parents=True, exist_ok=True)
+    _write_json_exclusive(
+        install_root / "product-binding.json",
+        {
+            "product_id": product_id,
+            "repository": repository,
+        },
+    )
+
+
+def _promote_external_product(
+    *,
+    source: Path,
+    install_root: Path,
+    product_id: str,
+    repository: str,
+    release_id: str,
+    staging_digest: str,
+) -> None:
+    from factory.deployment import TransactionalDeployer
+    from factory.release_executor import _release_digest
+
+    _bind_external_product(install_root, product_id, repository)
+    _run(["systemctl", "start", "hermes-factory-backup.service"])
+    transaction = TransactionalDeployer(
+        install_root,
+        health_probe=lambda current: _release_digest(current) == staging_digest,
+    ).promote(release_id, source)
+    if transaction.status != "PROMOTED":
+        raise SubmitError(f"external product transaction did not promote: {transaction.status}")
+    _write_json_exclusive(
+        Path("/var/lib/hermes-factory/evidence")
+        / f"product-release-{product_id}-{release_id[:12]}.json",
+        {
+            "product_id": product_id,
+            "repository": repository,
+            "release_id": release_id,
+            "image_digest": staging_digest,
+            "transaction": transaction.__dict__,
+        },
+    )
 
 
 def _extract_archive(archive: bytes, destination: Path) -> None:
@@ -134,6 +207,7 @@ def _fetch_source(repository: str, release_id: str, destination: Path) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--product-id", default="")
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--staging-digest", required=True)
     return parser
@@ -152,12 +226,8 @@ def main(argv: list[str] | None = None) -> int:
         if not _DIGEST.fullmatch(args.staging_digest):
             raise SubmitError("staging digest is invalid")
         data = _config()
-        if args.repository != _allowed_repository(data):
-            raise SubmitError("repository is not allowlisted")
-        install_root = _install_root(data)
-        trusted_entrypoint = ROOT / "scripts" / "deploy" / "promote-release.py"
-        if not trusted_entrypoint.is_file() or trusted_entrypoint.is_symlink():
-            raise SubmitError("trusted release entrypoint is missing")
+        install_root = _install_root(data, args.repository, args.product_id)
+        factory_repository = _factory_repository(data)
         with tempfile.TemporaryDirectory(prefix="hermes-release-submit-", dir="/var/tmp") as directory:
             staging = Path(directory)
             _fetch_source(args.repository, args.release_id, staging)
@@ -166,27 +236,40 @@ def main(argv: list[str] | None = None) -> int:
             source = staging / "source"
             if _release_digest(source) != args.staging_digest:
                 raise SubmitError("immutable source does not match accepted staging digest")
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(trusted_entrypoint),
-                    "--release-id",
-                    args.release_id,
-                    "--source",
-                    str(source),
-                    "--install-root",
-                    str(install_root),
-                    "--health-url",
-                    "http://127.0.0.1:8787/healthz",
-                ],
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=900,
-            )
-            if result.returncode != 0:
-                raise SubmitError("trusted release entrypoint failed")
+            if args.repository == factory_repository:
+                trusted_entrypoint = ROOT / "scripts" / "deploy" / "promote-release.py"
+                if not trusted_entrypoint.is_file() or trusted_entrypoint.is_symlink():
+                    raise SubmitError("trusted release entrypoint is missing")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(trusted_entrypoint),
+                        "--release-id",
+                        args.release_id,
+                        "--source",
+                        str(source),
+                        "--install-root",
+                        str(install_root),
+                        "--health-url",
+                        "http://127.0.0.1:8787/healthz",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=900,
+                )
+                if result.returncode != 0:
+                    raise SubmitError("trusted release entrypoint failed")
+            else:
+                _promote_external_product(
+                    source=source,
+                    install_root=install_root,
+                    product_id=args.product_id,
+                    repository=args.repository,
+                    release_id=args.release_id,
+                    staging_digest=args.staging_digest,
+                )
         print(json.dumps({"status": "PROMOTED", "release_id": args.release_id}))
         return 0
     except (OSError, SubmitError, ValueError, yaml.YAMLError) as error:

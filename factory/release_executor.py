@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
+import tomllib
 from collections.abc import Callable, Mapping
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from .config import FactoryConfig
@@ -29,6 +34,12 @@ from .release import ReleaseExecutor
 _SHA = re.compile(r"^[a-f0-9]{40}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
+_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_HTTPS_REMOTE = re.compile(
+    r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?$"
+)
+_PROTECTED_CANDIDATE_ROOTS = {".git", "artifacts", "release-artifacts", "secrets", "production"}
+_PROTECTED_CANDIDATE_PATHS = {".gitmodules"}
 
 
 class ReleaseAdapterError(RuntimeError):
@@ -36,9 +47,12 @@ class ReleaseAdapterError(RuntimeError):
 
 
 CommandRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
+AssuranceRunner = Callable[[Path, str], Mapping[str, Mapping[str, Any]]]
 
 
 class ReleaseGitHub(Protocol):
+    def create_pull_request(self, *, head: str, base: str, title: str, body: str) -> Any: ...
+
     def pull_request_for_head_sha(self, expected_sha: str) -> str: ...
 
     def verify_pull_request(
@@ -64,6 +78,17 @@ class ReleaseGitHub(Protocol):
     def merged_commit(self, pull_request: str) -> str: ...
 
 
+@dataclass(frozen=True)
+class PublishedCandidate:
+    repository: str
+    candidate_sha: str
+    branch: str
+    base_branch: str
+    pull_request: str
+    source: Path
+    temporary: tempfile.TemporaryDirectory[str]
+
+
 def _default_command_runner(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False, timeout=120)
 
@@ -77,7 +102,8 @@ def _release_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix()
-        if relative == ".lease.json":
+        parts = Path(relative).parts
+        if (parts and parts[0] == ".git") or relative == ".lease.json":
             continue
         if path.is_symlink():
             raise ReleaseAdapterError("release source contains a symlink")
@@ -100,31 +126,137 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         config: FactoryConfig,
         *,
         github: ReleaseGitHub | None = None,
+        github_factory: Callable[[str, str], ReleaseGitHub] | None = None,
         command_runner: CommandRunner | None = None,
+        assurance_runner: AssuranceRunner | None = None,
     ) -> None:
         self.config = config
         github_config = config.raw.get("github", {})
         deployment_config = config.raw.get("deployment", {})
         governance = github_config.get("governance", {})
-        self.repository = f"{github_config.get('owner', '')}/{github_config.get('factory_repository', '')}"
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository):
+        self.owner = str(github_config.get("owner", ""))
+        self.repository = f"{self.owner}/{github_config.get('factory_repository', '')}"
+        if not _REPOSITORY.fullmatch(self.repository):
             raise ValueError("GitHub release repository is not safely configured")
-        self.github = github or GitHubAdapter(
-            str(github_config["owner"]),
-            str(github_config["factory_repository"]),
-            single_owner_mode=(
-                str(governance.get("mode", "")) == "single_owner"
-                and bool(governance.get("owner_override_enabled", False))
-            ),
+        self.single_owner_mode = (
+            str(governance.get("mode", "")) == "single_owner"
+            and bool(governance.get("owner_override_enabled", False))
         )
+        self.github = github or GitHubAdapter(
+            self.owner,
+            str(github_config["factory_repository"]),
+            single_owner_mode=self.single_owner_mode,
+        )
+        self.github_factory = github_factory
         configured_staging = deployment_config.get("staging_root")
         self.staging_root = Path(str(configured_staging)) if configured_staging else config.state_dir / "staging"
         self.production_helper = str(deployment_config.get("production_helper", "")).strip()
         self.command_runner = command_runner or _default_command_runner
+        self.assurance_runner = assurance_runner or self._default_assurance_runner
         self.required_checks = tuple(str(item) for item in governance.get("required_checks", []) if str(item).strip())
         self.owner_override_enabled = bool(governance.get("owner_override_enabled", False))
         self.owner_override_reason = str(governance.get("owner_override_reason", "")).strip()
         self.owner_override_reason_required = bool(governance.get("owner_override_reason_required", False))
+        self.external_required_checks = tuple(
+            str(item)
+            for item in governance.get("external_required_checks", [])
+            if str(item).strip()
+        )
+
+    def _github_for_repository(self, repository: str) -> ReleaseGitHub:
+        if repository == self.repository:
+            return self.github
+        owner, name = repository.split("/", 1)
+        if owner != self.owner:
+            raise ExternalBlocker("product repository is outside the configured GitHub owner")
+        if self.github_factory is not None:
+            return self.github_factory(owner, name)
+        return GitHubAdapter(owner, name, single_owner_mode=self.single_owner_mode)
+
+    @staticmethod
+    def _default_assurance_runner(
+        workspace: Path,
+        candidate_sha: str,
+    ) -> Mapping[str, Mapping[str, Any]]:
+        from scripts.quality_gate import load_catalog, run_gate
+
+        catalog_path = Path(__file__).resolve().parents[1] / "config" / "quality-gates.yaml"
+        catalog = load_catalog(catalog_path)
+        gates = catalog.get("gates", [])
+        if not isinstance(gates, list):
+            raise ReleaseAdapterError("target assurance catalog is invalid")
+        target_python = workspace.parent / "venv" / "bin" / "python"
+        if not target_python.is_file():
+            windows_python = workspace.parent / "venv" / "Scripts" / "python.exe"
+            target_python = windows_python if windows_python.is_file() else target_python
+        if not target_python.is_file():
+            raise ExternalBlocker("target virtual environment is unavailable for release assurance")
+        required = (
+            "target-secret-scan",
+            "target-sast",
+            "target-dependency-audit",
+            "target-license-check",
+        )
+        results: dict[str, Mapping[str, Any]] = {}
+        for gate_id in required:
+            gate = next(
+                (
+                    item
+                    for item in gates
+                    if isinstance(item, dict) and str(item.get("id", "")) == gate_id
+                ),
+                None,
+            )
+            if gate is None:
+                raise ReleaseAdapterError(f"mandatory target assurance gate is missing: {gate_id}")
+            results[gate_id] = run_gate(
+                gate,
+                workspace,
+                candidate_sha,
+                python_executable=str(target_python),
+            )
+        return results
+
+    def _run_release_assurance(
+        self,
+        product_id: str,
+        workspace: Path,
+        candidate_sha: str,
+    ) -> str:
+        results = dict(self.assurance_runner(workspace, candidate_sha))
+        required = {
+            "target-secret-scan",
+            "target-sast",
+            "target-dependency-audit",
+            "target-license-check",
+        }
+        if set(results) != required:
+            raise ExternalBlocker("release assurance did not return every mandatory target gate")
+        path = self.config.evidence_dir / f"release-assurance-{product_id}-{candidate_sha[:12]}.json"
+        payload = {
+            "schema_version": "1.0",
+            "product_id": product_id,
+            "subject_sha": candidate_sha,
+            "gates": results,
+        }
+        content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        self.config.evidence_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError:
+            if path.read_text(encoding="utf-8") != content:
+                raise ReleaseAdapterError("release assurance evidence conflict")
+        failed = sorted(
+            gate_id
+            for gate_id, result in results.items()
+            if str(result.get("status", "")) != "PASS"
+        )
+        if failed:
+            raise ExternalBlocker("mandatory release assurance failed: " + ", ".join(failed))
+        return f"evidence/{path.name}"
 
     @staticmethod
     def _safe_product_id(value: str) -> str:
@@ -133,14 +265,253 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         return value
 
     @staticmethod
-    def _version(source: Path) -> str:
+    def _version(source: Path, candidate_sha: str) -> str:
         version_path = source / "VERSION"
-        if not version_path.is_file():
-            raise ReleaseAdapterError("release VERSION file is missing")
-        version = version_path.read_text(encoding="utf-8").strip()
+        version = version_path.read_text(encoding="utf-8").strip() if version_path.is_file() else ""
+        pyproject = source / "pyproject.toml"
+        if not version and pyproject.is_file():
+            try:
+                payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError) as error:
+                raise ReleaseAdapterError("release pyproject metadata is invalid") from error
+            project = payload.get("project", {})
+            if isinstance(project, Mapping):
+                configured = project.get("version")
+                if isinstance(configured, str):
+                    version = configured.strip()
+        if not version:
+            version = candidate_sha[:12]
         if not version or len(version) > 120 or any(char in version for char in "\r\n"):
             raise ReleaseAdapterError("release VERSION is invalid")
         return version
+
+    def _command(
+        self,
+        argv: list[str],
+        cwd: Path,
+        *,
+        allowed_returncodes: tuple[int, ...] = (0,),
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            result = self.command_runner(argv, cwd)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ReleaseAdapterError(f"allowlisted command unavailable: {argv[0]}") from error
+        if result.returncode not in allowed_returncodes:
+            raise ReleaseAdapterError(f"allowlisted command failed: {argv[0]}")
+        return result
+
+    def _repository_for_workspace(self, workspace: Path) -> str:
+        result = self._command(["git", "remote", "get-url", "origin"], workspace)
+        remote = result.stdout.strip()
+        match = _HTTPS_REMOTE.fullmatch(remote)
+        if match is None:
+            raise ExternalBlocker("workspace origin must be an HTTPS GitHub repository")
+        owner = match.group("owner")
+        repository = match.group("repository")
+        if owner != self.owner:
+            raise ExternalBlocker("workspace repository is outside the configured GitHub owner")
+        slug = f"{owner}/{repository}"
+        if not _REPOSITORY.fullmatch(slug):
+            raise ReleaseAdapterError("derived workspace repository is invalid")
+        return slug
+
+    def _default_branch(self, workspace: Path) -> str:
+        symbolic = self._command(
+            ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+            workspace,
+            allowed_returncodes=(0, 1),
+        )
+        if symbolic.returncode == 0:
+            value = symbolic.stdout.strip()
+            if value.startswith("origin/"):
+                branch = value.removeprefix("origin/")
+                if re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+                    return branch
+        main = self._command(
+            ["git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+            workspace,
+            allowed_returncodes=(0, 1),
+        )
+        if main.returncode == 0:
+            return "main"
+        raise ExternalBlocker("workspace default branch cannot be derived safely")
+
+    @staticmethod
+    def _candidate_path(value: str) -> PurePosixPath:
+        path = PurePosixPath(value)
+        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            raise ReleaseAdapterError("Git candidate path is unsafe")
+        return path
+
+    def _candidate_paths(self, workspace: Path) -> list[str]:
+        result = self._command(
+            ["git", "ls-files", "--modified", "--deleted", "--others", "--exclude-standard", "-z"],
+            workspace,
+        )
+        selected: list[str] = []
+        for raw in result.stdout.split("\0"):
+            if not raw:
+                continue
+            path = self._candidate_path(raw)
+            root = path.parts[0]
+            if root in {"artifacts", "release-artifacts"} or raw == ".lease.json":
+                continue
+            if (
+                root in _PROTECTED_CANDIDATE_ROOTS
+                or raw in _PROTECTED_CANDIDATE_PATHS
+                or path.parts[:2] == (".github", "workflows")
+                or root.startswith(".env")
+            ):
+                raise ExternalBlocker(f"candidate contains a protected path: {raw}")
+            local = workspace.joinpath(*path.parts)
+            if local.exists():
+                if local.is_symlink() or not local.is_file():
+                    raise ReleaseAdapterError(f"candidate path is not a regular file: {raw}")
+                if local.stat().st_size > 10 * 1024 * 1024:
+                    raise ExternalBlocker(f"candidate file exceeds the 10 MiB boundary: {raw}")
+            selected.append(raw)
+        selected = sorted(set(selected))
+        if len(selected) > 500:
+            raise ExternalBlocker("candidate contains more than 500 changed files")
+        return selected
+
+    @staticmethod
+    def _extract_git_archive(archive: Path, destination: Path) -> None:
+        destination.mkdir()
+        with tarfile.open(archive, mode="r:") as handle:
+            members = handle.getmembers()
+            for member in members:
+                relative = PurePosixPath(member.name)
+                if (
+                    relative.is_absolute()
+                    or not relative.parts
+                    or any(part in {"", ".", ".."} for part in relative.parts)
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isdir() or member.isfile())
+                ):
+                    raise ReleaseAdapterError("Git archive contains an unsafe entry")
+            for member in members:
+                relative = PurePosixPath(member.name)
+                target = destination.joinpath(*relative.parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = handle.extractfile(member)
+                if source is None:
+                    raise ReleaseAdapterError("Git archive file could not be read")
+                with target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                os.chmod(target, stat.S_IMODE(member.mode))
+
+    def _candidate_source(
+        self,
+        workspace: Path,
+        candidate_sha: str,
+    ) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
+        temporary = tempfile.TemporaryDirectory(prefix="candidate-source-", dir=self.config.state_dir)
+        parent = Path(temporary.name)
+        archive = parent / "candidate.tar"
+        source = parent / "source"
+        try:
+            self._command(
+                ["git", "archive", "--format=tar", f"--output={archive}", candidate_sha],
+                workspace,
+            )
+            self._extract_git_archive(archive, source)
+        except Exception:
+            temporary.cleanup()
+            raise
+        return source, temporary
+
+    def _publish_candidate(
+        self,
+        *,
+        product_id: str,
+        repository: str,
+        workspace: Path,
+        github: ReleaseGitHub,
+    ) -> PublishedCandidate:
+        base_branch = self._default_branch(workspace)
+        self._command(["git", "reset", "--quiet", "HEAD", "--"], workspace)
+        changed_paths = self._candidate_paths(workspace)
+        if changed_paths:
+            self._command(["git", "add", "--all", "--", *changed_paths], workspace)
+        changed = self._command(
+            ["git", "diff", "--cached", "--quiet"],
+            workspace,
+            allowed_returncodes=(0, 1),
+        ).returncode == 1
+        if changed:
+            tree_sha = self._command(["git", "write-tree"], workspace).stdout.strip()
+            if not _SHA.fullmatch(tree_sha):
+                raise ReleaseAdapterError("Git candidate tree is invalid")
+            branch = f"codex/hermes-{product_id[-20:].lower()}-{tree_sha[:12]}"
+            existing = self._command(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                workspace,
+                allowed_returncodes=(0, 1),
+            )
+            if existing.returncode == 0:
+                existing_tree = self._command(["git", "rev-parse", f"{branch}^{{tree}}"], workspace).stdout.strip()
+                if existing_tree != tree_sha:
+                    raise ReleaseAdapterError("existing candidate branch has a different tree")
+                self._command(["git", "switch", branch], workspace)
+            else:
+                self._command(["git", "switch", "-c", branch], workspace)
+                self._command(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Hermes Software Factory",
+                        "-c",
+                        "user.email=hermes-factory@users.noreply.github.com",
+                        "commit",
+                        "--no-gpg-sign",
+                        "-m",
+                        f"Hermes candidate for {product_id}",
+                    ],
+                    workspace,
+                )
+        else:
+            branch = self._command(["git", "branch", "--show-current"], workspace).stdout.strip()
+            if not branch or branch == base_branch:
+                raise ExternalBlocker("workspace has no unpublished candidate changes")
+        candidate_sha = self._command(["git", "rev-parse", "HEAD"], workspace).stdout.strip()
+        if not _SHA.fullmatch(candidate_sha):
+            raise ReleaseAdapterError("published candidate SHA is invalid")
+        self._command(
+            ["git", "push", "--set-upstream", "origin", f"{candidate_sha}:refs/heads/{branch}"],
+            workspace,
+        )
+        try:
+            pull_request = github.pull_request_for_head_sha(candidate_sha)
+        except GitHubCommandError:
+            visible_paths = changed_paths[:50]
+            path_summary = "\n".join(f"- `{path}`" for path in visible_paths) or "- existing committed candidate"
+            github.create_pull_request(
+                head=branch,
+                base=base_branch,
+                title=f"[Hermes] Candidate for {product_id}",
+                body=(
+                    "Controller-owned release candidate produced after mandatory pipeline gates.\n\n"
+                    f"Candidate SHA: `{candidate_sha}`\n\n"
+                    "Included source changes:\n"
+                    f"{path_summary}"
+                ),
+            )
+            pull_request = github.pull_request_for_head_sha(candidate_sha)
+        source, temporary = self._candidate_source(workspace, candidate_sha)
+        return PublishedCandidate(
+            repository=repository,
+            candidate_sha=candidate_sha,
+            branch=branch,
+            base_branch=base_branch,
+            pull_request=pull_request,
+            source=source,
+            temporary=temporary,
+        )
 
     @staticmethod
     def _health_probe(current: Path) -> bool:
@@ -178,7 +549,8 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         return source, temporary
 
     def _write_audit(self, product_id: str, candidate_sha: str, payload: Mapping[str, Any]) -> str:
-        path = self.config.evidence_dir / f"release-adapter-{product_id}-{candidate_sha[:12]}.json"
+        stage = str(payload.get("stage", "unknown"))
+        path = self.config.evidence_dir / f"release-adapter-{stage}-{product_id}-{candidate_sha[:12]}.json"
         content = json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         self.config.evidence_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -190,27 +562,88 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 raise ReleaseAdapterError("release adapter audit conflict")
         return f"evidence/{path.name}"
 
-    def _stage(self, product_id: str, candidate_sha: str, workspace: Path) -> tuple[str, TransactionResult, str]:
+    def _stage(
+        self,
+        product_id: str,
+        candidate_sha: str,
+        source: Path,
+        repository: str,
+    ) -> tuple[str, TransactionResult, str]:
         staging_root = (self.staging_root / product_id).resolve()
         if staging_root.parent != self.staging_root.resolve():
             raise ReleaseAdapterError("staging path escaped configured root")
         staging_root.mkdir(parents=True, exist_ok=True)
-        digest = _release_digest(workspace)
+        digest = _release_digest(source)
         current = staging_root / "current"
         if current.is_dir() and _release_digest(current) == digest:
             transaction = TransactionResult(candidate_sha, "PROMOTED", str(current), None, None, "already promoted")
         else:
-            source, temporary = self._filtered_source(workspace, self.config.state_dir)
-            try:
-                transaction = TransactionalDeployer(
-                    staging_root,
-                    health_probe=self._health_probe,
-                ).promote(candidate_sha, source)
-            finally:
-                temporary.cleanup()
+            health_probe = (
+                self._health_probe
+                if repository == self.repository
+                else lambda promoted: _release_digest(promoted) == digest
+            )
+            transaction = TransactionalDeployer(
+                staging_root,
+                health_probe=health_probe,
+            ).promote(candidate_sha, source)
             if transaction.status != "PROMOTED":
                 raise ReleaseAdapterError(f"staging transaction did not promote: {transaction.status}")
-        return digest, transaction, self._version(workspace)
+        return digest, transaction, self._version(source, candidate_sha)
+
+    def _staging_record_path(self, product_id: str) -> Path:
+        staging_root = (self.staging_root / product_id).resolve()
+        if staging_root.parent != self.staging_root.resolve():
+            raise ReleaseAdapterError("staging record path escaped configured root")
+        return staging_root / "release.json"
+
+    def _write_staging_record(self, product_id: str, payload: Mapping[str, Any]) -> None:
+        path = self._staging_record_path(product_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".json.tmp")
+        content = json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+
+    def _load_staging_record(self, product_id: str) -> dict[str, str]:
+        path = self._staging_record_path(product_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ExternalBlocker("trusted staging release record is unavailable") from error
+        if not isinstance(payload, dict):
+            raise ExternalBlocker("trusted staging release record is invalid")
+        record = {key: str(payload.get(key, "")) for key in ("repository", "candidate_sha", "pull_request", "image_digest", "version")}
+        if (
+            not _REPOSITORY.fullmatch(record["repository"])
+            or not _SHA.fullmatch(record["candidate_sha"])
+            or not record["pull_request"].isdigit()
+            or not _DIGEST.fullmatch(record["image_digest"])
+            or not record["version"]
+        ):
+            raise ExternalBlocker("trusted staging release record is incomplete")
+        current = path.parent / "current"
+        if not current.is_dir() or _release_digest(current) != record["image_digest"]:
+            raise ExternalBlocker("staging content does not match its accepted release record")
+        return record
+
+    @staticmethod
+    def _authoritative_result(
+        proposed: Mapping[str, Any],
+        product_id: str,
+        fields: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        envelope = {
+            key: proposed[key]
+            for key in ("schema_version", "artifact_id", "created_at", "producer", "policy_digest")
+            if key in proposed
+        }
+        envelope["product_id"] = product_id
+        envelope.update(fields)
+        return envelope
 
     def _production_policy(self, *, risk: str, image_digest: str, staging_digest: str | None) -> None:
         decision = DeploymentGuard().promote(
@@ -225,15 +658,22 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         if decision.status != "READY":
             raise ExternalBlocker("production deployment policy did not return READY")
 
-    def _validate_production_helper(self) -> Path:
+    def _validate_production_helper(self) -> PurePosixPath:
         if not self.production_helper:
             raise ExternalBlocker("production release helper is not configured")
-        helper = Path(self.production_helper)
+        helper = PurePosixPath(self.production_helper)
         if not helper.is_absolute() or not helper.name.startswith("hermes-factory-"):
             raise ValueError("production release helper must be an absolute hermes-factory command")
         return helper
 
-    def _run_production_helper(self, *, repository: str, release_id: str, staging_digest: str) -> None:
+    def _run_production_helper(
+        self,
+        *,
+        repository: str,
+        product_id: str,
+        release_id: str,
+        staging_digest: str,
+    ) -> None:
         helper = self._validate_production_helper()
         sudo = shutil.which("sudo") or "/usr/bin/sudo"
         result = self.command_runner(
@@ -243,6 +683,8 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 str(helper),
                 "--repository",
                 repository,
+                "--product-id",
+                product_id,
                 "--release-id",
                 release_id,
                 "--staging-digest",
@@ -266,78 +708,121 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         if stage not in {"staging", "production"}:
             raise ValueError("release stage must be staging or production")
         product_id = self._safe_product_id(product_id)
-        if str(proposed.get("repository", "")) != self.repository:
-            raise ExternalBlocker("release proposal repository is not the configured repository")
-        candidate_sha = str(proposed.get("candidate_sha", ""))
-        if not _SHA.fullmatch(candidate_sha):
-            raise ValueError("release proposal candidate SHA is invalid")
-        try:
-            pull_request = self.github.pull_request_for_head_sha(candidate_sha)
-        except GitHubCommandError as error:
-            raise ExternalBlocker(str(error)) from error
+        repository = self._repository_for_workspace(workspace)
+        github = self._github_for_repository(repository)
 
         if stage == "staging":
-            digest, transaction, version = self._stage(product_id, candidate_sha, workspace)
-            evidence_ref = self._write_audit(
+            try:
+                candidate = self._publish_candidate(
+                    product_id=product_id,
+                    repository=repository,
+                    workspace=workspace,
+                    github=github,
+                )
+            except GitHubCommandError as error:
+                raise ExternalBlocker(str(error)) from error
+            try:
+                assurance_ref = self._run_release_assurance(
+                    product_id,
+                    workspace,
+                    candidate.candidate_sha,
+                )
+                digest, transaction, version = self._stage(
+                    product_id,
+                    candidate.candidate_sha,
+                    candidate.source,
+                    repository,
+                )
+                self._write_staging_record(
+                    product_id,
+                    {
+                        "repository": repository,
+                        "candidate_sha": candidate.candidate_sha,
+                        "pull_request": candidate.pull_request,
+                        "image_digest": digest,
+                        "version": version,
+                    },
+                )
+                evidence_ref = self._write_audit(
+                    product_id,
+                    candidate.candidate_sha,
+                    {
+                        "stage": stage,
+                        "repository": repository,
+                        "pull_request": candidate.pull_request,
+                        "candidate_sha": candidate.candidate_sha,
+                        "branch": candidate.branch,
+                        "base_branch": candidate.base_branch,
+                        "image_digest": digest,
+                        "transaction": transaction.__dict__,
+                    },
+                )
+            finally:
+                candidate.temporary.cleanup()
+            return self._authoritative_result(
+                proposed,
                 product_id,
-                candidate_sha,
                 {
-                    "stage": stage,
-                    "repository": self.repository,
-                    "pull_request": pull_request,
-                    "candidate_sha": candidate_sha,
-                    "image_digest": digest,
-                    "transaction": transaction.__dict__,
+                    "status": "completed",
+                    "repository": repository,
+                    "candidate_sha": candidate.candidate_sha,
+                    "merge": {"performed": False, "merge_sha": None},
+                    "release": {"version": version, "image_digest": digest},
+                    "staging": "deployed",
+                    "production": "not_started",
+                    "rollback": "not_tested",
+                    "summary": (
+                        "Adapter published a controller-owned immutable PR candidate "
+                        "and promoted its Git archive to local staging."
+                    ),
+                    "findings": [],
+                    "evidence_refs": [assurance_ref, evidence_ref],
                 },
             )
-            return {
-                "status": "completed",
-                "repository": self.repository,
-                "candidate_sha": candidate_sha,
-                "merge": {"performed": False, "merge_sha": None},
-                "release": {"version": version, "image_digest": digest},
-                "staging": "deployed",
-                "production": "not_started",
-                "rollback": "not_tested",
-                "summary": "Adapter verified the immutable open PR and promoted the candidate to local staging.",
-                "findings": [],
-                "evidence_refs": [evidence_ref],
-            }
 
+        record = self._load_staging_record(product_id)
+        if repository != record["repository"]:
+            raise ExternalBlocker("production workspace repository differs from accepted staging")
+        candidate_sha = record["candidate_sha"]
+        pull_request = record["pull_request"]
         if expected_staging_digest is None or not _DIGEST.fullmatch(expected_staging_digest):
             raise ExternalBlocker("accepted staging digest is missing")
-        digest = _release_digest(workspace)
-        if digest != expected_staging_digest:
-            raise ExternalBlocker("workspace does not match the accepted staging digest")
+        if record["image_digest"] != expected_staging_digest:
+            raise ExternalBlocker("accepted staging digest differs from the trusted staging record")
         self._production_policy(
             risk=str(task_contract.get("risk_tier", "medium")),
             image_digest=expected_staging_digest,
             staging_digest=expected_staging_digest,
         )
-        if not self.required_checks:
+        required_checks = self.required_checks if repository == self.repository else self.external_required_checks
+        if repository == self.repository and not required_checks:
             raise ExternalBlocker("required GitHub checks are not configured")
         owner_override = self.owner_override_enabled
         if owner_override and self.owner_override_reason_required and not self.owner_override_reason:
             raise ExternalBlocker("owner override reason is not configured")
         self._validate_production_helper()
         try:
-            self.github.verify_pull_request(
+            derived_pull_request = github.pull_request_for_head_sha(candidate_sha)
+            if derived_pull_request != pull_request:
+                raise GitHubCommandError("accepted staging pull request no longer matches its candidate")
+            github.verify_pull_request(
                 pull_request,
                 expected_sha=candidate_sha,
-                required_checks=self.required_checks,
+                required_checks=required_checks,
                 owner_override=owner_override,
                 owner_override_reason=self.owner_override_reason if owner_override else None,
             )
-            self.github.merge_pull_request_checked(
+            github.merge_pull_request_checked(
                 pull_request,
                 expected_sha=candidate_sha,
-                required_checks=self.required_checks,
+                required_checks=required_checks,
                 owner_override=owner_override,
                 owner_override_reason=self.owner_override_reason if owner_override else None,
             )
-            merge_sha = self.github.merged_commit(pull_request)
+            merge_sha = github.merged_commit(pull_request)
             self._run_production_helper(
-                repository=self.repository,
+                repository=repository,
+                product_id=product_id,
                 release_id=merge_sha,
                 staging_digest=expected_staging_digest,
             )
@@ -348,7 +833,7 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             merge_sha,
             {
                 "stage": stage,
-                "repository": self.repository,
+                "repository": repository,
                 "pull_request": pull_request,
                 "candidate_sha": candidate_sha,
                 "merge_sha": merge_sha,
@@ -356,19 +841,23 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 "approval_mode": "owner_override" if owner_override else "independent",
             },
         )
-        return {
-            "status": "completed",
-            "repository": self.repository,
-            "candidate_sha": merge_sha,
-            "merge": {"performed": True, "merge_sha": merge_sha},
-            "release": {"version": self._version(workspace), "image_digest": expected_staging_digest},
-            "staging": "deployed",
-            "production": "deployed",
-            "rollback": "not_needed",
-            "summary": "Adapter verified, merged, and promoted the accepted immutable release.",
-            "findings": [],
-            "evidence_refs": [evidence_ref],
-        }
+        return self._authoritative_result(
+            proposed,
+            product_id,
+            {
+                "status": "completed",
+                "repository": repository,
+                "candidate_sha": merge_sha,
+                "merge": {"performed": True, "merge_sha": merge_sha},
+                "release": {"version": record["version"], "image_digest": expected_staging_digest},
+                "staging": "deployed",
+                "production": "deployed",
+                "rollback": "not_needed",
+                "summary": "Adapter verified, merged, and promoted the accepted immutable release.",
+                "findings": [],
+                "evidence_refs": [evidence_ref],
+            },
+        )
 
 
 def build_release_executor(config: FactoryConfig) -> ConfiguredReleaseExecutor:
