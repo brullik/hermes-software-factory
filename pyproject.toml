@@ -9,6 +9,8 @@ description = "Reference policy, schema and validation utilities for Hermes Soft
 requires-python = ">=3.12"
 dependencies = [
   "jsonschema>=4.23,<5",
+  "packaging>=24,<27",
+  "pip-audit>=2.10,<3",
   "PyYAML>=6.0,<7",
 ]
 

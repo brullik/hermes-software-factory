@@ -48,7 +48,15 @@ class PipelineTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(tester["quality_gates"], builder["quality_gates"])
-            self.assertEqual(security["quality_gates"], ["target-secret-scan"])
+            self.assertEqual(
+                security["quality_gates"],
+                [
+                    "target-sast",
+                    "target-dependency-audit",
+                    "target-license-check",
+                    "target-secret-scan",
+                ],
+            )
             self.assertEqual(builder["conflict_keys"], tester["conflict_keys"])
             self.assertEqual(tester["conflict_keys"], security["conflict_keys"])
             state.close()

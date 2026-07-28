@@ -936,9 +936,9 @@ class AgentWorker:
             + ("\n".join(inventory) if inventory else "(none)")
             + "\npreflight_gates:"
             + json.dumps(gate_summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            + "\nscan_applicability: SAST, dependency/license, container, and DAST scans are "
-            "NOT_RUN unless named in accepted upstream gate evidence or this Task Contract. "
-            "NOT_RUN is not PASS; determine applicability from the candidate and record any "
+            + "\nscan_applicability: gate statuses above are authoritative. Any security "
+            "assurance scan not named in accepted upstream gate evidence or this Task Contract "
+            "is NOT_RUN, not PASS. Determine applicability from the candidate and record any "
             "required follow-up. No secret values are included.\ncandidate_diff_or_content:"
             + "".join(excerpts)
             + ("\n[diff excerpt truncated; inspect the pinned workspace for full content]" if remaining <= 0 else "")

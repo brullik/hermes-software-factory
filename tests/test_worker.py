@@ -739,6 +739,7 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("source.py status=present", evidence["summary"])
             self.assertIn("+value = 2", evidence["summary"])
             self.assertIn('"status":"PASS"', evidence["summary"])
+            self.assertIn("gate statuses above are authoritative", evidence["summary"])
             self.assertIn(("source.py", "security review candidate changed from base"), candidates)
             self.assertNotIn(".lease.json", evidence["summary"])
             self.assertNotIn("artifacts/security-review.json", evidence["summary"])
