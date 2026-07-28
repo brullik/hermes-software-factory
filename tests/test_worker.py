@@ -636,6 +636,19 @@ class WorkerTests(unittest.TestCase):
                 cwd=Path.cwd(),
             )
 
+    def test_subprocess_runner_pins_tools_and_ignores_repository_rules(self) -> None:
+        selection = ModelSelection("openai-codex", "economy", "gpt-5.6-luna", "luna")
+        coding = SubprocessHermesRunner()
+        planning = SubprocessHermesRunner(toolsets=("vision",))
+
+        coding_argv = coding.build_argv(selection, "prompt", None)
+        planning_argv = planning.build_argv(selection, "prompt", None)
+
+        self.assertEqual(coding_argv[coding_argv.index("--toolsets") + 1], "file,terminal")
+        self.assertEqual(planning_argv[planning_argv.index("--toolsets") + 1], "vision")
+        self.assertIn("--ignore-rules", coding_argv)
+        self.assertIn("--ignore-rules", planning_argv)
+
 
 if __name__ == "__main__":
     unittest.main()
