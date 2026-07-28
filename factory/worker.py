@@ -523,6 +523,12 @@ class AgentWorker:
         else:
             evidence.extend(self._dependency_evidence(task))
         decisions = ["Use safe defaults for unspecified reversible product details."]
+        if prompt_role == "security-reviewer":
+            decisions.append(
+                "Controller gate evidence preserves mandatory status. A failed mandatory gate "
+                "blocks acceptance; a failed optional gate remains visible and advisory, and "
+                "must never be relabeled PASS."
+            )
         if prompt_role in _PLANNING_ROLES:
             decisions.append(
                 "This role produces a planning artifact. Do not run repository commands such as "
@@ -651,6 +657,55 @@ class AgentWorker:
             )
         return evidence
 
+    def _review_gate_results(
+        self,
+        attempt_artifact: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Resolve gate mandatory/subject provenance from immutable evidence."""
+
+        resolved: list[dict[str, Any]] = []
+        for raw in attempt_artifact.get("test_results", []):
+            if not isinstance(raw, Mapping):
+                continue
+            gate_id = str(raw.get("gate_id", ""))
+            status = str(raw.get("status", "NOT_RUN"))
+            ref = str(raw.get("evidence_ref") or "")
+            record: dict[str, Any] = {
+                "gate_id": gate_id,
+                "status": status,
+                "mandatory": True,
+                "evidence_ref": ref,
+            }
+            name = Path(ref).name
+            if name.startswith("gate-") and name.endswith(".json"):
+                path = (self.config.evidence_dir / name).resolve()
+                if path.parent != self.config.evidence_dir.resolve() or not path.is_file():
+                    raise ExternalBlocker(f"review gate evidence is missing for {gate_id}")
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                    raise ExternalBlocker(
+                        f"review gate evidence is unreadable for {gate_id}"
+                    ) from error
+                if not isinstance(payload, dict):
+                    raise ExternalBlocker(f"review gate evidence is invalid for {gate_id}")
+                self.schemas.validate("gate-evidence.schema.json", payload)
+                normalized = "PASS" if payload.get("status") == "PASS" else "FAIL"
+                if str(payload.get("gate_id")) != gate_id or normalized != status:
+                    raise ExternalBlocker(f"review gate evidence conflicts for {gate_id}")
+                record.update(
+                    {
+                        "mandatory": bool(payload["mandatory"]),
+                        "subject_sha": str(payload["subject_sha"]),
+                        "evidence_ref": f"evidence/{name}",
+                    }
+                )
+                if normalized != "PASS":
+                    summary, _ = redact_text(str(payload.get("summary", "")))
+                    record["summary"] = summary[:1000]
+            resolved.append(record)
+        return resolved
+
     def _completed_review_evidence(self, task: Mapping[str, Any]) -> list[dict[str, str]]:
         """Give reviewers bounded accepted architecture/build/test evidence.
 
@@ -681,7 +736,7 @@ class AgentWorker:
                 "role": role,
                 "subject_sha_before": attempt_artifact.get("subject_sha_before"),
                 "changed_files": attempt_artifact.get("changed_files", []),
-                "test_results": attempt_artifact.get("test_results", []),
+                "test_results": self._review_gate_results(attempt_artifact),
                 "accepted_output": result_payload,
             }
             compact = json.dumps(

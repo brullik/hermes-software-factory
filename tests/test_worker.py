@@ -745,6 +745,65 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(any("Context Pack subject_sha" in item for item in decisions))
             state.close()
 
+    def test_review_gate_evidence_preserves_optional_failure_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            gate_path = artifacts.write(
+                "gate-evidence.schema.json",
+                {
+                    "schema_version": "1.0",
+                    "gate_id": "target-lint",
+                    "status": "FAIL",
+                    "subject_sha": "a" * 64,
+                    "command_digest": "b" * 64,
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "finished_at": "2026-01-01T00:00:01Z",
+                    "exit_code": 1,
+                    "artifact_digest": "c" * 64,
+                    "summary": "Baseline lint finding outside the candidate slice.",
+                    "mandatory": False,
+                },
+                filename="gate-review-test-target-lint.json",
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            results = worker._review_gate_results(
+                {
+                    "test_results": [
+                        {
+                            "gate_id": "target-lint",
+                            "status": "FAIL",
+                            "evidence_ref": str(gate_path),
+                        }
+                    ]
+                }
+            )
+
+            self.assertEqual(
+                results,
+                [
+                    {
+                        "gate_id": "target-lint",
+                        "status": "FAIL",
+                        "mandatory": False,
+                        "subject_sha": "a" * 64,
+                        "evidence_ref": "evidence/gate-review-test-target-lint.json",
+                        "summary": "Baseline lint finding outside the candidate slice.",
+                    }
+                ],
+            )
+            state.close()
+
     def test_security_finding_hands_off_without_same_role_model_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
