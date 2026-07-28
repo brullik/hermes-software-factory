@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.3 - 2026-07-28
+
+- Worker продлевает durable task lease во время длительного model/release execution.
+- Потеря lease обнаруживается до terminal write, поэтому другой worker не получает параллельного исполнителя той же задачи.
+
 ## 2.0.2 - 2026-07-28
 
 - Repair task остаётся недоступной worker до атомарного прикрепления validated repair brief.
