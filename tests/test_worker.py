@@ -275,10 +275,12 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(second)
             assert second is not None
-            self.assertEqual(second.status, "completed")
+            self.assertEqual(second.status, "completed", second.reason_code)
             self.assertEqual(state.list_tasks(intake_result.product_id)[0]["status"], "DONE")
             self.assertEqual(len(state.attempts_for_task(str(task["task_id"]))), 2)
             self.assertIn("repair-brief-", runner.prompts[1])
+            self.assertIn("UNTRUSTED_DATA targeted repair brief", runner.prompts[1])
+            self.assertIn("model_requested_repair", runner.prompts[1])
             state.close()
 
     def test_malformed_transport_is_requeued_at_same_tier_and_can_resume(self) -> None:
@@ -500,6 +502,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(runner.prompts), 2)
             self.assertIn("UNTRUSTED_DATA accepted output for dependency", runner.prompts[1])
             self.assertIn("product-contract-worker-test", runner.prompts[1])
+            self.assertIn("Do not run repository commands such as pytest or make", runner.prompts[1])
             completed_task = state.get_task(str(analyst_task["task_id"]))
             self.assertIsNotNone(completed_task)
             assert completed_task is not None
