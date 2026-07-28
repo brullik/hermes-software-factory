@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.model_router import FailureClass, Tier, classify_failure, next_tier
+from scripts.quality_gate import load_catalog
 
 from .artifacts import ArtifactStore, artifact_metadata
 from .common import new_id, sha256_text
@@ -98,6 +99,23 @@ class PipelineReconciler:
             else {}
         )
         self.transient_limit = int(transient.get("max", 3))
+        packaged_catalog = (
+            Path(__file__).resolve().parents[1] / "config" / "quality-gates.yaml"
+        )
+        configured_catalog = config.raw.get("paths", {}).get("quality_gates")
+        gate_catalog = load_catalog(
+            Path(str(configured_catalog)) if configured_catalog else packaged_catalog
+        )
+        entries = gate_catalog.get("gates", [])
+        self.optional_gate_ids = {
+            str(item["id"])
+            for item in entries
+            if (
+                isinstance(item, dict)
+                and item.get("id")
+                and item.get("mandatory") is False
+            )
+        }
 
     @staticmethod
     def _reason_text(reason_code: str, detail: str | None = None) -> str:
@@ -562,7 +580,11 @@ class PipelineReconciler:
         if (
             not isinstance(controller_results, list)
             or any(
-                not isinstance(item, dict) or item.get("status") == "FAIL"
+                not isinstance(item, dict)
+                or (
+                    item.get("status") == "FAIL"
+                    and str(item.get("gate_id") or "") not in self.optional_gate_ids
+                )
                 for item in controller_results
             )
         ):

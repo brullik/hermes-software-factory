@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.8 - 2026-07-28
+
+- Builder downstream-gate recovery читает mandatory/optional статус из controller-owned quality-gate catalog.
+- Optional lint baseline не останавливает восстановление, но любой mandatory или неизвестный failed gate остаётся fail-closed.
+
 ## 2.0.7 - 2026-07-28
 
 - Builder repair task активируется только с actionable brief: blocker IDs, точные required fixes, allowed paths и проверяемый DoD обязательны.

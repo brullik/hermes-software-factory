@@ -736,6 +736,7 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
                             "evidence_ref": str(output_path),
                         },
                         {"gate_id": "target-tests", "status": "PASS"},
+                        {"gate_id": "target-lint", "status": "FAIL"},
                     ],
                 }
             ),
@@ -785,4 +786,17 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
             for item in notifications
         )
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        state.close()
+
+
+def test_reconciler_reads_optional_gate_policy_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+
+        reconciler = PipelineReconciler(config, state)
+
+        assert "target-lint" in reconciler.optional_gate_ids
+        assert "target-tests" not in reconciler.optional_gate_ids
+        assert "unknown-gate" not in reconciler.optional_gate_ids
         state.close()
