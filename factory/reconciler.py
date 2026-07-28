@@ -45,6 +45,7 @@ _REASON_RU = {
     "worker_internal_error": "worker завершился внутренней ошибкой",
     "malformed_transport": "провайдер вернул повреждённый транспортный ответ",
     "provider_unavailable": "ни один разрешённый провайдер модели не доступен",
+    "duplicate_prompt_attempt": "задача попыталась повторить уже завершённый запрос без новых данных",
     "internal_blocker": "обнаружена внутренняя блокировка конвейера",
 }
 
@@ -454,6 +455,53 @@ class PipelineReconciler:
         )
         return True
 
+    def _previous_status_before_failed_safe(self, product_id: str) -> str | None:
+        for event in reversed(self.state.events(product_id)):
+            if str(event.get("event_type")) != "product_transition":
+                continue
+            try:
+                payload = json.loads(str(event.get("payload_json") or "{}"))
+            except json.JSONDecodeError:
+                continue
+            if payload.get("to") == "FAILED_SAFE":
+                previous = str(payload.get("from") or "")
+                return previous or None
+        return None
+
+    def _recover_interrupted_product(self, product: dict[str, Any]) -> bool:
+        product_id = str(product["product_id"])
+        task = self.state.latest_task(product_id)
+        if task is None:
+            return False
+        detail = str(task.get("terminal_detail") or "")
+        if not detail.startswith("Prompt digest already attempted for task "):
+            return False
+        resume_status = self._previous_status_before_failed_safe(product_id)
+        if resume_status is None:
+            return False
+        recovered = self.state.recover_interrupted_attempt(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            resume_status=resume_status,
+        )
+        if not recovered:
+            return False
+        self._enqueue_notification(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            kind="automatic_recovery",
+            discriminator=f"interrupted-attempt:{task['task_id']}",
+            text=(
+                "✅ Hermes автоматически возобновил внутренне прерванную задачу.\n"
+                f"Проект: {product_id}\n"
+                f"Этап: {task.get('title')}\n"
+                "Причина устранена: незавершённая попытка безопасно продолжена после "
+                "перезапуска worker.\n"
+                "Действие владельца: не требуется."
+            ),
+        )
+        return True
+
     def reconcile_product(self, product: dict[str, Any]) -> str:
         product_id = str(product["product_id"])
         status = str(product["status"])
@@ -554,7 +602,12 @@ class PipelineReconciler:
             "recovered_successors": 0,
         }
         for product in self.state.list_products():
-            if str(product["status"]) in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
+            status = str(product["status"])
+            if status == "FAILED_SAFE" and self._recover_interrupted_product(product):
+                counts["inspected"] += 1
+                counts["repaired"] += 1
+                continue
+            if status in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
                 continue
             counts["inspected"] += 1
             action = self.reconcile_product(product)

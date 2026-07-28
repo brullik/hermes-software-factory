@@ -437,3 +437,72 @@ def test_repair_budget_exhaustion_is_terminal_and_notified_in_russian() -> None:
         assert "required_path_missing: tests/test_product.py" in exhausted["text"]
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         state.close()
+
+
+def test_interrupted_started_attempt_is_recovered_without_owner_action() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "interrupted-attempt-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="Recover an interrupted task",
+            idempotency_key="interrupted-attempt-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+        ):
+            state.transition_product(product_id, status)
+        task_path = PipelineCoordinator(config, state).create_task(
+            product_id,
+            "test-engineer",
+            cycle=2,
+        )
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        assert state.claim_task(worker_id="worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-interrupted",
+            task_id=task_id,
+            tier="sol",
+            attempt_kind="initial",
+            prompt_digest="f" * 64,
+            status="started",
+            semantic_counted=True,
+        )
+        state.complete_task(
+            task_id,
+            "worker",
+            "BLOCKED_EXTERNAL",
+            reason_code="internal_blocker",
+            detail=f"Prompt digest already attempted for task {task_id}",
+            failure_kind="semantic",
+        )
+        state.transition_product(product_id, "FAILED_SAFE")
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.repaired == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "IMPLEMENTING"
+        task = state.get_task(task_id)
+        assert task is not None
+        assert task["status"] == "PENDING"
+        assert task["terminal_reason"] is None
+        assert state.attempts_for_task(task_id)[0]["status"] == "started"
+        assert any(
+            event["event_type"] == "interrupted_attempt_recovered"
+            for event in state.events(product_id)
+        )
+        payloads = [json.loads(item["payload_json"]) for item in state.list_outbox()]
+        recovered = next(item for item in payloads if item["kind"] == "automatic_recovery")
+        assert "Действие владельца: не требуется" in recovered["text"]
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        state.close()
