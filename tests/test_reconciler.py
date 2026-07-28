@@ -1048,10 +1048,21 @@ def test_director_opens_new_bounded_budget_for_distinct_security_diagnosis() -> 
         ):
             state.transition_product(product_id, status)
         pipeline = PipelineCoordinator(config, state)
+        historical_path = pipeline.create_task(
+            product_id,
+            "builder-core",
+            cycle=3,
+        )
+        historical_id = str(
+            json.loads(historical_path.read_text(encoding="utf-8"))["task_id"]
+        )
+        historical = state.claim_task(worker_id="historical-worker")
+        assert historical is not None and historical["task_id"] == historical_id
+        state.complete_task(historical_id, "historical-worker", "DONE")
         security_path = pipeline.create_task(
             product_id,
             "security-reviewer",
-            cycle=3,
+            cycle=2,
         )
         security_id = str(
             json.loads(security_path.read_text(encoding="utf-8"))["task_id"]
@@ -1060,7 +1071,7 @@ def test_director_opens_new_bounded_budget_for_distinct_security_diagnosis() -> 
         output_path.write_text(
             json.dumps(
                 {
-                    "status": "repair_required",
+                    "status": "needs_replan",
                     "findings": [
                         {
                             "id": "SEC-NEW-FAIL-OPEN",
