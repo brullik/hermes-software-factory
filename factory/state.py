@@ -1070,15 +1070,29 @@ class StateStore:
                 or provider_attempt is not None
             ):
                 return False
-            already_recovered = self._connection.execute(
-                """SELECT 1 FROM events
+            recovery_rows = self._connection.execute(
+                """SELECT payload_json FROM events
                    WHERE product_id=? AND task_id=?
                      AND event_type='deferred_dependency_consumer_recovered'
-                   LIMIT 1""",
+                   ORDER BY event_id""",
                 (product_id, task_id),
-            ).fetchone()
-            if already_recovered is not None:
-                return False
+            ).fetchall()
+            current_detail = str(row["terminal_detail"] or "")
+            for recovery_row in recovery_rows:
+                try:
+                    recovery_payload = json.loads(
+                        str(recovery_row["payload_json"] or "{}")
+                    )
+                except json.JSONDecodeError:
+                    continue
+                recorded_detail = recovery_payload.get("terminal_detail")
+                if recorded_detail == current_detail or (
+                    recorded_detail is None
+                    and current_detail.startswith(
+                        "accepted task result is missing for "
+                    )
+                ):
+                    return False
             now = utc_now()
             self._connection.execute(
                 "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
@@ -1113,6 +1127,7 @@ class StateStore:
                     "dependency_task_id": dependency_task_id,
                     "resume_status": resume_status,
                     "attempt_kind": "initial",
+                    "terminal_detail": current_detail,
                 },
             )
             return True
