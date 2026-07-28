@@ -816,6 +816,101 @@ class StateStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def recover_interrupted_attempt(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+        resume_status: str,
+    ) -> bool:
+        """Resume only a terminal task backed by an unfinished durable attempt."""
+
+        resumable_statuses = {
+            "IDEA_RECEIVED",
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+            "INTEGRATING",
+            "STAGING_DEPLOYED",
+            "PRODUCT_ACCEPTANCE",
+            "RELEASE_READY",
+            "PRODUCTION_DEPLOYED",
+            "OBSERVATION",
+            "REPAIRING",
+            "DELAYED_QUOTA",
+            "ROLLING_BACK",
+            "ROLLED_BACK",
+        }
+        if resume_status not in resumable_statuses:
+            raise ValueError("interrupted attempt resume status is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT products.status AS product_status,
+                          tasks.status AS task_status,
+                          tasks.terminal_reason,
+                          tasks.terminal_detail
+                   FROM tasks
+                   JOIN products ON products.product_id=tasks.product_id
+                   WHERE tasks.task_id=? AND tasks.product_id=?
+                     AND tasks.rowid=(
+                         SELECT MAX(latest.rowid)
+                         FROM tasks AS latest
+                         WHERE latest.product_id=tasks.product_id
+                     )""",
+                (task_id, product_id),
+            ).fetchone()
+            if row is None:
+                return False
+            detail = str(row["terminal_detail"] or "")
+            if (
+                str(row["product_status"]) != "FAILED_SAFE"
+                or str(row["task_status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or str(row["terminal_reason"] or "")
+                not in {"internal_blocker", "duplicate_prompt_attempt"}
+                or not detail.startswith("Prompt digest already attempted for task ")
+            ):
+                return False
+            unfinished = self._connection.execute(
+                "SELECT 1 FROM attempts WHERE task_id=? AND status='started' LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if unfinished is None:
+                return False
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                (resume_status, now, product_id),
+            )
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='PENDING', available_at=NULL,
+                       lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
+                       terminal_reason=NULL, terminal_detail=NULL,
+                       result_ref=NULL, failure_kind=NULL, updated_at=?
+                   WHERE task_id=?""",
+                (now, task_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": resume_status,
+                    "reason": "interrupted_attempt_recovery",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "interrupted_attempt_recovered",
+                {"resume_status": resume_status},
+            )
+            return True
+
     def update_attempt(self, attempt_id: str, *, status: str, reason_code: str | None = None) -> None:
         with self._lock, self._connection:
             updated = self._connection.execute(

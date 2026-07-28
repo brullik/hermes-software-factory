@@ -53,6 +53,28 @@ class AttemptManager:
             semantic_counted=semantic_counted,
         )
         if not inserted:
+            existing = next(
+                (
+                    item
+                    for item in self.state.attempts_for_task(task_id)
+                    if str(item["prompt_digest"]) == prompt_digest
+                ),
+                None,
+            )
+            if (
+                existing is not None
+                and str(existing["status"]) == "started"
+                and str(existing["tier"]) == tier.value
+                and str(existing["attempt_kind"]) == attempt_kind
+            ):
+                return Attempt(
+                    str(existing["attempt_id"]),
+                    task_id,
+                    tier,
+                    attempt_kind,
+                    prompt_digest,
+                    bool(existing["semantic_counted"]),
+                )
             raise IdenticalAttemptError(f"Prompt digest already attempted for task {task_id}")
         return attempt
 

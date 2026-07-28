@@ -1504,15 +1504,12 @@ class AgentWorker:
                 spec,
                 repository_root=lease.path,
             )
-            try:
-                attempt = self.attempts.begin(
-                    task_id=str(spec.task_contract["task_id"]),
-                    tier=tier,
-                    attempt_kind=spec.attempt_kind,
-                    prompt_digest=prompt_digest,
-                )
-            except IdenticalAttemptError as error:
-                raise ExternalBlocker(str(error)) from error
+            attempt = self.attempts.begin(
+                task_id=str(spec.task_contract["task_id"]),
+                tier=tier,
+                attempt_kind=spec.attempt_kind,
+                prompt_digest=prompt_digest,
+            )
         except Exception:
             self.workspace.release(lease)
             raise
@@ -2056,6 +2053,13 @@ class AgentWorker:
         try:
             try:
                 result = self.execute(self.default_spec(task))
+            except IdenticalAttemptError as error:
+                result = WorkerResult(
+                    task_id,
+                    "failed_safe",
+                    "duplicate_prompt_attempt",
+                    detail=str(error),
+                )
             except ExternalBlocker as error:
                 result = WorkerResult(
                     task_id,

@@ -396,6 +396,14 @@ class FactoryRuntimeTests(unittest.TestCase):
                 attempt_kind="semantic",
                 prompt_digest=prompt.digest,
             )
+            resumed = manager.begin(
+                task_id="attempt-task",
+                tier=Tier.LUNA,
+                attempt_kind="semantic",
+                prompt_digest=prompt.digest,
+            )
+            self.assertEqual(resumed, attempt)
+            self.assertEqual(len(state.attempts_for_task("attempt-task")), 1)
             manager.finish(attempt, status="repair_required", reason_code="unit_test_failure")
             decision = manager.route(
                 task_id="attempt-task",

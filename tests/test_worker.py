@@ -14,6 +14,7 @@ from unittest.mock import patch
 import yaml
 
 from factory.artifacts import ArtifactStore, artifact_metadata
+from factory.attempts import IdenticalAttemptError
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
 from factory.intake import IntakeService
@@ -438,6 +439,44 @@ class WorkerTests(unittest.TestCase):
             task = next(iter(state.list_tasks(product_id)))
             self.assertEqual(task["status"], "BLOCKED_EXTERNAL")
             self.assertEqual(state.attempts_for_task(str(task["task_id"])), [])
+            state.close()
+
+    def test_completed_duplicate_prompt_is_internal_not_external(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Classify a duplicate prompt safely",
+            )
+            runner = FakeRunner(product_contract(config, intake_result.product_id))
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            with patch.object(
+                worker.attempts,
+                "begin",
+                side_effect=IdenticalAttemptError("Prompt digest already attempted"),
+            ):
+                result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(result.reason_code, "duplicate_prompt_attempt")
+            task = next(iter(state.list_tasks(intake_result.product_id)))
+            self.assertEqual(task["status"], "FAILED_SAFE")
+            self.assertEqual(task["terminal_reason"], "duplicate_prompt_attempt")
+            self.assertEqual(runner.calls, [])
             state.close()
 
     def test_release_task_persists_only_adapter_authoritative_result(self) -> None:
