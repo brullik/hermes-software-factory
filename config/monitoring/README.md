@@ -11,6 +11,7 @@ The minimum operator probes are:
 - pilot `/health/live`, `/health/ready`, `/metrics`;
 - systemd service state and Docker health;
 - restic timer freshness and repository check;
+- `hermes-factory-osv-db.timer` state and OSV PyPI cache age below 72 hours;
 - disk/RAM capacity before starting another worker.
 
 ## Local Kanban

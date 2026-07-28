@@ -17,3 +17,15 @@ Report a suspected vulnerability privately through GitHub's private vulnerabilit
 5. Never weaken a gate or delete evidence to obtain PASS.
 
 The implementation agent must configure an equivalent private reporting path during bootstrap.
+
+## Dependency-audit privacy
+
+Target runtime dependencies are matched with the root-owned OSV-Scanner binary
+and a locally cached PyPI advisory archive. The controller invokes the scanner
+with `--offline --no-resolve`; package names, versions, repository identifiers,
+and file hashes are not sent to OSV, PyPI, or deps.dev during a gate.
+
+The public PyPI advisory archive is refreshed independently by
+`hermes-factory-osv-db.timer`. The updater receives no target path or dependency
+inventory. A missing, untrusted, corrupt, or older-than-72-hours database makes
+the mandatory dependency gate fail closed.

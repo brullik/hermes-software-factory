@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily refresh of the OSV PyPI vulnerability database
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=24h
+RandomizedDelaySec=1h
+Persistent=true
+Unit=hermes-factory-osv-db.service
+
+[Install]
+WantedBy=timers.target

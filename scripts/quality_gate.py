@@ -12,6 +12,8 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,6 +53,14 @@ def utc_now() -> str:
 
 def digest_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def digest_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def load_catalog(path: Path) -> dict[str, Any]:
@@ -311,6 +321,28 @@ def _target_site_packages(python_executable: str, cwd: Path) -> Path:
     return site_packages
 
 
+def _trusted_gate_file(
+    path: Path,
+    *,
+    label: str,
+    require_root_owned: bool,
+) -> tuple[Path, os.stat_result]:
+    if not path.is_absolute():
+        raise RuntimeError(f"{label} path must be absolute")
+    if path.is_symlink():
+        raise RuntimeError(f"{label} must not be a symbolic link")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise RuntimeError(f"{label} is not a regular file")
+    metadata = resolved.stat()
+    if require_root_owned and os.name != "nt":
+        if metadata.st_uid != 0:
+            raise RuntimeError(f"{label} must be root-owned")
+        if metadata.st_mode & 0o022:
+            raise RuntimeError(f"{label} must not be group/world writable")
+    return resolved, metadata
+
+
 def _dependency_audit(
     gate: dict[str, Any],
     cwd: Path,
@@ -348,51 +380,129 @@ def _dependency_audit(
 
     try:
         site_packages = _target_site_packages(python_executable, cwd)
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip_audit",
-                "--path",
-                str(site_packages),
-                "--progress-spinner",
-                "off",
-                "--format",
-                "json",
-                "--timeout",
-                "30",
-            ],
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=int(gate.get("timeout_seconds", 300)),
-            check=False,
+        records, reachable = _runtime_dependency_records(cwd, site_packages)
+        if not records:
+            raise RuntimeError("runtime dependency inventory is empty")
+
+        require_root_owned = bool(gate.get("require_root_owned", False))
+        scanner, _ = _trusted_gate_file(
+            Path(str(gate.get("scanner_path", ""))),
+            label="OSV-Scanner executable",
+            require_root_owned=require_root_owned,
         )
-        payload = json.loads(completed.stdout)
-        dependencies = payload.get("dependencies", []) if isinstance(payload, dict) else payload
-        if not isinstance(dependencies, list) or not dependencies:
-            raise RuntimeError("pip-audit returned no dependency inventory")
+        expected_scanner_digest = str(gate.get("scanner_sha256", "")).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_scanner_digest):
+            raise RuntimeError("OSV-Scanner digest pin is invalid")
+        scanner_digest = digest_file(scanner)
+        if scanner_digest != expected_scanner_digest:
+            raise RuntimeError("OSV-Scanner executable digest mismatch")
+
+        cache_directory = Path(str(gate.get("database_cache_directory", "")))
+        database, database_metadata = _trusted_gate_file(
+            cache_directory / "osv-scanner" / "PyPI" / "all.zip",
+            label="OSV PyPI database",
+            require_root_owned=require_root_owned,
+        )
+        maximum_age = int(gate.get("database_max_age_seconds", 259_200))
+        if maximum_age < 1:
+            raise RuntimeError("OSV database maximum age must be positive")
+        database_age = time.time() - database_metadata.st_mtime
+        if database_age < -300:
+            raise RuntimeError("OSV database timestamp is in the future")
+        if database_age > maximum_age:
+            raise RuntimeError("OSV PyPI database is stale")
+        database_digest = digest_file(database)
+
         inventory = sorted(
-            f"{item.get('name', 'unknown')}=={item.get('version', 'unknown')}"
-            for item in dependencies
-            if isinstance(item, dict)
+            f"{record['name']}=={record['version']}"
+            for record in records
         )
-        vulnerabilities = sorted(
-            f"{item.get('name', 'unknown')}:{vulnerability.get('id', 'unknown')}"
-            for item in dependencies
-            if isinstance(item, dict)
-            for vulnerability in item.get("vulns", [])
-            if isinstance(vulnerability, dict)
-        )
-        skipped = payload.get("fixes", []) if isinstance(payload, dict) else []
         inventory_digest = digest_text("\n".join(inventory))
+        scanner_input = {
+            "results": [
+                {
+                    "packages": [
+                        {
+                            "package": {
+                                "name": record["name"],
+                                "version": record["version"],
+                                "ecosystem": "PyPI",
+                            }
+                        }
+                        for record in records
+                    ]
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory(prefix="hermes-osv-audit-") as directory:
+            inventory_path = Path(directory) / "osv-scanner.json"
+            inventory_path.write_text(
+                json.dumps(scanner_input, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.chmod(inventory_path, 0o600)
+            scanner_environment = os.environ.copy()
+            scanner_environment["OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"] = str(
+                cache_directory
+            )
+            completed = subprocess.run(
+                [
+                    str(scanner),
+                    "--offline",
+                    "--no-resolve",
+                    "--verbosity=error",
+                    "--format=json",
+                    f"--lockfile=osv-scanner:{inventory_path}",
+                ],
+                cwd=cwd,
+                env=scanner_environment,
+                text=True,
+                capture_output=True,
+                timeout=int(gate.get("timeout_seconds", 300)),
+                check=False,
+            )
+
+        payload = json.loads(completed.stdout)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            raise TypeError("OSV-Scanner returned an invalid result envelope")
+        vulnerabilities: list[str] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            packages = result.get("packages", [])
+            if not isinstance(packages, list):
+                continue
+            for package_result in packages:
+                if not isinstance(package_result, dict):
+                    continue
+                package = package_result.get("package", {})
+                package_name = (
+                    str(package.get("name", "unknown"))
+                    if isinstance(package, dict)
+                    else "unknown"
+                )
+                findings = package_result.get("vulnerabilities", [])
+                if not isinstance(findings, list):
+                    continue
+                vulnerabilities.extend(
+                    f"{package_name}:{finding.get('id', 'unknown')}"
+                    for finding in findings
+                    if isinstance(finding, dict)
+                )
+        vulnerabilities.sort()
         details = ", ".join(vulnerabilities[:50]) if vulnerabilities else "none"
         output = (
-            f"audited_packages={len(inventory)}; inventory_sha256={inventory_digest}; "
-            f"known_vulnerabilities={details}; auxiliary_records={len(skipped)}"
+            f"audited_runtime_packages={len(reachable)}; "
+            f"inventory_sha256={inventory_digest}; "
+            f"osv_scanner_sha256={scanner_digest}; "
+            f"osv_pypi_database_sha256={database_digest}; "
+            f"osv_pypi_database_age_seconds={max(0, int(database_age))}; "
+            f"network_mode=offline; known_vulnerabilities={details}"
         )
         if completed.stderr.strip():
-            output += "; diagnostics=" + completed.stderr.strip()
+            diagnostics = " ".join(completed.stderr.strip().splitlines())
+            output += "; diagnostics=" + diagnostics[:1000]
         if completed.returncode == 0 and not vulnerabilities:
             status = "PASS"
         elif completed.returncode == 1 or vulnerabilities:
@@ -410,7 +520,14 @@ def _dependency_audit(
         )
     except subprocess.TimeoutExpired as error:
         output = f"target dependency audit timed out: {error}"
-    except (json.JSONDecodeError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+    except (
+        json.JSONDecodeError,
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        TypeError,
+        ValueError,
+    ) as error:
         output = f"target dependency audit failed closed: {error}"
     return _adapter_evidence(
         gate,
@@ -423,7 +540,10 @@ def _dependency_audit(
     )
 
 
-def _runtime_dependency_inventory(cwd: Path, site_packages: Path) -> tuple[list[str], list[str]]:
+def _runtime_dependency_records(
+    cwd: Path,
+    site_packages: Path,
+) -> tuple[list[dict[str, str]], list[str]]:
     pyproject_path = cwd / "pyproject.toml"
     if not pyproject_path.is_file():
         raise RuntimeError("pyproject.toml is required for deterministic license scope")
@@ -452,7 +572,7 @@ def _runtime_dependency_inventory(cwd: Path, site_packages: Path) -> tuple[list[
 
     visited: set[str] = set()
     missing: set[str] = set()
-    records: list[str] = []
+    records: list[dict[str, str]] = []
     while pending:
         name = pending.pop()
         if name in visited:
@@ -477,8 +597,11 @@ def _runtime_dependency_inventory(cwd: Path, site_packages: Path) -> tuple[list[
             "",
         )
         records.append(
-            f"{metadata.get('Name', name)}=={resolved_distribution.version} "
-            f"license={license_value or 'MISSING'}"
+            {
+                "name": str(metadata.get("Name", name)),
+                "version": resolved_distribution.version,
+                "license": license_value or "MISSING",
+            }
         )
         for raw_child in resolved_distribution.requires or []:
             try:
@@ -491,7 +614,7 @@ def _runtime_dependency_inventory(cwd: Path, site_packages: Path) -> tuple[list[
         raise RuntimeError(
             "declared runtime dependencies are not installed: " + ", ".join(sorted(missing))
         )
-    return sorted(records), sorted(visited)
+    return sorted(records, key=lambda item: canonicalize_name(item["name"])), sorted(visited)
 
 
 def _license_check(
@@ -531,10 +654,22 @@ def _license_check(
 
     try:
         site_packages = _target_site_packages(python_executable, cwd)
-        records, reachable = _runtime_dependency_inventory(cwd, site_packages)
-        missing = [record for record in records if record.endswith("license=MISSING")]
-        denied = [record for record in records if _DENIED_LICENSE_PATTERN.search(record)]
-        inventory_digest = digest_text("\n".join(records))
+        records, reachable = _runtime_dependency_records(cwd, site_packages)
+        formatted_records = [
+            f"{record['name']}=={record['version']} license={record['license']}"
+            for record in records
+        ]
+        missing = [
+            record
+            for record in formatted_records
+            if record.endswith("license=MISSING")
+        ]
+        denied = [
+            record
+            for record in formatted_records
+            if _DENIED_LICENSE_PATTERN.search(record)
+        ]
+        inventory_digest = digest_text("\n".join(formatted_records))
         output = (
             f"runtime_dependency_packages={len(reachable)}; "
             f"license_inventory_sha256={inventory_digest}; "
