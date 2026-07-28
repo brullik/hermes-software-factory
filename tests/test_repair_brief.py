@@ -6,6 +6,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from factory.repair_brief import (
+    builder_result_is_controller_complete,
     builder_result_is_locally_complete,
     normalized_repair_findings,
     product_goals_are_proven,
@@ -117,6 +118,52 @@ def test_builder_can_finish_when_only_immutable_candidate_gate_is_deferred() -> 
         }
     )
     assert not builder_result_is_locally_complete(output)
+
+
+def test_builder_controller_complete_result_rejects_only_detector_scope_conflict() -> None:
+    output = {
+        "status": "needs_replan",
+        "changed_files": [
+            {"path": "src/grid_bot/core.py", "change": "Implemented the grid simulation."}
+        ],
+        "test_results": [
+            {"gate_id": "target-environment", "status": "PASS"},
+            {"gate_id": "target-tests", "status": "PASS"},
+            {"gate_id": "target-compile", "status": "PASS"},
+            {"gate_id": "target-lint", "status": "PASS"},
+            {"gate_id": "target-secret-scan", "status": "PASS"},
+            {"gate_id": "canonical-command-detector", "status": "NOT_RUN"},
+        ],
+        "findings": [
+            {
+                "code": "CANONICAL_DETECTOR_SCOPE_CONFLICT",
+                "severity": "medium",
+                "text": "A root manifest is outside the exact Builder write scope.",
+            },
+            {
+                "code": "UNTRACKED_BYTECODE_PRESENT",
+                "severity": "low",
+                "text": "Runtime bytecode is excluded from the release candidate.",
+            },
+        ],
+    }
+
+    assert builder_result_is_controller_complete(output)
+
+    unknown_finding = {**output, "findings": [*output["findings"], {
+        "code": "IMPLEMENTATION_DEFECT",
+        "severity": "medium",
+        "text": "A product defect remains.",
+    }]}
+    assert not builder_result_is_controller_complete(unknown_finding)
+
+    failed_gate = {**output, "test_results": [
+        *output["test_results"],
+        {"gate_id": "extra-check", "status": "FAIL"},
+    ]}
+    assert not builder_result_is_controller_complete(failed_gate)
+
+    assert not builder_result_is_controller_complete({**output, "changed_files": []})
 
 
 def test_product_goals_require_passing_journeys_with_evidence() -> None:

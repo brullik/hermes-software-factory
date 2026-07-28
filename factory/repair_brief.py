@@ -11,6 +11,10 @@ _BUILDER_DEFERRED_FINDINGS = {
     "GITHUB_REQUIRED_CHECK_NOT_RUN",
     "OUT_OF_SCOPE_RUFF_BASELINE",
 }
+_BUILDER_CONTROLLER_COMPLETE_FINDINGS = {
+    "CANONICAL_DETECTOR_SCOPE_CONFLICT",
+    "UNTRACKED_BYTECODE_PRESENT",
+}
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,45 @@ def builder_result_is_locally_complete(output: Mapping[str, Any]) -> bool:
             local_pm_passed = True
     changed_files = output.get("changed_files", [])
     return local_pm_passed and isinstance(changed_files, list) and bool(changed_files)
+
+
+def builder_result_is_controller_complete(output: Mapping[str, Any]) -> bool:
+    """Accept a replan request caused only by controller-owned detector scope."""
+
+    if str(output.get("status")) != "needs_replan":
+        return False
+    findings = normalized_repair_findings(output)
+    finding_ids = {item.finding_id for item in findings}
+    if (
+        "CANONICAL_DETECTOR_SCOPE_CONFLICT" not in finding_ids
+        or not finding_ids.issubset(_BUILDER_CONTROLLER_COMPLETE_FINDINGS)
+    ):
+        return False
+    test_results = output.get("test_results", [])
+    if not isinstance(test_results, list) or not test_results:
+        return False
+    passed_gates: set[str] = set()
+    for item in test_results:
+        if not isinstance(item, Mapping):
+            return False
+        status = str(item.get("status") or "")
+        if status == "FAIL":
+            return False
+        if status == "PASS":
+            passed_gates.add(str(item.get("gate_id") or ""))
+    required_provider_gates = {
+        "target-environment",
+        "target-tests",
+        "target-compile",
+        "target-lint",
+        "target-secret-scan",
+    }
+    changed_files = output.get("changed_files", [])
+    return (
+        required_provider_gates.issubset(passed_gates)
+        and isinstance(changed_files, list)
+        and bool(changed_files)
+    )
 
 
 def product_goals_are_proven(output: Mapping[str, Any]) -> bool:

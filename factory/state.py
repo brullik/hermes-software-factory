@@ -994,6 +994,112 @@ class StateStore:
             )
             return True
 
+    def adopt_controller_valid_builder(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+    ) -> bool:
+        """Adopt an earlier Builder result proven complete by controller gates."""
+
+        with self._lock, self._connection:
+            product = self._connection.execute(
+                "SELECT status FROM products WHERE product_id=?",
+                (product_id,),
+            ).fetchone()
+            candidate = self._connection.execute(
+                """SELECT task_id, status, role, stage_key, cycle,
+                          terminal_reason, result_ref
+                   FROM tasks
+                   WHERE task_id=? AND product_id=?""",
+                (task_id, product_id),
+            ).fetchone()
+            latest = self._connection.execute(
+                """SELECT task_id, status, role, stage_key, cycle
+                   FROM tasks
+                   WHERE product_id=?
+                   ORDER BY rowid DESC
+                   LIMIT 1""",
+                (product_id,),
+            ).fetchone()
+            active = self._connection.execute(
+                """SELECT 1 FROM tasks
+                   WHERE product_id=? AND status IN ('PENDING', 'CLAIMED', 'WAITING')
+                   LIMIT 1""",
+                (product_id,),
+            ).fetchone()
+            attempt = self._connection.execute(
+                """SELECT status FROM attempts
+                   WHERE task_id=?
+                   ORDER BY rowid DESC
+                   LIMIT 1""",
+                (task_id,),
+            ).fetchone()
+            if (
+                product is None
+                or str(product["status"]) != "FAILED_SAFE"
+                or candidate is None
+                or str(candidate["status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or str(candidate["role"]) != "builder"
+                or str(candidate["stage_key"]) != "builder-core"
+                or str(candidate["terminal_reason"] or "") != "model_requested_repair"
+                or not str(candidate["result_ref"] or "")
+                or attempt is None
+                or str(attempt["status"]) != "repair_required"
+                or latest is None
+                or str(latest["task_id"]) == task_id
+                or str(latest["status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or str(latest["role"]) != "builder"
+                or str(latest["stage_key"]) != "builder-core"
+                or int(latest["cycle"] or 0) < int(candidate["cycle"] or 0)
+                or active is not None
+            ):
+                return False
+            already_adopted = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='builder_controller_gates_adopted'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            if already_adopted is not None:
+                return False
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status='IMPLEMENTING', updated_at=? WHERE product_id=?",
+                (now, product_id),
+            )
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='DONE', lease_owner=NULL, lease_until=NULL,
+                       heartbeat_at=NULL, terminal_reason=NULL,
+                       terminal_detail=NULL, failure_kind=NULL, updated_at=?
+                   WHERE task_id=?""",
+                (now, task_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": "IMPLEMENTING",
+                    "reason": "builder_controller_gates_adopted",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "builder_controller_gates_adopted",
+                {
+                    "resume_status": "IMPLEMENTING",
+                    "next_stage": "test-engineer",
+                    "candidate_cycle": int(candidate["cycle"] or 0),
+                    "superseded_task_id": str(latest["task_id"]),
+                },
+            )
+            return True
+
     def recover_deferred_dependency_consumer(
         self,
         *,
@@ -1304,6 +1410,98 @@ class StateStore:
                     "completed_cycle": int(row["cycle"] or 0),
                     "max_repair_cycles": max_repair_cycles,
                     "resume_status": resume_status,
+                },
+            )
+            return True
+
+    def reopen_for_director_root_cause(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+        blocker_signature: str,
+        blocker_ids: list[str],
+        max_replans: int = 3,
+    ) -> bool:
+        """Grant one new bounded budget for a newly diagnosed blocker."""
+
+        if (
+            not blocker_signature
+            or not blocker_ids
+            or max_replans < 1
+            or max_replans > 3
+        ):
+            raise ValueError("director root-cause replan contract is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT products.status AS product_status,
+                          tasks.status AS task_status
+                   FROM tasks
+                   JOIN products ON products.product_id=tasks.product_id
+                   WHERE tasks.task_id=? AND tasks.product_id=?
+                     AND tasks.rowid=(
+                         SELECT MAX(latest.rowid)
+                         FROM tasks AS latest
+                         WHERE latest.product_id=tasks.product_id
+                     )""",
+                (task_id, product_id),
+            ).fetchone()
+            exhausted = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='repair_budget_exhausted'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            replan_rows = self._connection.execute(
+                """SELECT payload_json FROM events
+                   WHERE product_id=?
+                     AND event_type='director_root_cause_replan'
+                   ORDER BY event_id""",
+                (product_id,),
+            ).fetchall()
+            signatures: set[str] = set()
+            for replan_row in replan_rows:
+                try:
+                    payload = json.loads(str(replan_row["payload_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict) and payload.get("blocker_signature"):
+                    signatures.add(str(payload["blocker_signature"]))
+            if (
+                row is None
+                or str(row["product_status"]) != "FAILED_SAFE"
+                or str(row["task_status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or exhausted is None
+                or blocker_signature in signatures
+                or len(signatures) >= max_replans
+            ):
+                return False
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status='REPAIRING', updated_at=? WHERE product_id=?",
+                (now, product_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": "REPAIRING",
+                    "reason": "director_root_cause_replan",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "director_root_cause_replan",
+                {
+                    "blocker_signature": blocker_signature,
+                    "blocker_ids": blocker_ids,
+                    "replan_number": len(signatures) + 1,
+                    "max_replans": max_replans,
+                    "next_action": "new_bounded_builder_budget",
                 },
             )
             return True

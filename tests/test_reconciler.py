@@ -853,6 +853,311 @@ def test_reconciler_reads_optional_gate_policy_fail_closed() -> None:
         state.close()
 
 
+def test_prior_builder_is_adopted_when_controller_gates_prove_completion() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "controller-valid-builder-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/grid-bot",
+            idempotency_key="controller-valid-builder-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+        ):
+            state.transition_product(product_id, status)
+        pipeline = PipelineCoordinator(config, state)
+        candidate_path = pipeline.create_task(product_id, "builder-core", cycle=2)
+        candidate_id = str(
+            json.loads(candidate_path.read_text(encoding="utf-8"))["task_id"]
+        )
+        output_path = config.evidence_dir / "controller-valid-builder-output.json"
+        output_path.write_text(
+            json.dumps(
+                {
+                    "status": "needs_replan",
+                    "changed_files": [
+                        {
+                            "path": "src/grid_bot/core.py",
+                            "change": "Implemented the offline grid simulation.",
+                        }
+                    ],
+                    "test_results": [
+                        {"gate_id": "target-environment", "status": "PASS"},
+                        {"gate_id": "target-tests", "status": "PASS"},
+                        {"gate_id": "target-compile", "status": "PASS"},
+                        {"gate_id": "target-lint", "status": "PASS"},
+                        {"gate_id": "target-secret-scan", "status": "PASS"},
+                        {
+                            "gate_id": "canonical-command-detector",
+                            "status": "NOT_RUN",
+                        },
+                    ],
+                    "findings": [
+                        {
+                            "code": "CANONICAL_DETECTOR_SCOPE_CONFLICT",
+                            "severity": "medium",
+                            "text": "A root manifest is outside the Builder write scope.",
+                        },
+                        {
+                            "code": "UNTRACKED_BYTECODE_PRESENT",
+                            "severity": "low",
+                            "text": "Bytecode is excluded from the release candidate.",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        candidate_attempt_path = (
+            config.evidence_dir / "attempt-controller-valid-builder.json"
+        )
+        candidate_attempt_path.write_text(
+            json.dumps(
+                {
+                    "summary": "Controller gates prove the implementation is complete.",
+                    "test_results": [
+                        {
+                            "gate_id": "schema-validation",
+                            "status": "PASS",
+                            "evidence_ref": str(output_path),
+                        },
+                        {"gate_id": "target-environment", "status": "PASS"},
+                        {"gate_id": "target-tests", "status": "PASS"},
+                        {"gate_id": "target-compile", "status": "PASS"},
+                        {"gate_id": "target-lint", "status": "PASS"},
+                        {"gate_id": "target-secret-scan", "status": "PASS"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert state.claim_task(worker_id="candidate-worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-controller-valid-builder",
+            task_id=candidate_id,
+            tier="sol",
+            attempt_kind="repair",
+            prompt_digest="a" * 64,
+            status="repair_required",
+            semantic_counted=True,
+            reason_code="model_requested_repair",
+        )
+        state.complete_task(
+            candidate_id,
+            "candidate-worker",
+            "FAILED_SAFE",
+            reason_code="model_requested_repair",
+            detail="Canonical command detector requires an out-of-scope root manifest.",
+            result_ref=str(candidate_attempt_path),
+            failure_kind="semantic",
+        )
+
+        latest_path = pipeline.create_task(product_id, "builder-core", cycle=3)
+        latest_id = str(
+            json.loads(latest_path.read_text(encoding="utf-8"))["task_id"]
+        )
+        assert state.claim_task(worker_id="latest-worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-latest-builder",
+            task_id=latest_id,
+            tier="sol",
+            attempt_kind="repair",
+            prompt_digest="b" * 64,
+            status="failed",
+            semantic_counted=True,
+            reason_code="secret_exposure",
+        )
+        state.complete_task(
+            latest_id,
+            "latest-worker",
+            "FAILED_SAFE",
+            reason_code="secret_exposure",
+            detail="Provider response was rejected before artifact persistence.",
+            failure_kind="semantic",
+        )
+        state.transition_product(product_id, "FAILED_SAFE")
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.recovered_successors == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "IMPLEMENTING"
+        candidate = state.get_task(candidate_id)
+        latest = state.get_task(latest_id)
+        assert candidate is not None and candidate["status"] == "DONE"
+        assert latest is not None and latest["status"] == "FAILED_SAFE"
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["stage_key"] == "test-engineer"
+        assert active[0]["cycle"] == 2
+        assert json.loads(active[0]["dependencies_json"]) == [candidate_id]
+        adoption_events = [
+            event
+            for event in state.events(product_id)
+            if event["event_type"] == "builder_controller_gates_adopted"
+        ]
+        assert len(adoption_events) == 1
+        notification = next(
+            json.loads(item["payload_json"])
+            for item in state.list_outbox()
+            if json.loads(item["payload_json"])["kind"] == "automatic_recovery"
+        )
+        assert "Действие владельца: не требуется." in notification["text"]
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+
+        PipelineReconciler(config, state).reconcile_once()
+        assert len(
+            [
+                event
+                for event in state.events(product_id)
+                if event["event_type"] == "builder_controller_gates_adopted"
+            ]
+        ) == 1
+        state.close()
+
+
+def test_director_opens_new_bounded_budget_for_distinct_security_diagnosis() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "director-root-cause-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/security-repair",
+            idempotency_key="director-root-cause-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+        ):
+            state.transition_product(product_id, status)
+        pipeline = PipelineCoordinator(config, state)
+        security_path = pipeline.create_task(
+            product_id,
+            "security-reviewer",
+            cycle=3,
+        )
+        security_id = str(
+            json.loads(security_path.read_text(encoding="utf-8"))["task_id"]
+        )
+        output_path = config.evidence_dir / "distinct-security-finding.json"
+        output_path.write_text(
+            json.dumps(
+                {
+                    "status": "repair_required",
+                    "findings": [
+                        {
+                            "id": "SEC-NEW-FAIL-OPEN",
+                            "severity": "high",
+                            "description": "A newly tested disposition is accepted fail-open.",
+                            "required_fix": (
+                                "Validate the disposition fail-closed and add the exact "
+                                "negative regression."
+                            ),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        attempt_path = config.evidence_dir / "attempt-distinct-security.json"
+        attempt_path.write_text(
+            json.dumps(
+                {
+                    "summary": "Security reviewer proved a new fail-open path.",
+                    "test_results": [
+                        {
+                            "gate_id": "schema-validation",
+                            "status": "PASS",
+                            "evidence_ref": str(output_path),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert state.claim_task(worker_id="security-worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-distinct-security",
+            task_id=security_id,
+            tier="sol",
+            attempt_kind="initial",
+            prompt_digest="e" * 64,
+            status="repair_required",
+            semantic_counted=True,
+            reason_code="model_requested_repair",
+        )
+        state.complete_task(
+            security_id,
+            "security-worker",
+            "BLOCKED_EXTERNAL",
+            reason_code="model_requested_repair",
+            detail="SEC-NEW-FAIL-OPEN requires a new exact negative regression.",
+            result_ref=str(attempt_path),
+            failure_kind="semantic",
+        )
+
+        exhausted = PipelineReconciler(config, state).reconcile_once()
+
+        assert exhausted.exhausted == 1
+        failed_product = state.get_product(product_id)
+        assert failed_product is not None
+        assert failed_product["status"] == "FAILED_SAFE"
+
+        replanned = PipelineReconciler(config, state).reconcile_once()
+
+        assert replanned.repaired == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "REPAIRING"
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["stage_key"] == "builder-core"
+        assert active[0]["cycle"] == 4
+        brief = json.loads(
+            (
+                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
+            ).read_text(encoding="utf-8")
+        )
+        assert brief["failed_gate_ids"] == ["SEC-NEW-FAIL-OPEN"]
+        assert "exact negative regression" in brief["required_fixes"][0]
+        replan_events = [
+            event
+            for event in state.events(product_id)
+            if event["event_type"] == "director_root_cause_replan"
+        ]
+        assert len(replan_events) == 1
+        payload = json.loads(replan_events[0]["payload_json"])
+        assert payload["blocker_ids"] == ["SEC-NEW-FAIL-OPEN"]
+        notifications = [
+            json.loads(item["payload_json"]) for item in state.list_outbox()
+        ]
+        assert any(
+            item["kind"] == "automatic_recovery"
+            and "Director пересмотрел постановку" in item["text"]
+            and "Действие владельца: не требуется." in item["text"]
+            for item in notifications
+        )
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        state.close()
+
+
 def test_exhausted_builder_opens_next_cycle_with_exact_gate_traceback() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
