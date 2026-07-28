@@ -17,6 +17,8 @@ SERVICE_USER="${SERVICE_USER:-hermesfactory}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 HERMES_AGENT_VERSION="${HERMES_AGENT_VERSION:-0.19.0}"
 HERMES_AGENT_SHA256="${HERMES_AGENT_SHA256:-bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f}"
+OSV_SCANNER_VERSION="2.4.0"
+OSV_SCANNER_SHA256="15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0"
 
 if [[ ! "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
   printf 'SERVICE_USER contains unsafe characters\n' >&2
@@ -38,6 +40,7 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates \
   caddy \
+  curl \
   docker.io \
   docker-compose-v2 \
   fail2ban \
@@ -52,6 +55,31 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3.12-venv \
   python-is-python3
 
+if [[ ! -x /usr/local/bin/osv-scanner ]] \
+  || [[ "$(sha256sum /usr/local/bin/osv-scanner | awk '{print $1}')" != "${OSV_SCANNER_SHA256}" ]]; then
+  OSV_SCANNER_TMP="$(mktemp)"
+  trap 'rm -f "${OSV_SCANNER_TMP}"' EXIT
+  curl \
+    --fail \
+    --silent \
+    --show-error \
+    --location \
+    --proto '=https' \
+    --proto-redir '=https' \
+    --connect-timeout 15 \
+    --max-time 600 \
+    --output "${OSV_SCANNER_TMP}" \
+    "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+  if [[ "$(sha256sum "${OSV_SCANNER_TMP}" | awk '{print $1}')" != "${OSV_SCANNER_SHA256}" ]]; then
+    rm -f "${OSV_SCANNER_TMP}"
+    printf 'OSV-Scanner digest mismatch\n' >&2
+    exit 1
+  fi
+  install -o root -g root -m 0755 "${OSV_SCANNER_TMP}" /usr/local/bin/osv-scanner
+  rm -f "${OSV_SCANNER_TMP}"
+  trap - EXIT
+fi
+
 if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${STATE_DIR}" --create-home --shell /usr/sbin/nologin "${SERVICE_USER}"
 fi
@@ -61,6 +89,11 @@ install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 \
   /var/log/hermes-factory
 install -d -o root -g root -m 0750 "${INSTALL_ROOT}/bin"
 install -d -o root -g "${SERVICE_USER}" -m 0750 "${CONFIG_DIR}" "${CONFIG_DIR}/credentials.d"
+install -d -o root -g "${SERVICE_USER}" -m 0750 \
+  /var/cache/hermes-factory \
+  /var/cache/hermes-factory/osv \
+  /var/cache/hermes-factory/osv/osv-scanner \
+  /var/cache/hermes-factory/osv/osv-scanner/PyPI
 chown root:"${SERVICE_USER}" "${CONFIG_DIR}" "${CONFIG_DIR}/credentials.d"
 chmod 0750 "${CONFIG_DIR}" "${CONFIG_DIR}/credentials.d"
 
@@ -140,11 +173,25 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-backup.timer" \
   /etc/systemd/system/hermes-factory-backup.timer
+install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-osv-db.service" \
+  /etc/systemd/system/hermes-factory-osv-db.service
+install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-osv-db.timer" \
+  /etc/systemd/system/hermes-factory-osv-db.timer
 install -o root -g "${SERVICE_USER}" -m 0750 \
   "${INSTALL_ROOT}/current/scripts/deploy/factory-rollback.sh" \
   "${INSTALL_ROOT}/bin/factory-rollback"
 
+"${INSTALL_ROOT}/current/scripts/security/update-osv-database.sh"
+
 systemctl daemon-reload
-systemctl enable docker.service fail2ban.service hermes-factory-controller.service hermes-factory-worker.service hermes-factory-backup.timer
+systemctl enable \
+  docker.service \
+  fail2ban.service \
+  hermes-factory-controller.service \
+  hermes-factory-worker.service \
+  hermes-factory-backup.timer \
+  hermes-factory-osv-db.timer
 systemctl start fail2ban.service
 printf 'Bootstrap files installed. Credentials, Hermes compatibility, firewall, SSH hardening, and service start require separate evidence-backed steps.\n'

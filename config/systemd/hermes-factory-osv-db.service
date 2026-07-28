@@ -1,0 +1,20 @@
+[Unit]
+Description=Refresh the public OSV PyPI vulnerability database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0027
+ExecStart=/opt/hermes-factory/current/scripts/security/update-osv-database.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/cache/hermes-factory/osv
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+TasksMax=64

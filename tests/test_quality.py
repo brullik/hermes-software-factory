@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -192,35 +194,82 @@ class QualityGateTests(unittest.TestCase):
             self.assertEqual(evidence["status"], "FAIL")
             self.assertIn("S307", evidence["summary"])
 
-    def test_target_dependency_audit_records_inventory_and_vulnerabilities(self) -> None:
-        gate = {
+    @staticmethod
+    def _offline_dependency_gate(root: Path, scanner: Path) -> dict[str, object]:
+        return {
             "id": "target-dependency-audit",
             "adapter": "target_dependency_audit",
             "command": "controller:target-dependency-audit",
             "allowlist_prefixes": ["controller:target-dependency-audit"],
+            "scanner_path": str(scanner),
+            "scanner_sha256": hashlib.sha256(scanner.read_bytes()).hexdigest(),
+            "database_cache_directory": str(root / "osv-cache"),
+            "database_max_age_seconds": 3600,
             "mandatory": True,
         }
+
+    def test_target_dependency_audit_is_offline_and_records_vulnerabilities(self) -> None:
         payload = {
-            "dependencies": [
+            "results": [
                 {
-                    "name": "example",
-                    "version": "1.0",
-                    "vulns": [{"id": "PYSEC-TEST-1", "fix_versions": ["1.1"]}],
+                    "packages": [
+                        {
+                            "package": {
+                                "name": "example",
+                                "version": "1.0",
+                                "ecosystem": "PyPI",
+                            },
+                            "vulnerabilities": [{"id": "PYSEC-TEST-1"}],
+                        }
+                    ]
                 }
-            ],
-            "fixes": [],
+            ]
         }
-        completed = subprocess.CompletedProcess(
-            args=["pip-audit"],
-            returncode=1,
-            stdout=json.dumps(payload),
-            stderr="",
-        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            scanner = root / "osv-scanner"
+            scanner.write_bytes(b"verified-scanner")
+            database = root / "osv-cache" / "osv-scanner" / "PyPI" / "all.zip"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"verified-database")
+            gate = self._offline_dependency_gate(root, scanner)
+
+            def offline_runner(
+                args: list[str],
+                **kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                self.assertIn("--offline", args)
+                self.assertIn("--no-resolve", args)
+                lockfile_argument = next(
+                    argument for argument in args if argument.startswith("--lockfile=osv-scanner:")
+                )
+                inventory_path = Path(lockfile_argument.split(":", 1)[1])
+                inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+                package = inventory["results"][0]["packages"][0]["package"]
+                self.assertEqual(package, {"ecosystem": "PyPI", "name": "example", "version": "1.0"})
+                environment = kwargs["env"]
+                self.assertIsInstance(environment, dict)
+                self.assertEqual(
+                    environment["OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY"],  # type: ignore[index]
+                    str(root / "osv-cache"),
+                )
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=1,
+                    stdout=json.dumps(payload),
+                    stderr="",
+                )
+
             with (
                 patch("scripts.quality_gate._target_site_packages", return_value=root),
-                patch("scripts.quality_gate.subprocess.run", return_value=completed),
+                patch(
+                    "scripts.quality_gate._runtime_dependency_records",
+                    return_value=(
+                        [{"name": "example", "version": "1.0", "license": "MIT"}],
+                        ["example"],
+                    ),
+                ),
+                patch("scripts.quality_gate.subprocess.run", side_effect=offline_runner),
             ):
                 result = run_gate(
                     gate,
@@ -233,6 +282,42 @@ class QualityGateTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 1)
         self.assertIn("example:PYSEC-TEST-1", result["summary"])
         self.assertIn("inventory_sha256=", result["summary"])
+        self.assertIn("network_mode=offline", result["summary"])
+
+    def test_target_dependency_audit_fails_closed_when_database_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scanner = root / "osv-scanner"
+            scanner.write_bytes(b"verified-scanner")
+            database = root / "osv-cache" / "osv-scanner" / "PyPI" / "all.zip"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"stale-database")
+            os.utime(database, (1, 1))
+            gate = self._offline_dependency_gate(root, scanner)
+            gate["database_max_age_seconds"] = 10
+            with (
+                patch("scripts.quality_gate._target_site_packages", return_value=root),
+                patch(
+                    "scripts.quality_gate._runtime_dependency_records",
+                    return_value=(
+                        [{"name": "example", "version": "1.0", "license": "MIT"}],
+                        ["example"],
+                    ),
+                ),
+                patch("scripts.quality_gate.time.time", return_value=100),
+                patch("scripts.quality_gate.subprocess.run") as scanner_runner,
+            ):
+                result = run_gate(
+                    gate,
+                    root,
+                    "2" * 64,
+                    python_executable="target-python",
+                )
+
+        self.assertEqual(result["status"], "ERROR")
+        self.assertIsNone(result["exit_code"])
+        self.assertIn("database is stale", result["summary"])
+        scanner_runner.assert_not_called()
 
     def test_target_license_check_fails_closed_on_policy_denied_runtime_license(self) -> None:
         gate = {

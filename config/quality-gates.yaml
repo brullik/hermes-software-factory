@@ -76,6 +76,11 @@ gates:
     adapter: target_dependency_audit
     command: controller:target-dependency-audit
     allowlist_prefixes: ["controller:target-dependency-audit"]
+    scanner_path: /usr/local/bin/osv-scanner
+    scanner_sha256: 15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
+    database_cache_directory: /var/cache/hermes-factory/osv
+    database_max_age_seconds: 259200
+    require_root_owned: true
     success_exit_codes: [0]
     timeout_seconds: 300
     mandatory: true
