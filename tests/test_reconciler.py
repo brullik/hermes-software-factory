@@ -123,6 +123,20 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
         task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
         claimed = state.claim_task(worker_id="tester")
         assert claimed is not None
+        failed_attempt = config.evidence_dir / "attempt-failed-pm-gates.json"
+        failed_attempt.write_text(
+            json.dumps(
+                {
+                    "summary": "repository acceptance failed",
+                    "test_results": [
+                        {"gate_id": "target-tests", "status": "FAIL"},
+                        {"gate_id": "target-lint", "status": "FAIL"},
+                        {"gate_id": "target-compile", "status": "PASS"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
         state.complete_task(
             task_id,
             "tester",
@@ -130,6 +144,7 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
             reason_code="pm_acceptance_failed",
             detail="required_path_missing and out_of_scope_path",
             failure_kind="semantic",
+            result_ref=str(failed_attempt),
         )
 
         result = PipelineReconciler(config, state).reconcile_once()
@@ -155,6 +170,16 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
             path in "\n".join(item["verification"] for item in contract["acceptance"])
             for path in required
         )
+        brief = json.loads(
+            (config.evidence_dir / Path(repair["repair_context_ref"]).name).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert brief["failed_gate_ids"] == [
+            "pm-acceptance",
+            "target-lint",
+            "target-tests",
+        ]
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         assert any(item["status"] == "PENDING" for item in state.list_outbox())
         state.close()

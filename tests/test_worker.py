@@ -1010,6 +1010,7 @@ class WorkerTests(unittest.TestCase):
 
             self.assertEqual(result.status, "failed_safe")
             self.assertEqual(result.reason_code, "mandatory_gate_failed")
+            self.assertEqual(result.detail, "failed mandatory gates: secret-scan")
             self.assertEqual(runner.calls, [])
             attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
             self.assertEqual(attempt["commands"][0]["result"], "not_run")

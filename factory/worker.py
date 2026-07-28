@@ -84,6 +84,19 @@ _WORKSPACE_COPY_IGNORES = (
 )
 
 
+def _failed_gate_detail(results: list[dict[str, Any]]) -> str:
+    failed = sorted(
+        str(item["gate_id"])
+        for item in results
+        if item.get("gate_id") and item.get("status") not in {"PASS", "NOT_RUN"}
+    )
+    return (
+        "failed mandatory gates: " + ", ".join(failed)
+        if failed
+        else "mandatory gate result did not pass"
+    )
+
+
 @dataclass(frozen=True)
 class HermesRunResult:
     status: str
@@ -1512,6 +1525,7 @@ class AgentWorker:
         )
         try:
             if preflight is not None and not preflight.mandatory_passed:
+                gate_detail = _failed_gate_detail(list(preflight.results))
                 self.attempts.finish(
                     attempt,
                     status="failed",
@@ -1531,7 +1545,7 @@ class AgentWorker:
                     status="failed_safe",
                     summary=(
                         "Mandatory security preflight failed before provider execution; "
-                        f"routing={route_action}."
+                        f"{gate_detail}; routing={route_action}."
                     ),
                     prompt_digest=prompt_digest,
                     subject_sha=spec.subject_sha,
@@ -1548,6 +1562,7 @@ class AgentWorker:
                     "mandatory_gate_failed",
                     str(result_path),
                     attempt.attempt_id,
+                    detail=gate_detail,
                 )
             active_runner = self.planning_runner if spec.role in _PLANNING_ROLES else self.runner
             run = active_runner.run(
@@ -1844,6 +1859,7 @@ class AgentWorker:
                 gate_ids=[str(gate) for gate in spec.task_contract.get("quality_gates", [])],
             )
             if not quality_run.mandatory_passed:
+                gate_detail = _failed_gate_detail(list(quality_run.results))
                 self.attempts.finish(attempt, status="failed", reason_code="mandatory_gate_failed")
                 route_action = self._route(spec, tier, success=False, reason_code="mandatory_gate_failed", attempt=attempt)
                 result_path = self._attempt_artifact(
@@ -1851,7 +1867,10 @@ class AgentWorker:
                     attempt,
                     selection,
                     status="failed_safe",
-                    summary=f"Mandatory quality gate failed; routing={route_action}.",
+                    summary=(
+                        f"Mandatory quality gate failed; {gate_detail}; "
+                        f"routing={route_action}."
+                    ),
                     prompt_digest=prompt_digest,
                     subject_sha=spec.subject_sha,
                     command_result="fail",
@@ -1868,6 +1887,7 @@ class AgentWorker:
                     "mandatory_gate_failed",
                     str(result_path),
                     attempt.attempt_id,
+                    detail=gate_detail,
                 )
             output_status = str(output.get("status"))
             if output_status not in {"completed", "accepted"}:

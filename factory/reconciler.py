@@ -171,6 +171,24 @@ class PipelineReconciler:
                     payload = None
                 if isinstance(payload, dict):
                     detail = str(payload.get("summary") or reason)
+                    test_results = payload.get("test_results", [])
+                    failed_gates = (
+                        sorted(
+                            str(item["gate_id"])
+                            for item in test_results
+                            if (
+                                isinstance(item, dict)
+                                and item.get("gate_id")
+                                and item.get("status") not in {"PASS", "NOT_RUN"}
+                            )
+                        )
+                        if isinstance(test_results, list)
+                        else []
+                    )
+                    if failed_gates:
+                        detail = (
+                            f"{detail}; failed gates: {', '.join(failed_gates)}"
+                        )
         return reason, detail
 
     def _next_repair_tier(self, task: dict[str, Any], reason: str) -> str | None:
