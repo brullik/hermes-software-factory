@@ -1,0 +1,2 @@
+# The installer substitutes @SERVICE_USER@ and validates this file with visudo.
+@SERVICE_USER@ ALL=(root) NOPASSWD: /usr/local/sbin/hermes-factory-release-submit *

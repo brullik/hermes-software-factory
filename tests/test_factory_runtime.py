@@ -531,6 +531,25 @@ class FactoryRuntimeTests(unittest.TestCase):
         with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(GitHubCommandError):
             adapter.merge_pull_request("17", expected_sha="b" * 40)
 
+    def test_github_release_lookup_requires_unique_head_and_reads_merge_sha(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str]):
+            calls.append(argv)
+            from subprocess import CompletedProcess
+
+            if "list" in argv:
+                output = json.dumps([{"number": 17, "headRefOid": "a" * 40}])
+            else:
+                output = json.dumps({"state": "MERGED", "mergeCommit": {"oid": "b" * 40}})
+            return CompletedProcess(argv, 0, output, "")
+
+        adapter = GitHubAdapter("brullik", "hermes-software-factory", runner=runner)
+        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False):
+            self.assertEqual(adapter.pull_request_for_head_sha("a" * 40), "17")
+            self.assertEqual(adapter.merged_commit("17"), "b" * 40)
+        self.assertTrue(any("--json" in call for call in calls))
+
     def test_github_governance_gate_requires_approval_and_checks(self) -> None:
         calls: list[list[str]] = []
 

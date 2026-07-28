@@ -28,6 +28,14 @@ redacted from the public repository), with `/opt/hermes-factory` as the install 
 `scripts/deploy/promote-release.py` entrypoint. Secrets and credentials remain
 outside the repository.
 
+The worker now constructs a concrete `ConfiguredReleaseExecutor` at runtime.
+It resolves the candidate by immutable GitHub PR head SHA, derives the staging
+digest from the leased source, promotes staging transactionally, and refuses
+production unless offsite backup, required checks, governance mode, and the
+absolute root-owned `production_helper` are configured. The helper receives only
+the repository, immutable release SHA, and accepted staging digest; no shell
+string or arbitrary source path crosses the privilege boundary.
+
 These are deterministic policy checks. A model-generated claim is not release
 evidence by itself. The executor receives the model proposal and must return
 the authoritative result after the GitHub/deployment side effects; only that

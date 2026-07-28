@@ -158,6 +158,76 @@ class GitHubAdapter:
         self.require_authentication()
         return self._run(["gh", "pr", "view", pull_request, "--repo", self.slug, "--json", "reviews,latestReviews"])
 
+    def pull_request_for_head_sha(self, expected_sha: str) -> str:
+        """Return the unique open PR whose head is ``expected_sha``.
+
+        A release executor must never trust a model-supplied PR number.  The
+        immutable head SHA is the lookup key; ambiguity or a missing PR is a
+        hard external block.
+        """
+
+        if len(expected_sha) != 40 or not all(char in "0123456789abcdef" for char in expected_sha.lower()):
+            raise ValueError("expected_sha must be a 40-character commit SHA")
+        self.require_authentication()
+        result = self._run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                self.slug,
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                "number,headRefOid",
+            ]
+        )
+        try:
+            payload = json.loads(result.output)
+        except json.JSONDecodeError as error:
+            raise GitHubCommandError("GitHub PR list did not return JSON") from error
+        if not isinstance(payload, list):
+            raise GitHubCommandError("GitHub PR list returned an invalid object")
+        matches = [
+            str(item["number"])
+            for item in payload
+            if isinstance(item, dict) and str(item.get("headRefOid", "")) == expected_sha
+        ]
+        if len(matches) != 1:
+            raise GitHubCommandError("expected exactly one open pull request for the candidate SHA")
+        return matches[0]
+
+    def merged_commit(self, pull_request: str) -> str:
+        """Read the immutable merge commit after a successful merge."""
+
+        self._safe(pull_request, "pull request")
+        self.require_authentication()
+        result = self._run(
+            [
+                "gh",
+                "pr",
+                "view",
+                pull_request,
+                "--repo",
+                self.slug,
+                "--json",
+                "state,mergeCommit",
+            ]
+        )
+        try:
+            payload = json.loads(result.output)
+        except json.JSONDecodeError as error:
+            raise GitHubCommandError("GitHub PR view did not return JSON") from error
+        if not isinstance(payload, dict) or payload.get("state") != "MERGED":
+            raise GitHubCommandError("pull request is not merged")
+        merge_commit = payload.get("mergeCommit")
+        sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+        if not isinstance(sha, str) or len(sha) != 40 or not all(char in "0123456789abcdef" for char in sha.lower()):
+            raise GitHubCommandError("merged pull request lacks an immutable merge SHA")
+        return sha
+
     def verify_pull_request(
         self,
         pull_request: str,

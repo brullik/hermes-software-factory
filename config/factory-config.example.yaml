@@ -19,6 +19,12 @@ github:
     mode: single_owner
     owner_override_enabled: true
     owner_override_reason_required: true
+    owner_override_reason: "Owner-authorized single-owner release mode for this installation"
+    required_checks:
+      - factory/quality
+      - factory/security
+      - factory/release-readiness
+      - factory/scope-guard
 telegram:
   allowed_user_ids: []
   token_credential_name: telegram-token
@@ -33,6 +39,8 @@ network:
 deployment:
   reverse_proxy: caddy
   current_vps_high_risk_production: false
+  staging_root: /var/lib/hermes-factory/staging
+  production_helper: /usr/local/sbin/hermes-factory-release-submit
   production_target:
     mode: current_vps
     host: current-vps.example.invalid
