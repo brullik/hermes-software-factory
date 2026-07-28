@@ -28,6 +28,7 @@ from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine
 from .registry import SchemaRegistry
 from .release import ReleaseExecutor, ReleasePolicyError, validate_release_operation
+from .release_executor import build_release_executor
 from .state import StateStore
 from .workflow import WorkflowEngine
 from .workspace import WorkspaceManager
@@ -1088,7 +1089,13 @@ def main() -> int:
         max_active_products=config.max_active_products,
     )
     state.recover_expired_leases()
-    worker = AgentWorker(config, state, worker_id=args.worker_id)
+    worker = AgentWorker(
+        config,
+        state,
+        repository_root=Path.cwd(),
+        release_executor=build_release_executor(config),
+        worker_id=args.worker_id,
+    )
     try:
         if args.once:
             result = worker.run_once()

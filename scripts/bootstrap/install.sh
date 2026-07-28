@@ -18,6 +18,11 @@ PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 HERMES_AGENT_VERSION="${HERMES_AGENT_VERSION:-0.19.0}"
 HERMES_AGENT_SHA256="${HERMES_AGENT_SHA256:-bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f}"
 
+if [[ ! "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+  printf 'SERVICE_USER contains unsafe characters\n' >&2
+  exit 78
+fi
+
 if [[ ! -f /etc/os-release ]]; then
   printf 'Cannot identify operating system\n' >&2
   exit 1
@@ -70,6 +75,17 @@ find "${INSTALL_ROOT}/current" -type d -exec chmod 0755 {} +
 find "${INSTALL_ROOT}/current" -type f -exec chmod 0644 {} +
 find "${INSTALL_ROOT}/current/scripts" -type f -name '*.sh' -exec chmod 0755 {} +
 chmod 0755 "${INSTALL_ROOT}/current/scripts/deploy/promote-release.py"
+install -d -o root -g root -m 0755 /usr/local/sbin
+install -o root -g root -m 0755 \
+  "${INSTALL_ROOT}/current/scripts/deploy/release-submit.py" \
+  /usr/local/sbin/hermes-factory-release-submit
+
+SUDOERS_RELEASE_TMP="$(mktemp)"
+sed "s/@SERVICE_USER@/${SERVICE_USER}/" \
+  "${INSTALL_ROOT}/current/config/sudoers/hermes-factory-release" > "${SUDOERS_RELEASE_TMP}"
+install -o root -g root -m 0440 "${SUDOERS_RELEASE_TMP}" /etc/sudoers.d/hermes-factory-release
+rm -f "${SUDOERS_RELEASE_TMP}"
+visudo -cf /etc/sudoers.d/hermes-factory-release
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 "${INSTALL_ROOT}/venv"
 "${PYTHON_BIN}" -m venv "${INSTALL_ROOT}/venv"
 "${INSTALL_ROOT}/venv/bin/python" -m pip install --upgrade pip
