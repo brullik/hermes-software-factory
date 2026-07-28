@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -156,6 +157,58 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
         )
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         assert any(item["status"] == "PENDING" for item in state.list_outbox())
+        state.close()
+
+
+def test_repair_task_cannot_be_claimed_before_brief_is_attached() -> None:
+    class RaceProbeArtifacts(ArtifactStore):
+        def __init__(self, config: FactoryConfig, state: StateStore) -> None:
+            super().__init__(config)
+            self.state = state
+            self.claimed_during_brief: dict[str, object] | None = None
+
+        def write(
+            self,
+            schema_name: str,
+            data: dict[str, Any],
+            *,
+            filename: str | None = None,
+        ) -> Path:
+            if schema_name == "repair-brief.schema.json":
+                self.claimed_during_brief = self.state.claim_task(worker_id="race-worker")
+            return super().write(schema_name, data, filename=filename)
+
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "atomic-repair-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/bybit-grid-research",
+            idempotency_key="atomic-repair-key",
+        )
+        product_at_staging(state, product_id)
+        write_pm_task(config, product_id)
+        artifacts = RaceProbeArtifacts(config, state)
+        task_path = PipelineCoordinator(config, state, artifacts).create_task(
+            product_id,
+            "product-tester",
+        )
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        assert state.claim_task(worker_id="failed-tester") is not None
+        state.complete_task(task_id, "failed-tester", "FAILED_SAFE")
+
+        result = PipelineReconciler(config, state, artifacts).reconcile_once()
+
+        assert result.repaired == 1
+        assert artifacts.claimed_during_brief is None
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["status"] == "PENDING"
+        assert active[0]["next_tier"] == "terra"
+        assert active[0]["repair_context_ref"]
         state.close()
 
 
