@@ -108,10 +108,48 @@ class GatewayTests(unittest.TestCase):
                 self.assertTrue(gateway.process_update(update(30, 42, "/help")))
             self.assertEqual(
                 api.sent[0][1],
-                "/idea <текст>, /status, /projects, /pause <product>, /resume <product>, /cancel <product>, /owner_action",
+                "/idea <текст>, /status, /projects, /kanban, /pause <product>, /resume <product>, /cancel <product>, /owner_action",
             )
             self.assertNotIn("Р", api.sent[0][1])
             self.assertIn("telegram update processed update_id=30 command=help", "\n".join(logs.output))
+            state.close()
+
+    def test_kanban_command_returns_read_only_task_summary_without_private_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = make_config(Path(directory))
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            state.create_product(
+                product_id="telegram-kanban-product",
+                owner_id="private-owner",
+                source="telegram",
+                idea="private idea must not be sent in the Kanban summary",
+                idempotency_key="telegram-kanban-fixture",
+            )
+            state.add_task(
+                task_id="telegram-kanban-task",
+                product_id="telegram-kanban-product",
+                title="Build the first slice",
+                role="builder",
+                priority=10,
+            )
+            api = FakeTelegramApi()
+            gateway = TelegramGateway(
+                config,
+                state,
+                ArtifactStore(config),
+                api,  # type: ignore[arg-type]
+                offset_path=Path(directory) / "offset",
+            )
+
+            self.assertTrue(gateway.process_update(update(40, 42, "/kanban")))
+            response = api.sent[0][1]
+            self.assertIn("Hermes Kanban (read-only)", response)
+            self.assertIn("telegram-kanban-product", response)
+            self.assertIn("telegram-kanban-task", response)
+            self.assertIn("Build the first slice", response)
+            self.assertNotIn("private-owner", response)
+            self.assertNotIn("private idea", response)
+            self.assertLessEqual(len(response), 4096)
             state.close()
 
     def test_api_client_never_exposes_token_in_request_payload(self) -> None:

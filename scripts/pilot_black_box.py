@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -13,11 +14,14 @@ from urllib.parse import urljoin, urlparse
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from factory.artifacts import artifact_metadata
 from factory.common import new_id
 from factory.config import load_config
 
-ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAME = "pilot-black-box.schema.json"
 
 
