@@ -38,7 +38,7 @@ class WorkflowEngine:
             product = self.transition(product_id, status)
         elif str(product["status"]) in {"CANCELLED", "COMPLETED", "FAILED_SAFE"}:
             raise ValueError(f"cannot resume terminal product {product_id}")
-        self.state.requeue_blocked_tasks(product_id)
+        self.state.requeue_resumable_tasks(product_id)
         return product
 
     def cancel(self, product_id: str) -> dict[str, object]:
