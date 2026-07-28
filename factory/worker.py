@@ -250,7 +250,62 @@ class WorkerResult:
 
 
 def _workspace_snapshot(root: Path) -> dict[str, str]:
-    snapshot: dict[str, str] = {}
+    repository_marker = root / ".git"
+    if repository_marker.exists():
+        try:
+            listed = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError("workspace inventory command failed") from error
+        if listed.returncode != 0:
+            raise RuntimeError("workspace inventory command failed")
+        snapshot: dict[str, str] = {}
+        try:
+            relative_paths = sorted(
+                {
+                    os.fsdecode(value)
+                    for value in listed.stdout.split(b"\0")
+                    if value
+                }
+            )
+        except UnicodeError as error:
+            raise RuntimeError("workspace inventory contains an invalid path") from error
+        for relative in relative_paths:
+            relative_path = Path(relative)
+            if (
+                relative_path.is_absolute()
+                or ".." in relative_path.parts
+                or relative_path.as_posix() == ".lease.json"
+            ):
+                if relative_path.as_posix() == ".lease.json":
+                    continue
+                raise RuntimeError("workspace inventory contains an unsafe path")
+            path = root / relative_path
+            normalized = relative_path.as_posix()
+            if path.is_symlink():
+                snapshot[normalized] = f"SYMLINK:{path.resolve()}"
+            elif path.is_file():
+                snapshot[normalized] = sha256_file(path)
+            else:
+                # ``git ls-files --cached`` includes tracked files deleted in
+                # the worktree. Preserve that state so deletion is detected.
+                snapshot[normalized] = "MISSING"
+        return snapshot
+
+    fallback_snapshot: dict[str, str] = {}
     for path in root.rglob("*"):
         if path.name == ".lease.json":
             continue
@@ -258,10 +313,10 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
         if ".git" in Path(relative).parts:
             continue
         if path.is_symlink():
-            snapshot[relative] = f"SYMLINK:{path.resolve()}"
+            fallback_snapshot[relative] = f"SYMLINK:{path.resolve()}"
         elif path.is_file():
-            snapshot[relative] = sha256_file(path)
-    return snapshot
+            fallback_snapshot[relative] = sha256_file(path)
+    return fallback_snapshot
 
 
 def public_github_repository_url(value: str) -> str | None:
