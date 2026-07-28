@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = ROOT / "scripts" / "deploy" / "promote-release.py"
+RELEASE_SUBMIT = ROOT / "scripts" / "deploy" / "release-submit.py"
 
 
 class DeployEntrypointTests(unittest.TestCase):
@@ -14,6 +15,9 @@ class DeployEntrypointTests(unittest.TestCase):
         loaded = runpy.run_path(str(ENTRYPOINT))
         cls.validate_health_url = loaded["validate_health_url"]
         cls.health_probe = loaded["health_probe"]
+        submit = runpy.run_path(str(RELEASE_SUBMIT))
+        cls.install_root = submit["_install_root"]
+        cls.submit_error = submit["SubmitError"]
 
     def test_health_url_requires_loopback_http(self) -> None:
         self.assertEqual(
@@ -40,6 +44,29 @@ class DeployEntrypointTests(unittest.TestCase):
             type(self).health_probe("http://127.0.0.1:8787/healthz", 0, 1.0)
         with self.assertRaises(ValueError):
             type(self).health_probe("http://127.0.0.1:8787/healthz", 1, -1.0)
+
+    def test_external_product_install_root_is_controller_derived(self) -> None:
+        config = {
+            "github": {"owner": "brullik", "factory_repository": "hermes-software-factory"},
+            "deployment": {"production_target": {"install_root": "/opt/hermes-factory"}},
+        }
+        external = type(self).install_root(
+            config,
+            "brullik/bybit-grid-research",
+            "bybit-grid-research-1234",
+        )
+        self.assertEqual(external.name, "bybit-grid-research-1234")
+        self.assertEqual(external.parent.name, "hermes-factory-products")
+
+    def test_external_product_install_root_rejects_other_owner_and_unsafe_id(self) -> None:
+        config = {
+            "github": {"owner": "brullik", "factory_repository": "hermes-software-factory"},
+            "deployment": {"production_target": {"install_root": "/opt/hermes-factory"}},
+        }
+        with self.assertRaises(type(self).submit_error):
+            type(self).install_root(config, "attacker/bybit-grid-research", "safe-product")
+        with self.assertRaises(type(self).submit_error):
+            type(self).install_root(config, "brullik/bybit-grid-research", "../escape")
 
 
 if __name__ == "__main__":

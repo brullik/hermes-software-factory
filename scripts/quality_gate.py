@@ -71,10 +71,32 @@ def load_catalog(path: Path) -> dict[str, Any]:
 
 
 def _git_changed_paths(cwd: Path) -> list[str]:
-    commands = (
+    commands: list[list[str]] = [
         ["git", "diff", "--name-only", "-z", "--diff-filter=ACMR", "HEAD", "--"],
         ["git", "ls-files", "-z", "--others", "--exclude-standard"],
+    ]
+    remote_head = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        timeout=120,
+        check=False,
     )
+    if remote_head.returncode == 0:
+        base_ref = os.fsdecode(remote_head.stdout).strip()
+        if not re.fullmatch(r"origin/[A-Za-z0-9._/-]+", base_ref):
+            raise RuntimeError("git remote default branch is unsafe")
+        commands.append(
+            [
+                "git",
+                "diff",
+                "--name-only",
+                "-z",
+                "--diff-filter=ACMR",
+                f"{base_ref}...HEAD",
+                "--",
+            ]
+        )
     paths: set[str] = set()
     for argv in commands:
         completed = subprocess.run(

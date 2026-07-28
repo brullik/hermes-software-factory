@@ -11,7 +11,8 @@ rollback, and audit evidence.
 The production target is the owner's VPS:
 
 - host: `current-vps.example.invalid` (actual address is kept outside the public repository)
-- install root: `/opt/hermes-factory`
+- factory install root: `/opt/hermes-factory`
+- external product roots: `/opt/hermes-factory-products/<product_id>`
 - deployment entrypoint: `scripts/deploy/promote-release.py`
 - mode: `current_vps`
 

@@ -194,6 +194,66 @@ class QualityGateTests(unittest.TestCase):
             self.assertEqual(evidence["status"], "FAIL")
             self.assertIn("S307", evidence["summary"])
 
+    def test_target_sast_scans_committed_candidate_against_remote_default_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "target"
+            source = repository / "src" / "sample.py"
+            source.parent.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "factory-tests@example.invalid"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Factory Tests"],
+                cwd=repository,
+                check=True,
+            )
+            source.write_text("def parse(value: str) -> str:\n    return value\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/sample.py"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(["git", "switch", "-q", "-c", "candidate"], cwd=repository, check=True)
+            source.write_text(
+                "def parse(value: str) -> object:\n    return eval(value)\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "src/sample.py"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repository, check=True)
+
+            config = make_config(
+                root,
+                selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+            )
+            engine = QualityGateEngine(config, ArtifactStore(config))
+            run = engine.run(
+                cwd=repository,
+                subject_sha=subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repository,
+                    text=True,
+                ).strip(),
+                task_id="T-SAST-COMMITTED",
+                attempt_id="attempt-sast-committed",
+                gate_ids=["target-sast"],
+            )
+
+            self.assertFalse(run.mandatory_passed)
+            evidence = json.loads(run.evidence_paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "FAIL")
+            self.assertIn("S307", evidence["summary"])
+
     @staticmethod
     def _offline_dependency_gate(root: Path, scanner: Path) -> dict[str, object]:
         return {

@@ -1564,6 +1564,18 @@ class AgentWorker:
             except (TypeError, ValueError) as error:
                 raise ValueError("schema_validation") from error
             if spec.role == "release-operator":
+                proposal_snapshot = _workspace_snapshot(lease.path)
+                proposal_changed_paths = {
+                    path
+                    for path in set(before_snapshot) | set(proposal_snapshot)
+                    if before_snapshot.get(path) != proposal_snapshot.get(path)
+                }
+                if enforce_changed_paths(
+                    proposal_changed_paths,
+                    [str(path) for path in spec.task_contract["allowed_paths"]],
+                    [str(path) for path in spec.task_contract["forbidden_paths"]],
+                ):
+                    raise ValueError("scope_violation")
                 stage = "staging" if "staging" in str(spec.task_contract.get("title", "")).lower() else "production"
                 assert self.release_executor is not None
                 expected_staging_digest = (
@@ -1804,6 +1816,7 @@ class AgentWorker:
                 "malformed_transport",
                 "schema_validation",
                 "release_policy_violation",
+                "scope_violation",
             } else "malformed_transport"
             self.attempts.finish(attempt, status="failed", reason_code=reason)
             route_action = self._route(

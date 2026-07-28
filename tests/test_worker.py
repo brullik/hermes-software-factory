@@ -434,6 +434,39 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(state.get_product(product_id)["status"], "STAGING_DEPLOYED")
             state.close()
 
+    def test_release_scope_is_checked_before_adapter_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            product_id, _ = staging_release_task(config, state, artifacts)
+            proposed = release_operation(
+                config,
+                product_id,
+                candidate_sha="a" * 40,
+                image_digest="sha256:" + "b" * 64,
+            )
+            executor = RecordingReleaseExecutor(proposed)
+            worker = AgentWorker(
+                config,
+                state,
+                runner=ScopeViolatingRunner(json.dumps(proposed)),
+                release_executor=executor,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(result.reason_code, "scope_violation")
+            self.assertEqual(executor.calls, [])
+            state.close()
+
     def test_worker_runs_selected_provider_and_persists_contract_and_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
