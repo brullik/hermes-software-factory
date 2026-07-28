@@ -73,11 +73,17 @@ class AttemptManager:
         current_attempt: Attempt | None = None,
     ) -> RouteDecision:
         semantic, transient = self.state.attempt_counts(task_id, tier.value)
-        if current_attempt is not None and current_attempt.tier.value == tier.value:
-            if current_attempt.semantic_counted:
-                semantic = max(0, semantic - 1)
-            elif current_attempt.attempt_kind == "transient_retry":
-                transient = max(0, transient - 1)
+        if (
+            current_attempt is not None
+            and current_attempt.tier.value == tier.value
+            and current_attempt.semantic_counted
+        ):
+            semantic = max(0, semantic - 1)
+        # ``semantic`` is the count *before* the current semantic attempt
+        # because the routing policy decides whether this failure gets a
+        # repair or an escalation.  Transient retries are different: the
+        # current retry must count toward the retry cap, otherwise every
+        # retry would subtract itself and the cap would never be reached.
         state = RouteState(role, risk, complexity_score, tier, semantic, transient)
         return decide(
             state,

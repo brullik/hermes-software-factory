@@ -46,6 +46,9 @@ _EXTERNAL_CODES = {
     "legal_decision",
     "unapproved_irreversible_production_action",
 }
+_POLICY_CODES = {
+    "release_policy_violation",
+}
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,7 @@ def classify_failure(reason_code: str | None) -> FailureClass:
         return FailureClass.TRANSIENT
     if reason_code in _EXTERNAL_CODES:
         return FailureClass.EXTERNAL
-    if reason_code.startswith("policy_") or reason_code in {"scope_violation", "secret_exposure"}:
+    if reason_code.startswith("policy_") or reason_code in {"scope_violation", "secret_exposure", *_POLICY_CODES}:
         return FailureClass.POLICY
     return FailureClass.SEMANTIC
 

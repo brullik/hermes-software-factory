@@ -96,6 +96,30 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(result.tier, Tier.LUNA)
         self.assertFalse(result.semantic_attempt_counted)
 
+    def test_transient_retry_cap_counts_the_current_retry(self) -> None:
+        state = RouteState("builder", "low", 2, Tier.LUNA, transient_retries=3)
+        result = decide(
+            state,
+            success=False,
+            reason_code="network_timeout",
+            new_evidence=False,
+            policy=self.policy,
+        )
+        self.assertEqual(result.action, "fallback_same_tier_or_delay")
+        self.assertEqual(result.reason, "transient_retries_exhausted")
+
+    def test_release_policy_violation_is_a_policy_failure(self) -> None:
+        state = RouteState("release_operator", "medium", 2, Tier.TERRA)
+        result = decide(
+            state,
+            success=False,
+            reason_code="release_policy_violation",
+            new_evidence=False,
+            policy=self.policy,
+        )
+        self.assertEqual(result.action, "escalate")
+        self.assertEqual(result.tier, Tier.SOL)
+
     def test_external_blocker_creates_owner_action(self) -> None:
         state = RouteState("release_operator", "medium", 2, Tier.TERRA)
         result = decide(
