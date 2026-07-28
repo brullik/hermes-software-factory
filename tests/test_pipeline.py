@@ -14,6 +14,47 @@ from factory.state import StateStore
 
 
 class PipelineTests(unittest.TestCase):
+    def test_different_products_have_disjoint_workspace_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+                max_active_products=config.max_active_products,
+            )
+            pipeline = PipelineCoordinator(config, state)
+            product_ids = ("isolated-product-a", "isolated-product-b")
+            for product_id in product_ids:
+                state.create_product(
+                    product_id=product_id,
+                    owner_id="owner",
+                    source="test",
+                    idea=f"https://github.com/brullik/{product_id}",
+                    idempotency_key=f"isolation-{product_id}",
+                )
+                pipeline.create_task(product_id, "builder-core")
+
+            first = state.claim_task(worker_id="worker-a")
+            second = state.claim_task(worker_id="worker-b")
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            assert first is not None and second is not None
+            self.assertNotEqual(first["product_id"], second["product_id"])
+            first_locks = set(json.loads(first["conflict_keys_json"]))
+            second_locks = set(json.loads(second["conflict_keys_json"]))
+            self.assertTrue(first_locks)
+            self.assertTrue(second_locks)
+            self.assertTrue(first_locks.isdisjoint(second_locks))
+            state.close()
+
     def test_external_repository_uses_portable_target_gates_and_shared_workspace_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

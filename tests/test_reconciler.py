@@ -800,3 +800,126 @@ def test_reconciler_reads_optional_gate_policy_fail_closed() -> None:
         assert "target-tests" not in reconciler.optional_gate_ids
         assert "unknown-gate" not in reconciler.optional_gate_ids
         state.close()
+
+
+def test_exhausted_builder_opens_next_cycle_with_exact_gate_traceback() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "bounded-builder-cycle-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="https://github.com/brullik/example-product",
+            idempotency_key="bounded-builder-cycle-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+        ):
+            state.transition_product(product_id, status)
+        pipeline = PipelineCoordinator(config, state)
+        builder_path = pipeline.create_task(product_id, "builder-core", cycle=0)
+        task_id = json.loads(builder_path.read_text(encoding="utf-8"))["task_id"]
+        gate_path = config.evidence_dir / "gate-builder-target-tests.json"
+        gate_path.write_text(
+            json.dumps(
+                {
+                    "gate_id": "target-tests",
+                    "status": "FAIL",
+                    "summary": (
+                        "ImportError in tests/test_core.py: "
+                        "ModuleNotFoundError: No module named 'grid_bot'"
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        attempt_path = config.evidence_dir / "attempt-builder-exhausted.json"
+        attempt_path.write_text(
+            json.dumps(
+                {
+                    "summary": "Mandatory quality gate failed.",
+                    "test_results": [
+                        {
+                            "gate_id": "target-tests",
+                            "status": "FAIL",
+                            "evidence_ref": str(gate_path),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert state.claim_task(worker_id="builder-worker") is not None
+        attempts = (
+            ("luna-1", "luna"),
+            ("luna-2", "luna"),
+            ("terra-1", "terra"),
+            ("terra-2", "terra"),
+            ("sol-1", "sol"),
+        )
+        for index, (attempt_id, tier) in enumerate(attempts, start=1):
+            assert state.record_attempt(
+                attempt_id=attempt_id,
+                task_id=task_id,
+                tier=tier,
+                attempt_kind="repair",
+                prompt_digest=(str(index) * 64),
+                status="failed",
+                semantic_counted=True,
+                reason_code="mandatory_gate_failed",
+            )
+        state.complete_task(
+            task_id,
+            "builder-worker",
+            "FAILED_SAFE",
+            reason_code="mandatory_gate_failed",
+            detail="failed mandatory gates: target-tests",
+            result_ref=str(attempt_path),
+            failure_kind="semantic",
+        )
+        state.transition_product(product_id, "FAILED_SAFE")
+        state.record_event(
+            product_id=product_id,
+            task_id=task_id,
+            event_type="repair_budget_exhausted",
+            payload={"reason_code": "mandatory_gate_failed", "attempts": 5},
+        )
+
+        first = PipelineReconciler(config, state).reconcile_once()
+
+        assert first.repaired == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "REPAIRING"
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["role"] == "builder"
+        assert active[0]["cycle"] == 1
+        assert active[0]["next_tier"] == "terra"
+        brief = json.loads(
+            (
+                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
+            ).read_text(encoding="utf-8")
+        )
+        assert "target-tests" in brief["failed_gate_ids"]
+        assert any(
+            "ModuleNotFoundError: No module named 'grid_bot'" in item
+            for item in brief["required_fixes"]
+        )
+        assert "ModuleNotFoundError" in brief["relevant_log_fragment"]
+        assert any(
+            event["event_type"] == "builder_cycle_reopened"
+            for event in state.events(product_id)
+        )
+
+        second = PipelineReconciler(config, state).reconcile_once()
+
+        assert second.repaired == 0
+        assert len(state.active_tasks(product_id)) == 1
+        state.close()

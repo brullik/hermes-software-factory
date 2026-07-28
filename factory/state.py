@@ -268,7 +268,7 @@ class StateStore:
             "CONTRACT_VALIDATED": {"RISK_CLASSIFIED", "PAUSED", "CANCELLED"},
             "RISK_CLASSIFIED": {"ARCHITECTED", "PAUSED", "CANCELLED"},
             "ARCHITECTED": {"BACKLOG_READY", "PAUSED", "CANCELLED"},
-            "BACKLOG_READY": {"IMPLEMENTING", "PAUSED", "CANCELLED"},
+            "BACKLOG_READY": {"IMPLEMENTING", "REPAIRING", "PAUSED", "CANCELLED"},
             "IMPLEMENTING": {"INTEGRATING", "REPAIRING", "DELAYED_QUOTA", "PAUSED", "CANCELLED"},
             "INTEGRATING": {"STAGING_DEPLOYED", "REPAIRING", "PAUSED", "CANCELLED"},
             "STAGING_DEPLOYED": {"PRODUCT_ACCEPTANCE", "ROLLING_BACK", "PAUSED", "CANCELLED"},
@@ -994,6 +994,91 @@ class StateStore:
             )
             return True
 
+    def recover_exhausted_builder_cycle(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+        resume_status: str,
+        max_repair_cycles: int,
+    ) -> bool:
+        """Reopen one exhausted Builder task so a new bounded cycle can be created."""
+
+        if resume_status not in _RECOVERABLE_PRODUCT_STATUSES:
+            raise ValueError("Builder cycle resume status is invalid")
+        if max_repair_cycles < 1 or max_repair_cycles > 3:
+            raise ValueError("repair budget is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT products.status AS product_status,
+                          tasks.status AS task_status,
+                          tasks.role,
+                          tasks.stage_key,
+                          tasks.cycle
+                   FROM tasks
+                   JOIN products ON products.product_id=tasks.product_id
+                   WHERE tasks.task_id=? AND tasks.product_id=?
+                     AND tasks.rowid=(
+                         SELECT MAX(latest.rowid)
+                         FROM tasks AS latest
+                         WHERE latest.product_id=tasks.product_id
+                     )""",
+                (task_id, product_id),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["product_status"]) != "FAILED_SAFE"
+                or str(row["task_status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or str(row["role"]) != "builder"
+                or str(row["stage_key"]) != "builder-core"
+                or int(row["cycle"] or 0) >= max_repair_cycles
+            ):
+                return False
+            exhausted = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='repair_budget_exhausted'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            already_reopened = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='builder_cycle_reopened'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            if exhausted is None or already_reopened is not None:
+                return False
+            now = utc_now()
+            completed_cycle = int(row["cycle"] or 0)
+            self._connection.execute(
+                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                (resume_status, now, product_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": resume_status,
+                    "reason": "builder_cycle_recovery",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "builder_cycle_reopened",
+                {
+                    "completed_cycle": completed_cycle,
+                    "next_cycle": completed_cycle + 1,
+                    "max_repair_cycles": max_repair_cycles,
+                    "resume_status": resume_status,
+                },
+            )
+            return True
+
     def recover_exhausted_product_budget(
         self,
         *,
@@ -1039,6 +1124,25 @@ class StateStore:
             ).fetchone()
             if exhausted is None:
                 return False
+            reopened_rows = self._connection.execute(
+                """SELECT payload_json FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='repair_budget_reopened'""",
+                (product_id, task_id),
+            ).fetchall()
+            for reopened_row in reopened_rows:
+                try:
+                    reopened_payload = json.loads(
+                        str(reopened_row["payload_json"] or "{}")
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if (
+                    isinstance(reopened_payload, dict)
+                    and int(reopened_payload.get("max_repair_cycles") or 0)
+                    >= max_repair_cycles
+                ):
+                    return False
             now = utc_now()
             self._connection.execute(
                 "UPDATE products SET status=?, updated_at=? WHERE product_id=?",

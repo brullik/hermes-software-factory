@@ -65,7 +65,7 @@ class FactoryConfig:
 
     @property
     def max_active_products(self) -> int:
-        return int(self.controller.get("max_active_products", 1))
+        return int(self.controller.get("max_active_products", 2))
 
     @property
     def reconcile_interval_seconds(self) -> float:
@@ -155,10 +155,10 @@ def validate_config(config: FactoryConfig) -> list[str]:
     paths = config.raw.get("paths", {})
     models = config.raw.get("models", {})
     intake = config.raw.get("intake", {})
-    if int(controller.get("max_active_products", 1)) < 1:
+    if int(controller.get("max_active_products", 2)) < 1:
         errors.append("max_active_products must be positive")
-    if int(controller.get("max_active_products", 1)) > 1:
-        errors.append("max_active_products must not exceed 1")
+    if int(controller.get("max_active_products", 2)) > 2:
+        errors.append("max_active_products must not exceed 2")
     if int(controller.get("max_active_workers", 2)) < 1:
         errors.append("max_active_workers must be positive")
     if int(controller.get("max_active_workers", 2)) > 2:

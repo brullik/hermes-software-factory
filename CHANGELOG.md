@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.9 - 2026-07-28
+
+- После исчерпания model tiers Builder запускает следующий bounded product repair cycle вместо повторного FAILED_SAFE-loop.
+- Controller-owned gate traceback попадает в `relevant_log_fragment` и `required_fixes`, поэтому Builder видит точную ошибку, а не только gate ID.
+- Recovery каждого исчерпанного Builder cycle идемпотентен; повторное расширение того же policy budget также не создаёт цикл событий.
+- Два проекта могут быть активны одновременно при двух workers; их planning/workspace/assurance locks остаются строго product-scoped.
+
 ## 2.0.8 - 2026-07-28
 
 - Builder downstream-gate recovery читает mandatory/optional статус из controller-owned quality-gate catalog.

@@ -551,6 +551,18 @@ class PipelineCoordinator:
                 continue
             if not isinstance(payload, dict):
                 continue
+            if (
+                payload.get("gate_id")
+                and payload.get("status") not in {"PASS", "NOT_RUN"}
+            ):
+                gate_id = str(payload["gate_id"])
+                failed.append(gate_id)
+                gate_summary = str(payload.get("summary") or "").strip()
+                if gate_summary:
+                    required_fixes.append(
+                        f"Make controller gate {gate_id} pass. "
+                        f"Observed failure: {gate_summary[:2500]}"
+                    )
             if payload.get("status") in {"repair_required", "blocked_external"}:
                 findings = normalized_repair_findings(payload)
                 failed.extend(item.finding_id for item in findings)
@@ -566,11 +578,7 @@ class PipelineCoordinator:
                     and item.get("status") not in {"PASS", "NOT_RUN"}
                 ):
                     failed.append(str(item["gate_id"]))
-                if (
-                    item.get("gate_id") == "schema-validation"
-                    and item.get("status") == "PASS"
-                    and item.get("evidence_ref")
-                ):
+                if item.get("evidence_ref"):
                     pending_refs.append(str(item["evidence_ref"]))
         failed, fallback_fixes = repair_requirements(
             output=None,

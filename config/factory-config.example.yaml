@@ -3,7 +3,7 @@ controller:
   database_url: sqlite:////var/lib/hermes-factory/controller.db
   event_retention_days: 90
   transcript_retention_days: 14
-  max_active_products: 1
+  max_active_products: 2
   max_active_workers: 2
   reconcile_interval_seconds: 2
   max_repair_cycles: 3
