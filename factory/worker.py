@@ -518,9 +518,10 @@ class AgentWorker:
                 "artifact_ref": f"evidence/intake-{task['product_id']}.json",
             },
         ]
-        evidence.extend(self._dependency_evidence(task))
         if prompt_role == "security-reviewer":
             evidence.extend(self._completed_review_evidence(task))
+        else:
+            evidence.extend(self._dependency_evidence(task))
         decisions = ["Use safe defaults for unspecified reversible product details."]
         if prompt_role in _PLANNING_ROLES:
             decisions.append(
@@ -782,6 +783,11 @@ class AgentWorker:
             relative_path = Path(relative)
             if relative_path.is_absolute() or ".." in relative_path.parts:
                 raise ExternalBlocker("security review candidate contains an unsafe path")
+            if (
+                relative_path.as_posix() == ".lease.json"
+                or relative_path.parts[:1] == ("artifacts",)
+            ):
+                continue
             candidate = (root / relative_path).resolve()
             try:
                 candidate.relative_to(root)
@@ -1666,15 +1672,23 @@ class AgentWorker:
             output_status = str(output.get("status"))
             if output_status not in {"completed", "accepted"}:
                 self.attempts.finish(attempt, status="repair_required", reason_code="model_requested_repair")
-                route_action = self._route(
-                    spec,
-                    tier,
-                    success=False,
-                    reason_code="model_requested_repair",
-                    new_evidence=output_status == "repair_required",
-                    attempt=attempt,
+                reviewer_handoff = (
+                    output_status == "repair_required"
+                    and spec.role == "security-reviewer"
                 )
-                if output_status == "repair_required":
+                route_action = (
+                    "builder_repair_handoff"
+                    if reviewer_handoff
+                    else self._route(
+                        spec,
+                        tier,
+                        success=False,
+                        reason_code="model_requested_repair",
+                        new_evidence=output_status == "repair_required",
+                        attempt=attempt,
+                    )
+                )
+                if output_status == "repair_required" and not reviewer_handoff:
                     scheduled = self._schedule_repair(
                         spec,
                         attempt,

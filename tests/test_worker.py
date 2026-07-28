@@ -18,6 +18,7 @@ from factory.intake import IntakeService
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
 from factory.providers import ModelSelection
+from factory.quality import QualityGateRun
 from factory.state import StateStore
 from factory.worker import (
     AgentWorker,
@@ -119,6 +120,21 @@ class ScopeViolatingRunner(FakeRunner):
     ) -> HermesRunResult:
         (cwd / "forbidden.txt").write_text("unexpected change\n", encoding="utf-8")
         return super().run(selection=selection, prompt=prompt, cwd=cwd, usage_path=usage_path)
+
+
+class PassingQuality:
+    def run(self, **_: object) -> QualityGateRun:
+        return QualityGateRun(
+            (
+                {
+                    "gate_id": "security-preflight",
+                    "status": "PASS",
+                    "evidence_ref": "evidence/security-preflight.json",
+                },
+            ),
+            (),
+            True,
+        )
 
 
 class RecordingReleaseExecutor:
@@ -679,6 +695,10 @@ class WorkerTests(unittest.TestCase):
                 check=True,
             )
             source.write_text("value = 2\n", encoding="utf-8")
+            (repository / ".lease.json").write_text("{}\n", encoding="utf-8")
+            generated = repository / "artifacts" / "security-review.json"
+            generated.parent.mkdir()
+            generated.write_text('{"status":"repair_required"}\n', encoding="utf-8")
             registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
             config = make_config(root / "state", registry_path)
             state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
@@ -720,7 +740,88 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("+value = 2", evidence["summary"])
             self.assertIn('"status":"PASS"', evidence["summary"])
             self.assertIn(("source.py", "security review candidate changed from base"), candidates)
+            self.assertNotIn(".lease.json", evidence["summary"])
+            self.assertNotIn("artifacts/security-review.json", evidence["summary"])
             self.assertTrue(any("Context Pack subject_sha" in item for item in decisions))
+            state.close()
+
+    def test_security_finding_hands_off_without_same_role_model_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / "README.md").write_text("minimal workspace\n", encoding="utf-8")
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            product_id = "P-SECURITY-HANDOFF"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Review a candidate and hand findings to the builder",
+                idempotency_key="security-handoff-test",
+            )
+            task_path = PipelineCoordinator(config, state, ArtifactStore(config)).create_task(
+                product_id,
+                "security-reviewer",
+            )
+            contract = json.loads(task_path.read_text(encoding="utf-8"))
+            output = {
+                **artifact_metadata(
+                    config,
+                    "security-reviewer",
+                    "security-review-handoff-test",
+                    product_id,
+                ),
+                "producer": {
+                    "role": "security-reviewer",
+                    "tier": "terra",
+                    "provider": "openai_codex_subscription",
+                    "model": "gpt-5.6-terra",
+                },
+                "task_id": contract["task_id"],
+                "subject_sha": "b" * 64,
+                "status": "repair_required",
+                "changed_trust_boundaries": ["untrusted input boundary"],
+                "findings": [
+                    {
+                        "id": "SEC-001",
+                        "severity": "medium",
+                        "category": "input-validation",
+                        "description": "An input boundary needs a deterministic bound.",
+                        "evidence": "source.py:1",
+                        "required_fix": "Add the bound and a negative test.",
+                    }
+                ],
+                "release_blocked": True,
+                "assumptions": ["The candidate remains immutable during review."],
+                "evidence_refs": ["evidence/security-preflight.json"],
+            }
+            runner = FakeRunner(json.dumps(output))
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=repository,
+            )
+            worker.quality = PassingQuality()  # type: ignore[assignment]
+            spec = TaskExecutionSpec(
+                task_contract=contract,
+                role="security-reviewer",
+                output_schema="security-review-result.schema.json",
+                subject_sha="a" * 64,
+            )
+
+            result = worker.execute(spec)
+
+            self.assertEqual(result.status, "repair_required")
+            self.assertEqual(result.reason_code, "model_requested_repair")
+            self.assertEqual(len(runner.calls), 1)
+            self.assertEqual(list(config.evidence_dir.glob("repair-brief-*.json")), [])
+            attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
+            self.assertIn("builder_repair_handoff", attempt["summary"])
             state.close()
 
     def test_security_preflight_failure_skips_provider_call(self) -> None:
