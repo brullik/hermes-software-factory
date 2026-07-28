@@ -173,6 +173,34 @@ class FactoryRuntimeTests(unittest.TestCase):
             state.mark_outbox_done("outbox-1", "worker")
             state.close()
 
+    def test_owner_resume_requeues_task_that_failed_safe_before_provider_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "controller.db")
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="cli",
+                idea="idea",
+                idempotency_key="failed-safe-resume",
+            )
+            state.transition_product("product", "CONTRACT_DRAFTED")
+            state.add_task(task_id="failed", product_id="product", title="Failed before provider")
+            claimed = state.claim_task(worker_id="worker")
+            self.assertIsNotNone(claimed)
+            state.complete_task("failed", "worker", "FAILED_SAFE")
+
+            product = WorkflowEngine(state).resume("product", "IMPLEMENTING")
+
+            self.assertEqual(product["status"], "CONTRACT_DRAFTED")
+            resumed = state.get_task("failed")
+            self.assertIsNotNone(resumed)
+            assert resumed is not None
+            self.assertEqual(resumed["status"], "PENDING")
+            event = state.events("product")[-1]
+            self.assertEqual(event["event_type"], "task_requeued")
+            self.assertEqual(json.loads(event["payload_json"])["previous_status"], "FAILED_SAFE")
+            state.close()
+
     def test_conflict_keys_serialize_same_file_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = StateStore(Path(directory) / "controller.db")
