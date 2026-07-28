@@ -15,6 +15,7 @@ class DeployEntrypointTests(unittest.TestCase):
         loaded = runpy.run_path(str(ENTRYPOINT))
         cls.validate_health_url = loaded["validate_health_url"]
         cls.health_probe = loaded["health_probe"]
+        cls.optional_services = loaded["OPTIONAL_SERVICES"]
         submit = runpy.run_path(str(RELEASE_SUBMIT))
         cls.install_root = submit["_install_root"]
         cls.submit_error = submit["SubmitError"]
@@ -67,6 +68,30 @@ class DeployEntrypointTests(unittest.TestCase):
             type(self).install_root(config, "attacker/bybit-grid-research", "safe-product")
         with self.assertRaises(type(self).submit_error):
             type(self).install_root(config, "brullik/bybit-grid-research", "../escape")
+
+    def test_second_worker_is_durable_and_restarted_when_installed(self) -> None:
+        worker_one = (
+            ROOT / "config" / "systemd" / "hermes-factory-worker.service"
+        ).read_text(encoding="utf-8")
+        worker_two = (
+            ROOT / "config" / "systemd" / "hermes-factory-worker-2.service"
+        ).read_text(encoding="utf-8")
+        installer = (
+            ROOT / "scripts" / "bootstrap" / "install.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("--worker-id hermes-worker-1", worker_one)
+        self.assertNotIn("--worker-id hermes-worker-2", worker_one)
+        self.assertIn("--worker-id hermes-worker-2", worker_two)
+        self.assertNotIn("--worker-id hermes-worker-1", worker_two)
+        self.assertIn(
+            "hermes-factory-worker-2.service",
+            type(self).optional_services,
+        )
+        self.assertGreaterEqual(
+            installer.count("hermes-factory-worker-2.service"),
+            2,
+        )
 
 
 if __name__ == "__main__":

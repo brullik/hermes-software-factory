@@ -710,6 +710,55 @@ class PipelineReconciler:
         )
         return True
 
+    def _recover_deferred_dependency_consumer(
+        self,
+        product: dict[str, Any],
+    ) -> bool:
+        """Retry Test Engineer after a controller-accepted deferred Builder."""
+
+        product_id = str(product["product_id"])
+        task = self.state.latest_task(product_id)
+        if (
+            task is None
+            or str(task.get("status")) != "BLOCKED_EXTERNAL"
+            or str(task.get("role")) != "test-engineer"
+            or str(task.get("stage_key")) != "test-engineer"
+            or str(task.get("terminal_reason") or "") != "internal_blocker"
+        ):
+            return False
+        prefix = "accepted task result is missing for "
+        detail = str(task.get("terminal_detail") or "")
+        if not detail.startswith(prefix):
+            return False
+        dependency_task_id = detail.removeprefix(prefix).strip()
+        if not dependency_task_id:
+            return False
+        resume_status = self._previous_status_before_failed_safe(product_id)
+        if resume_status is None:
+            return False
+        recovered = self.state.recover_deferred_dependency_consumer(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            dependency_task_id=dependency_task_id,
+            resume_status=resume_status,
+        )
+        if not recovered:
+            return False
+        self._enqueue_notification(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            kind="automatic_recovery",
+            discriminator=f"deferred-dependency:{task['task_id']}",
+            text=(
+                "✅ Hermes автоматически восстановил передачу результата Builder.\n"
+                f"Проект: {product_id}\n"
+                f"Builder: {dependency_task_id}\n"
+                "Test Engineer повторно поставлен в очередь без нового Builder-вызова.\n"
+                "Действие владельца: не требуется."
+            ),
+        )
+        return True
+
     def _recover_exhausted_builder_cycle(self, product: dict[str, Any]) -> bool:
         product_id = str(product["product_id"])
         task = self.state.latest_task(product_id)
@@ -922,6 +971,12 @@ class PipelineReconciler:
                     counts["repaired"] += 1
                 continue
             if status == "FAILED_SAFE" and self._recover_interrupted_product(product):
+                counts["inspected"] += 1
+                counts["repaired"] += 1
+                continue
+            if status == "FAILED_SAFE" and self._recover_deferred_dependency_consumer(
+                product
+            ):
                 counts["inspected"] += 1
                 counts["repaired"] += 1
                 continue

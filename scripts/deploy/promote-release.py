@@ -30,6 +30,7 @@ SERVICES = (
     "hermes-factory-gateway.service",
     "hermes-factory-worker.service",
 )
+OPTIONAL_SERVICES = ("hermes-factory-worker-2.service",)
 
 
 def validate_health_url(value: str) -> str:
@@ -58,7 +59,12 @@ def validate_source(source: Path) -> None:
 
 
 def restart_services() -> None:
-    run_checked(["systemctl", "restart", *SERVICES])
+    installed_optional = tuple(
+        service
+        for service in OPTIONAL_SERVICES
+        if (Path("/etc/systemd/system") / service).is_file()
+    )
+    run_checked(["systemctl", "restart", *SERVICES, *installed_optional])
 
 
 def health_probe(url: str, attempts: int, delay_seconds: float) -> Callable[[Path], bool]:

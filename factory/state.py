@@ -994,6 +994,128 @@ class StateStore:
             )
             return True
 
+    def recover_deferred_dependency_consumer(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+        dependency_task_id: str,
+        resume_status: str,
+    ) -> bool:
+        """Retry a pre-provider consumer after a deferred Builder was accepted."""
+
+        if resume_status not in _RECOVERABLE_PRODUCT_STATUSES:
+            raise ValueError("deferred dependency resume status is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT products.status AS product_status,
+                          tasks.status AS task_status,
+                          tasks.role,
+                          tasks.stage_key,
+                          tasks.terminal_reason,
+                          tasks.terminal_detail,
+                          tasks.dependencies_json
+                   FROM tasks
+                   JOIN products ON products.product_id=tasks.product_id
+                   WHERE tasks.task_id=? AND tasks.product_id=?
+                     AND tasks.rowid=(
+                         SELECT MAX(latest.rowid)
+                         FROM tasks AS latest
+                         WHERE latest.product_id=tasks.product_id
+                     )""",
+                (task_id, product_id),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                dependencies = json.loads(str(row["dependencies_json"]))
+            except (TypeError, json.JSONDecodeError):
+                return False
+            expected_detail = (
+                f"accepted task result is missing for {dependency_task_id}"
+            )
+            if (
+                str(row["product_status"]) != "FAILED_SAFE"
+                or str(row["task_status"]) != "BLOCKED_EXTERNAL"
+                or str(row["role"]) != "test-engineer"
+                or str(row["stage_key"]) != "test-engineer"
+                or str(row["terminal_reason"] or "") != "internal_blocker"
+                or str(row["terminal_detail"] or "") != expected_detail
+                or dependencies != [dependency_task_id]
+            ):
+                return False
+            dependency = self._connection.execute(
+                """SELECT status, role, stage_key FROM tasks
+                   WHERE task_id=? AND product_id=?""",
+                (dependency_task_id, product_id),
+            ).fetchone()
+            deferred = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='builder_downstream_gate_deferred'
+                   LIMIT 1""",
+                (product_id, dependency_task_id),
+            ).fetchone()
+            provider_attempt = self._connection.execute(
+                "SELECT 1 FROM attempts WHERE task_id=? LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if (
+                dependency is None
+                or str(dependency["status"]) != "DONE"
+                or str(dependency["role"]) != "builder"
+                or str(dependency["stage_key"]) != "builder-core"
+                or deferred is None
+                or provider_attempt is not None
+            ):
+                return False
+            already_recovered = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='deferred_dependency_consumer_recovered'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            if already_recovered is not None:
+                return False
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                (resume_status, now, product_id),
+            )
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='PENDING', available_at=NULL,
+                       lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
+                       next_tier=NULL, next_attempt_kind='initial',
+                       repair_context_ref=NULL, terminal_reason=NULL,
+                       terminal_detail=NULL, result_ref=NULL,
+                       failure_kind=NULL, updated_at=?
+                   WHERE task_id=?""",
+                (now, task_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": resume_status,
+                    "reason": "deferred_dependency_consumer_recovery",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "deferred_dependency_consumer_recovered",
+                {
+                    "dependency_task_id": dependency_task_id,
+                    "resume_status": resume_status,
+                    "attempt_kind": "initial",
+                },
+            )
+            return True
+
     def recover_exhausted_builder_cycle(
         self,
         *,

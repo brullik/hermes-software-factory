@@ -786,6 +786,47 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
             for item in notifications
         )
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+
+        test_task_id = str(active[0]["task_id"])
+        claimed = state.claim_task(worker_id="test-worker")
+        assert claimed is not None
+        assert claimed["task_id"] == test_task_id
+        state.complete_task(
+            test_task_id,
+            "test-worker",
+            "BLOCKED_EXTERNAL",
+            reason_code="internal_blocker",
+            detail=f"accepted task result is missing for {task_id}",
+            failure_kind="semantic",
+        )
+        state.transition_product(product_id, "FAILED_SAFE")
+
+        consumer_recovery = PipelineReconciler(config, state).reconcile_once()
+
+        assert consumer_recovery.repaired == 1
+        recovered_product = state.get_product(product_id)
+        assert recovered_product is not None
+        assert recovered_product["status"] == "REPAIRING"
+        recovered_test_task = state.get_task(test_task_id)
+        assert recovered_test_task is not None
+        assert recovered_test_task["status"] == "PENDING"
+        assert recovered_test_task["next_attempt_kind"] == "initial"
+        recovery_events = [
+            event
+            for event in state.events(product_id)
+            if event["event_type"] == "deferred_dependency_consumer_recovered"
+        ]
+        assert len(recovery_events) == 1
+
+        PipelineReconciler(config, state).reconcile_once()
+        assert len(
+            [
+                event
+                for event in state.events(product_id)
+                if event["event_type"]
+                == "deferred_dependency_consumer_recovered"
+            ]
+        ) == 1
         state.close()
 
 
