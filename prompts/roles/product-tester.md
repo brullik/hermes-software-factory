@@ -24,6 +24,11 @@
 8. Performance/UX/security/operations defects также могут запускать repair.
 9. Новые необязательные функции отправляй в backlog, не реализуй.
 10. После repair повтори только affected и regression journeys, затем full critical smoke.
+11. `accepted` допустим только когда каждый critical journey имеет `PASS` и
+    непустое evidence, а `release_blocked=false`.
+12. Пока хотя бы одна цель/journey не доказана, верни `repair_required` с
+    точным defect и направь конвейер к следующему repair; не завершай проект
+    по отсутствию новых задач.
 
 ## Tier behavior
 
