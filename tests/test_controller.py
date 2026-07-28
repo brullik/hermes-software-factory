@@ -17,6 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ControllerHttpTests(unittest.TestCase):
+    def _config_and_state(self, state_dir: Path) -> tuple[FactoryConfig, StateStore]:
+        raw = yaml.safe_load((ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8"))
+        raw["paths"]["state"] = str(state_dir)
+        raw["paths"]["policies"] = str(ROOT / "policies")
+        raw["paths"]["schemas"] = str(ROOT / "schemas")
+        raw["paths"]["prompts"] = str(ROOT / "prompts")
+        raw["paths"]["worktrees"] = str(state_dir / "worktrees")
+        raw["paths"]["logs"] = str(state_dir / "logs")
+        raw["controller"]["database_url"] = f"sqlite:///{(state_dir / 'controller.db').as_posix()}"
+        config = FactoryConfig(raw, ROOT / "config" / "factory-config.example.yaml")
+        return config, StateStore(config.database_path, max_active_workers=config.max_active_workers)
+
     def test_local_intake_endpoint_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_dir = Path(directory)
@@ -92,6 +104,52 @@ class ControllerHttpTests(unittest.TestCase):
                         self.assertEqual(response.status, 201)
                     else:
                         self.assertEqual(response.status, 429)
+                client.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+                state.close()
+
+    def test_local_kanban_is_read_only_and_minimal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config, state = self._config_and_state(Path(directory))
+            state.create_product(
+                product_id="kanban-product",
+                owner_id="private-owner",
+                source="telegram",
+                idea="private idea that must not enter the dashboard",
+                idempotency_key="kanban-fixture",
+            )
+            state.add_task(
+                task_id="kanban-task",
+                product_id="kanban-product",
+                title="Build the first slice",
+                role="builder",
+                priority=10,
+            )
+            server = ControllerHttpServer(("127.0.0.1", 0), state, config)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                client = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                client.request("GET", "/api/kanban?view=current")
+                response = client.getresponse()
+                payload = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+                self.assertEqual(payload["summary"]["products_total"], 1)
+                self.assertEqual(payload["products"][0]["product_id"], "kanban-product")
+                self.assertEqual(payload["products"][0]["tasks"][0]["task_id"], "kanban-task")
+                self.assertNotIn("idea", payload["products"][0])
+                self.assertNotIn("owner_id", payload["products"][0])
+                client.request("GET", "/kanban")
+                html_response = client.getresponse()
+                html = html_response.read().decode("utf-8")
+                headers = dict(html_response.getheaders())
+                self.assertEqual(html_response.status, 200)
+                self.assertIn("Hermes Kanban", html)
+                self.assertIn("/api/kanban", html)
+                self.assertIn("Content-Security-Policy", headers)
                 client.close()
             finally:
                 server.shutdown()

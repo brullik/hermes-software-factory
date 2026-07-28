@@ -12,10 +12,12 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .artifacts import ArtifactStore
 from .config import FactoryConfig, load_config
 from .intake import IntakeRejected, IntakeService
+from .kanban import KANBAN_HTML, build_kanban_snapshot
 from .state import IntakeRateLimitError, ProductCapacityError, StateStore
 from .workflow import WorkflowEngine
 
@@ -24,7 +26,14 @@ class ControllerHandler(BaseHTTPRequestHandler):
     server: ControllerHttpServer
 
     def do_GET(self) -> None:
-        if self.path == "/metrics":
+        path = urlsplit(self.path).path
+        if path == "/kanban":
+            self._send_text(200, KANBAN_HTML, "text/html; charset=utf-8")
+            return
+        if path == "/api/kanban":
+            self._send_json(200, build_kanban_snapshot(self.server.state))
+            return
+        if path == "/metrics":
             database_ready = int(self.server.state.health())
             product_count = len(self.server.state.list_products())
             body = (
@@ -41,7 +50,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path not in {"/healthz", "/readyz", "/status"}:
+        if path not in {"/healthz", "/readyz", "/status"}:
             self.send_error(404)
             return
         payload: dict[str, Any] = {
@@ -49,19 +58,15 @@ class ControllerHandler(BaseHTTPRequestHandler):
             "service": "hermes-factory-controller",
             "database": self.server.state.health(),
         }
-        if self.path == "/status":
+        if path == "/status":
             payload["products"] = self.server.state.list_products()
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
+        self._send_json(200, payload)
 
     def do_POST(self) -> None:
         try:
             payload = self._read_json()
-            if self.path == "/intake":
+            path = urlsplit(self.path).path
+            if path == "/intake":
                 result = IntakeService(
                     self.server.config,
                     self.server.state,
@@ -84,7 +89,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            parts = self.path.strip("/").split("/")
+            parts = path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "products" and parts[2] in {"pause", "resume", "cancel"}:
                 workflow = WorkflowEngine(self.server.state)
                 if parts[2] == "pause":
@@ -117,6 +122,17 @@ class ControllerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _send_text(self, status: int, body: str, content_type: str) -> None:
+        encoded = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(encoded)
 

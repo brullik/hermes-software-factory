@@ -13,6 +13,7 @@ from .artifacts import ArtifactStore
 from .config import FactoryConfig, load_config
 from .gateway_commands import GatewayCommandError, parse_command
 from .intake import IntakeService
+from .kanban import build_kanban_snapshot, format_telegram_summary
 from .state import StateStore
 from .telegram import TelegramApi, TelegramApiError
 from .workflow import WorkflowEngine
@@ -117,9 +118,11 @@ class TelegramGateway:
 
     def _dispatch(self, command: str, argument: str | None, owner_id: int, update_id: int) -> str:
         if command == "help":
-            return "/idea <текст>, /status, /projects, /pause <product>, /resume <product>, /cancel <product>, /owner_action"
+            return "/idea <текст>, /status, /projects, /kanban, /pause <product>, /resume <product>, /cancel <product>, /owner_action"
         if command in {"status", "projects"}:
             return self._products_text()
+        if command == "kanban":
+            return format_telegram_summary(build_kanban_snapshot(self.state))
         if command == "owner_action":
             return self._owner_actions_text()
         if command == "idea":

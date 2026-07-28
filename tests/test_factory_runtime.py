@@ -145,6 +145,13 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertEqual(claimed["task_id"], "first")
             self.assertIsNone(state.claim_task(worker_id="other"))
             state.complete_task("first", "worker")
+            blocked_claim = state.claim_task(worker_id="worker")
+            self.assertIsNotNone(blocked_claim)
+            assert blocked_claim is not None
+            self.assertEqual(blocked_claim["task_id"], "second")
+            state.complete_task("second", "worker", "BLOCKED_EXTERNAL")
+            self.assertEqual(workflow.resume("product", "IMPLEMENTING")["status"], "CONTRACT_DRAFTED")
+            self.assertEqual(state.get_task("second")["status"], "PENDING")
             next_task = state.claim_task(worker_id="other")
             self.assertIsNotNone(next_task)
             assert next_task is not None

@@ -81,6 +81,46 @@ def _run_local(command: list[str], timeout: int = 300) -> dict[str, Any]:
     }
 
 
+def _strict_compatibility_open_scenarios(path: Path) -> list[dict[str, str]]:
+    """Project open Hermes compatibility gates into acceptance scenarios."""
+
+    compatibility_data: dict[str, Any] = {}
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            compatibility_data = loaded
+    checks = compatibility_data.get("checks", [])
+    if not isinstance(checks, list):
+        checks = []
+    checks_by_id = {
+        str(item.get("id")): item
+        for item in checks
+        if isinstance(item, dict) and item.get("id")
+    }
+    open_items = compatibility_data.get("open_items", [])
+    if not isinstance(open_items, list):
+        open_items = []
+    if compatibility_data.get("status") in {"FAIL", "BLOCKED_EXTERNAL"} and not open_items:
+        open_items = ["hermes-compatibility-audit"]
+    scenarios: list[dict[str, str]] = []
+    for item_value in open_items:
+        item_id = str(item_value)
+        if any(scenario["id"] == item_id for scenario in scenarios):
+            continue
+        record = checks_by_id.get(item_id, {})
+        status = str(record.get("status", "BLOCKED_EXTERNAL")) if isinstance(record, dict) else "BLOCKED_EXTERNAL"
+        if status not in {"PASS", "FAIL", "BLOCKED_EXTERNAL"}:
+            status = "BLOCKED_EXTERNAL"
+        scenarios.append(
+            {
+                "id": item_id,
+                "status": status,
+                "evidence_ref": f"evidence/{path.name}",
+            }
+        )
+    return scenarios
+
+
 def validate_config_command(args: argparse.Namespace) -> int:
     config = _config(args.config)
     print(json.dumps({"status": "PASS", "config": str(config.source), "policy_digest": policy_digest(config)}))
@@ -325,6 +365,14 @@ def acceptance_command(args: argparse.Namespace) -> int:
                 "evidence_ref": str(record.get("evidence_ref", "docs/IMPLEMENTATION-LEDGER.md")),
             }
         )
+    # A broad external acceptance summary is not sufficient evidence for the
+    # stricter Hermes compatibility gates.  Carry every explicitly open gate
+    # into the final acceptance result so a stale summary cannot turn an
+    # incomplete provider-backed pipeline probe into PASS.
+    compatibility_path = ROOT / "evidence" / "hermes-compatibility-observations.json"
+    for scenario in _strict_compatibility_open_scenarios(compatibility_path):
+        if not any(item["id"] == scenario["id"] for item in external_scenarios):
+            external_scenarios.append(scenario)
     scenarios.extend(external_scenarios)
     local_failed = any(check["status"] != "PASS" for check in checks)
     external_failed = any(item["status"] == "FAIL" for item in external_scenarios)
@@ -365,6 +413,9 @@ def acceptance_command(args: argparse.Namespace) -> int:
         evidence_refs.append("evidence/compatibility-report.json")
     if (ROOT / "evidence" / "pilot" / "github-publication.json").is_file():
         evidence_refs.append("evidence/pilot/github-publication.json")
+    target_test_evidence = ROOT / "evidence" / "bybit-grid-research-test-run-20260728.json"
+    if target_test_evidence.is_file():
+        evidence_refs.append(f"evidence/{target_test_evidence.name}")
     evidence_refs.extend(
         f"evidence/pilot/{path.name}"
         for path in sorted((ROOT / "evidence" / "pilot").glob("black-box-vps-*.json"))

@@ -462,6 +462,38 @@ class StateStore:
                 },
             )
 
+    def requeue_blocked_tasks(self, product_id: str) -> list[str]:
+        """Explicitly return blocked external tasks to the queue on owner resume.
+
+        Resume is an operator action, so retrying a blocked task is intentional.
+        The attempt manager still rejects an identical prompt digest, preventing
+        an unchanged task from consuming another provider call.
+        """
+
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                "SELECT task_id FROM tasks WHERE product_id=? AND status='BLOCKED_EXTERNAL' ORDER BY created_at",
+                (product_id,),
+            ).fetchall()
+            task_ids = [str(row["task_id"]) for row in rows]
+            now = utc_now()
+            for task_id in task_ids:
+                self._connection.execute(
+                    """UPDATE tasks
+                       SET status='PENDING', lease_owner=NULL, lease_until=NULL,
+                           heartbeat_at=NULL, next_tier=NULL, next_attempt_kind='initial',
+                           repair_context_ref=NULL, updated_at=?
+                       WHERE task_id=? AND product_id=? AND status='BLOCKED_EXTERNAL'""",
+                    (now, task_id, product_id),
+                )
+                self._record_event(
+                    product_id,
+                    task_id,
+                    "task_requeued",
+                    {"attempt_kind": "owner_resume", "reason": "owner_resume"},
+                )
+            return task_ids
+
     def events(self, product_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
             if product_id:

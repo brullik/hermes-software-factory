@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from factory.common import SECRET_PATTERNS
 
-ROOT = Path(__file__).resolve().parents[1]
 IGNORED_DIRS = {".deployment", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "build", "dist", ".venv", "state", "__pycache__"}
 SUFFIXES = {".json", ".md", ".py", ".sh", ".toml", ".yaml", ".yml", ".txt"}
 EXTRA_PATTERNS = (

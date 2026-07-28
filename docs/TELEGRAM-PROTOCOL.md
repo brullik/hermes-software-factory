@@ -62,6 +62,10 @@ event.
 
 ## Owner control
 
+The owner can request a bounded, read-only Kanban text snapshot with `/kanban`.
+It includes column names, product IDs, lifecycle statuses, and a compact list
+of durable tasks; ideas, owner IDs, provider output, and credentials are omitted.
+
 `pause` прекращает запуск новых attempts, но не прерывает атомарный deploy/rollback.
 `cancel` создаёт safe cancellation plan: закрывает tasks, удаляет ephemeral worktrees и сохраняет evidence.
 `resume` запускает reconciliation перед продолжением.

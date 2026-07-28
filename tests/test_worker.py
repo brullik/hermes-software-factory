@@ -73,6 +73,31 @@ class SequenceRunner:
         return HermesRunResult("PASS", output, "sequence-output-digest", None, str(usage_path) if usage_path else None)
 
 
+class UsageRunner(FakeRunner):
+    def run(
+        self,
+        *,
+        selection: Any,
+        prompt: str,
+        cwd: Path,
+        usage_path: Path | None = None,
+    ) -> HermesRunResult:
+        if usage_path is not None:
+            usage_path.write_text(
+                json.dumps(
+                    {
+                        "input_tokens": 42,
+                        "output_tokens": 7,
+                        "cache_tokens": 3,
+                        "tool_rounds": 1,
+                        "wall_clock_seconds": 0.25,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return super().run(selection=selection, prompt=prompt, cwd=cwd, usage_path=usage_path)
+
+
 class ScopeViolatingRunner(FakeRunner):
     def run(
         self,
@@ -135,6 +160,30 @@ def product_contract(config: FactoryConfig, product_id: str) -> str:
     }
     artifact["status"] = "completed"
     artifact["created_at"] = "2026-01-01T00:00:00Z"
+    return json.dumps(artifact, ensure_ascii=False)
+
+
+def requirements_package(config: FactoryConfig, product_id: str) -> str:
+    artifact = {
+        **artifact_metadata(config, "product-analyst", "requirements-worker-test", product_id),
+        "status": "completed",
+        "summary": "Traceable requirements derived from the accepted Product Contract.",
+        "domain_terms": [{"term": "product", "definition": "The owner-scoped deliverable."}],
+        "user_stories": [
+            {
+                "id": "US-001",
+                "actor": "owner",
+                "goal": "inspect the accepted deliverable",
+                "benefit": "the result is verifiable",
+                "acceptance_ids": ["AC-001"],
+            }
+        ],
+        "edge_cases": [],
+        "traceability": [{"requirement_id": "REQ-001", "story_ids": ["US-001"], "acceptance_ids": ["AC-001"]}],
+        "assumptions": ["The owner can inspect the result locally."],
+        "findings": [],
+        "evidence_refs": ["evidence/product-contract-worker-test.json"],
+    }
     return json.dumps(artifact, ensure_ascii=False)
 
 
@@ -366,7 +415,7 @@ class WorkerTests(unittest.TestCase):
             artifacts = ArtifactStore(config)
             intake = IntakeService(config, state, artifacts)
             intake_result = intake.submit(source="cli", owner_id="owner", idea="Build a safe product")
-            runner = FakeRunner(product_contract(config, intake_result.product_id))
+            runner = UsageRunner(product_contract(config, intake_result.product_id))
             worker = AgentWorker(
                 config,
                 state,
@@ -404,6 +453,44 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(attempts[0]["status"], "completed")
             attempt_artifact = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
             self.assertEqual(artifacts.validate("attempt-result.schema.json", attempt_artifact), [])
+            self.assertTrue(any(ref.startswith("evidence/usage-") for ref in attempt_artifact["evidence_refs"]))
+            state.close()
+
+    def test_completed_dependency_output_is_in_next_context_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli", owner_id="owner", idea="Build a dependency-aware product"
+            )
+            runner = SequenceRunner(
+                [
+                    product_contract(config, intake_result.product_id),
+                    requirements_package(config, intake_result.product_id),
+                ]
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            first = worker.run_once()
+            second = worker.run_once()
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertEqual(second.status, "completed")
+            self.assertEqual(len(runner.prompts), 2)
+            self.assertIn("UNTRUSTED_DATA accepted output for dependency", runner.prompts[1])
+            self.assertIn("product-contract-worker-test", runner.prompts[1])
+            self.assertEqual(state.list_tasks(intake_result.product_id)[1]["status"], "DONE")
             state.close()
 
     def test_unselected_route_blocks_before_provider_call(self) -> None:

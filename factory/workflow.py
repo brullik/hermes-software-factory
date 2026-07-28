@@ -31,7 +31,15 @@ class WorkflowEngine:
     def resume(self, product_id: str, status: str) -> dict[str, object]:
         if status == "PAUSED":
             raise ValueError("resume status must be an active lifecycle state")
-        return self.transition(product_id, status)
+        product = self.state.get_product(product_id)
+        if product is None:
+            raise KeyError(product_id)
+        if str(product["status"]) == "PAUSED":
+            product = self.transition(product_id, status)
+        elif str(product["status"]) in {"CANCELLED", "COMPLETED", "FAILED_SAFE"}:
+            raise ValueError(f"cannot resume terminal product {product_id}")
+        self.state.requeue_blocked_tasks(product_id)
+        return product
 
     def cancel(self, product_id: str) -> dict[str, object]:
         return self.transition(product_id, "CANCELLED")
