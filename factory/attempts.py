@@ -70,8 +70,14 @@ class AttemptManager:
         success: bool,
         reason_code: str | None,
         new_evidence: bool,
+        current_attempt: Attempt | None = None,
     ) -> RouteDecision:
         semantic, transient = self.state.attempt_counts(task_id, tier.value)
+        if current_attempt is not None and current_attempt.tier.value == tier.value:
+            if current_attempt.semantic_counted:
+                semantic = max(0, semantic - 1)
+            elif current_attempt.attempt_kind == "transient_retry":
+                transient = max(0, transient - 1)
         state = RouteState(role, risk, complexity_score, tier, semantic, transient)
         return decide(
             state,

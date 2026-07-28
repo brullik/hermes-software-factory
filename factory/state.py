@@ -61,6 +61,9 @@ class StateStore:
                     task_id TEXT PRIMARY KEY,
                     product_id TEXT NOT NULL REFERENCES products(product_id),
                     title TEXT NOT NULL,
+                    role TEXT,
+                    output_schema TEXT,
+                    contract_ref TEXT,
                     priority INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     dependencies_json TEXT NOT NULL,
@@ -121,6 +124,18 @@ class StateStore:
                 self._connection.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            for column, definition in (
+                ("role", "TEXT"),
+                ("output_schema", "TEXT"),
+                ("contract_ref", "TEXT"),
+                ("next_tier", "TEXT"),
+                ("next_attempt_kind", "TEXT NOT NULL DEFAULT 'initial'"),
+                ("repair_context_ref", "TEXT"),
+            ):
+                try:
+                    self._connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+                except sqlite3.OperationalError:
+                    pass
             try:
                 self._connection.execute("ALTER TABLE outbox ADD COLUMN lease_until TEXT")
             except sqlite3.OperationalError:
@@ -265,6 +280,9 @@ class StateStore:
         task_id: str,
         product_id: str,
         title: str,
+        role: str | None = None,
+        output_schema: str | None = None,
+        contract_ref: str | None = None,
         dependencies: list[str] | None = None,
         conflict_keys: list[str] | None = None,
         priority: int = 0,
@@ -275,12 +293,16 @@ class StateStore:
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO tasks
-                (task_id, product_id, title, priority, status, dependencies_json, conflict_keys_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
+                (task_id, product_id, title, role, output_schema, contract_ref, priority, status,
+                 dependencies_json, conflict_keys_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
                     title,
+                    role,
+                    output_schema,
+                    contract_ref,
                     priority,
                     json.dumps(dependencies or []),
                     json.dumps(conflict_keys or []),
@@ -289,6 +311,26 @@ class StateStore:
                 ),
             )
             self._record_event(product_id, task_id, "task_created", {"title": title})
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_tasks(self, product_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if product_id is None:
+                rows = self._connection.execute(
+                    "SELECT * FROM tasks ORDER BY created_at"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT * FROM tasks WHERE product_id = ? ORDER BY created_at",
+                    (product_id,),
+                ).fetchall()
+            return [dict(row) for row in rows]
 
     def claim_task(self, *, worker_id: str, lease_seconds: int = 300) -> dict[str, Any] | None:
         with self._lock:
@@ -378,6 +420,47 @@ class StateStore:
                 (status, utc_now(), task_id),
             )
             self._record_event(row["product_id"], task_id, "task_completed", {"status": status})
+
+    def requeue_task(
+        self,
+        task_id: str,
+        worker_id: str,
+        *,
+        next_tier: str,
+        attempt_kind: str,
+        repair_context_ref: str,
+    ) -> None:
+        """Return a leased task to the queue with explicit repair routing."""
+
+        if attempt_kind not in {"repair", "transient_retry"}:
+            raise ValueError("requeued task must be a repair or transient retry")
+        if next_tier not in {"luna", "terra", "sol"}:
+            raise ValueError("requeued task tier is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT product_id FROM tasks WHERE task_id=? AND status='CLAIMED' AND lease_owner=?",
+                (task_id, worker_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Task lease is missing or owned by another worker")
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='PENDING', lease_owner=NULL, lease_until=NULL,
+                       heartbeat_at=NULL, next_tier=?, next_attempt_kind=?,
+                       repair_context_ref=?, updated_at=?
+                 WHERE task_id=?""",
+                (next_tier, attempt_kind, repair_context_ref, utc_now(), task_id),
+            )
+            self._record_event(
+                row["product_id"],
+                task_id,
+                "task_requeued",
+                {
+                    "next_tier": next_tier,
+                    "attempt_kind": attempt_kind,
+                    "repair_context_ref": repair_context_ref,
+                },
+            )
 
     def events(self, product_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:

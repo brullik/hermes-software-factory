@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "benchmark-routing-expert-20260727",
+  "product_id": "hermes-software-factory",
+  "created_at": "2026-07-27T08:33:11Z",
+  "producer": {
+    "role": "benchmark-evaluator",
+    "tier": "sol",
+    "provider": "openai-codex",
+    "model": "gpt-5.6-sol"
+  },
+  "policy_digest": "8fa83aa61b556c59ccdc3e756c16e51193614ad6d19caadaa39f49f7ac29bc02",
+  "role": "benchmark-evaluator",
+  "candidate_alias": "expert",
+  "baseline_alias": "nous-reference-tencent-hy3-free",
+  "task_count": 20,
+  "quality": {
+    "candidate_pass_rate": 1.0,
+    "baseline_pass_rate": 0.45,
+    "candidate_not_worse": true
+  },
+  "repair_rate": {
+    "candidate": 0.0,
+    "baseline": 0.0,
+    "not_increased": true
+  },
+  "false_pass_rate": {
+    "candidate": 0.0,
+    "baseline": 0.0,
+    "not_increased": true
+  },
+  "quota_efficiency": {
+    "candidate": 0.0,
+    "baseline": 0.0,
+    "improved": false
+  },
+  "recommendation": "approve_route_change",
+  "canary": {
+    "percent": 1,
+    "rollback_condition": "Rollback immediately on any deterministic safety-gate regression, provider health failure, or quota exhaustion without a same-tier healthy fallback."
+  },
+  "evidence_refs": [
+    "evidence/model-benchmark-safety-v3.json",
+    "evidence/external-acceptance.json",
+    "evidence/hermes-compatibility-observations.json"
+  ]
+}

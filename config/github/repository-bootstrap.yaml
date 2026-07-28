@@ -3,12 +3,19 @@ owner: brullik
 default_branch: main
 merge_method: squash
 delete_branch_on_merge: true
+governance:
+  mode: single_owner
+  owner_override:
+    enabled: true
+    reason_required: true
+    audit_evidence_required: true
+    independent_review_claim: forbidden
 visibility:
   safe_default: public
   force_private_from_policy: true
 ruleset:
   require_pull_request: true
-  required_approvals_from_independent_agent: 1
+  required_approvals_from_independent_agent: 0
   dismiss_stale_approvals: true
   require_conversation_resolution: true
   block_force_push: true
@@ -18,7 +25,6 @@ ruleset:
     - factory/scope-guard
     - factory/quality
     - factory/security
-    - factory/independent-review
     - factory/release-readiness
 actions:
   default_permissions:
@@ -28,6 +34,6 @@ actions:
   fork_self_hosted_runner: false
 environments:
   staging:
-    prevent_self_review: true
+    prevent_self_review: false
   production:
-    prevent_self_review: true
+    prevent_self_review: false

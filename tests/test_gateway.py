@@ -91,6 +91,29 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(api.offsets, [None, 21])
             state.close()
 
+    def test_help_response_is_utf8_and_contains_cyrillic_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = make_config(Path(directory))
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            api = FakeTelegramApi()
+            gateway = TelegramGateway(
+                config,
+                state,
+                ArtifactStore(config),
+                api,  # type: ignore[arg-type]
+                offset_path=Path(directory) / "offset",
+            )
+
+            with self.assertLogs("factory.gateway", level="INFO") as logs:
+                self.assertTrue(gateway.process_update(update(30, 42, "/help")))
+            self.assertEqual(
+                api.sent[0][1],
+                "/idea <текст>, /status, /projects, /pause <product>, /resume <product>, /cancel <product>, /owner_action",
+            )
+            self.assertNotIn("Р", api.sent[0][1])
+            self.assertIn("telegram update processed update_id=30 command=help", "\n".join(logs.output))
+            state.close()
+
     def test_api_client_never_exposes_token_in_request_payload(self) -> None:
         calls: list[tuple[str, dict[str, object]]] = []
 

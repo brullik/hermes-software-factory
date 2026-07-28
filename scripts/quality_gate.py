@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shlex
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,7 +33,13 @@ def load_catalog(path: Path) -> dict[str, Any]:
     return data
 
 
-def run_gate(gate: dict[str, Any], cwd: Path, subject_sha: str) -> dict[str, Any]:
+def run_gate(
+    gate: dict[str, Any],
+    cwd: Path,
+    subject_sha: str,
+    *,
+    python_executable: str | None = None,
+) -> dict[str, Any]:
     command = str(gate["command"])
     prefixes = gate.get("allowlist_prefixes", [])
     allowed, reason = command_allowed(command, prefixes)
@@ -41,17 +49,29 @@ def run_gate(gate: dict[str, Any], cwd: Path, subject_sha: str) -> dict[str, Any
         exit_code = None
         status = "ERROR"
     else:
-        completed = subprocess.run(
-            command.split(),
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=int(gate.get("timeout_seconds", 600)),
-            check=False,
-        )
-        output = (completed.stdout + "\n" + completed.stderr).strip()
-        exit_code = completed.returncode
-        status = "PASS" if completed.returncode == 0 else "FAIL"
+        try:
+            argv = shlex.split(command)
+            if python_executable and argv and argv[0].lower() in {"python", "python3", "python.exe"}:
+                argv[0] = python_executable
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                timeout=int(gate.get("timeout_seconds", 600)),
+                check=False,
+            )
+            output = (completed.stdout + "\n" + completed.stderr).strip()
+            exit_code = completed.returncode
+            status = "PASS" if completed.returncode == 0 else "FAIL"
+        except subprocess.TimeoutExpired as error:
+            output = f"gate timed out after {gate.get('timeout_seconds', 600)} seconds: {error}"
+            exit_code = None
+            status = "ERROR"
+        except OSError as error:
+            output = f"gate process could not start: {error}"
+            exit_code = None
+            status = "ERROR"
     finished = utc_now()
     return {
         "schema_version": "1.0",
@@ -81,7 +101,7 @@ def main() -> int:
     selected = next((gate for gate in catalog["gates"] if gate["id"] == args.gate), None)
     if selected is None:
         raise SystemExit(f"Unknown gate: {args.gate}")
-    result = run_gate(selected, args.cwd, args.subject_sha)
+    result = run_gate(selected, args.cwd, args.subject_sha, python_executable=sys.executable)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(result["status"])
     return 0 if result["status"] == "PASS" else 1

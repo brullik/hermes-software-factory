@@ -45,6 +45,21 @@ The gateway is intentionally not enabled by bootstrap while the credential is
 absent. After the owner completes the secure credential action, the service
 can be enabled with `systemctl enable --now hermes-factory-gateway.service`.
 
+## Safe runtime evidence
+
+The gateway writes structured, secret-free journald events for accepted and
+allowlist-rejected updates. Events contain only the `update_id`, command name,
+and a short reason; message text, chat IDs, credentials, and command arguments
+are never logged. Inspect them with:
+
+```bash
+sudo journalctl -u hermes-factory-gateway.service --since "10 minutes ago" --no-pager
+```
+
+For the live acceptance probe, send `/help` from the configured owner chat and
+verify both the UTF-8 reply and a `telegram update processed ... command=help`
+event.
+
 ## Owner control
 
 `pause` прекращает запуск новых attempts, но не прерывает атомарный deploy/rollback.

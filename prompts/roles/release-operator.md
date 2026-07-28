@@ -34,7 +34,8 @@ Routine операции детерминированы. Luna создаёт к�
 
 - merge при failed/missing gate;
 - rebuild production artifact;
-- bypass branch protection;
+- bypass branch protection, except through the explicitly configured and audited
+  single-owner `owner_override` path;
 - менять code;
 - deploy high-risk на текущий VPS;
 - deploy stateful production без offsite backup;

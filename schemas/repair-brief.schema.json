@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/repair-brief.schema.json",
+  "title": "Repair Brief",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "created_at",
+    "producer",
+    "policy_digest",
+    "task_id",
+    "attempt_id",
+    "failure_class",
+    "failed_gate_ids",
+    "relevant_log_fragment",
+    "expected_vs_actual",
+    "changed_files",
+    "forbidden_actions",
+    "previous_attempt_summary",
+    "definition_of_done",
+    "evidence_refs"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "artifact_id": {"type": "string", "minLength": 8},
+    "product_id": {"type": "string", "minLength": 8},
+    "created_at": {"type": "string", "format": "date-time"},
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "tier"],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "tier": {"type": "string", "enum": ["deterministic", "luna", "terra", "sol"]},
+        "provider": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]}
+      }
+    },
+    "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "task_id": {"type": "string", "minLength": 1},
+    "attempt_id": {"type": "string", "minLength": 1},
+    "failure_class": {"type": "string", "minLength": 1},
+    "failed_gate_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "relevant_log_fragment": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "expected_vs_actual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected", "actual"],
+      "properties": {
+        "expected": {"type": "string", "minLength": 1},
+        "actual": {"type": "string", "minLength": 1}
+      }
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "change"],
+        "properties": {"path": {"type": "string"}, "change": {"type": "string"}}
+      }
+    },
+    "forbidden_actions": {"type": "array", "items": {"type": "string"}},
+    "previous_attempt_summary": {"type": "string", "minLength": 1},
+    "definition_of_done": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  }
+}

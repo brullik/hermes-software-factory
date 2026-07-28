@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "pilot-github-publication-20260727",
+  "created_at": "2026-07-27T08:17:04Z",
+  "policy_digest": "8fa83aa61b556c59ccdc3e756c16e51193614ad6d19caadaa39f49f7ac29bc02",
+  "status": "PASS",
+  "repository": "brullik/hermes-factory-pilot",
+  "url": "https://github.com/brullik/hermes-factory-pilot",
+  "visibility": "PUBLIC",
+  "default_branch": "main",
+  "initial_commit": "1907ecfbc4ccccb58bd78846a78dcf1f3b7713b9",
+  "latest_commit": "6a943737be1e7d7af52556e99f44b680da7ba06c",
+  "content": "Neutral credential-free pilot source, Docker Compose staging configuration, tests, runbook, architecture, ADR, backlog, and threat model.",
+  "ci": {
+    "workflow": "pilot-quality",
+    "required_context": "pilot/test",
+    "latest_run": "https://github.com/brullik/hermes-factory-pilot/actions/runs/30249520917",
+    "status": "PASS"
+  },
+  "ruleset": {
+    "id": 19801631,
+    "name": "Hermes pilot governance",
+    "enforcement": "active",
+    "requires_pull_request": true,
+    "required_approvals": 1,
+    "blocks_force_push_and_deletion": true
+  },
+  "secrets_published": false,
+  "open_items": [
+    "pilot PR/review/merge",
+    "provider-backed agent acceptance",
+    "Telegram black-box acceptance",
+    "release rollback drill",
+    "offsite backup"
+  ],
+  "evidence_refs": [
+    "evidence/pilot/product-contract.json",
+    "evidence/pilot/staging-smoke.json"
+  ]
+}

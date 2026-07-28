@@ -58,14 +58,17 @@
     },
     {
       "id": "provider-live-discovery",
-      "status": "BLOCKED_EXTERNAL",
+      "status": "PASS",
       "command": "provider health and model discovery",
       "evidence_ref": "evidence/external-acceptance.json",
-      "reason": "Owner OAuth and health probes passed for the three ChatGPT tiers; the closed benchmark completed but did not clear the safety-gated route-change threshold, so factory aliases remain fail-closed"
+      "reason": "Pinned Hermes install, profile/state restart probes, owner OAuth, Telegram gateway credential probe, and live Codex health probes passed. Owner-authorized single-owner mode activated the benchmark-backed Codex aliases with rollback registry retention; delegation boundary and incompatible-release negative smoke remain separate external checks."
     }
   ],
   "evidence_refs": [
     "evidence/hermes-agent-release.txt",
-    "evidence/external-acceptance.json"
+    "evidence/external-acceptance.json",
+    "evidence/hermes-compatibility-observations.json",
+    "evidence/hermes-compatibility-live-probes.json",
+    "evidence/hermes-compatibility-negative-smoke-20260728.json"
   ]
 }

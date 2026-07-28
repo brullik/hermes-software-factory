@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -26,6 +27,17 @@ class GitHubResult:
     output: str
 
 
+@dataclass(frozen=True)
+class PullRequestGate:
+    pull_request: str
+    head_sha: str
+    approved: bool
+    merge_state: str
+    checks: tuple[str, ...]
+    approval_mode: str
+    owner_override_reason: str | None = None
+
+
 class GitHubCommandError(RuntimeError):
     """Raised when an allowlisted gh operation fails."""
 
@@ -38,10 +50,18 @@ def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 class GitHubAdapter:
-    def __init__(self, owner: str, repository: str, *, runner: Runner | None = None) -> None:
+    def __init__(
+        self,
+        owner: str,
+        repository: str,
+        *,
+        runner: Runner | None = None,
+        single_owner_mode: bool = False,
+    ) -> None:
         self.owner = owner
         self.repository = repository
         self._runner = runner or _default_runner
+        self.single_owner_mode = single_owner_mode
 
     @property
     def slug(self) -> str:
@@ -137,6 +157,123 @@ class GitHubAdapter:
         self._safe(pull_request, "pull request")
         self.require_authentication()
         return self._run(["gh", "pr", "view", pull_request, "--repo", self.slug, "--json", "reviews,latestReviews"])
+
+    def verify_pull_request(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...] = (),
+        owner_override: bool = False,
+        owner_override_reason: str | None = None,
+    ) -> PullRequestGate:
+        """Verify immutable review/CI state before a merge side effect.
+
+        The owner override is deliberately explicit and does not masquerade as
+        an independent approval. It is available only when the adapter is
+        configured for single-owner operation and a non-secret audit reason is
+        supplied.
+        """
+
+        self._safe(pull_request, "pull request")
+        if len(expected_sha) != 40 or not all(char in "0123456789abcdef" for char in expected_sha.lower()):
+            raise ValueError("expected_sha must be a 40-character commit SHA")
+        if owner_override and not self.single_owner_mode:
+            raise GitHubCommandError("owner override requires single-owner mode")
+        if owner_override and not owner_override_reason:
+            raise ValueError("owner_override_reason is required")
+        if not owner_override and owner_override_reason is not None:
+            raise ValueError("owner_override_reason requires owner_override=True")
+        if owner_override_reason is not None:
+            owner_override_reason = owner_override_reason.strip()
+            if len(owner_override_reason) < 12:
+                raise ValueError("owner_override_reason must contain at least 12 characters")
+            if len(owner_override_reason) > 240:
+                raise ValueError("owner_override_reason must not exceed 240 characters")
+            self._safe(owner_override_reason, "owner override reason")
+        self.require_authentication()
+        view = self._run(
+            [
+                "gh",
+                "pr",
+                "view",
+                pull_request,
+                "--repo",
+                self.slug,
+                "--json",
+                "headRefOid,state,reviewDecision,mergeStateStatus,statusCheckRollup",
+            ]
+        )
+        try:
+            payload = json.loads(view.output)
+        except json.JSONDecodeError as error:
+            raise GitHubCommandError("GitHub PR view did not return JSON") from error
+        if not isinstance(payload, dict):
+            raise GitHubCommandError("GitHub PR view returned an invalid object")
+        head_sha = str(payload.get("headRefOid", ""))
+        if head_sha != expected_sha:
+            raise GitHubCommandError("reviewed SHA does not match expected SHA")
+        if payload.get("state") != "OPEN":
+            raise GitHubCommandError("pull request is not open")
+        approved = payload.get("reviewDecision") == "APPROVED"
+        approval_mode = "independent"
+        if not approved:
+            if not owner_override:
+                raise GitHubCommandError("independent approval is missing")
+            approval_mode = "owner_override"
+        merge_state = str(payload.get("mergeStateStatus", ""))
+        if merge_state != "CLEAN":
+            raise GitHubCommandError("pull request is not cleanly mergeable")
+        checks = payload.get("statusCheckRollup", [])
+        if not isinstance(checks, list):
+            raise GitHubCommandError("pull request check rollup is invalid")
+        check_states = {
+            str(item.get("name", item.get("context", ""))): str(item.get("state", item.get("conclusion", "")))
+            for item in checks
+            if isinstance(item, dict)
+        }
+        missing = [name for name in required_checks if check_states.get(name) not in {"SUCCESS", "SKIPPED", "NEUTRAL"}]
+        if missing:
+            raise GitHubCommandError("required checks are not passing: " + ", ".join(missing))
+        return PullRequestGate(
+            pull_request=str(pull_request),
+            head_sha=head_sha,
+            approved=approved,
+            merge_state=merge_state,
+            checks=tuple(sorted(name for name in required_checks if name in check_states)),
+            approval_mode=approval_mode,
+            owner_override_reason=owner_override_reason if approval_mode == "owner_override" else None,
+        )
+
+    def merge_pull_request_checked(
+        self,
+        pull_request: str,
+        *,
+        expected_sha: str,
+        required_checks: tuple[str, ...] = (),
+        owner_override: bool = False,
+        owner_override_reason: str | None = None,
+    ) -> GitHubResult:
+        """Squash merge only after the configured governance gate passes."""
+
+        gate = self.verify_pull_request(
+            pull_request,
+            expected_sha=expected_sha,
+            required_checks=required_checks,
+            owner_override=owner_override,
+            owner_override_reason=owner_override_reason,
+        )
+        args = ["gh", "pr", "merge", pull_request, "--repo", self.slug, "--squash", "--delete-branch"]
+        if gate.approval_mode == "owner_override":
+            args.append("--admin")
+        result = self._run(args)
+        if gate.approval_mode == "owner_override":
+            return GitHubResult(
+                result.status,
+                "approval_mode=owner_override; "
+                f"owner_override_reason={gate.owner_override_reason}; {result.output}",
+            )
+        return result
 
     def merge_pull_request(self, pull_request: str, *, expected_sha: str) -> GitHubResult:
         self._safe(pull_request, "pull request")

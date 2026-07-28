@@ -10,6 +10,7 @@ from .artifacts import ArtifactStore
 from .common import new_id, redact_text, sha256_text, slugify, utc_now
 from .config import FactoryConfig
 from .state import StateStore
+from .worker import ensure_initial_product_task
 
 
 class IntakeRejected(ValueError):
@@ -141,4 +142,5 @@ class IntakeService:
             "language": "ru",
         }
         path = self.artifacts.write("idea-intake.schema.json", artifact, filename=f"intake-{product_id}.json")
+        ensure_initial_product_task(self.config, self.state, self.artifacts, product_id)
         return IntakeResult(product_id, str(path), True, correlation_id)
