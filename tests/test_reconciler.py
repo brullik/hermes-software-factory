@@ -788,6 +788,16 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
 
         test_task_id = str(active[0]["task_id"])
+        state.record_event(
+            product_id=product_id,
+            task_id=test_task_id,
+            event_type="deferred_dependency_consumer_recovered",
+            payload={
+                "dependency_task_id": task_id,
+                "resume_status": "REPAIRING",
+                "attempt_kind": "initial",
+            },
+        )
         claimed = state.claim_task(worker_id="test-worker")
         assert claimed is not None
         assert claimed["task_id"] == test_task_id
@@ -816,7 +826,7 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
             for event in state.events(product_id)
             if event["event_type"] == "deferred_dependency_consumer_recovered"
         ]
-        assert len(recovery_events) == 1
+        assert len(recovery_events) == 2
 
         PipelineReconciler(config, state).reconcile_once()
         assert len(
@@ -826,7 +836,7 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
                 if event["event_type"]
                 == "deferred_dependency_consumer_recovered"
             ]
-        ) == 1
+        ) == 2
         state.close()
 
 
