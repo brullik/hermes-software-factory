@@ -17,5 +17,5 @@ The production target is the owner's VPS:
 
 An owner override requires an explicit non-secret reason and is represented as
 `approval_mode=owner_override`. It is not an independent approval. Offsite
-backup remains a separate external acceptance item until an external Restic
-repository is connected.
+backup is connected to the owner's encrypted Backblaze B2 Restic repository,
+with a separate workstation repository retained as a fallback.
