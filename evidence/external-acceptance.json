@@ -83,7 +83,7 @@
       "status": "PASS",
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
       "details": [
-        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit 4a81bb89287d8ba1dd4139477555878f1d1eb33c",
+        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit d7185fe93527e690ec8f0fef2d59d5a66e64d165",
         "Hermes main governance ruleset is active: pull request required, single-owner mode does not require a second approver, stale-review dismissal, conversation resolution, deletion/force-push blocked, and configured required status contexts",
         "factory-quality GitHub Actions passed on main and codex/publish-hermes-factory"
       ]
@@ -111,9 +111,9 @@
       "status": "PASS",
       "evidence_ref": "evidence/offsite-backup-20260728.json",
       "details": [
-        "Owner-controlled separate workstation offsite Restic repository received 23 encrypted snapshots from the VPS repository",
+        "Owner-controlled Backblaze B2 and separate workstation offsite Restic repositories received encrypted snapshots from the VPS repository",
         "Repository check and verified restore of controller.db passed",
-        "A daily 03:30 local user-owned Windows scheduled task runs the sync; paths and credentials are excluded from public evidence"
+        "Backblaze B2 repository check and fresh backup passed with 26 snapshots; a daily 03:30 local user-owned Windows scheduled task runs the workstation sync; paths, bucket names, and credentials are excluded from public evidence"
       ]
     }
   }

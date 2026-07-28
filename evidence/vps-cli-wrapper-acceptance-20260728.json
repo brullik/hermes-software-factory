@@ -26,7 +26,7 @@
     {
       "id": "backup-schedule",
       "status": "PASS",
-      "result": "The encrypted local Restic backup timer is active; offsite configuration remains separately blocked."
+      "result": "The encrypted local Restic backup timer is active; owner-controlled Backblaze B2 offsite configuration is connected and verified separately."
     }
   ],
   "privacy": {

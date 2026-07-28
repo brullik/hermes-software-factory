@@ -111,8 +111,9 @@ governance: независимый reviewer не имитируется, а owne
 как отдельный режим с причиной. Production target настраивается вне публичного
 репозитория; адрес production-хоста в публичных артефактах скрыт.
 Подключённые VPS, GitHub governance, OAuth, Telegram credential/gateway и
-локальный encrypted-backup probe фиксируются в `evidence/external-acceptance.json`.
-Offsite backup остаётся отдельным внешним условием.
+локальный encrypted-backup probe и проверка Backblaze B2 фиксируются в
+`evidence/external-acceptance.json`. Offsite backup подключён и подтверждён
+Restic check/fresh backup; публичные артефакты не содержат bucket name или ключи.
 
 ## Durable role pipeline
 
