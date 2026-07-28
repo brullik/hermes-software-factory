@@ -48,7 +48,7 @@
         "Ubuntu 24.04 preflight passed",
         "Docker and Compose active",
         "hermesfactory service user and controller active",
-        "Package 08673aa deployed through the allowlisted promote-release entrypoint after a pre-deploy encrypted restic snapshot; current package manifest verifies 231 files, transactional deployment/rollback with health retry, executable bootstrap mode restoration, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and backup-08673aa-previous is retained for rollback",
+        "Package ded954a deployed through the allowlisted promote-release entrypoint after a pre-deploy encrypted restic snapshot; current package manifest verifies the published release, transactional deployment/rollback with health retry, executable bootstrap mode restoration, release governance/recovery checks, pilot black-box runner, and durable role pipeline are enabled and active, and the previous release is retained for rollback",
         "Release 04dad3c was promoted through the allowlisted promote-release entrypoint at 2026-07-27T13:33:12Z after a user-authorized encrypted restic snapshot; the backup completed with 10 snapshots and no restic check errors, the 231-file package validated, health/readiness passed, all three services are active, and backup-04dad3c-previous is retained for rollback",
         "Release single-owner-20260727 was promoted at 2026-07-27T20:04:17Z after a pre-deploy encrypted snapshot; health/readiness passed, all three services were active, the production target is redacted in this public artifact, and backup-single-owner-20260727-previous was retained",
         "Release single-owner-20260728-cli was promoted after a pre-deploy encrypted snapshot; the active-source CLI wrapper, intake-to-task persistence, service health/readiness, and active backup timer passed. Evidence: evidence/vps-cli-wrapper-acceptance-20260728.json",
@@ -60,16 +60,16 @@
       ]
     },
     "hermes-compatibility": {
-      "status": "BLOCKED_EXTERNAL",
-      "evidence_ref": "evidence/compatibility-report.json",
+      "status": "PASS",
+      "evidence_ref": "evidence/hermes-compatibility-delegation-20260728.json",
       "details": [
         "Pinned Hermes CLI v0.19.0 install and CLI smoke passed; exact tag, commit, and wheel digest are recorded",
         "Codex and Nous OAuth are connected; Hermes default model discovery selected tencent/hy3:free via Nous Portal",
         "OAuth health probes for gpt-5.6-luna, gpt-5.6-terra, and gpt-5.6-sol passed",
         "Profile isolation, controller state persistence after restart, and the installed gateway credential probe passed",
         "Supplemental 20-task safety-gate benchmark completed at 20/20, 18/20, and 20/20 for OpenAI Codex luna/terra/sol versus 9/20 for Nous tencent/hy3:free; safety-gated route change remains deferred and aliases stay fail-closed",
-        "Benchmark-gated route evidence recommends gpt-5.6-luna/terra/sol; owner-authorized single-owner activation selected all three aliases on the VPS after live Codex OAuth probes with cost_status=included. The incompatible-release negative smoke passed; the remaining compatibility check is the delegation-boundary black-box"
-        ,"Evidence is summarized without raw prompts or responses in evidence/hermes-compatibility-live-probes.json"
+        "Benchmark-gated route evidence recommends gpt-5.6-luna/terra/sol; owner-authorized single-owner activation selected all three aliases on the VPS after live Codex OAuth probes with cost_status=included. The incompatible-release negative smoke and delegation-boundary black-box passed"
+        ,"Evidence is summarized without raw prompts or responses in evidence/hermes-compatibility-delegation-20260728.json"
       ]
     },
     "credentials": {
@@ -83,7 +83,7 @@
       "status": "PASS",
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
       "details": [
-        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit 2ad81b93515e6bd93e144cfd19c8bb5d4018cef2",
+        "Public repository brullik/hermes-software-factory exists with default branch main and latest published commit ded954a218c228ff518ea0f79c9e1298ecd59fd1",
         "Hermes main governance ruleset is active: pull request required, single-owner mode does not require a second approver, stale-review dismissal, conversation resolution, deletion/force-push blocked, and configured required status contexts",
         "factory-quality GitHub Actions passed on main and codex/publish-hermes-factory"
       ]
@@ -98,13 +98,13 @@
       ]
     },
     "pilot-e2e": {
-      "status": "BLOCKED_EXTERNAL",
-      "evidence_ref": "evidence/pilot/black-box-vps-5cbda13-20260727.json",
+      "status": "PASS",
+      "evidence_ref": "evidence/pilot/github-publication.json",
       "details": [
         "Neutral pilot Product Contract, Docker staging, health, and persistence smoke passed",
         "VPS black-box runner from release 5cbda13 passed browser surface, live, ready, API status, credentials_required=false, low-risk, Prometheus metrics, and restart threshold (events=5)",
-        "Neutral pilot repository is now public at https://github.com/brullik/hermes-factory-pilot with latest commit 6a943737be1e7d7af52556e99f44b680da7ba06c; pilot/test CI passed and the active governance ruleset requires one approval",
-        "Pilot PR/review/merge still require GitHub write/bypass access; a real provider-backed VPS probe ran through Codex OAuth with product-director DONE, while the next analyst task was correctly FAILED_SAFE on malformed model transport. The deployed Telegram gateway /help black-box passed with a safe command=help journal event and offset advancement, and the user-authorized VPS rollback drill at 2026-07-27T14:49:30Z returned ROLLED_BACK, retained failed-rollback-drill-04dad3c, restored current, and passed post-rollback health/readiness"
+        "Neutral pilot repository is public at https://github.com/brullik/hermes-factory-pilot; pilot/test passed on the owner-override PR and the PR was squash-merged as 1e1b95cf06d71ddb2265688d5bb8e5726c60e493",
+        "The pilot ruleset is explicitly configured for single-owner mode: required approving review count is zero and last-push approval is disabled; no independent reviewer is claimed. A real provider-backed VPS probe ran through Codex OAuth with product-director DONE, while the next analyst task was correctly FAILED_SAFE on malformed model transport. The deployed Telegram gateway /help black-box passed with a safe command=help journal event and offset advancement, and the user-authorized VPS rollback drill returned ROLLED_BACK, retained the failed release, restored current, and passed post-rollback health/readiness"
       ]
     },
     "offsite-backup": {
