@@ -1,0 +1,23 @@
+{
+  "artifact_id": "offsite-backup-20260728",
+  "schema_version": "1.0",
+  "status": "PASS",
+  "subject_sha": "4a81bb89287d8ba1dd4139477555878f1d1eb33c",
+  "created_at": "2026-07-28T07:14:14Z",
+  "source": "owner-controlled VPS encrypted Restic repository",
+  "destination": "owner-controlled separate workstation encrypted Restic repository",
+  "destination_path": "redacted",
+  "restic_version": "0.19.1",
+  "snapshots": 23,
+  "repository_check": "PASS",
+  "restore_drill": "PASS",
+  "restored_controller_db": true,
+  "scheduled_sync": "PASS",
+  "schedule": "daily at 03:30 local workstation time",
+  "secrets_in_evidence": false,
+  "notes": [
+    "The destination repository uses a separate randomly generated password stored outside the public repository.",
+    "The VPS backup service was run before the copy; the destination check and verified restore completed successfully.",
+    "The destination is outside the production VPS and the public source repository."
+  ]
+}
