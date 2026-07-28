@@ -20,6 +20,7 @@ from .owner_actions import OwnerActionService
 from .pipeline import PipelineCoordinator
 from .policy import load_policies, owner_action_allowed
 from .repair_brief import (
+    builder_result_is_controller_complete,
     builder_result_is_locally_complete,
     normalized_repair_findings,
     repair_finding_detail,
@@ -676,6 +677,104 @@ class PipelineReconciler:
         )
         return True
 
+    def _recover_controller_valid_builder(self, product: dict[str, Any]) -> bool:
+        """Resume from an earlier Builder result already proven by controller gates."""
+
+        product_id = str(product["product_id"])
+        tasks = self.state.list_tasks(product_id)
+        latest = self.state.latest_task(product_id)
+        if len(tasks) < 2 or latest is None:
+            return False
+        if (
+            str(latest.get("status")) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+            or str(latest.get("role")) != "builder"
+            or str(latest.get("stage_key")) != "builder-core"
+        ):
+            return False
+        required_controller_gates = {
+            "target-environment",
+            "target-tests",
+            "target-compile",
+            "target-secret-scan",
+        }
+        candidates = sorted(
+            (
+                candidate
+                for candidate in tasks
+                if str(candidate.get("task_id")) != str(latest["task_id"])
+            ),
+            key=lambda candidate: (
+                int(candidate.get("cycle") or 0),
+                str(candidate.get("created_at") or ""),
+            ),
+            reverse=True,
+        )
+        for candidate in candidates:
+            if (
+                str(candidate.get("status")) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or str(candidate.get("role")) != "builder"
+                or str(candidate.get("stage_key")) != "builder-core"
+                or int(candidate.get("cycle") or 0) > int(latest.get("cycle") or 0)
+            ):
+                continue
+            attempt_payload = self._read_evidence_payload(
+                str(candidate.get("result_ref") or "")
+            )
+            if attempt_payload is None:
+                continue
+            controller_results = attempt_payload.get("test_results", [])
+            if not isinstance(controller_results, list):
+                continue
+            passed_controller_gates: set[str] = set()
+            controller_failed = False
+            for item in controller_results:
+                if not isinstance(item, dict):
+                    controller_failed = True
+                    break
+                gate_id = str(item.get("gate_id") or "")
+                status = str(item.get("status") or "")
+                if status == "PASS":
+                    passed_controller_gates.add(gate_id)
+                elif status == "FAIL" and gate_id not in self.optional_gate_ids:
+                    controller_failed = True
+                    break
+            if (
+                controller_failed
+                or not required_controller_gates.issubset(passed_controller_gates)
+            ):
+                continue
+            output = self._validated_output_payload(attempt_payload)
+            if output is None or not builder_result_is_controller_complete(output):
+                continue
+            task_id = str(candidate["task_id"])
+            if not self.state.adopt_controller_valid_builder(
+                product_id=product_id,
+                task_id=task_id,
+            ):
+                continue
+            refreshed = self.state.get_product(product_id)
+            if refreshed is None or not self._recover_successor(refreshed, candidate):
+                raise RuntimeError(
+                    f"controller-valid Builder successor was not created for {task_id}"
+                )
+            self._enqueue_notification(
+                product_id=product_id,
+                task_id=task_id,
+                kind="automatic_recovery",
+                discriminator=f"builder-controller-gates:{task_id}",
+                text=(
+                    "✅ Hermes автоматически продолжил проект по доказанному результату Builder.\n"
+                    f"Проект: {product_id}\n"
+                    "Обязательные проверки контроллера прошли. Запрос на перепланирование "
+                    "касался внутреннего детектора, для которого потребовался бы выход за "
+                    "разрешённую область изменений; дефект продукта не обнаружен.\n"
+                    "Следующий шаг: Test Engineer.\n"
+                    "Действие владельца: не требуется."
+                ),
+            )
+            return True
+        return False
+
     def _recover_interrupted_product(self, product: dict[str, Any]) -> bool:
         product_id = str(product["product_id"])
         task = self.state.latest_task(product_id)
@@ -849,6 +948,113 @@ class PipelineReconciler:
         )
         return True
 
+    def _recover_director_root_cause_budget(self, product: dict[str, Any]) -> bool:
+        """Treat a newly proven blocker as a new diagnosis, not an old failed attempt."""
+
+        product_id = str(product["product_id"])
+        task = self.state.latest_task(product_id)
+        if task is None or int(task.get("cycle") or 0) < 3:
+            return False
+        task_id = str(task["task_id"])
+        if not any(
+            str(event.get("task_id") or "") == task_id
+            and str(event.get("event_type") or "") == "repair_budget_exhausted"
+            for event in self.state.events(product_id)
+        ):
+            return False
+        reason, detail = self._task_reason(task)
+        if (
+            owner_action_allowed(self.config, reason)
+            or classify_failure(reason) is FailureClass.EXTERNAL
+        ):
+            return False
+        blocker_ids: list[str] = []
+        attempt_payload = self._read_evidence_payload(
+            str(task.get("result_ref") or "")
+        )
+        if attempt_payload is not None:
+            test_results = attempt_payload.get("test_results", [])
+            if isinstance(test_results, list):
+                blocker_ids.extend(
+                    str(item.get("gate_id") or "")
+                    for item in test_results
+                    if (
+                        isinstance(item, dict)
+                        and item.get("gate_id")
+                        and item.get("status") == "FAIL"
+                    )
+                )
+            output = self._validated_output_payload(attempt_payload)
+            if output is not None:
+                blocker_ids.extend(
+                    finding.finding_id
+                    for finding in normalized_repair_findings(output)
+                )
+        blocker_ids = list(
+            dict.fromkeys(value.strip() for value in blocker_ids if value.strip())
+        )
+        if not blocker_ids:
+            blocker_ids = [reason]
+        blocker_signature = sha256_text(
+            json.dumps(
+                {
+                    "role": str(task.get("role") or ""),
+                    "stage": str(task.get("stage_key") or ""),
+                    "reason": reason,
+                    "blocker_ids": sorted(blocker_ids),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        if not self.state.reopen_for_director_root_cause(
+            product_id=product_id,
+            task_id=task_id,
+            blocker_signature=blocker_signature,
+            blocker_ids=blocker_ids,
+        ):
+            return False
+        attempts = self.state.attempts_for_task(task_id)
+        diagnosed_summary = (
+            "Director root-cause diagnosis: the previous bounded budget is closed, "
+            "but this evidence identifies a distinct problem hypothesis. "
+            f"Blockers: {', '.join(blocker_ids)}. Exact evidence: {detail}"
+        )
+        path = self.pipeline.begin_repair_cycle(
+            task,
+            reason_code=reason,
+            summary=diagnosed_summary,
+            evidence_refs=[
+                str(task.get("result_ref") or ""),
+                f"evidence/task-{task_id}.json",
+            ],
+            attempt_id=(
+                str(attempts[-1]["attempt_id"]) if attempts else None
+            ),
+            director_replan=True,
+        )
+        if path is None:
+            raise RuntimeError(
+                f"Director root-cause replan did not create a Builder task for {task_id}"
+            )
+        next_task = self.state.latest_task(product_id)
+        self._enqueue_notification(
+            product_id=product_id,
+            task_id=task_id,
+            kind="automatic_recovery",
+            discriminator=f"director-root-cause:{blocker_signature}",
+            text=(
+                "🧭 Director пересмотрел постановку после исчерпания прежних попыток.\n"
+                f"Проект: {product_id}\n"
+                f"Новая гипотеза проблемы: {', '.join(blocker_ids)}.\n"
+                "Создан новый ограниченный repair budget с отдельным доказательным brief.\n"
+                f"Следующая задача Builder: "
+                f"{next_task.get('task_id') if next_task else 'создана'}.\n"
+                "Действие владельца: не требуется."
+            ),
+        )
+        return True
+
     def reconcile_product(self, product: dict[str, Any]) -> str:
         product_id = str(product["product_id"])
         status = str(product["status"])
@@ -966,6 +1172,12 @@ class PipelineReconciler:
         }
         for product in self.state.list_products():
             status = str(product["status"])
+            if status == "FAILED_SAFE" and self._recover_controller_valid_builder(
+                product
+            ):
+                counts["inspected"] += 1
+                counts["recovered_successors"] += 1
+                continue
             if status == "FAILED_SAFE" and self._recover_builder_downstream_gate(product):
                 counts["inspected"] += 1
                 refreshed = self.state.get_product(str(product["product_id"]))
@@ -1012,6 +1224,12 @@ class PipelineReconciler:
                     counts["exhausted"] += 1
                 elif action == "successor":
                     counts["recovered_successors"] += 1
+                continue
+            if status == "FAILED_SAFE" and self._recover_director_root_cause_budget(
+                product
+            ):
+                counts["inspected"] += 1
+                counts["repaired"] += 1
                 continue
             if status in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
                 continue

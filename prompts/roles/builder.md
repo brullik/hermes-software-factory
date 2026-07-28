@@ -35,6 +35,10 @@
 13. `blocked_external` допустим только для доступа или решения, которое
     действительно требуется во время текущей Builder-роли и не может быть
     автоматически получено контроллером.
+14. Controller-owned target quality gates являются authoritative. Не создавай
+    отдельное требование к корневому manifest, Makefile или canonical-command detector,
+    если этих файлов нет в `allowed_paths`. Когда штатная task-local acceptance command
+    репозитория проходит, зафиксируй evidence и заверши реализацию.
 
 ## Tier behavior
 

@@ -17,8 +17,15 @@ an incident, not a normal idle state.
 4. The repair pipeline runs Builder, Test Engineer, Security Reviewer,
    Independent Reviewer, Staging Release, and Product Tester again.
 5. Repair cycle 1 uses at least Terra; cycle 2 uses Sol.
-6. Exceeding `max_repair_cycles` moves the product to `FAILED_SAFE`, preserves
-   evidence, and sends the exact reason to the owner in Russian.
+6. Exceeding `max_repair_cycles` closes the current problem hypothesis,
+   preserves evidence, and sends the exact reason to the owner in Russian.
+7. Director then compares provider findings with controller-owned evidence. A
+   controller-scope contradiction is resolved by orchestration; a distinct,
+   proven defect receives a new actionable repair brief and a fresh bounded
+   budget. The same diagnosis is never reopened twice, and at most three
+   Director root-cause replans are allowed per product.
+8. Only after the bounded Director re-diagnosis policy is exhausted does the
+   product remain `FAILED_SAFE`.
 
 The reconciler never restarts product planning when recovery can continue from
 the failed stage.

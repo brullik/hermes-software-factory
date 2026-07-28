@@ -38,6 +38,7 @@ from .release_executor import (
     build_release_executor,
 )
 from .repair_brief import (
+    builder_result_is_controller_complete,
     builder_result_is_locally_complete,
     product_goals_are_proven,
     repair_finding_detail,
@@ -564,6 +565,13 @@ class AgentWorker:
         else:
             evidence.extend(self._dependency_evidence(task))
         decisions = ["Use safe defaults for unspecified reversible product details."]
+        if prompt_role == "builder":
+            decisions.append(
+                "Controller-owned target quality gates are authoritative. Do not invent a "
+                "root manifest, Makefile, or separate canonical-command detector outside "
+                "allowed_paths. When the repository's task-local acceptance command passes, "
+                "report that evidence and complete the implementation."
+            )
         if prompt_role == "security-reviewer":
             decisions.append(
                 "Controller gate evidence preserves mandatory status. A failed mandatory gate "
@@ -626,22 +634,28 @@ class AgentWorker:
             if str(item.get("status")) == "completed"
         ]
         deferred_builder = False
+        controller_adopted_builder = False
         if not attempts and (
             str(task.get("role")) == "builder"
             and str(task.get("stage_key")) == "builder-core"
-            and any(
-                str(event.get("task_id") or "") == task_id
-                and str(event.get("event_type") or "")
-                == "builder_downstream_gate_deferred"
-                for event in self.state.events(str(task["product_id"]))
-            )
         ):
-            attempts = [
-                item
-                for item in self.state.attempts_for_task(task_id)
-                if str(item.get("status")) == "repair_required"
-            ]
-            deferred_builder = bool(attempts)
+            recovery_events = {
+                str(event.get("event_type") or "")
+                for event in self.state.events(str(task["product_id"]))
+                if str(event.get("task_id") or "") == task_id
+            }
+            deferred_builder = "builder_downstream_gate_deferred" in recovery_events
+            controller_adopted_builder = (
+                "builder_controller_gates_adopted" in recovery_events
+            )
+            if deferred_builder or controller_adopted_builder:
+                attempts = [
+                    item
+                    for item in self.state.attempts_for_task(task_id)
+                    if str(item.get("status")) == "repair_required"
+                ]
+                deferred_builder = deferred_builder and bool(attempts)
+                controller_adopted_builder = controller_adopted_builder and bool(attempts)
         if not attempts:
             raise ExternalBlocker(f"accepted task result is missing for {task_id}")
         attempt_id = str(attempts[-1].get("attempt_id", ""))
@@ -659,11 +673,11 @@ class AgentWorker:
         ):
             raise ExternalBlocker(f"task attempt evidence identity conflicts for {task_id}")
         if (
-            deferred_builder
+            (deferred_builder or controller_adopted_builder)
             and str(attempt_artifact.get("status"))
             not in {"repair_required", "blocked_external"}
         ):
-            raise ExternalBlocker(f"deferred Builder evidence is invalid for {task_id}")
+            raise ExternalBlocker(f"recovered Builder evidence is invalid for {task_id}")
         refs = attempt_artifact.get("evidence_refs", [])
         if not isinstance(refs, list):
             raise ExternalBlocker(f"task evidence references are invalid for {task_id}")
@@ -703,6 +717,11 @@ class AgentWorker:
                 accepted_output = (
                     candidate.name in schema_output_names
                     and builder_result_is_locally_complete(payload)
+                )
+            elif controller_adopted_builder:
+                accepted_output = (
+                    candidate.name in schema_output_names
+                    and builder_result_is_controller_complete(payload)
                 )
             if not accepted_output:
                 continue

@@ -768,6 +768,7 @@ class WorkerTests(unittest.TestCase):
             state = StateStore(
                 config.database_path,
                 max_active_workers=config.max_active_workers,
+                max_active_products=2,
             )
             artifacts = ArtifactStore(config)
             product_id = "deferred-builder-worker-product"
@@ -998,6 +999,208 @@ class WorkerTests(unittest.TestCase):
                 dependency["artifact_ref"],
                 f"evidence/{output_path.name}",
             )
+
+            adopted_product_id = "controller-adopted-builder-product"
+            state.create_product(
+                product_id=adopted_product_id,
+                owner_id="owner",
+                source="cli",
+                idea="https://github.com/brullik/grid-bot",
+                idempotency_key="controller-adopted-builder-key",
+            )
+            for status in (
+                "CONTRACT_DRAFTED",
+                "CONTRACT_VALIDATED",
+                "RISK_CLASSIFIED",
+                "ARCHITECTED",
+                "BACKLOG_READY",
+                "IMPLEMENTING",
+            ):
+                state.transition_product(adopted_product_id, status)
+            adopted_builder_path = pipeline.create_task(
+                adopted_product_id,
+                "builder-core",
+                cycle=2,
+            )
+            adopted_builder_id = str(
+                json.loads(
+                    adopted_builder_path.read_text(encoding="utf-8")
+                )["task_id"]
+            )
+            adopted_attempt_id = "attempt-controller-adopted-builder"
+            adopted_changed_files = [
+                {
+                    "path": "src/grid_bot/core.py",
+                    "change": "Implemented the offline grid simulation.",
+                }
+            ]
+            adopted_output = {
+                **artifact_metadata(
+                    config,
+                    "builder",
+                    "builder-controller-adopted-output",
+                    adopted_product_id,
+                ),
+                "producer": output["producer"],
+                "task_id": adopted_builder_id,
+                "attempt_id": adopted_attempt_id,
+                "tier": "sol",
+                "attempt_kind": "repair",
+                "prompt_digest": "c" * 64,
+                "subject_sha_before": "d" * 64,
+                "status": "needs_replan",
+                "summary": "Implementation passes; detector scope requires controller handling.",
+                "changed_files": adopted_changed_files,
+                "commands": [
+                    {
+                        "command_id": "repository-acceptance",
+                        "result": "pass",
+                        "artifact_ref": "evidence/repository-acceptance.json",
+                    }
+                ],
+                "test_results": [
+                    {"gate_id": "target-environment", "status": "PASS"},
+                    {"gate_id": "target-tests", "status": "PASS"},
+                    {"gate_id": "target-compile", "status": "PASS"},
+                    {"gate_id": "target-lint", "status": "PASS"},
+                    {"gate_id": "target-secret-scan", "status": "PASS"},
+                    {
+                        "gate_id": "canonical-command-detector",
+                        "status": "NOT_RUN",
+                        "evidence_ref": None,
+                    },
+                ],
+                "assumptions": [],
+                "findings": [
+                    {
+                        "code": "CANONICAL_DETECTOR_SCOPE_CONFLICT",
+                        "severity": "medium",
+                        "text": "A root manifest is outside the exact Builder write scope.",
+                    },
+                    {
+                        "code": "UNTRACKED_BYTECODE_PRESENT",
+                        "severity": "low",
+                        "text": "Runtime bytecode is excluded from release candidates.",
+                    },
+                ],
+                "evidence_refs": [],
+            }
+            adopted_output_path = artifacts.write(
+                "attempt-result.schema.json",
+                adopted_output,
+                filename="builder-controller-adopted-output.json",
+            )
+            adopted_attempt_artifact = {
+                **artifact_metadata(
+                    config,
+                    "builder",
+                    "builder-controller-adopted-attempt",
+                    adopted_product_id,
+                ),
+                "producer": output["producer"],
+                "task_id": adopted_builder_id,
+                "attempt_id": adopted_attempt_id,
+                "tier": "sol",
+                "attempt_kind": "repair",
+                "prompt_digest": "c" * 64,
+                "subject_sha_before": "d" * 64,
+                "status": "blocked_external",
+                "summary": "Controller gates prove the implementation is complete.",
+                "changed_files": adopted_changed_files,
+                "commands": [
+                    {
+                        "command_id": "hermes-oneshot",
+                        "result": "pass",
+                        "artifact_ref": "evidence/context.json",
+                    }
+                ],
+                "test_results": [
+                    {
+                        "gate_id": "schema-validation",
+                        "status": "PASS",
+                        "evidence_ref": str(adopted_output_path),
+                    },
+                    {"gate_id": "target-environment", "status": "PASS"},
+                    {"gate_id": "target-tests", "status": "PASS"},
+                    {"gate_id": "target-compile", "status": "PASS"},
+                    {"gate_id": "target-lint", "status": "PASS"},
+                    {"gate_id": "target-secret-scan", "status": "PASS"},
+                ],
+                "assumptions": [],
+                "findings": [
+                    {
+                        "code": "model_requested_repair",
+                        "severity": "medium",
+                        "text": "Provider requested controller replanning.",
+                    }
+                ],
+                "evidence_refs": [str(adopted_output_path)],
+            }
+            adopted_attempt_path = artifacts.write(
+                "attempt-result.schema.json",
+                adopted_attempt_artifact,
+                filename=f"attempt-{adopted_attempt_id}.json",
+            )
+            claimed_adopted = state.claim_task(worker_id="adopted-builder-worker")
+            self.assertIsNotNone(claimed_adopted)
+            assert claimed_adopted is not None
+            self.assertEqual(claimed_adopted["task_id"], adopted_builder_id)
+            self.assertTrue(
+                state.record_attempt(
+                    attempt_id=adopted_attempt_id,
+                    task_id=adopted_builder_id,
+                    tier="sol",
+                    attempt_kind="repair",
+                    prompt_digest="c" * 64,
+                    status="repair_required",
+                    semantic_counted=True,
+                    reason_code="model_requested_repair",
+                )
+            )
+            state.complete_task(
+                adopted_builder_id,
+                "adopted-builder-worker",
+                "FAILED_SAFE",
+                reason_code="model_requested_repair",
+                detail="Canonical detector conflicts with exact Builder scope.",
+                result_ref=str(adopted_attempt_path),
+                failure_kind="semantic",
+            )
+            superseded_path = pipeline.create_task(
+                adopted_product_id,
+                "builder-core",
+                cycle=3,
+            )
+            superseded_id = str(
+                json.loads(superseded_path.read_text(encoding="utf-8"))["task_id"]
+            )
+            claimed_superseded = state.claim_task(worker_id="superseded-builder-worker")
+            self.assertIsNotNone(claimed_superseded)
+            assert claimed_superseded is not None
+            self.assertEqual(claimed_superseded["task_id"], superseded_id)
+            state.complete_task(
+                superseded_id,
+                "superseded-builder-worker",
+                "FAILED_SAFE",
+                reason_code="secret_exposure",
+                detail="Later provider response was rejected.",
+                failure_kind="semantic",
+            )
+            state.transition_product(adopted_product_id, "FAILED_SAFE")
+            self.assertTrue(
+                state.adopt_controller_valid_builder(
+                    product_id=adopted_product_id,
+                    task_id=adopted_builder_id,
+                )
+            )
+
+            adopted_result_path, adopted_payload, adopted_controller = (
+                worker._accepted_task_artifacts(adopted_builder_id)
+            )
+
+            self.assertEqual(adopted_result_path, adopted_output_path)
+            self.assertEqual(adopted_payload["status"], "needs_replan")
+            self.assertEqual(adopted_controller["status"], "blocked_external")
             state.close()
 
     def test_public_github_repository_url_accepts_only_exact_repository_urls(self) -> None:

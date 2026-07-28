@@ -598,12 +598,13 @@ class PipelineCoordinator:
         summary: str,
         evidence_refs: list[str],
         attempt_id: str | None = None,
+        director_replan: bool = False,
     ) -> Path | None:
         """Start a bounded build-to-staging repair cycle from the current state."""
 
         product_id = str(failed_task["product_id"])
         cycle = self.next_repair_cycle(product_id)
-        if cycle > self.config.max_repair_cycles:
+        if cycle > self.config.max_repair_cycles and not director_replan:
             return None
         product = self.state.get_product(product_id)
         if product is None:
@@ -685,6 +686,7 @@ class PipelineCoordinator:
                 "cycle": cycle,
                 "reason_code": reason_code,
                 "failed_task_id": failed_task["task_id"],
+                "director_replan": director_replan,
             },
         )
         return task_path
