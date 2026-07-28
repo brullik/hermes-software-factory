@@ -403,6 +403,31 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertFalse((lease.path / "state").exists())
             manager.release(lease)
 
+    def test_persistent_product_workspace_preserves_changes_between_task_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def initialize(_product_id: str, destination: Path) -> None:
+                destination.mkdir(parents=True)
+                (destination / "README.md").write_text("target repository\n", encoding="utf-8")
+
+            manager = WorkspaceManager(
+                root / "worktrees",
+                persistent=True,
+                initializer=initialize,
+            )
+            first = manager.acquire(product_id="product", task_id="builder", worker_id="worker")
+            (first.path / "src.py").write_text("value = 1\n", encoding="utf-8")
+            manager.release(first)
+
+            second = manager.acquire(product_id="product", task_id="tests", worker_id="worker")
+
+            self.assertEqual(second.path, first.path)
+            self.assertEqual((second.path / "src.py").read_text(encoding="utf-8"), "value = 1\n")
+            manager.release(second)
+            self.assertTrue(second.path.is_dir())
+            self.assertFalse((second.path / ".lease.json").exists())
+
     def test_external_boundaries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = _make_config(Path(directory) / "state")

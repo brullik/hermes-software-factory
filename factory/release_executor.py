@@ -169,7 +169,12 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             raise ReleaseAdapterError("leased workspace is missing or unsafe")
         temporary = tempfile.TemporaryDirectory(prefix="release-source-", dir=parent)
         source = Path(temporary.name) / "source"
-        shutil.copytree(workspace, source, symlinks=False, ignore=shutil.ignore_patterns(".lease.json"))
+        shutil.copytree(
+            workspace,
+            source,
+            symlinks=False,
+            ignore=shutil.ignore_patterns(".git", ".lease.json"),
+        )
         return source, temporary
 
     def _write_audit(self, product_id: str, candidate_sha: str, payload: Mapping[str, Any]) -> str:

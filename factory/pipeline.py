@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,15 @@ def _task_id(product_id: str, stage: str) -> str:
     return f"T-{sha256_text(f'{product_id}:{stage}')[:12].upper()}"
 
 
+def _external_github_repository(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?",
+            value.strip(),
+        )
+    )
+
+
 class PipelineCoordinator:
     """Create the next bounded task only after its predecessor is accepted."""
 
@@ -46,7 +56,44 @@ class PipelineCoordinator:
         self.workflow = WorkflowEngine(state)
 
     def _definition(self, product_id: str, stage: str) -> StageDefinition:
-        planning_conflict = f"product:{product_id}:planning"
+        workspace_conflict = f"product:{product_id}:workspace"
+        product = self.state.get_product(product_id) or {}
+        external_repository = _external_github_repository(str(product.get("idea", "")))
+        implementation_gates = (
+            (
+                "target-environment",
+                "target-tests",
+                "target-compile",
+                "target-lint",
+                "target-secret-scan",
+            )
+            if external_repository
+            else (
+                "package-integrity",
+                "unit-tests",
+                "python-compile",
+                "lint",
+                "typecheck",
+                "secret-scan",
+                "manifest",
+                "sbom",
+            )
+        )
+        test_gates = (
+            implementation_gates
+            if external_repository
+            else (
+                "unit-tests",
+                "pilot-tests",
+                "python-compile",
+                "lint",
+                "typecheck",
+                "secret-scan",
+                "manifest",
+                "sbom",
+            )
+        )
+        security_gates = ("target-secret-scan",) if external_repository else ("secret-scan",)
         definitions = {
             "product-director": StageDefinition(
                 "product-director",
@@ -58,7 +105,7 @@ class PipelineCoordinator:
                 "Turn the owner's idea into a validated Product Contract.",
                 "Validate the Product Contract against product-contract.schema.json.",
                 ("artifacts/**",),
-                planning_conflict,
+                workspace_conflict,
                 100,
             ),
             "product-analyst": StageDefinition(
@@ -71,7 +118,7 @@ class PipelineCoordinator:
                 "Derive traceable requirements and edge cases from the Product Contract.",
                 "Validate the Requirements Package and its traceability against the Product Contract.",
                 ("artifacts/**",),
-                planning_conflict,
+                workspace_conflict,
                 90,
             ),
             "solution-architect": StageDefinition(
@@ -84,7 +131,7 @@ class PipelineCoordinator:
                 "Design the smallest deployable architecture satisfying the accepted requirements.",
                 "Validate architecture boundaries, backup, rollback, capacity, and test strategy.",
                 ("artifacts/**",),
-                planning_conflict,
+                workspace_conflict,
                 80,
             ),
             "task-specifier": StageDefinition(
@@ -97,7 +144,7 @@ class PipelineCoordinator:
                 "Turn the accepted architecture into a small dependency-aware backlog DAG.",
                 "Validate task IDs, edges, parallel groups, and critical path in backlog-plan.schema.json.",
                 ("artifacts/**",),
-                planning_conflict,
+                workspace_conflict,
                 70,
             ),
             "builder-core": StageDefinition(
@@ -110,9 +157,9 @@ class PipelineCoordinator:
                 "Implement the smallest user-visible vertical slice in the leased worktree.",
                 "Run the task acceptance commands and report changed files and evidence.",
                 ("src/**", "tests/**", "README.md"),
-                f"product:{product_id}:src",
+                workspace_conflict,
                 60,
-                ("package-integrity", "unit-tests", "python-compile", "lint", "typecheck", "secret-scan", "manifest", "sbom"),
+                implementation_gates,
             ),
             "test-engineer": StageDefinition(
                 "test-engineer",
@@ -124,9 +171,9 @@ class PipelineCoordinator:
                 "Add deterministic tests for the critical journeys and their negative paths.",
                 "Validate traceability, mutation or negative check, and coverage expectation.",
                 ("tests/**",),
-                f"product:{product_id}:tests",
+                workspace_conflict,
                 55,
-                ("unit-tests", "pilot-tests", "python-compile", "lint", "typecheck", "secret-scan", "manifest", "sbom"),
+                test_gates,
             ),
             "security-reviewer": StageDefinition(
                 "security-reviewer",
@@ -138,9 +185,9 @@ class PipelineCoordinator:
                 "Review the candidate slice for secrets, trust-boundary, and permission regressions.",
                 "Validate the security review result and ensure no blocking finding is hidden.",
                 ("artifacts/**",),
-                f"product:{product_id}:assurance",
+                workspace_conflict,
                 50,
-                ("secret-scan",),
+                security_gates,
             ),
             "independent-reviewer": StageDefinition(
                 "independent-reviewer",
@@ -152,7 +199,7 @@ class PipelineCoordinator:
                 "Independently review the immutable candidate against contracts and gate evidence.",
                 "Accept only when every mandatory criterion is proven and no blocking finding remains.",
                 ("artifacts/**",),
-                f"product:{product_id}:assurance",
+                workspace_conflict,
                 45,
             ),
             "release-staging": StageDefinition(
@@ -165,7 +212,7 @@ class PipelineCoordinator:
                 "Prepare and verify the immutable candidate for staging without merging or deploying production.",
                 "Record candidate SHA, release digest, staging checks, and rollback readiness.",
                 ("artifacts/**", "release-artifacts/**"),
-                f"product:{product_id}:release",
+                workspace_conflict,
                 40,
             ),
             "product-tester": StageDefinition(
@@ -178,7 +225,7 @@ class PipelineCoordinator:
                 "Exercise the critical user journeys against the isolated staging release.",
                 "Accept only when every critical journey passes and release_blocked is false.",
                 ("artifacts/**",),
-                f"product:{product_id}:assurance",
+                workspace_conflict,
                 35,
             ),
             "release-production": StageDefinition(
@@ -191,7 +238,7 @@ class PipelineCoordinator:
                 "Promote the exact accepted staging artifact under deployment and backup policy.",
                 "Record production health, rollback evidence, and the final immutable release digest.",
                 ("artifacts/**", "release-artifacts/**"),
-                f"product:{product_id}:release",
+                workspace_conflict,
                 30,
             ),
         }

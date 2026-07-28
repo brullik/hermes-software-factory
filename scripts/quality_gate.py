@@ -67,7 +67,12 @@ def run_gate(
             )
             output = (completed.stdout + "\n" + completed.stderr).strip()
             exit_code = completed.returncode
-            status = "PASS" if completed.returncode == 0 else "FAIL"
+            success_exit_codes = gate.get("success_exit_codes", [0])
+            if not isinstance(success_exit_codes, list) or not all(
+                isinstance(item, int) for item in success_exit_codes
+            ):
+                raise TypeError("success_exit_codes must be a list of integers")
+            status = "PASS" if completed.returncode in success_exit_codes else "FAIL"
         except subprocess.TimeoutExpired as error:
             output = f"gate timed out after {gate.get('timeout_seconds', 600)} seconds: {error}"
             exit_code = None
