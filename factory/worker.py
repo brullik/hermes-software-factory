@@ -7,7 +7,9 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -377,13 +379,24 @@ class AgentWorker:
         release_executor: ReleaseExecutor | None = None,
         worker_id: str = "hermes-worker-1",
         poll_seconds: float = 2.0,
+        lease_seconds: int = 300,
+        heartbeat_interval_seconds: float = 60.0,
     ) -> None:
         if poll_seconds < 0.1:
             raise ValueError("poll_seconds is too small")
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        if (
+            heartbeat_interval_seconds <= 0
+            or heartbeat_interval_seconds >= lease_seconds
+        ):
+            raise ValueError("heartbeat interval must be positive and shorter than the lease")
         self.config = config
         self.state = state
         self.worker_id = worker_id
         self.poll_seconds = poll_seconds
+        self.lease_seconds = lease_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.repository_root = (repository_root or Path.cwd()).resolve()
         self.release_executor = release_executor
         configured_worktrees = Path(str(config.raw["paths"]["worktrees"]))
@@ -1991,25 +2004,61 @@ class AgentWorker:
             self.workspace.release(lease)
 
     def run_once(self) -> WorkerResult | None:
-        task = self.workflow.claim(self.worker_id)
+        task = self.workflow.claim(self.worker_id, lease_seconds=self.lease_seconds)
         if task is None:
             return None
         task_id = str(task["task_id"])
+        heartbeat_stop = threading.Event()
+        heartbeat_lost = threading.Event()
+
+        def keep_lease() -> None:
+            while not heartbeat_stop.wait(self.heartbeat_interval_seconds):
+                try:
+                    self.workflow.heartbeat(
+                        task_id,
+                        self.worker_id,
+                        lease_seconds=self.lease_seconds,
+                    )
+                except ValueError:
+                    heartbeat_lost.set()
+                    return
+                except sqlite3.Error:
+                    # A short database writer collision is retried on the next
+                    # heartbeat while the existing lease remains valid.
+                    continue
+
+        heartbeat = threading.Thread(
+            target=keep_lease,
+            name=f"lease-heartbeat-{task_id}",
+            daemon=True,
+        )
+        heartbeat.start()
         try:
-            result = self.execute(self.default_spec(task))
-        except ExternalBlocker as error:
-            result = WorkerResult(
+            try:
+                result = self.execute(self.default_spec(task))
+            except ExternalBlocker as error:
+                result = WorkerResult(
+                    task_id,
+                    "blocked_external",
+                    error.reason_code,
+                    detail=str(error),
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                result = WorkerResult(
+                    task_id,
+                    "failed_safe",
+                    "worker_internal_error",
+                    detail="worker raised an internal exception",
+                )
+        finally:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=max(1.0, self.heartbeat_interval_seconds))
+        if heartbeat_lost.is_set():
+            return WorkerResult(
                 task_id,
-                "blocked_external",
-                error.reason_code,
-                detail=str(error),
-            )
-        except (OSError, RuntimeError, TypeError, ValueError):
-            result = WorkerResult(
-                task_id,
-                "failed_safe",
-                "worker_internal_error",
-                detail="worker raised an internal exception",
+                "lease_lost",
+                "task_lease_lost",
+                detail="task lease ownership changed before terminal persistence",
             )
         if result.status == "repair_scheduled":
             if result.next_tier is None or result.next_attempt_kind is None or result.repair_context_ref is None:

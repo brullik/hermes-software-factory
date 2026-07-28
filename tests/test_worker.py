@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import yaml
 
@@ -25,6 +27,7 @@ from factory.worker import (
     HermesRunResult,
     SubprocessHermesRunner,
     TaskExecutionSpec,
+    WorkerResult,
     _workspace_snapshot,
     public_github_repository_url,
 )
@@ -259,6 +262,53 @@ def staging_release_task(config: FactoryConfig, state: Any, artifacts: ArtifactS
 
 
 class WorkerTests(unittest.TestCase):
+    def test_run_once_renews_lease_during_long_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+            )
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            state.create_product(
+                product_id="P-LEASE-HEARTBEAT",
+                owner_id="owner",
+                source="test",
+                idea="Verify long task lease renewal",
+                idempotency_key="lease-heartbeat-test",
+            )
+            PipelineCoordinator(config, state).seed_initial("P-LEASE-HEARTBEAT")
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                repository_root=ROOT,
+                lease_seconds=1,
+                heartbeat_interval_seconds=0.02,
+            )
+
+            def slow_execute(spec: TaskExecutionSpec) -> WorkerResult:
+                time.sleep(0.08)
+                return WorkerResult(
+                    str(spec.task_contract["task_id"]),
+                    "completed",
+                    None,
+                )
+
+            with (
+                patch.object(worker, "execute", side_effect=slow_execute),
+                patch.object(state, "heartbeat", wraps=state.heartbeat) as heartbeat,
+            ):
+                result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "completed")
+            self.assertGreaterEqual(heartbeat.call_count, 2)
+            tasks = state.list_tasks("P-LEASE-HEARTBEAT")
+            self.assertEqual(tasks[0]["status"], "DONE")
+            state.close()
+
     def test_schema_valid_repair_is_requeued_with_targeted_brief(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
