@@ -37,7 +37,8 @@ excludes generated release evidence, and publishes source changes through a
 controller-owned commit and pull request. Protected paths such as workflows,
 secrets, and production configuration cannot cross this boundary. Staging is a
 safe extraction of that commit's `git archive`, not a copy of mutable `.git`
-metadata or runtime artifacts. Before staging promotion, the controller reruns
+metadata, generated artifacts, or Python bytecode caches. Before staging
+promotion, the controller reruns
 secret, SAST, offline dependency, and license gates against that exact candidate
 SHA and stores one immutable assurance bundle.
 

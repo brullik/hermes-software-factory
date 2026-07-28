@@ -358,4 +358,7 @@ def test_release_digest_ignores_git_metadata() -> None:
         expected = _release_digest(source)
         (source / ".git").mkdir()
         (source / ".git" / "index").write_text("mutable metadata\n", encoding="utf-8")
+        cache = source / "package" / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "module.cpython-312.pyc").write_bytes(b"runtime bytecode")
         assert _release_digest(source) == expected
