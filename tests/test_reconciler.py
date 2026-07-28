@@ -796,7 +796,7 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
             "test-worker",
             "BLOCKED_EXTERNAL",
             reason_code="internal_blocker",
-            detail=f"accepted task result is missing for {task_id}",
+            detail=f"deferred Builder evidence is invalid for {task_id}",
             failure_kind="semantic",
         )
         state.transition_product(product_id, "FAILED_SAFE")

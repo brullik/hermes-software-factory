@@ -726,9 +726,16 @@ class PipelineReconciler:
             or str(task.get("terminal_reason") or "") != "internal_blocker"
         ):
             return False
-        prefix = "accepted task result is missing for "
         detail = str(task.get("terminal_detail") or "")
-        if not detail.startswith(prefix):
+        prefixes = (
+            "accepted task result is missing for ",
+            "deferred Builder evidence is invalid for ",
+        )
+        prefix = next(
+            (candidate for candidate in prefixes if detail.startswith(candidate)),
+            None,
+        )
+        if prefix is None:
             return False
         dependency_task_id = detail.removeprefix(prefix).strip()
         if not dependency_task_id:

@@ -1031,16 +1031,17 @@ class StateStore:
                 dependencies = json.loads(str(row["dependencies_json"]))
             except (TypeError, json.JSONDecodeError):
                 return False
-            expected_detail = (
-                f"accepted task result is missing for {dependency_task_id}"
-            )
+            expected_details = {
+                f"accepted task result is missing for {dependency_task_id}",
+                f"deferred Builder evidence is invalid for {dependency_task_id}",
+            }
             if (
                 str(row["product_status"]) != "FAILED_SAFE"
                 or str(row["task_status"]) != "BLOCKED_EXTERNAL"
                 or str(row["role"]) != "test-engineer"
                 or str(row["stage_key"]) != "test-engineer"
                 or str(row["terminal_reason"] or "") != "internal_blocker"
-                or str(row["terminal_detail"] or "") != expected_detail
+                or str(row["terminal_detail"] or "") not in expected_details
                 or dependencies != [dependency_task_id]
             ):
                 return False

@@ -658,7 +658,11 @@ class AgentWorker:
             or str(attempt_artifact.get("attempt_id") or "") != attempt_id
         ):
             raise ExternalBlocker(f"task attempt evidence identity conflicts for {task_id}")
-        if deferred_builder and str(attempt_artifact.get("status")) != "repair_required":
+        if (
+            deferred_builder
+            and str(attempt_artifact.get("status"))
+            not in {"repair_required", "blocked_external"}
+        ):
             raise ExternalBlocker(f"deferred Builder evidence is invalid for {task_id}")
         refs = attempt_artifact.get("evidence_refs", [])
         if not isinstance(refs, list):
