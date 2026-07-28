@@ -757,6 +757,249 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(health_checks), 1)
             state.close()
 
+    def test_deferred_builder_output_is_accepted_by_test_engineer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-luna",
+            )
+            config = make_config(root, registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            artifacts = ArtifactStore(config)
+            product_id = "deferred-builder-worker-product"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="cli",
+                idea="https://github.com/brullik/example-product",
+                idempotency_key="deferred-builder-worker-key",
+            )
+            for status in (
+                "CONTRACT_DRAFTED",
+                "CONTRACT_VALIDATED",
+                "RISK_CLASSIFIED",
+                "ARCHITECTED",
+                "BACKLOG_READY",
+                "IMPLEMENTING",
+                "REPAIRING",
+            ):
+                state.transition_product(product_id, status)
+            pipeline = PipelineCoordinator(config, state, artifacts)
+            builder_path = pipeline.create_task(
+                product_id,
+                "builder-core",
+                cycle=3,
+            )
+            builder_id = str(
+                json.loads(builder_path.read_text(encoding="utf-8"))["task_id"]
+            )
+            attempt_id = "attempt-deferred-builder"
+            changed_files = [
+                {
+                    "path": "src/product.py",
+                    "change": "Completed the locally accepted implementation.",
+                }
+            ]
+            output = {
+                **artifact_metadata(
+                    config,
+                    "builder",
+                    "builder-deferred-output",
+                    product_id,
+                ),
+                "producer": {
+                    "role": "builder",
+                    "tier": "sol",
+                    "provider": "openai_codex_subscription",
+                    "model": "gpt-5.6-sol",
+                },
+                "task_id": builder_id,
+                "attempt_id": attempt_id,
+                "tier": "sol",
+                "attempt_kind": "repair",
+                "prompt_digest": "a" * 64,
+                "subject_sha_before": "b" * 64,
+                "status": "blocked_external",
+                "summary": "Implementation and local PM acceptance are complete.",
+                "changed_files": changed_files,
+                "commands": [
+                    {
+                        "command_id": "local-acceptance",
+                        "result": "pass",
+                        "artifact_ref": "evidence/local-acceptance.json",
+                    }
+                ],
+                "test_results": [
+                    {
+                        "gate_id": "target-tests",
+                        "status": "PASS",
+                        "evidence_ref": "pytest: pass",
+                    },
+                    {
+                        "gate_id": "local-pm-acceptance",
+                        "status": "PASS",
+                        "evidence_ref": "pm: pass",
+                    },
+                    {
+                        "gate_id": "AC-PM-SCOPE-GITHUB",
+                        "status": "NOT_RUN",
+                        "evidence_ref": None,
+                    },
+                ],
+                "assumptions": [],
+                "findings": [
+                    {
+                        "code": "GITHUB_REQUIRED_CHECK_NOT_RUN",
+                        "severity": "medium",
+                        "text": "The immutable candidate check belongs to staging.",
+                    }
+                ],
+                "evidence_refs": [],
+            }
+            output_path = artifacts.write(
+                "attempt-result.schema.json",
+                output,
+                filename="builder-deferred-output.json",
+            )
+            attempt_artifact = {
+                **artifact_metadata(
+                    config,
+                    "builder",
+                    "builder-deferred-attempt",
+                    product_id,
+                ),
+                "producer": {
+                    "role": "builder",
+                    "tier": "sol",
+                    "provider": "openai_codex_subscription",
+                    "model": "gpt-5.6-sol",
+                },
+                "task_id": builder_id,
+                "attempt_id": attempt_id,
+                "tier": "sol",
+                "attempt_kind": "repair",
+                "prompt_digest": "a" * 64,
+                "subject_sha_before": "b" * 64,
+                "status": "repair_required",
+                "summary": "Provider reported a downstream-only blocker.",
+                "changed_files": changed_files,
+                "commands": [
+                    {
+                        "command_id": "hermes-oneshot",
+                        "result": "pass",
+                        "artifact_ref": "evidence/context.json",
+                    }
+                ],
+                "test_results": [
+                    {
+                        "gate_id": "schema-validation",
+                        "status": "PASS",
+                        "evidence_ref": str(output_path),
+                    },
+                    {
+                        "gate_id": "target-tests",
+                        "status": "PASS",
+                        "evidence_ref": "evidence/tests.json",
+                    },
+                    {
+                        "gate_id": "target-lint",
+                        "status": "FAIL",
+                        "evidence_ref": "evidence/lint.json",
+                    },
+                ],
+                "assumptions": [],
+                "findings": [
+                    {
+                        "code": "model_requested_repair",
+                        "severity": "medium",
+                        "text": "Provider requested repair.",
+                    }
+                ],
+                "evidence_refs": [str(output_path)],
+            }
+            attempt_path = artifacts.write(
+                "attempt-result.schema.json",
+                attempt_artifact,
+                filename=f"attempt-{attempt_id}.json",
+            )
+            claimed = state.claim_task(worker_id="builder-worker")
+            self.assertIsNotNone(claimed)
+            self.assertTrue(
+                state.record_attempt(
+                    attempt_id=attempt_id,
+                    task_id=builder_id,
+                    tier="sol",
+                    attempt_kind="repair",
+                    prompt_digest="a" * 64,
+                    status="repair_required",
+                    semantic_counted=True,
+                    reason_code="model_requested_repair",
+                )
+            )
+            state.complete_task(
+                builder_id,
+                "builder-worker",
+                "BLOCKED_EXTERNAL",
+                reason_code="model_requested_repair",
+                detail="GitHub required check was not run.",
+                result_ref=str(attempt_path),
+                failure_kind="semantic",
+            )
+            state.transition_product(product_id, "FAILED_SAFE")
+            self.assertTrue(
+                state.recover_deferred_builder_gate(
+                    product_id=product_id,
+                    task_id=builder_id,
+                    resume_status="REPAIRING",
+                )
+            )
+            test_path = pipeline.create_task(
+                product_id,
+                "test-engineer",
+                dependencies=(builder_id,),
+                cycle=3,
+            )
+            test_id = str(
+                json.loads(test_path.read_text(encoding="utf-8"))["task_id"]
+            )
+            test_task = state.get_task(test_id)
+            self.assertIsNotNone(test_task)
+            assert test_task is not None
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result_path, result_payload, controller_payload = (
+                worker._accepted_task_artifacts(builder_id)
+            )
+            spec = worker.default_spec(test_task)
+
+            self.assertEqual(result_path, output_path)
+            self.assertEqual(result_payload["status"], "blocked_external")
+            self.assertEqual(controller_payload["status"], "repair_required")
+            dependency = next(
+                item
+                for item in spec.evidence
+                if item["type"] == "dependency-result"
+            )
+            self.assertIn(
+                "Implementation and local PM acceptance are complete.",
+                dependency["summary"],
+            )
+            self.assertEqual(
+                dependency["artifact_ref"],
+                f"evidence/{output_path.name}",
+            )
+            state.close()
+
     def test_public_github_repository_url_accepts_only_exact_repository_urls(self) -> None:
         self.assertEqual(
             public_github_repository_url("https://github.com/brullik/bybit-grid-research"),

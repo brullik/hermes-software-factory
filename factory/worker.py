@@ -625,6 +625,23 @@ class AgentWorker:
             for item in self.state.attempts_for_task(task_id)
             if str(item.get("status")) == "completed"
         ]
+        deferred_builder = False
+        if not attempts and (
+            str(task.get("role")) == "builder"
+            and str(task.get("stage_key")) == "builder-core"
+            and any(
+                str(event.get("task_id") or "") == task_id
+                and str(event.get("event_type") or "")
+                == "builder_downstream_gate_deferred"
+                for event in self.state.events(str(task["product_id"]))
+            )
+        ):
+            attempts = [
+                item
+                for item in self.state.attempts_for_task(task_id)
+                if str(item.get("status")) == "repair_required"
+            ]
+            deferred_builder = bool(attempts)
         if not attempts:
             raise ExternalBlocker(f"accepted task result is missing for {task_id}")
         attempt_id = str(attempts[-1].get("attempt_id", ""))
@@ -636,9 +653,25 @@ class AgentWorker:
         if not isinstance(attempt_artifact, dict):
             raise ExternalBlocker(f"task attempt evidence is invalid for {task_id}")
         self.schemas.validate("attempt-result.schema.json", attempt_artifact)
+        if (
+            str(attempt_artifact.get("task_id") or "") != task_id
+            or str(attempt_artifact.get("attempt_id") or "") != attempt_id
+        ):
+            raise ExternalBlocker(f"task attempt evidence identity conflicts for {task_id}")
+        if deferred_builder and str(attempt_artifact.get("status")) != "repair_required":
+            raise ExternalBlocker(f"deferred Builder evidence is invalid for {task_id}")
         refs = attempt_artifact.get("evidence_refs", [])
         if not isinstance(refs, list):
             raise ExternalBlocker(f"task evidence references are invalid for {task_id}")
+        schema_output_names = {
+            Path(str(item.get("evidence_ref") or "")).name
+            for item in attempt_artifact.get("test_results", [])
+            if (
+                isinstance(item, Mapping)
+                and item.get("gate_id") == "schema-validation"
+                and item.get("status") == "PASS"
+            )
+        }
 
         output_schema = str(task.get("output_schema") or "")
         if not output_schema:
@@ -659,7 +692,15 @@ class AgentWorker:
                 payload = json.loads(raw)
             except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
-            if not isinstance(payload, dict) or payload.get("status") not in {"completed", "accepted"}:
+            if not isinstance(payload, dict):
+                continue
+            accepted_output = payload.get("status") in {"completed", "accepted"}
+            if deferred_builder:
+                accepted_output = (
+                    candidate.name in schema_output_names
+                    and builder_result_is_locally_complete(payload)
+                )
+            if not accepted_output:
                 continue
             if find_secret_candidates(raw):
                 raise ExternalBlocker(f"secret-like task evidence was rejected for {task_id}")

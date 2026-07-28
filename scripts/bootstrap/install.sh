@@ -168,6 +168,9 @@ install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-worker.service" \
   /etc/systemd/system/hermes-factory-worker.service
 install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-worker-2.service" \
+  /etc/systemd/system/hermes-factory-worker-2.service
+install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-backup.service" \
   /etc/systemd/system/hermes-factory-backup.service
 install -o root -g root -m 0644 \
@@ -191,6 +194,7 @@ systemctl enable \
   fail2ban.service \
   hermes-factory-controller.service \
   hermes-factory-worker.service \
+  hermes-factory-worker-2.service \
   hermes-factory-backup.timer \
   hermes-factory-osv-db.timer
 systemctl start fail2ban.service
