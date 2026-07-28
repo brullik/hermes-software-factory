@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from factory.artifacts import ArtifactStore, artifact_metadata
+from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
 from factory.intake import IntakeService
 from factory.pipeline import PipelineCoordinator
@@ -22,6 +23,7 @@ from factory.worker import (
     AgentWorker,
     HermesRunResult,
     SubprocessHermesRunner,
+    TaskExecutionSpec,
     _workspace_snapshot,
     public_github_repository_url,
 )
@@ -650,6 +652,126 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(planning_argv[planning_argv.index("--toolsets") + 1], "vision")
         self.assertIn("--ignore-rules", coding_argv)
         self.assertIn("--ignore-rules", planning_argv)
+
+    def test_security_context_is_bound_to_candidate_diff_and_preflight_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+            source = repository / "source.py"
+            source.write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "source.py"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "-c",
+                    "user.name=Hermes Test",
+                    "-c",
+                    "user.email=hermes@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "baseline",
+                ],
+                check=True,
+            )
+            source.write_text("value = 2\n", encoding="utf-8")
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            subject_sha = sha256_text(stable_json(_workspace_snapshot(repository)))
+            spec = TaskExecutionSpec(
+                task_contract={
+                    "product_id": "P-SECURITY-CONTEXT",
+                    "task_id": "T-SECURITY-CONTEXT",
+                    "quality_gates": ["target-secret-scan"],
+                },
+                role="security-reviewer",
+                output_schema="security-review-result.schema.json",
+                subject_sha=subject_sha,
+            )
+            preflight = worker.quality.run(
+                cwd=repository,
+                subject_sha=subject_sha,
+                task_id="T-SECURITY-CONTEXT",
+                attempt_id="preflight-test",
+                gate_ids=["target-secret-scan"],
+            )
+
+            evidence, candidates, decisions = worker._security_review_context(
+                spec,
+                repository,
+                preflight,
+            )
+
+            self.assertTrue(preflight.mandatory_passed)
+            self.assertIn(f"subject_sha={subject_sha}", evidence["summary"])
+            self.assertIn("source.py status=present", evidence["summary"])
+            self.assertIn("+value = 2", evidence["summary"])
+            self.assertIn('"status":"PASS"', evidence["summary"])
+            self.assertIn(("source.py", "security review candidate changed from base"), candidates)
+            self.assertTrue(any("Context Pack subject_sha" in item for item in decisions))
+            state.close()
+
+    def test_security_preflight_failure_skips_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / "README.md").write_text("minimal workspace\n", encoding="utf-8")
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            product_id = "P-SECURITY-PREFLIGHT"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Review an internal copied workspace",
+                idempotency_key="security-preflight-test",
+            )
+            task_path = PipelineCoordinator(config, state, ArtifactStore(config)).create_task(
+                product_id,
+                "security-reviewer",
+            )
+            contract = json.loads(task_path.read_text(encoding="utf-8"))
+            runner = FakeRunner("{}")
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=repository,
+            )
+            spec = TaskExecutionSpec(
+                task_contract=contract,
+                role="security-reviewer",
+                output_schema="security-review-result.schema.json",
+                subject_sha="a" * 64,
+            )
+
+            result = worker.execute(spec)
+
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(result.reason_code, "mandatory_gate_failed")
+            self.assertEqual(runner.calls, [])
+            attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
+            self.assertEqual(attempt["commands"][0]["result"], "not_run")
+            self.assertTrue(
+                any(item["gate_id"] == "secret-scan" and item["status"] == "FAIL"
+                    for item in attempt["test_results"])
+            )
+            state.close()
 
     def test_git_workspace_snapshot_ignores_generated_files_but_tracks_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

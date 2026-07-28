@@ -373,31 +373,14 @@ class PipelineCoordinator:
             return [self.create_task(product_id, "task-specifier", dependencies=(task_id,))]
         if role == "task-specifier":
             self._transition_if(product_id, "ARCHITECTED", "BACKLOG_READY")
-            return [
-                self.create_task(product_id, "builder-core", dependencies=(task_id,)),
-                self.create_task(product_id, "test-engineer", dependencies=(task_id,)),
-                self.create_task(product_id, "security-reviewer", dependencies=(task_id,)),
-            ]
-        if role in {"builder", "test-engineer", "security-reviewer"}:
+            return [self.create_task(product_id, "builder-core", dependencies=(task_id,))]
+        if role == "builder":
             self._transition_if(product_id, "BACKLOG_READY", "IMPLEMENTING")
-            roles = {"builder", "test-engineer", "security-reviewer"}
-            completed_roles = {
-                str(item.get("role"))
-                for item in self.state.list_tasks(product_id)
-                if item.get("status") == "DONE"
-            }
-            # The worker advances the DAG while the current task is still leased;
-            # count the accepted current result without weakening the durable
-            # dependency check used by the next claim.
-            completed_roles.add(role)
-            if roles <= completed_roles:
-                dependencies = tuple(
-                    str(item["task_id"])
-                    for item in self.state.list_tasks(product_id)
-                    if str(item.get("role")) in roles
-                )
-                return [self.create_task(product_id, "independent-reviewer", dependencies=dependencies)]
-            return []
+            return [self.create_task(product_id, "test-engineer", dependencies=(task_id,))]
+        if role == "test-engineer":
+            return [self.create_task(product_id, "security-reviewer", dependencies=(task_id,))]
+        if role == "security-reviewer":
+            return [self.create_task(product_id, "independent-reviewer", dependencies=(task_id,))]
         if role == "independent-reviewer":
             self._transition_if(product_id, "IMPLEMENTING", "INTEGRATING")
             return [self.create_task(product_id, "release-staging", dependencies=(task_id,))]

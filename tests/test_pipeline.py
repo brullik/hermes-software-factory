@@ -132,6 +132,19 @@ class PipelineTests(unittest.TestCase):
                 self.assertTrue(task["contract_ref"].startswith("evidence/task-T-"))
                 for dependency in json.loads(task["dependencies_json"]):
                     self.assertIn(dependency, {item["task_id"] for item in tasks})
+            by_role = {str(task["role"]): task for task in tasks if task["role"] != "release-operator"}
+            self.assertEqual(
+                json.loads(by_role["test-engineer"]["dependencies_json"]),
+                [by_role["builder"]["task_id"]],
+            )
+            self.assertEqual(
+                json.loads(by_role["security-reviewer"]["dependencies_json"]),
+                [by_role["test-engineer"]["task_id"]],
+            )
+            self.assertEqual(
+                json.loads(by_role["independent-reviewer"]["dependencies_json"]),
+                [by_role["security-reviewer"]["task_id"]],
+            )
             self.assertEqual(artifacts.validate("risk-assessment.schema.json", json.loads((config.evidence_dir / f"risk-{product_id}.json").read_text(encoding="utf-8"))), [])
             state.close()
 
