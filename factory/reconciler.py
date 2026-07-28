@@ -346,6 +346,7 @@ class PipelineReconciler:
         reason: str,
         detail: str,
         tier: str,
+        requeue: bool = True,
     ) -> str:
         task_id = str(task["task_id"])
         product_id = str(task["product_id"])
@@ -446,11 +447,12 @@ class PipelineReconciler:
             brief,
             filename=f"repair-brief-{task_id}-{new_id('reconcile')}.json",
         )
-        self.state.requeue_terminal_task(
-            task_id,
-            next_tier=tier,
-            repair_context_ref=f"evidence/{path.name}",
-        )
+        if requeue:
+            self.state.requeue_terminal_task(
+                task_id,
+                next_tier=tier,
+                repair_context_ref=f"evidence/{path.name}",
+            )
         return f"evidence/{path.name}"
 
     def _owner_action(
@@ -804,6 +806,62 @@ class PipelineReconciler:
                 f"Этап: {task.get('title')}\n"
                 "Причина устранена: незавершённая попытка безопасно продолжена после "
                 "перезапуска worker.\n"
+                "Действие владельца: не требуется."
+            ),
+        )
+        return True
+
+    def _recover_undiagnosed_secret_exposure(
+        self,
+        product: dict[str, Any],
+    ) -> bool:
+        """Retry one old opaque rejection with deterministic output sanitizing."""
+
+        product_id = str(product["product_id"])
+        task = self.state.latest_task(product_id)
+        if (
+            task is None
+            or str(task.get("status")) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+            or str(task.get("terminal_reason") or "") != "secret_exposure"
+            or str(task.get("terminal_detail") or "").strip()
+        ):
+            return False
+        resume_status = self._previous_status_before_failed_safe(product_id)
+        if resume_status is None:
+            return False
+        detail = (
+            "The legacy detector rejected the provider response without preserving "
+            "usable coordinates. Repeat this task once under provider-output "
+            "sanitizer v2. The controller will replace only credential-like values "
+            "with [REDACTED], validate the complete sanitized JSON, and continue "
+            "without copying matched values into durable evidence."
+        )
+        repair_context_ref = self._write_same_task_repair(
+            task,
+            reason="secret_exposure",
+            detail=detail,
+            tier="sol",
+            requeue=False,
+        )
+        recovered = self.state.recover_undiagnosed_secret_exposure(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            resume_status=resume_status,
+            repair_context_ref=repair_context_ref,
+        )
+        if not recovered:
+            return False
+        self._enqueue_notification(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            kind="automatic_recovery",
+            discriminator=f"provider-output-sanitizer-v2:{task['task_id']}",
+            text=(
+                "🔁 Hermes автоматически исправляет внутреннюю потерю диагностики.\n"
+                f"Проект: {product_id}\n"
+                "Старый детектор сообщил только secret_exposure. Задача один раз "
+                "повторена на уровне Sol; найденные значения будут автоматически "
+                "заменены на [REDACTED], а остальной ответ сохранён и проверен.\n"
                 "Действие владельца: не требуется."
             ),
         )
@@ -1204,6 +1262,13 @@ class PipelineReconciler:
                     counts["repaired"] += 1
                 continue
             if status == "FAILED_SAFE" and self._recover_interrupted_product(product):
+                counts["inspected"] += 1
+                counts["repaired"] += 1
+                continue
+            if (
+                status == "FAILED_SAFE"
+                and self._recover_undiagnosed_secret_exposure(product)
+            ):
                 counts["inspected"] += 1
                 counts["repaired"] += 1
                 continue

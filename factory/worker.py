@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 from scripts.model_router import Tier, classify_failure, next_tier
 from scripts.policy_guard import enforce_changed_paths
-from scripts.prompt_compiler import find_secret_candidates
+from scripts.prompt_compiler import find_secret_candidates, redact_secret_candidates
 
 from .artifacts import ArtifactConflictError, ArtifactStore, artifact_metadata
 from .attempts import Attempt, AttemptManager, IdenticalAttemptError
@@ -106,6 +106,22 @@ def _failed_gate_detail(results: list[dict[str, Any]]) -> str:
 
 def _repair_request_detail(output: Mapping[str, Any]) -> str:
     return repair_finding_detail(output)[:3500]
+
+
+def _provider_redaction_summary(
+    diagnostics: list[dict[str, str]],
+) -> str | None:
+    if not diagnostics:
+        return None
+    locations = ", ".join(
+        f"{item['location']} ({item['detector']})"
+        for item in diagnostics
+    )
+    return (
+        "Provider output was automatically sanitized before persistence at "
+        f"{locations}. Matched values were replaced with [REDACTED] and were "
+        "not copied into durable evidence."
+    )[:3500]
 
 
 @dataclass(frozen=True)
@@ -1701,10 +1717,14 @@ class AgentWorker:
                     reason_code=reason_code,
                 )
                 return WorkerResult(str(spec.task_contract["task_id"]), "failed_safe", reason_code, str(result_path), attempt.attempt_id)
-            if find_secret_candidates(run.output):
-                raise ValueError("secret_exposure")
+            provider_output, secret_diagnostics = redact_secret_candidates(
+                run.output
+            )
+            provider_redaction_summary = _provider_redaction_summary(
+                secret_diagnostics
+            )
             try:
-                output = json.loads(run.output)
+                output = json.loads(provider_output)
             except (json.JSONDecodeError, TypeError) as error:
                 raise ValueError("malformed_transport") from error
             if not isinstance(output, dict):
@@ -1971,6 +1991,11 @@ class AgentWorker:
                     summary=(
                         f"Mandatory quality gate failed; {gate_detail}; "
                         f"routing={route_action}."
+                        + (
+                            f" {provider_redaction_summary}"
+                            if provider_redaction_summary
+                            else ""
+                        )
                     ),
                     prompt_digest=prompt_digest,
                     subject_sha=spec.subject_sha,
@@ -2047,6 +2072,11 @@ class AgentWorker:
                     summary=(
                         "The provider returned a schema-valid non-completed result; "
                         f"{repair_detail}; routing={route_action}."
+                        + (
+                            f" {provider_redaction_summary}"
+                            if provider_redaction_summary
+                            else ""
+                        )
                     ),
                     prompt_digest=prompt_digest,
                     subject_sha=spec.subject_sha,
@@ -2073,11 +2103,18 @@ class AgentWorker:
                 selection,
                 status="completed",
                 summary=(
-                    "Hermes accepted the Builder implementation after all local evidence "
-                    "passed; the GitHub pm-acceptance check is deferred to the immutable "
-                    "candidate stage."
+                    (
+                        "Hermes accepted the Builder implementation after all local evidence "
+                        "passed; the GitHub pm-acceptance check is deferred to the immutable "
+                        "candidate stage."
+                    )
                     if builder_gate_deferred
                     else f"Hermes returned a schema-valid {spec.role} result."
+                )
+                + (
+                    f" {provider_redaction_summary}"
+                    if provider_redaction_summary
+                    else ""
                 ),
                 prompt_digest=prompt_digest,
                 subject_sha=spec.subject_sha,

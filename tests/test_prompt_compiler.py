@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -7,7 +8,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from prompt_compiler import compile_prompt, find_secret_candidates
+from prompt_compiler import (
+    compile_prompt,
+    find_secret_candidate_diagnostics,
+    find_secret_candidates,
+    redact_secret_candidates,
+)
 
 
 class PromptCompilerTests(unittest.TestCase):
@@ -28,6 +34,32 @@ class PromptCompilerTests(unittest.TestCase):
     def test_secret_candidate_rejected(self) -> None:
         with self.assertRaises(ValueError):
             compile_prompt(["token=" + "abcdefghijklmnopqrstuvwxyz" + "123456"])
+
+    def test_secret_diagnostics_and_redaction_never_return_value(self) -> None:
+        marker = "ghp_" + ("A" * 24)
+        text = '{"findings":[{"description":"' + marker + '"}]}'
+
+        redacted, diagnostics = redact_secret_candidates(text)
+
+        self.assertEqual(
+            diagnostics,
+            [
+                {
+                    "detector": "github_classic_token",
+                    "location": "$.findings[0].description",
+                }
+            ],
+        )
+        self.assertNotIn(marker, redacted)
+        self.assertNotIn(marker, str(diagnostics))
+        self.assertEqual(
+            find_secret_candidate_diagnostics(redacted),
+            [],
+        )
+        self.assertEqual(
+            json.loads(redacted)["findings"][0]["description"],
+            "[REDACTED]",
+        )
 
 
 if __name__ == "__main__":

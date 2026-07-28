@@ -994,6 +994,98 @@ class StateStore:
             )
             return True
 
+    def recover_undiagnosed_secret_exposure(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+        resume_status: str,
+        repair_context_ref: str,
+    ) -> bool:
+        """Retry one legacy opaque rejection under the sanitizing protocol."""
+
+        if resume_status not in _RECOVERABLE_PRODUCT_STATUSES:
+            raise ValueError("secret diagnostic resume status is invalid")
+        if not repair_context_ref:
+            raise ValueError("secret diagnostic repair context is required")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT products.status AS product_status,
+                          tasks.status AS task_status,
+                          tasks.terminal_reason,
+                          tasks.terminal_detail
+                   FROM tasks
+                   JOIN products ON products.product_id=tasks.product_id
+                   WHERE tasks.task_id=? AND tasks.product_id=?
+                     AND tasks.rowid=(
+                         SELECT MAX(latest.rowid)
+                         FROM tasks AS latest
+                         WHERE latest.product_id=tasks.product_id
+                     )""",
+                (task_id, product_id),
+            ).fetchone()
+            already_recovered = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='secret_sanitizer_retry_scheduled'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            active = self._connection.execute(
+                """SELECT 1 FROM tasks
+                   WHERE product_id=? AND status IN ('PENDING', 'CLAIMED', 'WAITING')
+                   LIMIT 1""",
+                (product_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["product_status"]) != "FAILED_SAFE"
+                or str(row["task_status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or str(row["terminal_reason"] or "") != "secret_exposure"
+                or str(row["terminal_detail"] or "").strip()
+                or already_recovered is not None
+                or active is not None
+            ):
+                return False
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                (resume_status, now, product_id),
+            )
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='PENDING', available_at=NULL,
+                       lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
+                       next_tier='sol', next_attempt_kind='repair',
+                       repair_context_ref=?, terminal_reason=NULL,
+                       terminal_detail=NULL, result_ref=NULL,
+                       failure_kind=NULL, updated_at=?
+                   WHERE task_id=?""",
+                (repair_context_ref, now, task_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": resume_status,
+                    "reason": "secret_sanitizer_upgrade",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "secret_sanitizer_retry_scheduled",
+                {
+                    "protocol": "provider-output-sanitizer-v2",
+                    "next_tier": "sol",
+                    "attempt_kind": "repair",
+                    "repair_context_ref": repair_context_ref,
+                },
+            )
+            return True
+
     def adopt_controller_valid_builder(
         self,
         *,
