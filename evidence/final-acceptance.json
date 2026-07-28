@@ -1,7 +1,7 @@
 {
-  "artifact_id": "acceptance-5cccb36d58db500dfca4",
+  "artifact_id": "acceptance-9e5e08a186d26364f455",
   "backup_restore": "PASS",
-  "created_at": "2026-07-28T05:18:19Z",
+  "created_at": "2026-07-28T06:24:33Z",
   "evidence_refs": [
     "evidence/package-validation-report.json",
     "docs/IMPLEMENTATION-LEDGER.md",
@@ -19,6 +19,7 @@
     "evidence/model-benchmark-routing-standard-20260727.json",
     "evidence/model-benchmark-safety-v3.json",
     "evidence/model-benchmark-standard.json",
+    "evidence/hermes-compatibility-delegation-20260728.json",
     "evidence/hermes-compatibility-live-probes.json",
     "evidence/hermes-compatibility-negative-smoke-20260728.json",
     "evidence/hermes-compatibility-observations.json"
@@ -105,9 +106,9 @@
       "status": "PASS"
     },
     {
-      "evidence_ref": "evidence/compatibility-report.json",
+      "evidence_ref": "evidence/hermes-compatibility-delegation-20260728.json",
       "id": "hermes-compatibility",
-      "status": "BLOCKED_EXTERNAL"
+      "status": "PASS"
     },
     {
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
@@ -125,9 +126,9 @@
       "status": "PASS"
     },
     {
-      "evidence_ref": "evidence/pilot/black-box-vps-5cbda13-20260727.json",
+      "evidence_ref": "evidence/pilot/github-publication.json",
       "id": "pilot-e2e",
-      "status": "BLOCKED_EXTERNAL"
+      "status": "PASS"
     },
     {
       "evidence_ref": "docs/BOOTSTRAP-OWNER-ACTIONS.md",
@@ -136,8 +137,6 @@
     }
   ],
   "open_items": [
-    "hermes-compatibility",
-    "pilot-e2e",
     "offsite-backup"
   ],
   "pilot": {

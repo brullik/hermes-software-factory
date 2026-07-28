@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "hermes-compatibility-delegation-20260728",
+  "status": "PASS",
+  "host": "redacted-production-target",
+  "runtime": {
+    "hermes_agent": "0.19.0",
+    "model": "gpt-5.6-luna",
+    "provider": "openai-codex",
+    "toolsets": ["delegation"]
+  },
+  "probe": {
+    "mode": "internal-one-shot-diagnostic",
+    "response_marker_verified": true,
+    "delegate_task_tool_calls": 1,
+    "tool_result_messages": 1,
+    "raw_prompt_or_response_persisted": false
+  },
+  "result": "A real provider-backed Hermes run invoked delegate_task once and received one child tool result; the stateless one-shot boundary returned the verified completion marker.",
+  "evidence_refs": [
+    "evidence/compatibility-report.json",
+    "evidence/hermes-compatibility-live-probes.json"
+  ]
+}
