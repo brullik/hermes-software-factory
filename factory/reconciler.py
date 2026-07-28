@@ -150,6 +150,70 @@ class PipelineReconciler:
             ),
         )
 
+    def _read_evidence_payload(self, reference: str) -> dict[str, Any] | None:
+        if not reference:
+            return None
+        candidate = Path(reference)
+        if not candidate.is_absolute():
+            candidate = self.config.evidence_dir / candidate.name
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return None
+        evidence_root = self.config.evidence_dir.resolve()
+        if (
+            resolved.parent != evidence_root
+            or not resolved.is_file()
+            or resolved.is_symlink()
+        ):
+            return None
+        try:
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _validated_output_payload(
+        self,
+        attempt_payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        test_results = attempt_payload.get("test_results", [])
+        if not isinstance(test_results, list):
+            return None
+        for item in test_results:
+            if (
+                isinstance(item, dict)
+                and item.get("gate_id") == "schema-validation"
+                and item.get("status") == "PASS"
+            ):
+                payload = self._read_evidence_payload(
+                    str(item.get("evidence_ref") or "")
+                )
+                if payload is not None:
+                    return payload
+        return None
+
+    @staticmethod
+    def _blocking_finding_detail(output: dict[str, Any]) -> str | None:
+        findings = output.get("findings", [])
+        if not isinstance(findings, list):
+            return None
+        details: list[str] = []
+        for item in findings:
+            if not isinstance(item, dict) or str(item.get("severity")) == "info":
+                continue
+            finding_id = str(item.get("id") or "unnamed-finding")
+            severity = str(item.get("severity") or "unknown")
+            description = str(item.get("description") or "repair required")
+            required_fix = str(
+                item.get("required_fix") or "apply the required repair"
+            )
+            details.append(
+                f"{finding_id} [{severity}]: {description}; "
+                f"required fix: {required_fix}"
+            )
+        return ("blocking findings: " + " | ".join(details))[:4000] if details else None
+
     def _task_reason(self, task: dict[str, Any]) -> tuple[str, str]:
         reason = str(task.get("terminal_reason") or "").strip()
         detail = str(task.get("terminal_detail") or reason).strip()
@@ -161,35 +225,33 @@ class PipelineReconciler:
         if not detail:
             detail = reason
         result_ref = str(task.get("result_ref") or "")
-        if result_ref:
-            candidate = Path(result_ref)
-            if not candidate.is_absolute():
-                candidate = self.config.evidence_dir / candidate.name
-            if candidate.is_file() and candidate.parent.resolve() == self.config.evidence_dir.resolve():
-                try:
-                    payload = json.loads(candidate.read_text(encoding="utf-8"))
-                except (OSError, UnicodeError, json.JSONDecodeError):
-                    payload = None
-                if isinstance(payload, dict):
-                    detail = str(payload.get("summary") or reason)
-                    test_results = payload.get("test_results", [])
-                    failed_gates = (
-                        sorted(
-                            str(item["gate_id"])
-                            for item in test_results
-                            if (
-                                isinstance(item, dict)
-                                and item.get("gate_id")
-                                and item.get("status") not in {"PASS", "NOT_RUN"}
-                            )
-                        )
-                        if isinstance(test_results, list)
-                        else []
+        payload = self._read_evidence_payload(result_ref)
+        if payload is not None:
+            detail = str(payload.get("summary") or reason)
+            test_results = payload.get("test_results", [])
+            failed_gates = (
+                sorted(
+                    str(item["gate_id"])
+                    for item in test_results
+                    if (
+                        isinstance(item, dict)
+                        and item.get("gate_id")
+                        and item.get("status") not in {"PASS", "NOT_RUN"}
                     )
-                    if failed_gates:
-                        detail = (
-                            f"{detail}; failed gates: {', '.join(failed_gates)}"
-                        )
+                )
+                if isinstance(test_results, list)
+                else []
+            )
+            if failed_gates:
+                detail = f"{detail}; failed gates: {', '.join(failed_gates)}"
+            output = self._validated_output_payload(payload)
+            finding_detail = (
+                self._blocking_finding_detail(output)
+                if output is not None
+                else None
+            )
+            if finding_detail:
+                detail = finding_detail
         return reason, detail
 
     def _next_repair_tier(self, task: dict[str, Any], reason: str) -> str | None:
@@ -502,6 +564,45 @@ class PipelineReconciler:
         )
         return True
 
+    def _recover_extended_repair_budget(self, product: dict[str, Any]) -> bool:
+        product_id = str(product["product_id"])
+        task = self.state.latest_task(product_id)
+        if task is None or int(task.get("cycle") or 0) >= self.config.max_repair_cycles:
+            return False
+        reason, detail = self._task_reason(task)
+        if owner_action_allowed(self.config, reason):
+            return False
+        if classify_failure(reason) is FailureClass.EXTERNAL:
+            return False
+        resume_status = self._previous_status_before_failed_safe(product_id)
+        if resume_status is None:
+            return False
+        recovered = self.state.recover_exhausted_product_budget(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            resume_status=resume_status,
+            max_repair_cycles=self.config.max_repair_cycles,
+        )
+        if not recovered:
+            return False
+        self._enqueue_notification(
+            product_id=product_id,
+            task_id=str(task["task_id"]),
+            kind="automatic_recovery",
+            discriminator=(
+                f"repair-budget:{task['task_id']}:{self.config.max_repair_cycles}"
+            ),
+            text=(
+                "🔁 Hermes автоматически возобновил проект в рамках расширенного, "
+                "но ограниченного бюджета исправлений.\n"
+                f"Проект: {product_id}\n"
+                f"Точный blocker: {self._reason_text(reason, detail)}\n"
+                f"Новый предел repair cycles: {self.config.max_repair_cycles}.\n"
+                "Действие владельца: не требуется."
+            ),
+        )
+        return True
+
     def reconcile_product(self, product: dict[str, Any]) -> str:
         product_id = str(product["product_id"])
         status = str(product["status"])
@@ -606,6 +707,21 @@ class PipelineReconciler:
             if status == "FAILED_SAFE" and self._recover_interrupted_product(product):
                 counts["inspected"] += 1
                 counts["repaired"] += 1
+                continue
+            if status == "FAILED_SAFE" and self._recover_extended_repair_budget(product):
+                counts["inspected"] += 1
+                refreshed = self.state.get_product(str(product["product_id"]))
+                if refreshed is None:
+                    continue
+                action = self.reconcile_product(refreshed)
+                if action == "repaired":
+                    counts["repaired"] += 1
+                elif action == "owner_action":
+                    counts["owner_actions"] += 1
+                elif action == "exhausted":
+                    counts["exhausted"] += 1
+                elif action == "successor":
+                    counts["recovered_successors"] += 1
                 continue
             if status in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
                 continue

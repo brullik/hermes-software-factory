@@ -1002,10 +1002,13 @@ class WorkerTests(unittest.TestCase):
 
             self.assertEqual(result.status, "repair_required")
             self.assertEqual(result.reason_code, "model_requested_repair")
+            self.assertIn("SEC-001 [medium]", result.detail or "")
+            self.assertIn("Add the bound and a negative test.", result.detail or "")
             self.assertEqual(len(runner.calls), 1)
             self.assertEqual(list(config.evidence_dir.glob("repair-brief-*.json")), [])
             attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
             self.assertIn("builder_repair_handoff", attempt["summary"])
+            self.assertIn("SEC-001 [medium]", attempt["summary"])
             state.close()
 
     def test_security_preflight_failure_skips_provider_call(self) -> None:

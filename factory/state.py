@@ -20,6 +20,27 @@ class IntakeRateLimitError(ValueError):
     """Raised when an intake source exceeds its durable request budget."""
 
 
+_RECOVERABLE_PRODUCT_STATUSES = {
+    "IDEA_RECEIVED",
+    "CONTRACT_DRAFTED",
+    "CONTRACT_VALIDATED",
+    "RISK_CLASSIFIED",
+    "ARCHITECTED",
+    "BACKLOG_READY",
+    "IMPLEMENTING",
+    "INTEGRATING",
+    "STAGING_DEPLOYED",
+    "PRODUCT_ACCEPTANCE",
+    "RELEASE_READY",
+    "PRODUCTION_DEPLOYED",
+    "OBSERVATION",
+    "REPAIRING",
+    "DELAYED_QUOTA",
+    "ROLLING_BACK",
+    "ROLLED_BACK",
+}
+
+
 class StateStore:
     def __init__(
         self,
@@ -825,26 +846,7 @@ class StateStore:
     ) -> bool:
         """Resume only a terminal task backed by an unfinished durable attempt."""
 
-        resumable_statuses = {
-            "IDEA_RECEIVED",
-            "CONTRACT_DRAFTED",
-            "CONTRACT_VALIDATED",
-            "RISK_CLASSIFIED",
-            "ARCHITECTED",
-            "BACKLOG_READY",
-            "IMPLEMENTING",
-            "INTEGRATING",
-            "STAGING_DEPLOYED",
-            "PRODUCT_ACCEPTANCE",
-            "RELEASE_READY",
-            "PRODUCTION_DEPLOYED",
-            "OBSERVATION",
-            "REPAIRING",
-            "DELAYED_QUOTA",
-            "ROLLING_BACK",
-            "ROLLED_BACK",
-        }
-        if resume_status not in resumable_statuses:
+        if resume_status not in _RECOVERABLE_PRODUCT_STATUSES:
             raise ValueError("interrupted attempt resume status is invalid")
         with self._lock, self._connection:
             row = self._connection.execute(
@@ -908,6 +910,78 @@ class StateStore:
                 task_id,
                 "interrupted_attempt_recovered",
                 {"resume_status": resume_status},
+            )
+            return True
+
+    def recover_exhausted_product_budget(
+        self,
+        *,
+        product_id: str,
+        task_id: str,
+        resume_status: str,
+        max_repair_cycles: int,
+    ) -> bool:
+        """Reopen a product only when policy now grants a new bounded cycle."""
+
+        if resume_status not in _RECOVERABLE_PRODUCT_STATUSES:
+            raise ValueError("repair budget resume status is invalid")
+        if max_repair_cycles < 1 or max_repair_cycles > 3:
+            raise ValueError("repair budget is invalid")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT products.status AS product_status,
+                          tasks.status AS task_status,
+                          tasks.cycle
+                   FROM tasks
+                   JOIN products ON products.product_id=tasks.product_id
+                   WHERE tasks.task_id=? AND tasks.product_id=?
+                     AND tasks.rowid=(
+                         SELECT MAX(latest.rowid)
+                         FROM tasks AS latest
+                         WHERE latest.product_id=tasks.product_id
+                     )""",
+                (task_id, product_id),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["product_status"]) != "FAILED_SAFE"
+                or str(row["task_status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
+                or int(row["cycle"] or 0) >= max_repair_cycles
+            ):
+                return False
+            exhausted = self._connection.execute(
+                """SELECT 1 FROM events
+                   WHERE product_id=? AND task_id=?
+                     AND event_type='repair_budget_exhausted'
+                   LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            if exhausted is None:
+                return False
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                (resume_status, now, product_id),
+            )
+            self._record_event(
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": "FAILED_SAFE",
+                    "to": resume_status,
+                    "reason": "repair_budget_extended",
+                },
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "repair_budget_reopened",
+                {
+                    "completed_cycle": int(row["cycle"] or 0),
+                    "max_repair_cycles": max_repair_cycles,
+                    "resume_status": resume_status,
+                },
             )
             return True
 

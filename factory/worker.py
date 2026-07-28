@@ -97,6 +97,27 @@ def _failed_gate_detail(results: list[dict[str, Any]]) -> str:
     )
 
 
+def _repair_request_detail(output: Mapping[str, Any]) -> str:
+    findings = output.get("findings", [])
+    blocking: list[str] = []
+    if isinstance(findings, list):
+        for item in findings:
+            if not isinstance(item, Mapping) or str(item.get("severity")) == "info":
+                continue
+            finding_id = str(item.get("id") or "unnamed-finding")
+            severity = str(item.get("severity") or "unknown")
+            description = str(item.get("description") or "repair required")
+            required_fix = str(item.get("required_fix") or "apply the required repair")
+            blocking.append(
+                f"{finding_id} [{severity}]: {description}; required fix: {required_fix}"
+            )
+    if blocking:
+        return ("blocking findings: " + " | ".join(blocking))[:3500]
+    if bool(output.get("release_blocked")):
+        return "provider marked the release as blocked without a structured blocking finding"
+    return f"provider requested repair with status={output.get('status', 'unknown')}"
+
+
 @dataclass(frozen=True)
 class HermesRunResult:
     status: str
@@ -1888,6 +1909,7 @@ class AgentWorker:
                 )
             output_status = str(output.get("status"))
             if output_status not in {"completed", "accepted"}:
+                repair_detail = _repair_request_detail(output)
                 self.attempts.finish(attempt, status="repair_required", reason_code="model_requested_repair")
                 reviewer_handoff = (
                     output_status == "repair_required"
@@ -1926,7 +1948,10 @@ class AgentWorker:
                     attempt,
                     selection,
                     status="repair_required" if output_status == "repair_required" else "blocked_external",
-                    summary=f"The provider returned a schema-valid non-completed result; routing={route_action}.",
+                    summary=(
+                        "The provider returned a schema-valid non-completed result; "
+                        f"{repair_detail}; routing={route_action}."
+                    ),
                     prompt_digest=prompt_digest,
                     subject_sha=spec.subject_sha,
                     command_result="pass",
@@ -1936,7 +1961,14 @@ class AgentWorker:
                     gate_results=list(quality_run.results),
                     changed_files=changed_files,
                 )
-                return WorkerResult(str(spec.task_contract["task_id"]), output_status, "model_requested_repair", str(result_path), attempt.attempt_id)
+                return WorkerResult(
+                    str(spec.task_contract["task_id"]),
+                    output_status,
+                    "model_requested_repair",
+                    str(result_path),
+                    attempt.attempt_id,
+                    detail=repair_detail,
+                )
             self.attempts.finish(attempt, status="completed")
             self._route(spec, tier, success=True, reason_code=None, attempt=attempt)
             result_path = self._attempt_artifact(

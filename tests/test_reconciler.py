@@ -396,6 +396,7 @@ def test_external_credential_block_creates_owner_action_but_internal_failure_doe
 def test_repair_budget_exhaustion_is_terminal_and_notified_in_russian() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
+        config.raw["controller"]["max_repair_cycles"] = 2
         state = StateStore(config.database_path)
         product_id = "repair-budget-product"
         state.create_product(
@@ -435,6 +436,146 @@ def test_repair_budget_exhaustion_is_terminal_and_notified_in_russian() -> None:
         exhausted = next(item for item in payloads if item["kind"] == "repair_exhausted")
         assert "исчерпал автоматические попытки" in exhausted["text"]
         assert "required_path_missing: tests/test_product.py" in exhausted["text"]
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        state.close()
+
+
+def test_expanded_bounded_budget_reopens_exact_security_repair() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        config.raw["controller"]["max_repair_cycles"] = 2
+        state = StateStore(config.database_path)
+        product_id = "expanded-security-budget-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="Repair a validated security finding",
+            idempotency_key="expanded-security-budget-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+        ):
+            state.transition_product(product_id, status)
+        pipeline = PipelineCoordinator(config, state)
+        task_path = pipeline.create_task(product_id, "security-reviewer", cycle=2)
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        security_output = config.evidence_dir / "security-review-output.json"
+        security_output.write_text(
+            json.dumps(
+                {
+                    "status": "repair_required",
+                    "release_blocked": True,
+                    "findings": [
+                        {
+                            "id": "SEC-WF-ASSIGNED-BOUNDARY-FAIL-OPEN",
+                            "severity": "medium",
+                            "description": "Assigned outcome end crosses its role boundary.",
+                            "required_fix": "Reject every assigned row that crosses its role end.",
+                        },
+                        {
+                            "id": "SEC-SCANS-NO-REGRESSION",
+                            "severity": "info",
+                            "description": "Scanner gates passed.",
+                            "required_fix": "No fix required.",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        attempt_path = config.evidence_dir / "attempt-security-repair.json"
+        attempt_path.write_text(
+            json.dumps(
+                {
+                    "summary": "provider requested repair",
+                    "test_results": [
+                        {
+                            "gate_id": "schema-validation",
+                            "status": "PASS",
+                            "evidence_ref": str(security_output),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert state.claim_task(worker_id="security-worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-security",
+            task_id=task_id,
+            tier="sol",
+            attempt_kind="initial",
+            prompt_digest="e" * 64,
+            status="repair_required",
+            semantic_counted=True,
+            reason_code="model_requested_repair",
+        )
+        state.complete_task(
+            task_id,
+            "security-worker",
+            "BLOCKED_EXTERNAL",
+            reason_code="model_requested_repair",
+            failure_kind="semantic",
+            result_ref=str(attempt_path),
+        )
+
+        exhausted_result = PipelineReconciler(config, state).reconcile_once()
+
+        assert exhausted_result.exhausted == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "FAILED_SAFE"
+        exhausted_payload = next(
+            json.loads(item["payload_json"])
+            for item in state.list_outbox()
+            if json.loads(item["payload_json"])["kind"] == "repair_exhausted"
+        )
+        assert "SEC-WF-ASSIGNED-BOUNDARY-FAIL-OPEN" in exhausted_payload["text"]
+        assert "Reject every assigned row" in exhausted_payload["text"]
+
+        unchanged_result = PipelineReconciler(config, state).reconcile_once()
+        assert unchanged_result.repaired == 0
+        config.raw["controller"]["max_repair_cycles"] = 3
+
+        reopened_result = PipelineReconciler(config, state).reconcile_once()
+
+        assert reopened_result.repaired == 1
+        product = state.get_product(product_id)
+        assert product is not None
+        assert product["status"] == "REPAIRING"
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["stage_key"] == "builder-core"
+        assert active[0]["cycle"] == 3
+        assert active[0]["next_tier"] == "sol"
+        brief = json.loads(
+            (
+                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
+            ).read_text(encoding="utf-8")
+        )
+        assert brief["failed_gate_ids"] == [
+            "SEC-WF-ASSIGNED-BOUNDARY-FAIL-OPEN"
+        ]
+        assert "Reject every assigned row" in brief["relevant_log_fragment"]
+        assert any(
+            event["event_type"] == "repair_budget_reopened"
+            for event in state.events(product_id)
+        )
+        recovered_payload = next(
+            json.loads(item["payload_json"])
+            for item in state.list_outbox()
+            if (
+                json.loads(item["payload_json"])["kind"] == "automatic_recovery"
+                and "расширенного" in json.loads(item["payload_json"])["text"]
+            )
+        )
+        assert "Действие владельца: не требуется" in recovered_payload["text"]
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         state.close()
 

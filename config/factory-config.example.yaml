@@ -6,7 +6,7 @@ controller:
   max_active_products: 1
   max_active_workers: 2
   reconcile_interval_seconds: 2
-  max_repair_cycles: 2
+  max_repair_cycles: 3
   github_check_timeout_seconds: 300
   github_check_poll_seconds: 5
   observation_seconds: 1209600
