@@ -502,6 +502,80 @@ def _migration_005_persistent_workspace_claim_recovery(
         )
 
 
+def _migration_006_resolved_failure_lineage(
+    connection: sqlite3.Connection,
+) -> None:
+    """Close historical failure ancestors proven obsolete by accepted work."""
+
+    seeds = [
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT DISTINCT failure_id
+              FROM tasks
+             WHERE failure_id IS NOT NULL
+               AND graph_status IN ('ACCEPTED','SUPERSEDED')
+            """
+        ).fetchall()
+    ]
+    if not seeds:
+        return
+    placeholders = ",".join("?" for _ in seeds)
+    failure_ids = [
+        str(row[0])
+        for row in connection.execute(
+            f"""
+            WITH RECURSIVE causal_failures(failure_id) AS (
+                SELECT failure_id
+                  FROM failures
+                 WHERE failure_id IN ({placeholders})
+                UNION
+                SELECT current.parent_failure_id
+                  FROM failures AS current
+                  JOIN causal_failures AS child
+                    ON current.failure_id=child.failure_id
+                 WHERE current.parent_failure_id IS NOT NULL
+            )
+            SELECT failure_id FROM causal_failures
+            """,
+            seeds,
+        ).fetchall()
+    ]
+    if not failure_ids:
+        return
+    now = utc_now()
+    causal_placeholders = ",".join("?" for _ in failure_ids)
+    connection.execute(
+        f"""
+        UPDATE failures
+           SET status='RESOLVED', last_seen_at=?
+         WHERE failure_id IN ({causal_placeholders})
+        """,
+        (now, *failure_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE hypotheses
+           SET status='RESOLVED', closed_at=COALESCE(closed_at, ?)
+         WHERE failure_id IN ({causal_placeholders})
+           AND status='ACTIVE'
+        """,
+        (now, *failure_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE controller_incidents
+           SET status='RESOLVED', resolved_at=?
+         WHERE status='OPEN'
+           AND task_id IN (
+               SELECT task_id FROM failures
+                WHERE failure_id IN ({causal_placeholders})
+           )
+        """,
+        (now, *failure_ids),
+    )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -640,6 +714,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         5,
         "persistent-workspace-claim-recovery",
         _migration_005_persistent_workspace_claim_recovery,
+    ),
+    (
+        6,
+        "resolved-failure-lineage-recovery",
+        _migration_006_resolved_failure_lineage,
     ),
 )
 

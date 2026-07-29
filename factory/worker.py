@@ -326,6 +326,19 @@ class WorkerResult:
     failure_data: FailureData | None = None
 
 
+def _normalized_output_status(
+    role: str,
+    reported_status: str,
+    *,
+    builder_gate_deferred: bool,
+) -> str:
+    if builder_gate_deferred:
+        return "completed"
+    if role == "incident-recovery" and reported_status == "recovered":
+        return "completed"
+    return reported_status
+
+
 def _workspace_snapshot(root: Path) -> dict[str, str]:
     repository_marker = root / ".git"
     if repository_marker.exists():
@@ -2866,7 +2879,11 @@ class AgentWorker:
             builder_gate_deferred = spec.role == "builder" and builder_result_is_locally_complete(
                 output
             )
-            output_status = "completed" if builder_gate_deferred else reported_output_status
+            output_status = _normalized_output_status(
+                spec.role,
+                reported_output_status,
+                builder_gate_deferred=builder_gate_deferred,
+            )
             if (
                 spec.role == "product-tester"
                 and output_status == "accepted"

@@ -18,6 +18,7 @@ _REPLAN_REASONS = {
     "scope_contradiction",
     "architecture_impossible",
     "invalid_capability_contract",
+    "liveness_invariant_violation",
     "repeated_hypothesis",
 }
 _CONTROLLER_PREFIXES = (

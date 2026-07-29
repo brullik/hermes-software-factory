@@ -1148,6 +1148,35 @@ def test_AUT_P0_017_completion_reducer_requires_all_evidence_and_is_idempotent(
                     else sha256_text(evidence_type)
                 ),
             )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """
+                INSERT INTO controller_incidents
+                    (incident_id, product_id, task_id, reason_code,
+                     evidence_ref, status, created_at)
+                VALUES ('incident-completion-open', 'product-autonomy',
+                        'T-OBSERVATION1', 'controller_completion_guard',
+                        'internal://completion-guard', 'OPEN',
+                        '2026-07-29T00:00:00Z')
+                """
+            )
+        blocked_by_incident = state.reduce_completion(
+            "product-autonomy",
+            artifacts=artifacts,
+        )
+        assert not blocked_by_incident.completed
+        assert (
+            "open_controller_incident:incident-completion-open"
+            in blocked_by_incident.unmet_conditions
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """
+                UPDATE controller_incidents
+                   SET status='RESOLVED', resolved_at='2026-07-29T00:01:00Z'
+                 WHERE incident_id='incident-completion-open'
+                """
+            )
         completed = state.reduce_completion(
             "product-autonomy",
             artifacts=artifacts,
@@ -1276,7 +1305,7 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3, 4, 5]
+        assert versions == [1, 2, 3, 4, 5, 6]
         assert database.with_suffix(
             database.suffix + ".pre-autonomy-v2.bak"
         ).is_file()
@@ -1515,7 +1544,108 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5]
+        assert versions == [1, 2, 3, 4, 5, 6]
+    finally:
+        restarted.close()
+
+
+def test_AUT_P0_019_failure_lineage_migration_closes_proven_ancestors(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-autonomy"
+    now = "2026-07-29T00:00:00Z"
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-HISTORICAL-FAILED",
+            product_id=product_id,
+            title="Historical failed controller task",
+            graph_status="FAILED_SEMANTIC",
+        )
+        state.add_task(
+            task_id="T-HISTORICAL-RECOVERED",
+            product_id=product_id,
+            title="Historical accepted recovery",
+            role="incident-recovery",
+            failure_id="failure-historical-child",
+            graph_status="SUPERSEDED",
+        )
+        with state._lock, state._connection:
+            for values in (
+                (
+                    "failure-historical-parent",
+                    "T-HISTORICAL-FAILED",
+                    None,
+                    "controller",
+                    "controller_historical",
+                ),
+                (
+                    "failure-historical-child",
+                    "T-HISTORICAL-RECOVERED",
+                    "failure-historical-parent",
+                    "semantic",
+                    "model_requested_repair",
+                ),
+            ):
+                state._connection.execute(
+                    """
+                    INSERT INTO failures
+                        (failure_id, product_id, task_id, parent_failure_id,
+                         failure_class, reason_code, fingerprint, safe_message,
+                         evidence_ref, status, retryable,
+                         owner_action_eligible, expected_json, actual_json,
+                         failed_gate_ids_json, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'historical safe diagnostic',
+                            'internal://historical', 'ROUTED', 0, 0,
+                            '{}', '{}', '[]', ?, ?)
+                    """,
+                    (
+                        values[0],
+                        product_id,
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        sha256_text(str(values)),
+                        now,
+                        now,
+                    ),
+                )
+            state._connection.execute(
+                """
+                INSERT INTO controller_incidents
+                    (incident_id, product_id, task_id, reason_code,
+                     evidence_ref, status, created_at)
+                VALUES ('incident-historical', ?, 'T-HISTORICAL-FAILED',
+                        'controller_historical', 'internal://historical',
+                        'OPEN', ?)
+                """,
+                (product_id, now),
+            )
+            state._connection.execute(
+                "DELETE FROM schema_migrations WHERE version=6"
+            )
+    finally:
+        state.close()
+
+    restarted = StateStore(config.database_path)
+    try:
+        assert {
+            failure["status"]
+            for failure in restarted.list_failures(product_id)
+        } == {"RESOLVED"}
+        incident = restarted._connection.execute(
+            """
+            SELECT status, resolved_at
+              FROM controller_incidents
+             WHERE incident_id='incident-historical'
+            """
+        ).fetchone()
+        assert incident is not None
+        assert incident["status"] == "RESOLVED"
+        assert incident["resolved_at"]
     finally:
         restarted.close()
 
@@ -1592,7 +1722,7 @@ def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
         ]
     finally:
         verified.close()
-    assert versions == [1, 2, 3, 4, 5]
+    assert versions == [1, 2, 3, 4, 5, 6]
 
 
 def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(
@@ -1689,6 +1819,133 @@ def test_AUT_P0_019_plan_candidate_reports_existing_plan_digest_coordinate(
 
         assert state.list_plans("product-autonomy") == plans_before
         assert state.get_task("T-PLAN-DIGEST-NEW") is None
+    finally:
+        state.close()
+
+
+def test_AUT_P0_019_plan_candidate_rejects_planning_only_graph(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-PLANNING-ONLY",
+            root_task_id="T-PLANNING-ONLY-ROOT",
+            node_specs=[("replan", "T-PLANNING-ONLY", "accept-replan")],
+            edges=[],
+        )
+        contract = plan["nodes"][0]["task_contract"]
+        contract["role"] = "replanner"
+        contract["output_schema"] = "backlog-plan-v2.schema.json"
+        contract["capability_profile"] = "planning_readonly"
+        contract["required_capabilities"] = [
+            "artifact.read",
+            "artifact.write",
+            "repository.read_bounded",
+            "state.read",
+            "plan.propose",
+        ]
+
+        with pytest.raises(
+            ValueError,
+            match="BacklogPlan nodes must include a non-planning execution task",
+        ):
+            state.validate_plan_candidate(plan)
+    finally:
+        state.close()
+
+
+def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        coordinator = PipelineCoordinator(config, state, ArtifactStore(config))
+        root_path = coordinator.create_task(
+            "product-autonomy",
+            "task-specifier",
+        )
+        root_task_id = str(
+            json.loads(root_path.read_text(encoding="utf-8"))["task_id"]
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """
+                UPDATE tasks
+                   SET status='DONE', graph_status='ACCEPTED'
+                 WHERE task_id=?
+                """,
+                (root_task_id,),
+            )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-EXHAUSTED-GRAPH",
+            root_task_id=root_task_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[("build", "T-EXHAUSTED-BUILD", "accept-build")],
+            edges=[],
+        )
+        persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=root_task_id,
+        )
+        claimed = state.claim_task(worker_id="liveness-builder")
+        assert claimed is not None
+        assert claimed["task_id"] == "T-EXHAUSTED-BUILD"
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-EXHAUSTED-BUILD",
+                worker_id="liveness-builder",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("accept-exhausted-build"),
+                result_ref="internal://accepted/exhausted-build",
+                result_digest=sha256_text("accepted-exhausted-build"),
+                status="ACCEPTED",
+            )
+        )
+        assert not state.has_bounded_progress_path("product-autonomy")
+
+        first = PipelineReconciler(config, state).reconcile_once()
+        second = PipelineReconciler(config, state).reconcile_once()
+
+        assert first.replanned == 1
+        assert second.replanned == 0
+        active = [
+            task
+            for task in state.list_tasks("product-autonomy")
+            if task["graph_status"] in {"READY", "CLAIMED"}
+        ]
+        assert len(active) == 1
+        assert active[0]["role"] == "replanner"
+        assert active[0]["failure_id"]
+        failures = state.list_failures("product-autonomy")
+        assert len(failures) == 1
+        assert failures[0]["reason_code"] == "liveness_invariant_violation"
+        assert failures[0]["status"] == "ROUTED"
+        incidents = state._connection.execute(
+            """
+            SELECT reason_code, status
+              FROM controller_incidents
+             WHERE product_id=?
+            """,
+            ("product-autonomy",),
+        ).fetchall()
+        assert [tuple(row) for row in incidents] == [
+            ("liveness_invariant_violation", "OPEN")
+        ]
     finally:
         state.close()
 

@@ -852,13 +852,16 @@ class PipelineCoordinator:
     ) -> PreparedPipelineOutcome:
         """Prepare immutable successors; SQLite mutation happens in outcome commit."""
 
-        if output.get("status") not in {"completed", "accepted"}:
-            return PreparedPipelineOutcome()
         product_id = str(task["product_id"])
         role = str(task.get("role") or "")
         task_id = str(task["task_id"])
         stage_key = str(task.get("stage_key") or "")
         cycle = int(task.get("cycle") or 0)
+        successful_statuses = {"completed", "accepted"}
+        if role == "incident-recovery":
+            successful_statuses.add("recovered")
+        if output.get("status") not in successful_statuses:
+            return PreparedPipelineOutcome()
         if role == "replanner":
             if str(output.get("schema_version")) != "2.0":
                 raise ValueError("replanner must return BacklogPlan v2")

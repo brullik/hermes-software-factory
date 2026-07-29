@@ -1003,6 +1003,65 @@ def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
         assert [tuple(row) for row in incidents] == [
             ("controller_schema_corruption", "OPEN")
         ]
+
+        first_recovery = state.claim_task(worker_id="incident-recovery-1")
+        assert first_recovery is not None
+        assert first_recovery["task_id"] == incident_task["task_id"]
+        first_failure_id = str(incident_task["failure_id"])
+        failed_recovery = state.commit_task_outcome(
+            TaskOutcome(
+                task_id=str(first_recovery["task_id"]),
+                worker_id="incident-recovery-1",
+                lease_token=str(first_recovery["lease_token"]),
+                expected_task_revision=int(first_recovery["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("incident-recovery-first-failure"),
+                result_ref="internal://incident/recovery-first-failure",
+                result_digest=sha256_text("incident-recovery-first-failure"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="semantic",
+                    reason_code="model_requested_repair",
+                    safe_message="Recovery evidence requires one corrected retry",
+                    evidence_ref="internal://incident/recovery-first-failure",
+                    parent_failure_id=first_failure_id,
+                ),
+            )
+        )
+        assert failed_recovery.failure_id is not None
+        rerouted = FailureRouter(config, state).route_open_failures(
+            "product-autonomy"
+        )
+        assert len(rerouted) == 1
+        final_recovery = state.claim_task(worker_id="incident-recovery-2")
+        assert final_recovery is not None
+        assert final_recovery["task_id"] == rerouted[0]
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=str(final_recovery["task_id"]),
+                worker_id="incident-recovery-2",
+                lease_token=str(final_recovery["lease_token"]),
+                expected_task_revision=int(final_recovery["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("incident-recovery-success"),
+                result_ref="internal://incident/recovered",
+                result_digest=sha256_text("incident-recovered"),
+                status="ACCEPTED",
+            )
+        )
+
+        assert {
+            failure["status"]
+            for failure in state.list_failures("product-autonomy")
+        } == {"RESOLVED"}
+        with state._lock:
+            resolved_incidents = state._connection.execute(
+                "SELECT status, resolved_at FROM controller_incidents"
+            ).fetchall()
+        assert all(
+            row["status"] == "RESOLVED" and row["resolved_at"]
+            for row in resolved_incidents
+        )
     finally:
         state.close()
 
