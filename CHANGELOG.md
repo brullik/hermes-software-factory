@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.16 - 2026-07-29
+
+- Product intake now persists every valid idempotent request in the durable
+  queue instead of rejecting it when all execution slots are occupied.
+- `max_active_products` now limits concurrently claimed product work at the
+  scheduler boundary; queued products remain independently visible and start
+  automatically when a slot becomes available.
+- Added v1 and v2 regression coverage for admission beyond execution capacity
+  and strict single-slot claim behavior.
+
 ## 2.1.15 - 2026-07-29
 
 - Failure Router now resolves legacy task-contract references through the
