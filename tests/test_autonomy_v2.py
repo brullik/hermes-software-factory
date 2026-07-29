@@ -2568,6 +2568,41 @@ def test_AUT_P0_018_registered_but_noncanonical_output_schema_is_rejected(
         state.close()
 
 
+def test_AUT_P0_018_unregistered_quality_gate_is_rejected_before_plan_ingest(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-UNREGISTERED-QUALITY-GATE",
+            root_task_id="T-UNREGISTERED-QUALITY-GATE-ROOT",
+            node_specs=[
+                ("A", "T-UNREGISTERED-QUALITY-GATE", "accept-quality-gate")
+            ],
+            edges=[],
+        )
+        plan["nodes"][0]["task_contract"]["quality_gates"] = [
+            "package_integrity"
+        ]
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"nodes\[0\]\.task_contract\.quality_gates\[0\] "
+                r"is not registered: package_integrity"
+            ),
+        ):
+            state.validate_plan_candidate(plan)
+
+        assert state.get_task("T-UNREGISTERED-QUALITY-GATE") is None
+    finally:
+        state.close()
+
+
 def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
     tmp_path: Path,
 ) -> None:

@@ -74,6 +74,28 @@ CANONICAL_ROLE_OUTPUT_SCHEMAS: dict[str, str] = {
     "product-tester": "product-test-result.schema.json",
 }
 
+CANONICAL_QUALITY_GATE_IDS = frozenset(
+    {
+        "package-integrity",
+        "unit-tests",
+        "python-compile",
+        "pilot-tests",
+        "lint",
+        "typecheck",
+        "secret-scan",
+        "manifest",
+        "sbom",
+        "target-environment",
+        "target-tests",
+        "target-compile",
+        "target-lint",
+        "target-sast",
+        "target-dependency-audit",
+        "target-license-check",
+        "target-secret-scan",
+    }
+)
+
 CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
     "planning_readonly": (
         "artifact.read",
@@ -209,9 +231,13 @@ def canonical_plan_identity_catalog() -> str:
         "copy one template key between nodes.\n"
         "- Every acceptance criterion_id must be unique across the proposed DAG. "
         "Every mandatory goal acceptance_ids list must be non-empty and contain only "
-        "criterion IDs that exist in proposed node task_contract.acceptance arrays."
+        "criterion IDs that exist in proposed node task_contract.acceptance arrays.\n"
+        "- Every task_contract.quality_gates entry must be copied exactly from "
+        "CANONICAL_QUALITY_GATE_IDS below; do not translate hyphens to underscores "
+        "or invent repository-local gate names."
     )
-    return f"{catalog}\n{invariants}"
+    quality_gates = ", ".join(sorted(CANONICAL_QUALITY_GATE_IDS))
+    return f"{catalog}\nCANONICAL_QUALITY_GATE_IDS=[{quality_gates}]\n{invariants}"
 
 
 def minimum_capability_profile(
@@ -751,6 +777,22 @@ class AutonomyStore:
                     f"must be {canonical_output_schema} for role "
                     f"{normalized_role}; got {output_schema}"
                 )
+            quality_gates = contract.get("quality_gates", [])
+            if not isinstance(quality_gates, list):
+                raise TypeError(
+                    "BacklogPlan "
+                    f"nodes[{node_index}].task_contract.quality_gates "
+                    "must be an array"
+                )
+            for gate_index, gate_id_value in enumerate(quality_gates):
+                gate_id = str(gate_id_value)
+                if gate_id not in CANONICAL_QUALITY_GATE_IDS:
+                    raise ValueError(
+                        "BacklogPlan "
+                        f"nodes[{node_index}].task_contract."
+                        f"quality_gates[{gate_index}] is not registered: "
+                        f"{gate_id or '<missing>'}"
+                    )
             idempotency_key = str(contract.get("idempotency_key", ""))
             if idempotency_key in idempotency_keys:
                 raise ValueError(

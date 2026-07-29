@@ -15,7 +15,7 @@ from test_worker import make_config, selected_registry
 
 from factory.artifacts import ArtifactStore
 from factory.config import FactoryConfig
-from factory.quality import QualityGateEngine
+from factory.quality import QualityGateEngine, UnknownQualityGatesError
 from scripts.quality_gate import run_gate
 
 
@@ -107,7 +107,7 @@ class QualityGateTests(unittest.TestCase):
             self.assertEqual(len(run.evidence_paths), 3)
             for path in run.evidence_paths:
                 self.assertEqual(ArtifactStore(config).validate("gate-evidence.schema.json", yaml.safe_load(path.read_text(encoding="utf-8"))), [])
-            with self.assertRaises(ValueError):
+            with self.assertRaises(UnknownQualityGatesError) as caught:
                 engine.run(
                     cwd=root,
                     subject_sha="a" * 64,
@@ -115,6 +115,7 @@ class QualityGateTests(unittest.TestCase):
                     attempt_id="attempt-quality-002",
                     gate_ids=["unknown-gate"],
                 )
+            self.assertEqual(caught.exception.gate_ids, ("unknown-gate",))
 
     def test_target_secret_scan_ignores_baseline_and_fails_on_changed_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

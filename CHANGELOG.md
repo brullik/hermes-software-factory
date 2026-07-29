@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.26 - 2026-07-29
+
+- Publish the controller-owned quality gate ID catalog to planning agents and
+  reject unregistered gate IDs before a proposed DAG can mutate durable state.
+- Route unknown gate IDs in older persisted plans as
+  `invalid_quality_gate_contract` with exact safe coordinates instead of
+  misclassifying the post-parse controller error as `malformed_transport`.
+
 ## 2.1.25 - 2026-07-29
 
 - Normalize every routed v2 repair brief to a non-empty blocker coordinate,

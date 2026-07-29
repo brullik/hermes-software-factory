@@ -22,6 +22,14 @@ class QualityGateRun:
     mandatory_passed: bool
 
 
+class UnknownQualityGatesError(ValueError):
+    """Raised when a persisted task references gates outside the controller catalog."""
+
+    def __init__(self, gate_ids: list[str]) -> None:
+        self.gate_ids = tuple(gate_ids)
+        super().__init__(f"Unknown quality gates: {', '.join(self.gate_ids)}")
+
+
 class QualityGateEngine:
     """Run only controller-selected catalog entries; model text cannot alter the catalog."""
 
@@ -61,7 +69,7 @@ class QualityGateEngine:
         by_id = {str(entry["id"]): entry for entry in entries if isinstance(entry, dict) and "id" in entry}
         unknown = sorted(set(gate_ids) - set(by_id))
         if unknown:
-            raise ValueError(f"Unknown quality gates: {', '.join(unknown)}")
+            raise UnknownQualityGatesError(unknown)
 
         results: list[dict[str, str]] = []
         evidence_paths: list[Path] = []

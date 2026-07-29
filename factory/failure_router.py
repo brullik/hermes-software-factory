@@ -20,6 +20,7 @@ _REPLAN_REASONS = {
     "scope_contradiction",
     "architecture_impossible",
     "invalid_capability_contract",
+    "invalid_quality_gate_contract",
     "liveness_invariant_violation",
     "repeated_hypothesis",
 }

@@ -29,6 +29,7 @@ from scripts.prompt_compiler import (
 from .artifacts import ArtifactConflictError, ArtifactStore, artifact_metadata
 from .attempts import Attempt, AttemptManager, IdenticalAttemptError
 from .autonomy import (
+    CANONICAL_QUALITY_GATE_IDS,
     OWNER_ACTION_REASONS,
     FailureData,
     HypothesisData,
@@ -43,7 +44,7 @@ from .context_builder import ContextBuilder, ContextPackResult
 from .pipeline import PipelineCoordinator, PreparedPipelineOutcome
 from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
-from .quality import QualityGateEngine, QualityGateRun
+from .quality import QualityGateEngine, QualityGateRun, UnknownQualityGatesError
 from .registry import SchemaRegistry
 from .release import ReleaseExecutor, ReleasePolicyError, validate_release_operation
 from .release_executor import (
@@ -2897,13 +2898,65 @@ class AgentWorker:
                 filename=f"{spec.output_schema.removesuffix('.schema.json')}-{spec.task_contract['product_id']}-{attempt.attempt_id}.json",
             )
             repair_output_path = output_path
-            quality_run = self.quality.run(
-                cwd=lease.path,
-                subject_sha=spec.subject_sha,
-                task_id=str(spec.task_contract["task_id"]),
-                attempt_id=attempt.attempt_id,
-                gate_ids=[str(gate) for gate in spec.task_contract.get("quality_gates", [])],
-            )
+            try:
+                quality_run = self.quality.run(
+                    cwd=lease.path,
+                    subject_sha=spec.subject_sha,
+                    task_id=str(spec.task_contract["task_id"]),
+                    attempt_id=attempt.attempt_id,
+                    gate_ids=[
+                        str(gate)
+                        for gate in spec.task_contract.get("quality_gates", [])
+                    ],
+                )
+            except UnknownQualityGatesError as error:
+                reason_code = "invalid_quality_gate_contract"
+                safe_detail = (
+                    "Task Contract quality_gates contain unregistered controller "
+                    f"gate IDs: {', '.join(error.gate_ids)}"
+                )
+                route_action = self._route(
+                    spec,
+                    tier,
+                    success=False,
+                    reason_code=reason_code,
+                    new_evidence=True,
+                    attempt=attempt,
+                )
+                result_path = self._attempt_artifact(
+                    spec,
+                    attempt,
+                    selection,
+                    status="failed_safe",
+                    summary=f"{safe_detail}; routing={route_action}.",
+                    prompt_digest=prompt_digest,
+                    subject_sha=spec.subject_sha,
+                    command_result="not_run",
+                    command_ref=str(context_path),
+                    output_ref=str(output_path),
+                    reason_code=reason_code,
+                    changed_files=changed_files,
+                )
+                return WorkerResult(
+                    str(spec.task_contract["task_id"]),
+                    "failed_safe",
+                    reason_code,
+                    str(result_path),
+                    attempt.attempt_id,
+                    detail=safe_detail,
+                    failure_data=FailureData(
+                        failure_class="semantic",
+                        reason_code=reason_code,
+                        safe_message=safe_detail,
+                        evidence_ref=f"evidence/{result_path.name}",
+                        attempt_id=attempt.attempt_id,
+                        expected={
+                            "quality_gates": sorted(CANONICAL_QUALITY_GATE_IDS)
+                        },
+                        actual={"quality_gates": list(error.gate_ids)},
+                        failed_gate_ids=error.gate_ids,
+                    ),
+                )
             if not quality_run.mandatory_passed:
                 gate_detail = _failed_gate_detail(list(quality_run.results))
                 route_action = self._route(
