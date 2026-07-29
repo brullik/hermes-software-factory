@@ -48,6 +48,14 @@ ACTIVE_GRAPH_STATUSES = {
     "FAILED_TRANSIENT",
     "FAILED_SEMANTIC",
 }
+PLANNING_ONLY_ROLES = {
+    "product-director",
+    "product-analyst",
+    "solution-architect",
+    "task-specifier",
+    "replanner",
+    "incident-recovery",
+}
 
 CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
     "planning_readonly": (
@@ -525,6 +533,7 @@ class AutonomyStore:
         task_ids: set[str] = set()
         idempotency_keys: set[str] = set()
         acceptance_ids: set[str] = set()
+        execution_roles: set[str] = set()
         known_capabilities = {
             capability
             for capabilities in CAPABILITY_PROFILES.values()
@@ -552,6 +561,7 @@ class AutonomyStore:
                     f"BacklogPlan nodes[{node_index}].task_contract.task_id is duplicated"
                 )
             task_ids.add(task_id)
+            execution_roles.add(str(contract.get("role", "")))
             idempotency_key = str(contract.get("idempotency_key", ""))
             if idempotency_key in idempotency_keys:
                 raise ValueError(
@@ -571,6 +581,10 @@ class AutonomyStore:
                 for capability in required
             ):
                 raise ValueError("BacklogPlan contains an unknown capability")
+        if execution_roles.issubset(PLANNING_ONLY_ROLES):
+            raise ValueError(
+                "BacklogPlan nodes must include a non-planning execution task"
+            )
         for goal in plan.get("goals", []):
             if not isinstance(goal, dict):
                 raise TypeError("BacklogPlan goal must be an object")
@@ -1057,21 +1071,13 @@ class AutonomyStore:
             row = self.connection.execute(
                 """SELECT 1 FROM tasks
                    WHERE product_id=? AND (
-                       graph_status IN ('READY','CLAIMED','WAITING_TIME','WAITING_EXTERNAL')
-                       OR (
-                           graph_status IN ('FAILED_TRANSIENT','FAILED_SEMANTIC',
-                                            'BLOCKED_DEPENDENCY','BLOCKED_CAPABILITY')
-                           AND (failure_id IS NOT NULL OR blocked_ref IS NOT NULL)
-                       )
+                       graph_status IN ('READY','CLAIMED')
+                       OR (graph_status='WAITING_TIME' AND available_at IS NOT NULL)
+                       OR (graph_status='WAITING_EXTERNAL' AND blocked_ref IS NOT NULL)
                    ) LIMIT 1""",
                 (product_id,),
             ).fetchone()
-            incident = self.connection.execute(
-                "SELECT 1 FROM controller_incidents "
-                "WHERE product_id=? AND status='OPEN' LIMIT 1",
-                (product_id,),
-            ).fetchone()
-            return row is not None or incident is not None
+            return row is not None
 
     def _insert_successor(
         self,
@@ -1213,6 +1219,63 @@ class AutonomyStore:
             ),
         )
         return failure_id
+
+    @staticmethod
+    def _resolve_failure_chain(
+        connection: sqlite3.Connection,
+        failure_id: str,
+        *,
+        resolved_at: str,
+    ) -> tuple[str, ...]:
+        rows = connection.execute(
+            """
+            WITH RECURSIVE causal_failures(failure_id) AS (
+                SELECT failure_id FROM failures WHERE failure_id=?
+                UNION
+                SELECT parent.parent_failure_id
+                  FROM failures AS parent
+                  JOIN causal_failures AS child
+                    ON parent.failure_id=child.failure_id
+                 WHERE parent.parent_failure_id IS NOT NULL
+            )
+            SELECT failure_id FROM causal_failures
+            """,
+            (failure_id,),
+        ).fetchall()
+        failure_ids = tuple(str(row[0]) for row in rows)
+        if not failure_ids:
+            return ()
+        placeholders = ",".join("?" for _ in failure_ids)
+        connection.execute(
+            f"""
+            UPDATE failures
+               SET status='RESOLVED', last_seen_at=?
+             WHERE failure_id IN ({placeholders})
+            """,
+            (resolved_at, *failure_ids),
+        )
+        connection.execute(
+            f"""
+            UPDATE hypotheses
+               SET status='RESOLVED', closed_at=COALESCE(closed_at, ?)
+             WHERE failure_id IN ({placeholders})
+               AND status='ACTIVE'
+            """,
+            (resolved_at, *failure_ids),
+        )
+        connection.execute(
+            f"""
+            UPDATE controller_incidents
+               SET status='RESOLVED', resolved_at=?
+             WHERE status='OPEN'
+               AND task_id IN (
+                   SELECT task_id FROM failures
+                    WHERE failure_id IN ({placeholders})
+               )
+            """,
+            (resolved_at, *failure_ids),
+        )
+        return failure_ids
 
     def commit_task_outcome(
         self,
@@ -1413,10 +1476,10 @@ class AutonomyStore:
                 if outcome.status in TERMINAL_SUCCESS and failure_id is None:
                     prior_failure_id = str(task["failure_id"] or "")
                     if prior_failure_id:
-                        self.connection.execute(
-                            "UPDATE failures SET status='RESOLVED', last_seen_at=? "
-                            "WHERE failure_id=?",
-                            (now, prior_failure_id),
+                        self._resolve_failure_chain(
+                            self.connection,
+                            prior_failure_id,
+                            resolved_at=now,
                         )
                     supersedes_task_id = str(task["supersedes_task_id"] or "")
                     if supersedes_task_id:
@@ -1650,6 +1713,18 @@ class AutonomyStore:
                     (product_id,),
                 ).fetchall()
                 unmet.extend(f"open_failure:{row[0]}" for row in open_failures)
+                open_incidents = self.connection.execute(
+                    """
+                    SELECT incident_id
+                      FROM controller_incidents
+                     WHERE product_id=? AND status='OPEN'
+                    """,
+                    (product_id,),
+                ).fetchall()
+                unmet.extend(
+                    f"open_controller_incident:{row[0]}"
+                    for row in open_incidents
+                )
                 try:
                     plan_goals_row = self.connection.execute(
                         "SELECT goals_json FROM plans WHERE plan_id=?", (plan_id,)

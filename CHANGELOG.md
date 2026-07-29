@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.1.7 - 2026-07-29
+
+- Successful recovery now resolves the complete causal failure ancestry,
+  associated hypotheses, and controller incidents atomically. Migration v6
+  reconciles historical chains already proven obsolete by accepted or
+  superseded recovery work.
+- `incident-result.status=recovered` is recognized as a successful
+  Incident Recovery outcome instead of being misrouted as another semantic
+  failure.
+- Liveness checks no longer treat failed rows or an incident record without an
+  active recovery task as proof of progress. An exhausted non-terminal graph
+  records the controller incident and creates a real Replanner task for plan
+  revision N+1.
+- Backlog plans containing only planning/recovery roles are rejected before
+  ingestion; every accepted plan must contain non-planning execution work.
+
 ## 2.1.6 - 2026-07-29
 
 - Reused `BacklogPlan.plan_id` values are now compared against the immutable

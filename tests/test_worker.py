@@ -31,6 +31,7 @@ from factory.worker import (
     SubprocessHermesRunner,
     TaskExecutionSpec,
     WorkerResult,
+    _normalized_output_status,
     _workspace_snapshot,
     public_github_repository_url,
 )
@@ -426,6 +427,24 @@ def staging_release_task(
 
 
 class WorkerTests(unittest.TestCase):
+    def test_incident_recovery_status_is_a_terminal_success(self) -> None:
+        self.assertEqual(
+            _normalized_output_status(
+                "incident-recovery",
+                "recovered",
+                builder_gate_deferred=False,
+            ),
+            "completed",
+        )
+        self.assertEqual(
+            _normalized_output_status(
+                "incident-recovery",
+                "contained",
+                builder_gate_deferred=False,
+            ),
+            "contained",
+        )
+
     def test_provider_output_secret_is_redacted_and_task_continues(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -14,7 +14,7 @@ from scripts.model_router import FailureClass, Tier, classify_failure, next_tier
 from scripts.quality_gate import load_catalog
 
 from .artifacts import ArtifactStore, artifact_metadata
-from .common import new_id, sha256_text
+from .common import new_id, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
 from .failure_router import FailureRouter
 from .owner_actions import OwnerActionService
@@ -1188,6 +1188,108 @@ class PipelineReconciler:
         )
         return True
 
+    def _route_liveness_violation(
+        self,
+        product: dict[str, Any],
+        plans: list[dict[str, Any]],
+        unmet_conditions: tuple[str, ...],
+    ) -> str:
+        product_id = str(product["product_id"])
+        active_plan = next(
+            (
+                plan
+                for plan in plans
+                if str(plan.get("status")) == "ACTIVE"
+            ),
+            None,
+        )
+        if active_plan is None:
+            raise RuntimeError("liveness recovery requires an active plan")
+        causal_task_id = str(active_plan.get("created_by_task_id") or "")
+        if not causal_task_id or self.state.get_task(causal_task_id) is None:
+            raise RuntimeError("active plan creator is unavailable for liveness recovery")
+        fingerprint = sha256_text(
+            stable_json(
+                [
+                    product_id,
+                    active_plan["plan_id"],
+                    active_plan["revision"],
+                    "liveness_invariant_violation",
+                ]
+            )
+        )
+        failure_id = f"failure-{fingerprint[:20]}"
+        incident_id = f"incident-{sha256_text(failure_id)[:20]}"
+        now = utc_now()
+        safe_message = (
+            "Active plan has no runnable task while completion prerequisites "
+            "remain unmet; create plan revision N+1 with non-planning delivery, "
+            "release, observation, and evidence nodes."
+        )
+        with self.state._lock, self.state._connection:
+            inserted = self.state._connection.execute(
+                """
+                INSERT OR IGNORE INTO failures
+                    (failure_id, product_id, task_id, attempt_id,
+                     parent_failure_id, failure_class, reason_code, fingerprint,
+                     safe_message, exception_type, stack_fingerprint,
+                     evidence_ref, status, retryable, owner_action_eligible,
+                     expected_json, actual_json, failed_gate_ids_json,
+                     first_seen_at, last_seen_at, occurrence_count)
+                VALUES (?, ?, ?, NULL, NULL, 'semantic',
+                        'liveness_invariant_violation', ?, ?, NULL, NULL,
+                        'state://graph-frontier', 'OPEN', 0, 0, ?, ?, ?,
+                        ?, ?, 1)
+                """,
+                (
+                    failure_id,
+                    product_id,
+                    causal_task_id,
+                    fingerprint,
+                    safe_message,
+                    stable_json(
+                        {
+                            "progress_path": (
+                                "READY, CLAIMED, bounded wait, or active "
+                                "controller recovery task"
+                            )
+                        }
+                    ),
+                    stable_json(
+                        {
+                            "active_plan_id": active_plan["plan_id"],
+                            "active_plan_revision": active_plan["revision"],
+                            "unmet_completion": list(unmet_conditions),
+                        }
+                    ),
+                    stable_json(["liveness_invariant_violation"]),
+                    now,
+                    now,
+                ),
+            ).rowcount
+            self.state._connection.execute(
+                """
+                INSERT OR IGNORE INTO controller_incidents
+                    (incident_id, product_id, task_id, reason_code,
+                     evidence_ref, status, created_at)
+                VALUES (?, ?, ?, 'liveness_invariant_violation',
+                        'state://graph-frontier', 'OPEN', ?)
+                """,
+                (incident_id, product_id, causal_task_id, now),
+            )
+            if inserted:
+                self.state._record_event(
+                    product_id,
+                    causal_task_id,
+                    "controller_incident",
+                    {
+                        "incident_id": incident_id,
+                        "failure_id": failure_id,
+                        "reason_code": "liveness_invariant_violation",
+                    },
+                )
+        return self.failure_router.route(failure_id)
+
     def reconcile_product(self, product: dict[str, Any]) -> str:
         product_id = str(product["product_id"])
         status = str(product["status"])
@@ -1215,32 +1317,24 @@ class PipelineReconciler:
                 task
                 for task in self.state.list_tasks(product_id)
                 if str(task.get("graph_status") or "")
-                in {"READY", "CLAIMED", "WAITING_TIME", "WAITING_EXTERNAL"}
+                in {"READY", "CLAIMED"}
             ]
             if graph_active:
                 return "active"
             if self.state.has_bounded_progress_path(product_id):
                 return "active"
-            incident_id = f"incident-{sha256_text(f'liveness:{product_id}')[:20]}"
-            with self.state._lock, self.state._connection:
-                self.state._connection.execute(
-                    """INSERT OR IGNORE INTO controller_incidents
-                       (incident_id, product_id, task_id, reason_code,
-                        evidence_ref, status, created_at)
-                       VALUES (?, ?, NULL, 'liveness_invariant_violation',
-                               'state://graph-frontier', 'OPEN', ?)""",
-                    (incident_id, product_id, datetime.now(UTC).isoformat()),
-                )
-                self.state._record_event(
-                    product_id,
-                    None,
-                    "controller_incident",
-                    {
-                        "incident_id": incident_id,
-                        "reason_code": "liveness_invariant_violation",
-                    },
-                )
-            return "incident"
+            completion = self.state.reduce_completion(
+                product_id,
+                artifacts=self.artifacts,
+            )
+            if completion.completed:
+                return "completed"
+            self._route_liveness_violation(
+                product,
+                plans,
+                completion.unmet_conditions,
+            )
+            return "replanned"
         if self.state.active_tasks(product_id):
             return "active"
 
