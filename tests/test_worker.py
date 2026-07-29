@@ -2314,6 +2314,34 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("--ignore-rules", coding_argv)
         self.assertIn("--ignore-rules", planning_argv)
 
+    def test_subprocess_runner_keeps_success_stderr_out_of_json_contract(self) -> None:
+        selection = ModelSelection(
+            "openai-codex",
+            "economy",
+            "gpt-5.6-luna",
+            "luna",
+        )
+        machine_output = '{"status":"completed","summary":"safe"}'
+        completed = subprocess.CompletedProcess(
+            args=["hermes"],
+            returncode=0,
+            stdout=machine_output + "\n",
+            stderr="tool progress diagnostic\n",
+        )
+        runner = SubprocessHermesRunner()
+
+        with patch("factory.worker.subprocess.run", return_value=completed):
+            result = runner.run(
+                selection=selection,
+                prompt="Return the required JSON object.",
+                cwd=Path.cwd(),
+            )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.output, machine_output)
+        self.assertEqual(result.output_digest, sha256_text(machine_output))
+        self.assertNotIn("tool progress", result.output)
+
     def test_security_context_is_bound_to_candidate_diff_and_preflight_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
