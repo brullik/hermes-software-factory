@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.18 - 2026-07-29
+
+- Preserve the final sanitized validator coordinate, structured required fixes,
+  blocker IDs, and transport-diagnostic reference when the bounded model tiers
+  are exhausted, so a newly planned recovery task never falls back to a generic
+  `schema_validation` failure.
+- Added terminal-path regression coverage proving the coordinate survives in
+  attempt and failure evidence while a secret-like provider value is absent
+  from prompts and every persisted JSON artifact.
+
 ## 2.1.17 - 2026-07-29
 
 - Propagate sanitized validator coordinates from transport diagnostics into

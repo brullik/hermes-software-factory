@@ -945,6 +945,66 @@ class WorkerTests(unittest.TestCase):
             self.assertIn(diagnostic_ref, attempt["evidence_refs"])
             state.close()
 
+    def test_terminal_schema_failure_preserves_safe_coordinate_for_replanner(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Preserve the final safe schema coordinate",
+            )
+            secret = "ghp_" + "A" * 24
+            runner = SequenceRunner([json.dumps({"credential": secret})])
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            task = state.list_tasks(intake_result.product_id)[0]
+
+            with patch.object(worker, "_route", return_value="stop"):
+                result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(result.reason_code, "schema_validation")
+            self.assertIsNotNone(result.detail)
+            assert result.detail is not None
+            self.assertIn(str(task["output_schema"]), result.detail)
+            self.assertNotIn(secret, result.detail)
+            failure = state.list_failures(intake_result.product_id)[-1]
+            self.assertEqual(failure["safe_message"], result.detail)
+            self.assertEqual(
+                json.loads(failure["actual_json"])["validator_diagnostic"],
+                result.detail,
+            )
+            self.assertEqual(
+                json.loads(failure["failed_gate_ids_json"]),
+                ["OUTPUT_SCHEMA_VALIDATION"],
+            )
+            attempt = json.loads(Path(str(result.artifact_ref)).read_text(encoding="utf-8"))
+            self.assertIn(result.detail, attempt["summary"])
+            diagnostic_ref = f"evidence/transport-diagnostic-{result.attempt_id}.json"
+            self.assertIn(diagnostic_ref, attempt["evidence_refs"])
+            self.assertNotIn(secret, "\n".join(runner.prompts))
+            for path in config.evidence_dir.glob("*.json"):
+                self.assertNotIn(secret, path.read_text(encoding="utf-8"))
+            state.close()
+
     def test_interrupted_attempt_replays_immutable_repair_without_provider_call(
         self,
     ) -> None:

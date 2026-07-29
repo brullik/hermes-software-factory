@@ -3131,12 +3131,45 @@ class AgentWorker:
                 )
                 if scheduled is not None:
                     return scheduled
+            terminal_detail: str | None = None
+            terminal_blocker_ids: list[str] = []
+            terminal_required_fixes: list[str] = []
+            terminal_output_status = "no_usable_provider_result"
+            if reason == "schema_validation":
+                terminal_output_status = (
+                    str(repair_diagnostic_output.get("status"))
+                    if repair_diagnostic_output
+                    else terminal_output_status
+                )
+                raw_terminal_detail = (
+                    str(repair_diagnostic_output.get("summary", ""))
+                    if repair_diagnostic_output
+                    else reason
+                )
+                terminal_detail, _ = redact_text(raw_terminal_detail)
+                terminal_detail, _ = redact_secret_candidates(terminal_detail)
+                terminal_detail = (terminal_detail.strip() or reason)[:4000]
+                terminal_blocker_ids, terminal_required_fixes = repair_requirements(
+                    output=repair_diagnostic_output,
+                    reason_code=reason,
+                    detail=terminal_detail,
+                )
             result_path = self._attempt_artifact(
                 spec,
                 attempt,
                 selection,
                 status="failed_safe",
-                summary=f"Hermes output was rejected before it could become an artifact; routing={route_action}.",
+                summary=(
+                    (
+                        f"{terminal_detail} No bounded repair tier remains; "
+                        f"routing={route_action}."
+                    )
+                    if terminal_detail
+                    else (
+                        "Hermes output was rejected before it could become an "
+                        f"artifact; routing={route_action}."
+                    )
+                )[:4000],
                 prompt_digest=prompt_digest,
                 subject_sha=spec.subject_sha,
                 command_result="pass",
@@ -3153,6 +3186,25 @@ class AgentWorker:
                 reason,
                 str(result_path),
                 attempt.attempt_id,
+                detail=terminal_detail,
+                failure_data=(
+                    FailureData(
+                        failure_class="semantic",
+                        reason_code=reason,
+                        safe_message=terminal_detail,
+                        evidence_ref=f"evidence/{result_path.name}",
+                        attempt_id=attempt.attempt_id,
+                        expected={"acceptance": spec.task_contract["acceptance"]},
+                        actual={
+                            "reported_status": terminal_output_status,
+                            "validator_diagnostic": terminal_detail,
+                            "required_fixes": terminal_required_fixes,
+                        },
+                        failed_gate_ids=tuple(terminal_blocker_ids),
+                    )
+                    if terminal_detail
+                    else None
+                ),
             )
         finally:
             self.workspace.release(lease)
