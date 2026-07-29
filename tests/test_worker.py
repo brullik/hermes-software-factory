@@ -923,6 +923,75 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(health_checks), 1)
             state.close()
 
+    def test_independent_reviewer_gets_upstream_and_dependency_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-terra",
+            )
+            config = make_config(root / "state", registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            product_id = "P-INDEPENDENT-CONTEXT"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Review one immutable candidate",
+                idempotency_key="independent-context-test",
+            )
+            task_path = PipelineCoordinator(
+                config,
+                state,
+                ArtifactStore(config),
+            ).create_task(product_id, "independent-reviewer")
+            task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+            task = state.get_task(task_id)
+            assert task is not None
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            upstream = {
+                "type": "accepted-review-evidence",
+                "summary": "complete upstream contracts and gates",
+                "artifact_ref": "evidence/upstream.json",
+            }
+            dependency = {
+                "type": "dependency-result",
+                "summary": "accepted security review",
+                "artifact_ref": "evidence/security.json",
+            }
+
+            with (
+                patch.object(
+                    worker,
+                    "_completed_review_evidence",
+                    return_value=[upstream],
+                ) as completed,
+                patch.object(
+                    worker,
+                    "_dependency_evidence",
+                    return_value=[dependency],
+                ) as dependencies,
+            ):
+                spec = worker.default_spec(task)
+
+            completed.assert_called_once_with(
+                task,
+                include_security_dependency=True,
+            )
+            dependencies.assert_called_once_with(task)
+            self.assertIn(upstream, spec.evidence)
+            self.assertIn(dependency, spec.evidence)
+            state.close()
+
     def test_deferred_builder_output_is_accepted_by_test_engineer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1567,10 +1636,38 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("+value = 2", evidence["summary"])
             self.assertIn('"status":"PASS"', evidence["summary"])
             self.assertIn("gate statuses above are authoritative", evidence["summary"])
-            self.assertIn(("source.py", "security review candidate changed from base"), candidates)
+            self.assertIn(
+                ("source.py", "immutable review candidate changed from base"),
+                candidates,
+            )
             self.assertNotIn(".lease.json", evidence["summary"])
             self.assertNotIn("artifacts/security-review.json", evidence["summary"])
             self.assertTrue(any("Context Pack subject_sha" in item for item in decisions))
+
+            independent_spec = replace(
+                spec,
+                role="independent-reviewer",
+                output_schema="review-result.schema.json",
+            )
+            independent_evidence, independent_candidates, independent_decisions = (
+                worker._independent_review_context(independent_spec, repository)
+            )
+
+            self.assertIn(
+                f"subject_sha={subject_sha}",
+                independent_evidence["summary"],
+            )
+            self.assertIn("+value = 2", independent_evidence["summary"])
+            self.assertIn(
+                ("source.py", "immutable review candidate changed from base"),
+                independent_candidates,
+            )
+            self.assertTrue(
+                any(
+                    "exact read-only workspace" in item
+                    for item in independent_decisions
+                )
+            )
             state.close()
 
     def test_review_gate_evidence_preserves_optional_failure_provenance(self) -> None:
@@ -1625,6 +1722,11 @@ class WorkerTests(unittest.TestCase):
                         "status": "FAIL",
                         "mandatory": False,
                         "subject_sha": "a" * 64,
+                        "command_digest": "b" * 64,
+                        "started_at": "2026-01-01T00:00:00Z",
+                        "finished_at": "2026-01-01T00:00:01Z",
+                        "exit_code": 1,
+                        "artifact_digest": "c" * 64,
                         "evidence_ref": "evidence/gate-review-test-target-lint.json",
                         "summary": "Baseline lint finding outside the candidate slice.",
                     }

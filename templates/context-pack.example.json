@@ -24,7 +24,10 @@
     {
       "path": "backend/app/api.py",
       "reason": "Target endpoint module",
-      "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      "digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "content": "def create_record(payload):\n    return repository.create(payload)\n",
+      "content_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "redactions": []
     }
   ],
   "evidence": [],

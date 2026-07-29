@@ -358,7 +358,11 @@ class FactoryRuntimeTests(unittest.TestCase):
 
             repo = root / "repo"
             repo.mkdir()
-            (repo / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            fake_credential = "A" * 24
+            (repo / "main.py").write_text(
+                f"password = {fake_credential}\nprint('ok')\n",
+                encoding="utf-8",
+            )
             context = ContextBuilder(config, repo, artifacts).build(
                 product_id="product",
                 task_id="task",
@@ -370,6 +374,13 @@ class FactoryRuntimeTests(unittest.TestCase):
                 forbidden_actions=["deploy"],
                 output_schema="attempt-result.schema.json",
                 evidence=[{"type": "test", "summary": "passed", "artifact_ref": "registered-intake.json"}],
+            )
+            selected_file = context.artifact["selected_files"][0]
+            self.assertIn("[REDACTED]", selected_file["content"])
+            self.assertNotIn(fake_credential, selected_file["content"])
+            self.assertEqual(
+                selected_file["redactions"][0]["detector"],
+                "named_credential",
             )
             prompt = PromptCompiler(config).compile(
                 role="builder",
