@@ -544,6 +544,83 @@ def test_AUT_P0_006_failed_dependency_routes_and_unblocks_after_repair(
         state.close()
 
 
+def test_AUT_P0_006_retryable_in_place_repair_is_not_double_routed(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-INPLACE-RETRY",
+            product_id="product-autonomy",
+            title="Retry schema-invalid planner output in place",
+            role="replanner",
+            priority=100,
+        )
+        claimed = state.claim_task(worker_id="planning-worker")
+        assert claimed is not None
+        assert claimed["task_id"] == "T-INPLACE-RETRY"
+        task_id = str(claimed["task_id"])
+        committed = state.commit_task_outcome(
+            TaskOutcome(
+                task_id=task_id,
+                worker_id="planning-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=0,
+                idempotency_key=sha256_text("schema-repair-attempt-one"),
+                result_ref="evidence/schema-diagnostic.json",
+                result_digest=sha256_text("schema-diagnostic"),
+                status="WAITING_TIME",
+                next_tier="sol",
+                next_attempt_kind="repair",
+                repair_context_ref="evidence/schema-repair-brief.json",
+                failure=FailureData(
+                    failure_class="semantic",
+                    reason_code="schema_validation",
+                    safe_message="Planner output did not match the required schema.",
+                    evidence_ref="evidence/schema-diagnostic.json",
+                    retryable=True,
+                ),
+            )
+        )
+        assert committed.failure_id is not None
+        task_count = len(state.list_tasks("product-autonomy"))
+
+        routed = FailureRouter(config, state, ArtifactStore(config)).route_open_failures(
+            "product-autonomy"
+        )
+
+        assert routed == []
+        assert len(state.list_tasks("product-autonomy")) == task_count
+        retry = state.get_task(task_id)
+        assert retry is not None
+        assert retry["graph_status"] == "READY"
+        assert retry["next_attempt_kind"] == "repair"
+        assert state.list_failures("product-autonomy")[0]["status"] == "OPEN"
+
+        reclaimed = state.claim_task(worker_id="planning-worker")
+        assert reclaimed is not None
+        assert reclaimed["task_id"] == task_id
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=task_id,
+                worker_id="planning-worker",
+                lease_token=str(reclaimed["lease_token"]),
+                expected_task_revision=int(reclaimed["task_revision"]),
+                expected_plan_revision=0,
+                idempotency_key=sha256_text("schema-repair-attempt-two"),
+                result_ref="evidence/valid-plan.json",
+                result_digest=sha256_text("valid-plan"),
+                status="ACCEPTED",
+            )
+        )
+        assert state.list_failures("product-autonomy")[0]["status"] == "RESOLVED"
+    finally:
+        state.close()
+
+
 def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
     tmp_path: Path,
 ) -> None:
