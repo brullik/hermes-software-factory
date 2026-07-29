@@ -1313,14 +1313,6 @@ class PipelineReconciler:
                 if "incident-recovery" in roles:
                     return "incident"
                 return "repaired"
-            graph_active = [
-                task
-                for task in self.state.list_tasks(product_id)
-                if str(task.get("graph_status") or "")
-                in {"READY", "CLAIMED"}
-            ]
-            if graph_active:
-                return "active"
             if self.state.has_bounded_progress_path(product_id):
                 return "active"
             completion = self.state.reduce_completion(

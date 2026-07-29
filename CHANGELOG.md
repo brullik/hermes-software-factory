@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.8 - 2026-07-29
+
+- Recovery work is always anchored to the product's current active plan, even
+  when the causal task created that plan from a superseded parent revision.
+- A routed recovery task stranded on an inactive plan is deterministically
+  superseded by a fresh immutable task contract on the active revision.
+- Liveness now counts only work belonging to the active plan. A stale READY
+  row can no longer conceal an exhausted graph or prevent automatic recovery.
+
 ## 2.1.7 - 2026-07-29
 
 - Successful recovery now resolves the complete causal failure ancestry,

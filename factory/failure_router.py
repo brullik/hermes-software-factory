@@ -208,6 +208,122 @@ class FailureRouter:
             filename=f"repair-brief-{repair_task_id}.json",
         )
 
+    def _active_plan_id(self, product_id: str) -> str | None:
+        row = self.state._connection.execute(
+            """
+            SELECT products.active_plan_id
+              FROM products
+              JOIN plans
+                ON plans.plan_id=products.active_plan_id
+               AND plans.product_id=products.product_id
+             WHERE products.product_id=? AND plans.status='ACTIVE'
+            """,
+            (product_id,),
+        ).fetchone()
+        return str(row[0]) if row is not None and row[0] else None
+
+    def _reanchor_routed_task(
+        self,
+        *,
+        failure: dict[str, Any],
+        routed: dict[str, Any],
+        active_plan_id: str,
+    ) -> str:
+        anchored = dict(routed)
+        anchored["plan_id"] = active_plan_id
+        original = self._contract(routed)
+        allowed_paths = [
+            str(value)
+            for value in original.get("allowed_paths", ["artifacts/**"])
+        ]
+        role = str(routed.get("role") or "replanner")
+        output_schema = str(
+            routed.get("output_schema") or "backlog-plan-v2.schema.json"
+        )
+        capability_profile = str(
+            routed.get("capability_profile") or "planning_readonly"
+        )
+        contract, path = self._write_contract(
+            failed=anchored,
+            failure=failure,
+            hypothesis_id=(
+                str(routed["hypothesis_id"])
+                if routed.get("hypothesis_id")
+                else None
+            ),
+            role=role,
+            output_schema=output_schema,
+            capability_profile=capability_profile,
+            objective=(
+                "Continue the routed recovery on the current active plan. "
+                "Preserve the complete causal lineage and create executable work."
+            ),
+            allowed_paths=allowed_paths,
+            task_revision=int(routed.get("task_revision") or 1) + 1,
+            node_suffix="active-plan-reanchor",
+        )
+        task_id = str(contract["task_id"])
+        if self.state.get_task(task_id) is None:
+            self.state.add_task(
+                task_id=task_id,
+                product_id=str(routed["product_id"]),
+                title=str(contract["title"]),
+                role=role,
+                output_schema=output_schema,
+                contract_ref=f"evidence/{path.name}",
+                stage_key="active-plan-reanchor",
+                dependencies=[],
+                conflict_keys=[
+                    str(value) for value in contract["conflict_keys"]
+                ],
+                priority=int(contract["priority"]),
+                root_task_id=str(contract["root_task_id"]),
+                parent_task_id=str(contract["parent_task_id"]),
+                source_task_id=str(contract["source_task_id"]),
+                plan_id=active_plan_id,
+                plan_node_id=str(contract["plan_node_id"]),
+                task_revision=int(contract["task_revision"]),
+                root_context_ref=str(contract["root_context_ref"]),
+                active_context_ref=str(contract["active_context_ref"]),
+                failure_id=str(failure["failure_id"]),
+                hypothesis_id=(
+                    str(contract["hypothesis_id"])
+                    if contract.get("hypothesis_id")
+                    else None
+                ),
+                capability_profile=capability_profile,
+                idempotency_key=str(contract["idempotency_key"]),
+                supersedes_task_id=str(routed["task_id"]),
+                required_capabilities=[
+                    str(value)
+                    for value in contract["required_capabilities"]
+                ],
+                graph_status="READY",
+            )
+        with self.state._lock, self.state._connection:
+            self.state._connection.execute(
+                """
+                UPDATE tasks
+                   SET status='DONE', graph_status='SUPERSEDED',
+                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                       heartbeat_at=NULL, available_at=NULL, updated_at=?
+                 WHERE task_id=?
+                   AND graph_status NOT IN ('ACCEPTED','CANCELLED','SUPERSEDED')
+                """,
+                (failure["last_seen_at"], routed["task_id"]),
+            )
+            self.state._record_event(
+                str(routed["product_id"]),
+                task_id,
+                "recovery_task_reanchored",
+                {
+                    "failure_id": str(failure["failure_id"]),
+                    "supersedes_task_id": str(routed["task_id"]),
+                    "active_plan_id": active_plan_id,
+                },
+            )
+        return task_id
+
     def route(self, failure_id: str) -> str:
         with self.state._lock:
             failure_row = self.state._connection.execute(
@@ -218,11 +334,29 @@ class FailureRouter:
             failure = dict(failure_row)
             if str(failure["status"]) == "ROUTED":
                 routed = self.state._connection.execute(
-                    "SELECT task_id FROM tasks WHERE failure_id=? "
+                    "SELECT * FROM tasks WHERE failure_id=? "
                     "ORDER BY created_at DESC LIMIT 1",
                     (failure_id,),
                 ).fetchone()
-                return str(routed[0]) if routed is not None else ""
+                if routed is None:
+                    return ""
+                routed_task = dict(routed)
+                active_plan_id = self._active_plan_id(
+                    str(routed_task["product_id"])
+                )
+                if (
+                    active_plan_id
+                    and str(routed_task.get("plan_id") or "")
+                    != active_plan_id
+                    and str(routed_task.get("graph_status") or "")
+                    not in {"ACCEPTED", "CANCELLED", "SUPERSEDED"}
+                ):
+                    return self._reanchor_routed_task(
+                        failure=failure,
+                        routed=routed_task,
+                        active_plan_id=active_plan_id,
+                    )
+                return str(routed_task["task_id"])
             failed_row = self.state._connection.execute(
                 "SELECT * FROM tasks WHERE task_id=?", (failure["task_id"],)
             ).fetchone()
@@ -230,6 +364,9 @@ class FailureRouter:
                 raise RuntimeError("failure source task is missing")
             failed = dict(failed_row)
             reason = str(failure["reason_code"])
+            active_plan_id = self._active_plan_id(str(failed["product_id"]))
+            if active_plan_id:
+                failed["plan_id"] = active_plan_id
             controller_fault = (
                 str(failure["failure_class"]) in {"controller", "transient"}
                 or reason.startswith(_CONTROLLER_PREFIXES)
