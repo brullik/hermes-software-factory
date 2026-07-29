@@ -17,7 +17,7 @@ from factory.autonomy import (
     safe_exception_diagnostic,
 )
 from factory.capabilities import CapabilityBroker, CapabilityCheck
-from factory.common import sha256_file, sha256_text
+from factory.common import sha256_file, sha256_text, stable_json
 from factory.context_builder import ContextBuilder
 from factory.failure_router import FailureRouter
 from factory.intake import IntakeService
@@ -506,6 +506,47 @@ def test_AUT_P0_005_lineage_is_preserved_through_repair(tmp_path: Path) -> None:
         assert repair["hypothesis_id"] == failed["hypothesis_id"]
         assert repair["plan_id"] == failed["plan_id"]
         assert str(repair["plan_node_id"]).startswith("A:")
+    finally:
+        state.close()
+
+
+def test_AUT_P0_005_failure_router_replays_partial_artifacts_idempotently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    router = FailureRouter(config, state, artifacts)
+    original_add_task = state.add_task
+    interrupted = True
+
+    def interrupt_once(**values: Any) -> bool:
+        nonlocal interrupted
+        if interrupted:
+            interrupted = False
+            raise RuntimeError("injected failure after immutable route artifacts")
+        return original_add_task(**values)
+
+    try:
+        monkeypatch.setattr(state, "add_task", interrupt_once)
+        with pytest.raises(
+            RuntimeError,
+            match="injected failure after immutable route artifacts",
+        ):
+            router.route(failure_id)
+        task_artifacts = sorted(config.evidence_dir.glob("task-T-*.json"))
+        repair_artifacts = sorted(
+            config.evidence_dir.glob("repair-brief-T-*.json")
+        )
+        monkeypatch.setattr(state, "add_task", original_add_task)
+
+        repair_task_id = router.route(failure_id)
+
+        assert state.get_task(repair_task_id) is not None
+        assert sorted(config.evidence_dir.glob("task-T-*.json")) == task_artifacts
+        assert (
+            sorted(config.evidence_dir.glob("repair-brief-T-*.json"))
+            == repair_artifacts
+        )
     finally:
         state.close()
 
@@ -1589,6 +1630,65 @@ def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(
 
         assert state.list_plans("product-autonomy")[0]["revision"] == 0
         assert state.get_task("T-EXISTING-IDENTITY")["graph_status"] == "READY"
+    finally:
+        state.close()
+
+
+def test_AUT_P0_019_plan_candidate_reports_existing_plan_digest_coordinate(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        root_task_id = "T-PLAN-DIGEST-ROOT"
+        state.add_task(
+            task_id=root_task_id,
+            product_id="product-autonomy",
+            title="Plan digest identity root",
+            role="task-specifier",
+        )
+        original = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-DIGEST-IDENTITY",
+            root_task_id=root_task_id,
+            node_specs=[("A", "T-PLAN-DIGEST-OLD", "accept-plan-digest")],
+            edges=[],
+        )
+        persist_and_ingest_plan(
+            config,
+            state,
+            original,
+            created_by_task_id=root_task_id,
+        )
+        plans_before = state.list_plans("product-autonomy")
+        existing = next(
+            item
+            for item in plans_before
+            if item["plan_id"] == "PLAN-DIGEST-IDENTITY"
+        )
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id=str(existing["plan_id"]),
+            root_task_id=root_task_id,
+            node_specs=[("A", "T-PLAN-DIGEST-NEW", "accept-plan-digest")],
+            edges=[],
+        )
+        assert str(existing["plan_digest"]) != sha256_text(stable_json(plan))
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "BacklogPlan plan_id already exists with a different "
+                "immutable digest"
+            ),
+        ):
+            state.validate_plan_candidate(plan)
+
+        assert state.list_plans("product-autonomy") == plans_before
+        assert state.get_task("T-PLAN-DIGEST-NEW") is None
     finally:
         state.close()
 

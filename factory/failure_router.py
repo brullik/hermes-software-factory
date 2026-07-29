@@ -8,7 +8,7 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .autonomy import CAPABILITY_PROFILES
-from .common import new_id, sha256_text, stable_json
+from .common import sha256_text, stable_json
 from .config import FactoryConfig
 from .registry import SchemaRegistry
 from .state import StateStore
@@ -89,7 +89,7 @@ class FailureRouter:
         contract_ref = f"evidence/task-{task_id}.json"
         contract = {
             "schema_version": "2.0",
-            "artifact_id": new_id("task-contract"),
+            "artifact_id": f"task-contract-{task_id}",
             "product_id": str(failed["product_id"]),
             "task_id": task_id,
             "root_task_id": str(failed["root_task_id"]),
@@ -162,7 +162,18 @@ class FailureRouter:
             required_fixes = []
         brief = {
             "schema_version": "2.0",
-            "artifact_id": new_id("repair-brief"),
+            "artifact_id": (
+                "repair-brief-"
+                + sha256_text(
+                    stable_json(
+                        [
+                            failure["failure_id"],
+                            hypothesis_id,
+                            repair_task_id,
+                        ]
+                    )
+                )[:20]
+            ),
             "product_id": str(failed["product_id"]),
             "task_id": repair_task_id,
             "root_task_id": str(failed["root_task_id"]),
