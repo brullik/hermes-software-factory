@@ -763,7 +763,7 @@ class StateStore:
                                 tasks.created_at, tasks.rowid"""
                 ).fetchall()
                 claimed_rows = self._connection.execute(
-                    """SELECT lease_owner, conflict_keys_json FROM tasks
+                    """SELECT product_id, lease_owner, conflict_keys_json FROM tasks
                        WHERE graph_status='CLAIMED' AND status='CLAIMED'"""
                 ).fetchall()
                 active_workers = {
@@ -774,11 +774,11 @@ class StateStore:
                 if worker_id in active_workers or len(active_workers) >= self.max_active_workers:
                     self._connection.commit()
                     return None
-                claimed_conflicts = {
-                    conflict_key
-                    for active_row in claimed_rows
-                    for conflict_key in json.loads(active_row["conflict_keys_json"])
-                }
+                claimed_conflicts: dict[str, set[str]] = {}
+                for active_row in claimed_rows:
+                    claimed_conflicts.setdefault(
+                        str(active_row["product_id"]), set()
+                    ).update(json.loads(active_row["conflict_keys_json"]))
                 chosen = None
                 for row in rows:
                     dependencies = self._connection.execute(
@@ -795,7 +795,9 @@ class StateStore:
                     ):
                         continue
                     conflict_keys = set(json.loads(row["conflict_keys_json"]))
-                    if conflict_keys & claimed_conflicts:
+                    if conflict_keys & claimed_conflicts.get(
+                        str(row["product_id"]), set()
+                    ):
                         continue
                     chosen = row
                     break

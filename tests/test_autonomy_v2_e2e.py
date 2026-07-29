@@ -612,7 +612,7 @@ def test_AUT_P1_001_parallel_frontier_respects_conflict_keys(
             task_id="T-PARALLELB1",
             product_id="parallel-product-b",
             title="Independent write",
-            conflict_keys=["other-scope"],
+            conflict_keys=["shared-scope"],
             priority=10,
         )
         first = state.claim_task(worker_id="parallel-1")

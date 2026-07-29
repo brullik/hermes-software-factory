@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Callable
 
 from .common import sha256_text, utc_now
 
 Migration = Callable[[sqlite3.Connection], None]
+
+_LEGACY_GITHUB_REPOSITORY = re.compile(
+    r"^https://github\.com/"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -239,6 +246,67 @@ def _migration_003_atomic_observation_binding(
     )
 
 
+def _migration_004_legacy_repository_binding(
+    connection: sqlite3.Connection,
+) -> None:
+    """Repair only exact URL-only legacy intake without changing canonical v2."""
+
+    rows = connection.execute(
+        """SELECT product_id, idea, goal_text, active_plan_id
+             FROM products
+            WHERE active_plan_revision=0
+              AND active_plan_id LIKE 'PLAN-LEGACY-%'
+              AND delivery_mode='new_repository'
+              AND (repository_url IS NULL OR repository_url='')"""
+    ).fetchall()
+    for row in rows:
+        product_id = str(row[0])
+        idea = str(row[1] or "").strip()
+        match = _LEGACY_GITHUB_REPOSITORY.fullmatch(idea)
+        if match is None:
+            continue
+        owner = match.group("owner")
+        repository = match.group("repository")
+        canonical_url = f"https://github.com/{owner}/{repository}"
+        recovered_goal = (
+            "Autonomously inspect the existing repository and complete all "
+            f"documented product goals for {owner}/{repository}."
+        )
+        connection.execute(
+            """UPDATE products
+                  SET goal_text=CASE
+                          WHEN goal_text IS NULL OR trim(goal_text)=trim(idea)
+                          THEN ?
+                          ELSE goal_text
+                      END,
+                      delivery_mode='existing_repository',
+                      repository_url=?,
+                      repository_name=?
+                WHERE product_id=?""",
+            (recovered_goal, canonical_url, repository, product_id),
+        )
+        plan_id = str(row[3] or "")
+        if plan_id:
+            connection.execute(
+                """UPDATE plans
+                      SET goals_json=?
+                    WHERE plan_id=? AND product_id=? AND revision=0""",
+                (
+                    json.dumps(
+                        [
+                            {
+                                "goal_id": "legacy-goal",
+                                "statement": recovered_goal,
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    plan_id,
+                    product_id,
+                ),
+            )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -372,6 +440,7 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
     (1, "legacy-schema-baseline", _migration_001_baseline),
     (2, "autonomy-v2-durable-graph", _migration_002_autonomy_v2),
     (3, "atomic-observation-release-binding", _migration_003_atomic_observation_binding),
+    (4, "legacy-url-repository-binding", _migration_004_legacy_repository_binding),
 )
 
 
