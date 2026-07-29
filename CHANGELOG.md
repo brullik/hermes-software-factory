@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.10 - 2026-07-29
+
+- Backlog plan precommit validation now rejects output schemas that are not
+  bundled in the immutable release schema registry, preventing an accepted
+  plan from creating unexecutable worker tasks.
+- Failure Router recognizes an exact missing planned-output-schema controller
+  diagnostic as a plan defect and sends it to Replanner instead of repeatedly
+  creating Incident Recovery work.
+- Migration v8 reopens historical missing-output-schema failures and
+  supersedes their obsolete incident-recovery branches so affected products
+  continue autonomously on a corrected plan revision.
+
 ## 2.1.9 - 2026-07-29
 
 - Failure Router now creates recovery work only for unresolved causal leaves.
