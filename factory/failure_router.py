@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -44,13 +45,97 @@ class FailureRouter:
 
     def _contract(self, task: dict[str, Any]) -> dict[str, Any]:
         reference = str(task.get("contract_ref") or "")
-        path = self.config.evidence_dir / Path(reference).name
-        if not path.is_file():
-            raise RuntimeError("failed task contract is unavailable")
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise TypeError("failed task contract is invalid")
-        return payload
+        task_id = str(task.get("task_id") or "")
+        candidates = [self.config.evidence_dir / Path(reference).name]
+        if re.fullmatch(r"T-[A-Z0-9_-]{4,}", task_id):
+            candidates.append(self.config.evidence_dir / f"task-{task_id}.json")
+        inspected: set[Path] = set()
+        for path in candidates:
+            if path in inspected or not path.is_file():
+                continue
+            inspected.add(path)
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and str(payload.get("task_id") or "") == task_id
+                and str(payload.get("product_id") or "")
+                == str(task.get("product_id") or "")
+            ):
+                return payload
+        readonly = str(task.get("capability_profile") or "") in {
+            "planning_readonly",
+            "reviewer_readonly",
+        }
+        return {
+            "_reconstructed": True,
+            "acceptance": [
+                {
+                    "criterion_id": (
+                        "reconstruct-"
+                        + sha256_text(
+                            f"{task.get('product_id')}:{task_id}:task-contract"
+                        )[:16]
+                    ),
+                    "verification": (
+                        "Reconstruct this plan node from durable task metadata "
+                        "and the active plan, then prove every mandatory active-plan "
+                        "completion criterion before acceptance."
+                    ),
+                    "mandatory": True,
+                }
+            ],
+            "allowed_paths": ["artifacts/**"] if readonly else ["**"],
+        }
+
+    def _record_contract_reconstruction(
+        self,
+        *,
+        failed: dict[str, Any],
+        failure: dict[str, Any],
+    ) -> None:
+        task_id = str(failed["task_id"])
+        coordinate = sha256_text(
+            stable_json(
+                [
+                    failed["product_id"],
+                    task_id,
+                    failed.get("contract_ref"),
+                ]
+            )
+        )
+        incident_id = f"incident-{coordinate[:20]}"
+        with self.state._lock, self.state._connection:
+            inserted = self.state._connection.execute(
+                """
+                INSERT OR IGNORE INTO controller_incidents
+                    (incident_id, product_id, task_id, reason_code,
+                     evidence_ref, status, created_at, resolved_at)
+                VALUES (?, ?, ?, 'artifact_task_contract_reconstructed',
+                        ?, 'RESOLVED', ?, ?)
+                """,
+                (
+                    incident_id,
+                    failed["product_id"],
+                    task_id,
+                    f"state://task-contract/{coordinate[:20]}",
+                    failure["last_seen_at"],
+                    failure["last_seen_at"],
+                ),
+            ).rowcount
+            if inserted:
+                self.state._record_event(
+                    str(failed["product_id"]),
+                    task_id,
+                    "task_contract_reconstructed",
+                    {
+                        "incident_id": incident_id,
+                        "failure_id": str(failure["failure_id"]),
+                        "coordinate": coordinate[:20],
+                    },
+                )
 
     @staticmethod
     def _acceptance(contract: dict[str, Any]) -> list[dict[str, Any]]:
@@ -566,8 +651,20 @@ class FailureRouter:
                     "acceptance, scope, failure, and hypothesis lineage."
                 )
             original = self._contract(failed)
+            if bool(original.get("_reconstructed")):
+                self._record_contract_reconstruction(
+                    failed=failed,
+                    failure=failure,
+                )
             allowed_paths = [
-                str(value) for value in original.get("allowed_paths", ["artifacts/**"])
+                str(value)
+                for value in (
+                    ["artifacts/**"]
+                    if bool(original.get("_reconstructed"))
+                    and capability_profile
+                    in {"planning_readonly", "reviewer_readonly"}
+                    else original.get("allowed_paths", ["artifacts/**"])
+                )
             ]
             contract, path = self._write_contract(
                 failed=failed,

@@ -1433,6 +1433,72 @@ class PipelineReconciler:
         self._write_same_task_repair(task, reason=reason, detail=detail, tier=tier)
         return "repaired"
 
+    def _reconcile_product_safely(self, product: dict[str, Any]) -> str:
+        product_id = str(product["product_id"])
+        try:
+            action = self.reconcile_product(product)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            exception_type = type(error).__name__
+            fingerprint = sha256_text(
+                stable_json([product_id, exception_type, str(error)])
+            )
+            incident_id = f"incident-{fingerprint[:20]}"
+            with self.state._lock, self.state._connection:
+                inserted = self.state._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO controller_incidents
+                        (incident_id, product_id, task_id, reason_code,
+                         evidence_ref, status, created_at)
+                    VALUES (?, ?, NULL, 'controller_product_reconcile_isolated',
+                            ?, 'OPEN', ?)
+                    """,
+                    (
+                        incident_id,
+                        product_id,
+                        f"state://product-reconcile/{fingerprint[:20]}",
+                        utc_now(),
+                    ),
+                ).rowcount
+                if inserted:
+                    self.state._record_event(
+                        product_id,
+                        None,
+                        "product_reconcile_isolated",
+                        {
+                            "incident_id": incident_id,
+                            "exception_type": exception_type,
+                            "coordinate": fingerprint[:20],
+                        },
+                    )
+            if inserted:
+                LOGGER.error(
+                    "product reconcile isolated product_id=%s incident_id=%s "
+                    "exception_type=%s",
+                    product_id,
+                    incident_id,
+                    exception_type,
+                )
+            return "incident"
+        with self.state._lock, self.state._connection:
+            resolved = self.state._connection.execute(
+                """
+                UPDATE controller_incidents
+                   SET status='RESOLVED', resolved_at=?
+                 WHERE product_id=?
+                   AND reason_code='controller_product_reconcile_isolated'
+                   AND status='OPEN'
+                """,
+                (utc_now(), product_id),
+            ).rowcount
+            if resolved:
+                self.state._record_event(
+                    product_id,
+                    None,
+                    "product_reconcile_isolation_resolved",
+                    {"resolved_incidents": resolved},
+                )
+        return action
+
     def reconcile_once(self) -> ReconcileResult:
         self.state.recover_expired_leases()
         counts = {
@@ -1457,7 +1523,7 @@ class PipelineReconciler:
                 refreshed = self.state.get_product(str(product["product_id"]))
                 if refreshed is None:
                     continue
-                action = self.reconcile_product(refreshed)
+                action = self._reconcile_product_safely(refreshed)
                 if action == "successor":
                     counts["recovered_successors"] += 1
                 elif action == "repaired":
@@ -1485,7 +1551,7 @@ class PipelineReconciler:
                 refreshed = self.state.get_product(str(product["product_id"]))
                 if refreshed is None:
                     continue
-                action = self.reconcile_product(refreshed)
+                action = self._reconcile_product_safely(refreshed)
                 if action == "repaired":
                     counts["repaired"] += 1
                 elif action == "exhausted":
@@ -1496,7 +1562,7 @@ class PipelineReconciler:
                 refreshed = self.state.get_product(str(product["product_id"]))
                 if refreshed is None:
                     continue
-                action = self.reconcile_product(refreshed)
+                action = self._reconcile_product_safely(refreshed)
                 if action == "repaired":
                     counts["repaired"] += 1
                 elif action == "owner_action":
@@ -1515,7 +1581,7 @@ class PipelineReconciler:
             if status in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
                 continue
             counts["inspected"] += 1
-            action = self.reconcile_product(product)
+            action = self._reconcile_product_safely(product)
             if action == "repaired":
                 counts["repaired"] += 1
             elif action == "replanned":

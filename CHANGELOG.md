@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.15 - 2026-07-29
+
+- Failure Router now resolves legacy task-contract references through the
+  canonical evidence coordinate and, when no file survives, reconstructs a
+  least-privilege recovery contract from durable task and active-plan
+  metadata without weakening mandatory product completion evidence.
+- Isolated per-product reconciliation faults into deduplicated internal
+  incidents so one malformed historical product cannot stop Director progress
+  for any other product; successful reconciliation resolves the incident.
+- Added regression coverage for legacy contract lookup, safe reconstruction,
+  sanitized diagnostics, and cross-product reconcile isolation.
+
 ## 2.1.14 - 2026-07-29
 
 - Made the durable task lease authoritative for persistent workspace markers:

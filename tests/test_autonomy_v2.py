@@ -787,6 +787,154 @@ def test_AUT_P0_006_missing_plan_output_schema_routes_replanner(
         state.close()
 
 
+def test_AUT_P0_006_legacy_contract_ref_uses_canonical_evidence_coordinate(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="needs_replan",
+    )
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET contract_ref=? WHERE task_id='T-FAILNODEA'",
+                ("artifacts/task-contracts/T-FAILNODEA.json",),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
+        reconstructed = [
+            event
+            for event in state.events("product-autonomy")
+            if event["event_type"] == "task_contract_reconstructed"
+        ]
+        assert reconstructed == []
+    finally:
+        state.close()
+
+
+def test_AUT_P0_006_missing_contract_reconstructs_safe_replan_coordinate(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="needs_replan",
+    )
+    try:
+        (config.evidence_dir / "task-T-FAILNODEA.json").unlink()
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET contract_ref=? WHERE task_id='T-FAILNODEA'",
+                ("artifacts/task-contracts/missing.json",),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
+        routed_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(routed["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert routed_contract["allowed_paths"] == ["artifacts/**"]
+        assert "mandatory active-plan completion criterion" in (
+            routed_contract["acceptance"][0]["verification"]
+        )
+        incident = state._connection.execute(
+            """
+            SELECT reason_code, status, evidence_ref
+              FROM controller_incidents
+             WHERE product_id=?
+               AND reason_code='artifact_task_contract_reconstructed'
+            """,
+            ("product-autonomy",),
+        ).fetchone()
+        assert incident is not None
+        assert incident["status"] == "RESOLVED"
+        assert str(incident["evidence_ref"]).startswith(
+            "state://task-contract/"
+        )
+    finally:
+        state.close()
+
+
+def test_AUT_P0_006_one_product_reconcile_failure_does_not_stop_another(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(
+        config.database_path,
+        max_active_products=2,
+    )
+    try:
+        create_v2_product(state, product_id="product-isolated-a")
+        create_v2_product(state, product_id="product-progress-b")
+        reconciler = PipelineReconciler(
+            config,
+            state,
+            ArtifactStore(config),
+        )
+        seen: list[str] = []
+
+        def isolate_first(product: dict[str, Any]) -> str:
+            product_id = str(product["product_id"])
+            seen.append(product_id)
+            if product_id == "product-isolated-a":
+                raise RuntimeError("sanitized injected reconcile failure")
+            return "active"
+
+        monkeypatch.setattr(
+            reconciler,
+            "reconcile_product",
+            isolate_first,
+        )
+        result = reconciler.reconcile_once()
+
+        assert seen == ["product-isolated-a", "product-progress-b"]
+        assert result.inspected == 2
+        assert result.incidents == 1
+        incident = state._connection.execute(
+            """
+            SELECT status, evidence_ref
+              FROM controller_incidents
+             WHERE product_id='product-isolated-a'
+               AND reason_code='controller_product_reconcile_isolated'
+            """
+        ).fetchone()
+        assert incident is not None
+        assert incident["status"] == "OPEN"
+        assert str(incident["evidence_ref"]).startswith(
+            "state://product-reconcile/"
+        )
+
+        monkeypatch.setattr(
+            reconciler,
+            "reconcile_product",
+            lambda _product: "active",
+        )
+        reconciler.reconcile_once()
+        resolved = state._connection.execute(
+            """
+            SELECT status, resolved_at
+              FROM controller_incidents
+             WHERE product_id='product-isolated-a'
+               AND reason_code='controller_product_reconcile_isolated'
+            """
+        ).fetchone()
+        assert resolved is not None
+        assert resolved["status"] == "RESOLVED"
+        assert resolved["resolved_at"]
+    finally:
+        state.close()
+
+
 def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
     tmp_path: Path,
 ) -> None:
