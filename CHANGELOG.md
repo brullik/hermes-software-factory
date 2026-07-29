@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.1.6 - 2026-07-29
+
+- Reused `BacklogPlan.plan_id` values are now compared against the immutable
+  candidate digest before any child task-contract artifact can be written.
+  Digest conflicts become an exact bounded validator diagnostic instead of a
+  late controller or artifact-conflict incident.
+- Failure Router task contracts and repair briefs now use deterministic
+  artifact identities. A restart after artifact persistence but before task
+  insertion can replay the same route without changing immutable evidence or
+  creating a competing recovery path.
+
 ## 2.1.5 - 2026-07-29
 
 - A restarted worker now detects a valid immutable result left by an

@@ -624,10 +624,17 @@ class AutonomyStore:
         self.validate_plan(plan)
         plan_id = str(plan.get("plan_id", ""))
         with self.lock:
-            if self.connection.execute(
-                "SELECT 1 FROM plans WHERE plan_id=?",
+            existing_plan = self.connection.execute(
+                "SELECT plan_digest FROM plans WHERE plan_id=?",
                 (plan_id,),
-            ).fetchone() is not None:
+            ).fetchone()
+            if existing_plan is not None:
+                candidate_digest = sha256_text(stable_json(plan))
+                if str(existing_plan["plan_digest"]) != candidate_digest:
+                    raise ValueError(
+                        "BacklogPlan plan_id already exists with a different "
+                        "immutable digest"
+                    )
                 return
             for node_index, node in enumerate(plan["nodes"]):
                 contract = dict(node["task_contract"])
