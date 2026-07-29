@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.22 - 2026-07-29
+
+- Give Task Specifier and Replanner the controller-owned executable identity
+  catalog, including each canonical role, output schema, capability profile,
+  and complete required-capability set.
+- Reject unsupported roles and registered-but-noncanonical output schemas
+  before a proposed BacklogPlan can mutate the durable execution graph.
+- Normalize planning-role identities during semantic validation so underscore
+  aliases cannot bypass the planning-only graph guard.
+
 ## 2.1.21 - 2026-07-29
 
 - Include every safe local JSON Schema dependency referenced by an output

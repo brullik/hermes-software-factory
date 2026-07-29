@@ -8,7 +8,10 @@ from pathlib import Path
 from test_worker import make_config, selected_registry
 
 from factory.artifacts import ArtifactStore
-from factory.autonomy import CAPABILITY_PROFILES
+from factory.autonomy import (
+    CANONICAL_ROLE_OUTPUT_SCHEMAS,
+    CAPABILITY_PROFILES,
+)
 from factory.common import sha256_text
 from factory.intake import IntakeService
 from factory.pipeline import PipelineCoordinator
@@ -193,7 +196,7 @@ class PipelineTests(unittest.TestCase):
                     "title": f"Execute {node_id}",
                     "objective": f"Complete and verify the {node_id} plan node",
                     "role": role,
-                    "output_schema": "attempt-result.schema.json",
+                    "output_schema": CANONICAL_ROLE_OUTPUT_SCHEMAS[role],
                     "dependencies": [],
                     "conflict_keys": [f"{product_id}:workspace"],
                     "acceptance": [

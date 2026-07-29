@@ -1265,6 +1265,7 @@ def test_AUT_P0_014_capability_preflight_controls_ready_frontier(
         )
         contract = plan["nodes"][0]["task_contract"]
         contract["role"] = "release-operator"
+        contract["output_schema"] = "release-operation-result.schema.json"
         contract["capability_profile"] = "release_staging"
         contract["required_capabilities"] = list(
             CAPABILITY_PROFILES["release_staging"]
@@ -2481,6 +2482,40 @@ def test_AUT_P0_018_unregistered_output_schema_is_rejected(
             state.validate_plan_candidate(plan)
 
         assert state.get_task("T-UNREGISTERED-SCHEMA") is None
+    finally:
+        state.close()
+
+
+def test_AUT_P0_018_registered_but_noncanonical_output_schema_is_rejected(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-WRONG-REGISTERED-SCHEMA",
+            root_task_id="T-WRONG-REGISTERED-SCHEMA-ROOT",
+            node_specs=[("A", "T-WRONG-REGISTERED-SCHEMA", "accept-schema")],
+            edges=[],
+        )
+        plan["nodes"][0]["task_contract"]["output_schema"] = (
+            "test-package-result.schema.json"
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"nodes\[0\]\.task_contract\.output_schema must be "
+                r"attempt-result\.schema\.json for role builder; "
+                r"got test-package-result\.schema\.json"
+            ),
+        ):
+            state.validate_plan_candidate(plan)
+
+        assert state.get_task("T-WRONG-REGISTERED-SCHEMA") is None
     finally:
         state.close()
 

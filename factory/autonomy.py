@@ -59,6 +59,21 @@ PLANNING_ONLY_ROLES = {
 }
 IMMUTABLE_SCHEMA_ROOT = Path(__file__).resolve().parent.parent / "schemas"
 
+CANONICAL_ROLE_OUTPUT_SCHEMAS: dict[str, str] = {
+    "product-director": "product-contract.schema.json",
+    "product-analyst": "requirements-package.schema.json",
+    "solution-architect": "architecture-package.schema.json",
+    "task-specifier": "backlog-plan-v2.schema.json",
+    "replanner": "backlog-plan-v2.schema.json",
+    "incident-recovery": "incident-result.schema.json",
+    "builder": "attempt-result.schema.json",
+    "test-engineer": "test-package-result.schema.json",
+    "security-reviewer": "security-review-result.schema.json",
+    "independent-reviewer": "review-result.schema.json",
+    "release-operator": "release-operation-result.schema.json",
+    "product-tester": "product-test-result.schema.json",
+}
+
 CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
     "planning_readonly": (
         "artifact.read",
@@ -147,6 +162,42 @@ _TEST_PROFILE_ROLES = {"test-engineer", "product-tester"}
 _REVIEW_PROFILE_ROLES = {"security-reviewer", "independent-reviewer"}
 _CONTROLLER_PROFILE_ROLES = {"incident-recovery", "controller-recovery"}
 _REPOSITORY_BOOTSTRAP_ROLES = {"repository-bootstrap", "repository_bootstrap"}
+
+
+def canonical_plan_identity_catalog() -> str:
+    """Return the controller-owned executable role contract for planning prompts."""
+
+    identities = (
+        ("builder", "attempt-result.schema.json", "builder_workspace"),
+        ("test-engineer", "test-package-result.schema.json", "test_workspace"),
+        (
+            "security-reviewer",
+            "security-review-result.schema.json",
+            "reviewer_readonly",
+        ),
+        ("independent-reviewer", "review-result.schema.json", "reviewer_readonly"),
+        (
+            "release-operator@release-staging",
+            "release-operation-result.schema.json",
+            "release_staging",
+        ),
+        ("product-tester", "product-test-result.schema.json", "test_workspace"),
+        (
+            "release-operator@release-production",
+            "release-operation-result.schema.json",
+            "release_production",
+        ),
+    )
+    return "\n".join(
+        (
+            f"{role}: output_schema={output_schema}; "
+            f"capability_profile={profile}; "
+            "required_capabilities=["
+            + ", ".join(CAPABILITY_PROFILES[profile])
+            + "]"
+        )
+        for role, output_schema, profile in identities
+    )
 
 
 def minimum_capability_profile(
@@ -654,7 +705,10 @@ class AutonomyStore:
                     f"BacklogPlan nodes[{node_index}].task_contract.task_id is duplicated"
                 )
             task_ids.add(task_id)
-            execution_roles.add(str(contract.get("role", "")))
+            normalized_role = (
+                str(contract.get("role", "")).strip().lower().replace("_", "-")
+            )
+            execution_roles.add(normalized_role)
             output_schema = str(contract.get("output_schema", ""))
             if (
                 not output_schema
@@ -666,6 +720,22 @@ class AutonomyStore:
                     "BacklogPlan "
                     f"nodes[{node_index}].task_contract.output_schema "
                     f"is not registered: {output_schema or '<missing>'}"
+                )
+            canonical_output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS.get(
+                normalized_role
+            )
+            if canonical_output_schema is None:
+                raise ValueError(
+                    "BacklogPlan "
+                    f"nodes[{node_index}].task_contract.role "
+                    f"is not supported: {normalized_role or '<missing>'}"
+                )
+            if output_schema != canonical_output_schema:
+                raise ValueError(
+                    "BacklogPlan "
+                    f"nodes[{node_index}].task_contract.output_schema "
+                    f"must be {canonical_output_schema} for role "
+                    f"{normalized_role}; got {output_schema}"
                 )
             idempotency_key = str(contract.get("idempotency_key", ""))
             if idempotency_key in idempotency_keys:
