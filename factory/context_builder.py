@@ -8,9 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from scripts.context_pack import select_files
+from scripts.prompt_compiler import (
+    find_secret_candidate_diagnostics,
+    redact_secret_candidates,
+)
 
 from .artifacts import ArtifactStore
-from .common import redact_text
+from .common import redact_text, sha256_text
 from .config import FactoryConfig
 
 
@@ -54,20 +58,52 @@ class ContextBuilder:
             max_files=max_files,
             max_chars=max_chars,
         )
-        selected_files = [
-            {"path": item.path, "reason": item.reason, "digest": item.digest}
-            for item in selected
-        ]
-        safe_evidence: list[dict[str, str]] = []
+        selected_files: list[dict[str, Any]] = []
         redaction_count = 0
-        for item in evidence:
-            summary, redactions = redact_text(str(item.get("summary", "")))
-            redaction_count += sum(int(redaction["count"]) for redaction in redactions)
+        for selected_file in selected:
+            diagnostics = find_secret_candidate_diagnostics(selected_file.content)
+            safe_content, common_redactions = redact_text(selected_file.content)
+            safe_content, remaining_diagnostics = redact_secret_candidates(
+                safe_content
+            )
+            redaction_count += sum(
+                int(redaction["count"]) for redaction in common_redactions
+            ) + len(remaining_diagnostics)
+            selected_files.append(
+                {
+                    "path": selected_file.path,
+                    "reason": selected_file.reason,
+                    "digest": selected_file.digest,
+                    "content": safe_content,
+                    "content_digest": sha256_text(safe_content),
+                    "redactions": diagnostics,
+                }
+            )
+        safe_evidence: list[dict[str, str]] = []
+        for evidence_item in evidence:
+            raw_summary = str(evidence_item.get("summary", ""))
+            diagnostics = find_secret_candidate_diagnostics(raw_summary)
+            summary, common_redactions = redact_text(raw_summary)
+            summary, remaining_diagnostics = redact_secret_candidates(summary)
+            redaction_count += sum(
+                int(redaction["count"]) for redaction in common_redactions
+            ) + len(remaining_diagnostics)
+            if diagnostics:
+                coordinates = ", ".join(
+                    f"{diagnostic['detector']}@{diagnostic['location']}"
+                    for diagnostic in diagnostics
+                )
+                summary += (
+                    "\nSAFE_REDACTION_COORDINATES: "
+                    f"{coordinates}. Secret values are not retained."
+                )
             safe_evidence.append(
                 {
-                    "type": str(item.get("type", "evidence")),
+                    "type": str(evidence_item.get("type", "evidence")),
                     "summary": summary or "redacted evidence",
-                    "artifact_ref": str(item.get("artifact_ref", "unknown")),
+                    "artifact_ref": str(
+                        evidence_item.get("artifact_ref", "unknown")
+                    ),
                 }
             )
         artifact = {

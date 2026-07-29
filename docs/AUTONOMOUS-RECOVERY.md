@@ -38,6 +38,11 @@ Default Builder scope includes the repository's Python project contract
 file. A repository-supplied PM task still replaces the default scope completely;
 Hermes never widens frozen PM `allowed_paths`.
 
+Independent review receives the subject-bound candidate contents, upstream Task
+Contracts, and complete controller gate records. Missing controller-owned
+review evidence is an internal factory defect, not a product-code hypothesis.
+See `docs/REVIEW-EVIDENCE.md`.
+
 The reconciler never restarts product planning when recovery can continue from
 the failed stage.
 

@@ -26,6 +26,7 @@ class ContextPackTests(unittest.TestCase):
             self.assertEqual(len(selected), 1)
             self.assertEqual(selected[0].path, "a.py")
             self.assertEqual(selected[0].reason, "imported")
+            self.assertEqual(selected[0].content, "a")
 
     def test_select_files_blocks_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

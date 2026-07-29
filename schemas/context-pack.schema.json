@@ -80,7 +80,10 @@
         "required": [
           "path",
           "reason",
-          "digest"
+          "digest",
+          "content",
+          "content_digest",
+          "redactions"
         ],
         "properties": {
           "path": {
@@ -94,6 +97,34 @@
           "digest": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "content": {
+            "type": "string"
+          },
+          "content_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "redactions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "detector",
+                "location"
+              ],
+              "properties": {
+                "detector": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "location": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
           }
         }
       }

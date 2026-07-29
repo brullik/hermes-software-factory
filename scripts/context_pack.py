@@ -15,6 +15,7 @@ class SelectedFile:
     reason: str
     digest: str
     chars: int
+    content: str
 
 
 def sha256_file(path: Path) -> str:
@@ -41,10 +42,20 @@ def select_files(
             continue
         if not path.is_file():
             continue
-        size = len(path.read_text(encoding="utf-8", errors="replace"))
+        raw = path.read_bytes()
+        content = raw.decode("utf-8", errors="replace")
+        size = len(content)
         if len(selected) >= max_files or total + size > max_chars:
             continue
-        selected.append(SelectedFile(relative, reason, sha256_file(path), size))
+        selected.append(
+            SelectedFile(
+                relative,
+                reason,
+                hashlib.sha256(raw).hexdigest(),
+                size,
+                content,
+            )
+        )
         total += size
     return selected
 
