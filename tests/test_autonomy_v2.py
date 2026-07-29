@@ -11,6 +11,7 @@ from test_worker import make_config, selected_registry
 
 from factory.artifacts import ArtifactStore
 from factory.autonomy import (
+    CAPABILITY_PROFILES,
     FailureData,
     HypothesisData,
     TaskOutcome,
@@ -104,7 +105,7 @@ def task_contract(
         ],
         "required_capabilities": capabilities
         if capabilities is not None
-        else ["repository.read", "repository.write_scoped"],
+        else list(CAPABILITY_PROFILES[profile]),
         "capability_profile": profile,
         "allowed_paths": [f"src/{node_id.lower()}/**"],
         "forbidden_paths": ["secrets/**"],
@@ -1008,13 +1009,28 @@ def test_AUT_P0_014_capability_preflight_controls_ready_frontier(
             plan_id="PLAN-CAPABILITY-1",
             root_task_id=root_id,
             parent_plan_id=str(product["active_plan_id"]),
-            node_specs=[("R", "T-RELEASECAP", "accept-release")],
+            node_specs=[
+                ("release-staging", "T-RELEASECAP", "accept-release")
+            ],
             edges=[],
         )
         contract = plan["nodes"][0]["task_contract"]
         contract["role"] = "release-operator"
         contract["capability_profile"] = "release_staging"
-        contract["required_capabilities"] = ["github.pull_request.create"]
+        contract["required_capabilities"] = list(
+            CAPABILITY_PROFILES["release_staging"]
+        )
+        for capability in CAPABILITY_PROFILES["release_staging"]:
+            if capability == "github.pull_request.create":
+                continue
+            state.grant_capability(
+                product_id="product-autonomy",
+                task_id=None,
+                capability=capability,
+                provider="fake-controller",
+                scope={"repository": "brullik/durable-task-service"},
+                status="AVAILABLE",
+            )
         persist_and_ingest_plan(
             config,
             state,
@@ -1114,7 +1130,18 @@ def test_AUT_P0_016_observation_is_atomic_with_production_release(
         contract["role"] = "release-operator"
         contract["output_schema"] = "release-operation-result.schema.json"
         contract["capability_profile"] = "release_production"
-        contract["required_capabilities"] = []
+        contract["required_capabilities"] = list(
+            CAPABILITY_PROFILES["release_production"]
+        )
+        for capability in CAPABILITY_PROFILES["release_production"]:
+            state.grant_capability(
+                product_id="product-autonomy",
+                task_id=None,
+                capability=capability,
+                provider="fake-controller",
+                scope={"repository": "brullik/durable-task-service"},
+                status="AVAILABLE",
+            )
         persist_and_ingest_plan(
             config,
             state,
@@ -1427,7 +1454,7 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert versions == [version for version, _, _ in MIGRATIONS]
         assert database.with_suffix(
             database.suffix + ".pre-autonomy-v2.bak"
         ).is_file()
@@ -1666,7 +1693,7 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert versions == [version for version, _, _ in MIGRATIONS]
     finally:
         restarted.close()
 
@@ -1867,7 +1894,7 @@ def test_AUT_P0_019_causal_leaf_migration_supersedes_duplicate_recovery(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert versions == [version for version, _, _ in MIGRATIONS]
     finally:
         restarted.close()
 
@@ -2038,7 +2065,7 @@ def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
         ]
     finally:
         verified.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert versions == [version for version, _, _ in MIGRATIONS]
 
 
 def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(

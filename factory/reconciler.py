@@ -14,6 +14,7 @@ from scripts.model_router import FailureClass, Tier, classify_failure, next_tier
 from scripts.quality_gate import load_catalog
 
 from .artifacts import ArtifactStore, artifact_metadata
+from .capabilities import CapabilityReconciler
 from .common import new_id, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
 from .failure_router import FailureRouter
@@ -1533,8 +1534,15 @@ class PipelineReconciler:
 class ReconcilerLoop:
     """Small stoppable controller companion loop."""
 
-    def __init__(self, reconciler: PipelineReconciler, interval_seconds: float) -> None:
+    def __init__(
+        self,
+        reconciler: PipelineReconciler,
+        interval_seconds: float,
+        *,
+        capability_reconciler: CapabilityReconciler | None = None,
+    ) -> None:
         self.reconciler = reconciler
+        self.capability_reconciler = capability_reconciler
         self.interval_seconds = interval_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1557,7 +1565,22 @@ class ReconcilerLoop:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                capability_result = (
+                    self.capability_reconciler.reconcile_once()
+                    if self.capability_reconciler is not None
+                    else None
+                )
                 result = self.reconciler.reconcile_once()
+                if capability_result is not None and any(
+                    (
+                        capability_result.changed,
+                        capability_result.resumed_tasks,
+                    )
+                ):
+                    LOGGER.info(
+                        "capability reconcile result=%s",
+                        capability_result,
+                    )
                 if any(
                     (
                         result.repaired,

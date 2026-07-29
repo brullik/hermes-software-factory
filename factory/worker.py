@@ -978,7 +978,12 @@ class AgentWorker:
                 raise ExternalBlocker(f"review task contract is missing for {task_id}") from error
             if not isinstance(task_contract, dict):
                 raise ExternalBlocker(f"review task contract is invalid for {task_id}")
-            self.schemas.validate("task-contract.schema.json", task_contract)
+            contract_schema = (
+                "task-contract-v2.schema.json"
+                if str(task_contract.get("schema_version")) == "2.0"
+                else "task-contract.schema.json"
+            )
+            self.schemas.validate(contract_schema, task_contract)
             if str(task_contract.get("task_id")) != task_id:
                 raise ExternalBlocker(f"review task contract identity conflicts for {task_id}")
             controller_summary = {
@@ -3412,12 +3417,104 @@ class AgentWorker:
                 detail=str(diagnostic["safe_message"]),
                 failure_data=controller_failure,
             )
+        if durable_status == "ACCEPTED":
+            self._record_completion_evidence(task_row, result)
         if prepared.run_completion_reducer:
             self.state.reduce_completion(
                 str(task_row["product_id"]),
                 artifacts=self.artifacts,
             )
         return result
+
+    def _record_completion_evidence(
+        self,
+        task: Mapping[str, Any],
+        result: WorkerResult,
+    ) -> None:
+        """Record controller-derived completion facts after an accepted commit."""
+
+        output_ref = str(result.output_ref or "")
+        output_path = self.config.evidence_dir / Path(output_ref).name
+        if (
+            not output_ref
+            or output_path.parent.resolve() != self.config.evidence_dir.resolve()
+            or not output_path.is_file()
+            or output_path.is_symlink()
+        ):
+            return
+        try:
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return
+        if not isinstance(output, dict):
+            return
+        product_id = str(task["product_id"])
+        role = str(task.get("role") or "")
+        stage = str(task.get("stage_key") or "")
+        artifact_ref = f"evidence/{output_path.name}"
+        artifact_digest = sha256_file(output_path)
+
+        evidence: list[tuple[str, str]] = []
+        if role == "independent-reviewer" and output.get("status") == "accepted":
+            evidence.append(("independent_review", artifact_digest))
+        release = output.get("release")
+        release_digest = (
+            str(release.get("image_digest") or "").removeprefix("sha256:")
+            if isinstance(release, Mapping)
+            else ""
+        )
+        if stage == "release-staging" and re.fullmatch(
+            r"[a-f0-9]{64}",
+            release_digest,
+        ):
+            evidence.extend(
+                (
+                    ("required_checks", artifact_digest),
+                    ("staging", release_digest),
+                )
+            )
+        if stage == "release-production" and re.fullmatch(
+            r"[a-f0-9]{64}",
+            release_digest,
+        ):
+            evidence.extend(
+                (
+                    ("production", release_digest),
+                    ("rollback", artifact_digest),
+                )
+            )
+        if stage == "observation" and output.get("status") == "accepted":
+            evidence.append(("observation", artifact_digest))
+        for evidence_type, digest in evidence:
+            self.state.record_product_evidence(
+                product_id=product_id,
+                evidence_type=evidence_type,
+                artifact_ref=artifact_ref,
+                artifact_digest=digest,
+            )
+        if stage != "observation" or output.get("status") != "accepted":
+            return
+        for plan in self.state.list_plans(product_id):
+            if str(plan.get("status")) != "ACTIVE":
+                continue
+            try:
+                goals = json.loads(str(plan.get("goals_json") or "[]"))
+            except json.JSONDecodeError:
+                goals = []
+            for goal in goals:
+                if not isinstance(goal, Mapping) or not bool(
+                    goal.get("mandatory", True)
+                ):
+                    continue
+                goal_id = str(goal.get("goal_id") or "")
+                if goal_id:
+                    self.state.record_product_evidence(
+                        product_id=product_id,
+                        evidence_type="goal",
+                        goal_id=goal_id,
+                        artifact_ref=artifact_ref,
+                        artifact_digest=artifact_digest,
+                    )
 
     def run_forever(self) -> None:
         while True:

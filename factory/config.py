@@ -165,6 +165,10 @@ def validate_config(config: FactoryConfig) -> list[str]:
         errors.append("max_active_workers must not exceed 2")
     if float(controller.get("reconcile_interval_seconds", 2.0)) < 0.2:
         errors.append("reconcile_interval_seconds must be at least 0.2")
+    if float(controller.get("capability_check_ttl_seconds", 300)) < 1:
+        errors.append("capability_check_ttl_seconds must be at least 1")
+    if float(controller.get("capability_retry_seconds", 15)) < 1:
+        errors.append("capability_retry_seconds must be at least 1")
     if int(controller.get("max_repair_cycles", 3)) < 1:
         errors.append("max_repair_cycles must be positive")
     if int(controller.get("max_repair_cycles", 3)) > 3:
@@ -181,6 +185,13 @@ def validate_config(config: FactoryConfig) -> list[str]:
         errors.append("paid API fallback must be disabled")
     if config.raw.get("backup", {}).get("tool") != "restic":
         errors.append("backup tool must be restic")
+    if int(
+        config.raw.get("backup", {}).get(
+            "max_proof_age_seconds",
+            36 * 60 * 60,
+        )
+    ) < 1:
+        errors.append("backup max_proof_age_seconds must be positive")
     if int(intake.get("rate_limit_requests", 10)) < 1:
         errors.append("intake rate_limit_requests must be positive")
     if int(intake.get("rate_limit_window_seconds", 60)) < 1:

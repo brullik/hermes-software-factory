@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .artifacts import ArtifactStore
+from .capabilities import CapabilityReconciler
 from .config import FactoryConfig, load_config
 from .intake import IntakeRejected, IntakeService
 from .kanban import KANBAN_HTML, build_kanban_snapshot
@@ -181,6 +182,7 @@ def serve(config: FactoryConfig) -> None:
     reconciler = ReconcilerLoop(
         PipelineReconciler(config, state, ArtifactStore(config)),
         config.reconcile_interval_seconds,
+        capability_reconciler=CapabilityReconciler(config, state),
     )
     reconciler.start()
     try:

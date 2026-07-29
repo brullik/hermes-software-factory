@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.1.12 - 2026-07-29
+
+- Added a durable capability reconciler that preflights newly created
+  products, refreshes stale or blocked grants, resumes their task frontier
+  without process restarts, persists sanitized probe results, and
+  deduplicates owner notifications.
+- Capability profiles are now controller-owned minimums. Plans and direct
+  task creation fail closed before SQLite mutation when a role/stage
+  downgrades its profile or omits a canonical capability.
+- GitHub grants now use repository-scoped read-only permission probes for
+  identity, credential type, repository permissions, rulesets, branch
+  protection, merge policy, and OAuth/App permissions; authentication alone
+  no longer proves write or merge access.
+- Production capability probes now require fresh offsite-restic proof, the
+  root-owned transactional deploy and rollback helpers, a non-interactive
+  sudo boundary, and a healthy target.
+- Added mandatory AUT-P0-023 through AUT-P0-027 service-level acceptance
+  coverage, including post-start intake, credential appearance, fail-closed
+  under-declaration, read-only GitHub credentials, and the complete private
+  product runtime path.
+
 ## 2.1.11 - 2026-07-29
 
 - Reclassifying a missing planned output schema now also resolves the matching

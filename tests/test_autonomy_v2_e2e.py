@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from test_autonomy_v2 import (
     FakePrivateRepositoryAdapter,
     FakeRepositoryAdapter,
@@ -13,17 +16,35 @@ from test_autonomy_v2 import (
     executable_plan,
     persist_and_ingest_plan,
 )
-from test_worker import make_config, selected_registry
+from test_worker import (
+    make_config,
+    product_contract,
+    requirements_package,
+    selected_registry,
+)
 
-from factory.artifacts import ArtifactStore
-from factory.autonomy import FailureData, HypothesisData, TaskOutcome
+from factory.artifacts import ArtifactStore, artifact_metadata
+from factory.autonomy import (
+    CAPABILITY_PROFILES,
+    FailureData,
+    HypothesisData,
+    TaskOutcome,
+)
+from factory.capabilities import (
+    CapabilityBroker,
+    CapabilityCheck,
+    CapabilityReconciler,
+    ConfiguredCapabilityProbe,
+    ProbeCommandResult,
+)
 from factory.common import sha256_text
 from factory.failure_router import FailureRouter
+from factory.gateway import TelegramGateway
 from factory.intake import IntakeService
 from factory.reconciler import PipelineReconciler
 from factory.repository import RepositoryBootstrapper
 from factory.state import StateStore
-from factory.worker import AgentWorker
+from factory.worker import AgentWorker, HermesRunResult, WorkerResult
 from factory.workflow import WorkflowEngine
 
 
@@ -1126,6 +1147,1001 @@ def test_AUT_P1_009_artifact_conflict_commits_controller_failure_only(
         assert failures[0]["failure_class"] == "controller"
         assert failures[0]["reason_code"] == "artifact_immutable_conflict"
         assert len(state.list_tasks(intake.product_id)) == 1
+    finally:
+        state.close()
+
+
+class MutableCapabilityProbe:
+    def __init__(
+        self,
+        *,
+        missing: set[str] | None = None,
+    ) -> None:
+        self.missing = set(missing or ())
+        self.calls: list[tuple[str, str]] = []
+
+    def check(
+        self,
+        capability: str,
+        *,
+        product: dict[str, Any],
+    ) -> CapabilityCheck:
+        self.calls.append((str(product["product_id"]), capability))
+        scope = {
+            "owner": "brullik",
+            "repository": str(
+                product.get("repository_name") or product["product_id"]
+            ),
+            "allowed_operations": [capability],
+        }
+        if capability in self.missing:
+            return CapabilityCheck(
+                capability,
+                "MISSING_EXTERNAL",
+                "strict-fake",
+                "missing_credential",
+                scope,
+            )
+        return CapabilityCheck(
+            capability,
+            "AVAILABLE",
+            "strict-fake",
+            scope=scope,
+        )
+
+
+def release_staging_plan(
+    config: Any,
+    state: StateStore,
+    *,
+    product_id: str,
+    root_task_id: str,
+) -> dict[str, Any]:
+    product = state.get_product(product_id)
+    assert product is not None
+    plan = executable_plan(
+        config,
+        product_id=product_id,
+        plan_id=f"PLAN-RECONCILE-{sha256_text(product_id)[:12].upper()}",
+        root_task_id=root_task_id,
+        parent_plan_id=str(product["active_plan_id"]),
+        node_specs=[
+            (
+                "release-staging",
+                f"T-RELEASE-{sha256_text(product_id)[:10].upper()}",
+                "accept-release",
+            )
+        ],
+        edges=[],
+    )
+    contract = plan["nodes"][0]["task_contract"]
+    contract["role"] = "release-operator"
+    contract["output_schema"] = "release-operation-result.schema.json"
+    contract["capability_profile"] = "release_staging"
+    contract["required_capabilities"] = list(
+        CAPABILITY_PROFILES["release_staging"]
+    )
+    return plan
+
+
+def test_AUT_P0_023_intake_after_worker_start_resumes_capability_task(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    artifacts = ArtifactStore(config)
+    probe = MutableCapabilityProbe(
+        missing={"github.pull_request.create"},
+    )
+    broker = CapabilityBroker(config, state, probe=probe)
+    worker = AgentWorker(
+        config,
+        state,
+        runner=None,
+        health_probe=lambda _: True,
+        repository_root=Path(__file__).resolve().parents[1],
+        repository_bootstrapper=RepositoryBootstrapper(
+            config,
+            state,
+            FakeRepositoryAdapter(),
+        ),
+        worker_id="long-lived-worker",
+    )
+    try:
+        intake = IntakeService(
+            config,
+            state,
+            artifacts,
+            capability_broker=broker,
+        ).submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Create a private release after worker startup",
+            delivery_mode="new_repository",
+            repository_name="aut-p0-023-private",
+            repository_visibility="private",
+            idempotency_key="aut-p0-023-intake",
+        )
+        root = state.list_tasks(intake.product_id)[0]
+        plan = release_staging_plan(
+            config,
+            state,
+            product_id=intake.product_id,
+            root_task_id=str(root["task_id"]),
+        )
+        task_ids = persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=str(root["task_id"]),
+        )
+        release_task_id = task_ids[0]
+        assert state.get_task(release_task_id)["graph_status"] == "BLOCKED_CAPABILITY"
+
+        probe.missing.clear()
+        reconcile = CapabilityReconciler(
+            config,
+            state,
+            probe=probe,
+            ttl_seconds=0,
+            retry_seconds=0,
+        ).reconcile_once()
+        assert reconcile.resumed_tasks == 1
+        assert state.get_task(release_task_id)["graph_status"] == "READY"
+
+        claimed = threading.Event()
+        finish = threading.Event()
+
+        def execute(_: Any) -> WorkerResult:
+            claimed.set()
+            assert finish.wait(5)
+            return WorkerResult(release_task_id, "completed", None)
+
+        with patch.object(worker, "execute", side_effect=execute):
+            thread = threading.Thread(target=worker.run_once, daemon=True)
+            thread.start()
+            assert claimed.wait(5)
+            assert state.get_task(release_task_id)["graph_status"] == "CLAIMED"
+            finish.set()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        assert not any(
+            event["event_type"] == "worker_restarted"
+            for event in state.events(intake.product_id)
+        )
+    finally:
+        state.close()
+
+
+def test_AUT_P0_024_credential_appearance_closes_old_owner_action(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    probe = MutableCapabilityProbe(
+        missing={"github.pull_request.create"},
+    )
+    broker = CapabilityBroker(config, state, probe=probe)
+    try:
+        intake = IntakeService(
+            config,
+            state,
+            ArtifactStore(config),
+            capability_broker=broker,
+        ).submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Resume automatically when the credential appears",
+            delivery_mode="new_repository",
+            repository_name="aut-p0-024-private",
+            repository_visibility="private",
+            idempotency_key="aut-p0-024-intake",
+        )
+        root = state.list_tasks(intake.product_id)[0]
+        plan = release_staging_plan(
+            config,
+            state,
+            product_id=intake.product_id,
+            root_task_id=str(root["task_id"]),
+        )
+        release_task_id = persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=str(root["task_id"]),
+        )[0]
+        reconciler = CapabilityReconciler(
+            config,
+            state,
+            probe=probe,
+            ttl_seconds=0,
+            retry_seconds=0,
+        )
+        reconciler.reconcile_once()
+        reconciler.reconcile_once()
+        owner_events = [
+            event
+            for event in state.events(intake.product_id)
+            if event["event_type"] == "owner_action_required"
+        ]
+        assert len(owner_events) == 1
+        assert len(state.open_capability_blocks()) == 1
+        assert len(
+            [
+                item
+                for item in state.list_outbox()
+                if json.loads(str(item["payload_json"])).get("kind")
+                == "owner_action"
+            ]
+        ) == 1
+
+        probe.missing.add("git.push_branch")
+        reconciler.reconcile_once()
+        assert len(state.open_capability_blocks()) == 2
+        assert len(
+            [
+                event
+                for event in state.events(intake.product_id)
+                if event["event_type"] == "owner_action_required"
+            ]
+        ) == 1
+        assert len(
+            [
+                item
+                for item in state.list_outbox()
+                if json.loads(str(item["payload_json"])).get("kind")
+                == "owner_action"
+            ]
+        ) == 1
+
+        probe.missing.remove("github.pull_request.create")
+        reconciler.reconcile_once()
+        assert state.get_task(release_task_id)["graph_status"] == "BLOCKED_CAPABILITY"
+        assert [
+            block["capability"] for block in state.open_capability_blocks()
+        ] == ["git.push_branch"]
+
+        probe.missing.clear()
+        result = reconciler.reconcile_once()
+        assert result.resumed_tasks == 1
+        assert state.get_task(release_task_id)["graph_status"] == "READY"
+        assert state.open_capability_blocks() == []
+        block = state._connection.execute(
+            """SELECT status, resolved_at, failure_ref
+                 FROM capability_blocks
+                WHERE product_id=? AND capability=?""",
+            (intake.product_id, "github.pull_request.create"),
+        ).fetchone()
+        assert block is not None
+        assert block["status"] == "RESOLVED"
+        assert block["resolved_at"]
+        assert str(block["failure_ref"]).startswith("capability://")
+    finally:
+        state.close()
+
+
+def test_AUT_P0_025_production_profile_underdeclaration_is_atomic(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        root_id = "T-P0-025-ROOT"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Production release planner",
+            role="task-specifier",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-AUT-P0-025",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[
+                (
+                    "release-production",
+                    "T-AUT-P0-025-PRODUCTION",
+                    "accept-production",
+                )
+            ],
+            edges=[],
+        )
+        contract = plan["nodes"][0]["task_contract"]
+        contract["role"] = "release-operator"
+        contract["output_schema"] = "release-operation-result.schema.json"
+        contract["capability_profile"] = "release_production"
+        contract["required_capabilities"] = []
+        before = {
+            table: state._connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in (
+                "plans",
+                "tasks",
+                "task_edges",
+                "task_outcomes",
+                "outbox",
+            )
+        }
+        with pytest.raises(
+            ValueError,
+            match=(
+                "required_capabilities omits canonical capability: "
+                "backup.verify"
+            ),
+        ):
+            state.ingest_plan(
+                plan,
+                plan_artifact_ref="evidence/aut-p0-025.json",
+                plan_digest=sha256_text(json.dumps(plan, sort_keys=True)),
+                created_by_task_id=root_id,
+            )
+        after = {
+            table: state._connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in before
+        }
+        assert after == before
+    finally:
+        state.close()
+
+
+def test_AUT_P0_026_contents_read_never_implies_github_write(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    product = {
+        "product_id": "aut-p0-026-product",
+        "repository_url": "https://github.com/brullik/read-only-private",
+        "repository_name": None,
+        "repository_visibility": "private",
+    }
+
+    def runner(argv: list[str]) -> ProbeCommandResult:
+        endpoint = argv[-1]
+        if endpoint == "user":
+            return ProbeCommandResult(
+                0,
+                'HTTP/2 200 OK\n\n{"login":"brullik"}',
+            )
+        if endpoint == "repos/brullik/read-only-private":
+            return ProbeCommandResult(
+                0,
+                (
+                    "HTTP/2 200 OK\n\n"
+                    '{"default_branch":"main","permissions":'
+                    '{"pull":true,"push":false,"maintain":false,"admin":false},'
+                    '"allow_merge_commit":true}'
+                ),
+            )
+        if endpoint.endswith("/rulesets"):
+            return ProbeCommandResult(0, "HTTP/2 200 OK\n\n[]")
+        if endpoint.endswith("/protection"):
+            return ProbeCommandResult(1, "HTTP/2 404 Not Found\n\n{}")
+        raise AssertionError(argv)
+
+    with patch("factory.capabilities.shutil.which", return_value="/safe/tool"):
+        probe = ConfiguredCapabilityProbe(
+            config,
+            command_runner=runner,
+        )
+        assert probe.check("repository.read", product=product).status == "AVAILABLE"
+        for capability in (
+            "git.push_branch",
+            "github.pull_request.create",
+            "github.pull_request.merge",
+        ):
+            assert probe.check(capability, product=product).status != "AVAILABLE"
+
+
+class QueuedRuntimeRunner:
+    def __init__(self) -> None:
+        self.outputs: list[str] = []
+        self.prompts: list[str] = []
+
+    def run(
+        self,
+        *,
+        selection: Any,
+        prompt: str,
+        cwd: Path,
+        usage_path: Path | None = None,
+    ) -> HermesRunResult:
+        del selection, cwd
+        self.prompts.append(prompt)
+        if not self.outputs:
+            raise AssertionError("runtime runner output queue is empty")
+        return HermesRunResult(
+            "PASS",
+            self.outputs.pop(0),
+            sha256_text("strict-runtime-output"),
+            None,
+            str(usage_path) if usage_path else None,
+        )
+
+
+class RecordingTelegramApi:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str]] = []
+
+    def send_message(self, chat_id: str, text: str) -> None:
+        self.messages.append((chat_id, text))
+
+
+class StrictLifecycleReleaseExecutor:
+    def __init__(self, config: Any) -> None:
+        self.config = config
+        self.calls: list[str] = []
+        self.candidate_sha = "c" * 40
+        self.release_digest = "sha256:" + "d" * 64
+
+    def execute(
+        self,
+        *,
+        stage: str,
+        proposed: Any,
+        product_id: str,
+        task_contract: Any,
+        workspace: Path,
+        expected_staging_digest: str | None,
+    ) -> dict[str, Any]:
+        del proposed, task_contract
+        assert workspace.is_dir()
+        if stage == "staging":
+            self.calls.extend(["pull_request", "checks", "staging"])
+            merge = {"performed": False, "merge_sha": None}
+            production = "not_started"
+            rollback = "not_tested"
+        else:
+            assert expected_staging_digest == self.release_digest
+            self.calls.extend(["merge", "production"])
+            merge = {
+                "performed": True,
+                "merge_sha": self.candidate_sha,
+            }
+            production = "deployed"
+            rollback = "not_needed"
+        return {
+            **artifact_metadata(
+                self.config,
+                "release-operator",
+                f"strict-release-{stage}-{product_id}",
+                product_id,
+            ),
+            "status": "completed",
+            "repository": "brullik/aut-p0-027-private",
+            "candidate_sha": self.candidate_sha,
+            "merge": merge,
+            "release": {
+                "version": "1.0.0",
+                "image_digest": self.release_digest,
+            },
+            "staging": "deployed",
+            "production": production,
+            "rollback": rollback,
+            "summary": f"Strict fake completed {stage}.",
+            "findings": [],
+            "evidence_refs": [
+                f"strict://{stage}/immutable-candidate",
+                f"strict://{stage}/health",
+            ],
+        }
+
+
+class RuntimeRepositoryAdapter(FakeRepositoryAdapter):
+    def clone(self, **values: Any) -> tuple[str, str]:
+        self.calls.append(("clone", str(values["idempotency_key"])))
+        destination = Path(values["destination"])
+        destination.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch=main", str(destination)],
+            check=True,
+        )
+        return "main", ""
+
+    def bootstrap_commit(self, **values: Any) -> str:
+        self.calls.append(("bootstrap", str(values["idempotency_key"])))
+        workspace = Path(values["workspace"])
+        (workspace / "README.md").write_text(
+            "# Runtime acceptance\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "add", "README.md"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workspace),
+                "-c",
+                "user.name=Hermes Test",
+                "-c",
+                "user.email=hermes-test@localhost",
+                "commit",
+                "--quiet",
+                "-m",
+                "Bootstrap runtime fixture",
+            ],
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+
+def _architecture_output(config: Any, product_id: str) -> str:
+    output = {
+        **artifact_metadata(
+            config,
+            "solution-architect",
+            "architecture-aut-p0-027",
+            product_id,
+        ),
+        "status": "completed",
+        "summary": "Small private service with transactional release.",
+        "components": [
+            {
+                "id": "service",
+                "responsibility": "Serve the verified product journey.",
+                "technology": "Python",
+                "data_owned": [],
+            }
+        ],
+        "interfaces": [],
+        "data_stores": [],
+        "trust_boundaries": [],
+        "adrs": [],
+        "deployment": {
+            "staging": "isolated",
+            "production": "transactional",
+            "image_promotion": "immutable digest",
+            "https": True,
+        },
+        "observability": ["health probe"],
+        "backup_restore": {
+            "backup": "offsite restic",
+            "restore_test": "controlled drill",
+        },
+        "rollback": {
+            "strategy": "previous immutable release",
+            "trigger": "health failure",
+            "verification": "health probe",
+        },
+        "test_strategy": ["unit and end-to-end"],
+        "capacity": {
+            "fits_current_vps": True,
+            "constraints": [],
+        },
+        "assumptions": [],
+        "findings": [],
+        "evidence_refs": ["strict://requirements/accepted"],
+    }
+    return json.dumps(output)
+
+
+def _runtime_plan(
+    config: Any,
+    state: StateStore,
+    *,
+    product_id: str,
+    root_task_id: str,
+) -> dict[str, Any]:
+    product = state.get_product(product_id)
+    assert product is not None
+    specs = [
+        ("builder-core", "T-AUT-P0-027-BUILDER", "accept-builder"),
+        ("test-engineer", "T-AUT-P0-027-TEST", "accept-test"),
+        ("security-reviewer", "T-AUT-P0-027-SECURITY", "accept-security"),
+        (
+            "independent-reviewer",
+            "T-AUT-P0-027-REVIEW",
+            "accept-review",
+        ),
+        ("release-staging", "T-AUT-P0-027-STAGING", "accept-staging"),
+        ("product-tester", "T-AUT-P0-027-PRODUCT", "accept-product"),
+        (
+            "release-production",
+            "T-AUT-P0-027-PRODUCTION",
+            "accept-production",
+        ),
+    ]
+    plan = executable_plan(
+        config,
+        product_id=product_id,
+        plan_id="PLAN-AUT-P0-027-RUNTIME",
+        root_task_id=root_task_id,
+        parent_plan_id=str(product["active_plan_id"]),
+        node_specs=specs,
+        edges=[
+            (specs[index][0], specs[index + 1][0])
+            for index in range(len(specs) - 1)
+        ],
+    )
+    identities = {
+        "builder-core": (
+            "builder",
+            "attempt-result.schema.json",
+            "builder_workspace",
+        ),
+        "test-engineer": (
+            "test-engineer",
+            "test-package-result.schema.json",
+            "test_workspace",
+        ),
+        "security-reviewer": (
+            "security-reviewer",
+            "security-review-result.schema.json",
+            "reviewer_readonly",
+        ),
+        "independent-reviewer": (
+            "independent-reviewer",
+            "review-result.schema.json",
+            "reviewer_readonly",
+        ),
+        "release-staging": (
+            "release-operator",
+            "release-operation-result.schema.json",
+            "release_staging",
+        ),
+        "product-tester": (
+            "product-tester",
+            "product-test-result.schema.json",
+            "test_workspace",
+        ),
+        "release-production": (
+            "release-operator",
+            "release-operation-result.schema.json",
+            "release_production",
+        ),
+    }
+    for node in plan["nodes"]:
+        node_id = str(node["node_id"])
+        role, output_schema, profile = identities[node_id]
+        contract = node["task_contract"]
+        contract["role"] = role
+        contract["output_schema"] = output_schema
+        contract["capability_profile"] = profile
+        contract["required_capabilities"] = list(
+            CAPABILITY_PROFILES[profile]
+        )
+    return plan
+
+
+def _attempt_output(
+    config: Any,
+    product_id: str,
+    task_id: str,
+) -> str:
+    output = {
+        **artifact_metadata(
+            config,
+            "builder",
+            "attempt-output-aut-p0-027",
+            product_id,
+        ),
+        "task_id": task_id,
+        "attempt_id": "provider-attempt-aut-p0-027",
+        "tier": "luna",
+        "attempt_kind": "initial",
+        "prompt_digest": "a" * 64,
+        "subject_sha_before": "b" * 64,
+        "status": "completed",
+        "summary": "Core slice is complete.",
+        "changed_files": [],
+        "commands": [],
+        "test_results": [],
+        "assumptions": [],
+        "findings": [],
+        "evidence_refs": ["strict://builder/complete"],
+    }
+    return json.dumps(output)
+
+
+def _test_output(config: Any, product_id: str, task_id: str) -> str:
+    return json.dumps(
+        {
+            **artifact_metadata(
+                config,
+                "test-engineer",
+                "test-output-aut-p0-027",
+                product_id,
+            ),
+            "task_id": task_id,
+            "status": "completed",
+            "traceability": [
+                {
+                    "criterion_id": "accept-builder",
+                    "test_ids": ["strict-e2e"],
+                }
+            ],
+            "tests_added": [],
+            "mutation_or_negative_check": "passed",
+            "coverage_expectation": 100,
+            "assumptions": [],
+            "findings": [],
+            "evidence_refs": ["strict://tests/pass"],
+        }
+    )
+
+
+def _security_output(config: Any, product_id: str, task_id: str) -> str:
+    return json.dumps(
+        {
+            **artifact_metadata(
+                config,
+                "security-reviewer",
+                "security-output-aut-p0-027",
+                product_id,
+            ),
+            "task_id": task_id,
+            "subject_sha": "e" * 64,
+            "status": "accepted",
+            "changed_trust_boundaries": [],
+            "findings": [],
+            "release_blocked": False,
+            "assumptions": [],
+            "evidence_refs": ["strict://security/pass"],
+        }
+    )
+
+
+def _review_output(config: Any, product_id: str, task_id: str) -> str:
+    return json.dumps(
+        {
+            **artifact_metadata(
+                config,
+                "independent-reviewer",
+                "review-output-aut-p0-027",
+                product_id,
+            ),
+            "task_id": task_id,
+            "subject_sha": "f" * 64,
+            "status": "accepted",
+            "acceptance_trace": [
+                {
+                    "criterion_id": "accept-review",
+                    "result": "PASS",
+                    "evidence_refs": ["strict://review/pass"],
+                }
+            ],
+            "findings": [],
+            "assumptions": [],
+            "evidence_refs": ["strict://review/pass"],
+        }
+    )
+
+
+def _release_proposal(config: Any, product_id: str, stage: str) -> str:
+    return json.dumps(
+        {
+            **artifact_metadata(
+                config,
+                "release-operator",
+                f"release-proposal-{stage}-aut-p0-027",
+                product_id,
+            ),
+            "status": "completed",
+            "repository": "brullik/aut-p0-027-private",
+            "candidate_sha": "c" * 40,
+            "merge": {"performed": False, "merge_sha": None},
+            "release": {
+                "version": "1.0.0",
+                "image_digest": "sha256:" + "d" * 64,
+            },
+            "staging": "deployed",
+            "production": "not_started",
+            "rollback": "not_tested",
+            "summary": f"Propose {stage}.",
+            "findings": [],
+            "evidence_refs": [f"strict://proposal/{stage}"],
+        }
+    )
+
+
+def _product_test_output(
+    config: Any,
+    product_id: str,
+    *,
+    environment: str,
+) -> str:
+    return json.dumps(
+        {
+            **artifact_metadata(
+                config,
+                "product-tester",
+                f"product-test-{environment}-aut-p0-027",
+                product_id,
+            ),
+            "release_digest": "sha256:" + "d" * 64,
+            "environment": environment,
+            "status": "accepted",
+            "journeys": [
+                {
+                    "journey_id": "critical-owner-journey",
+                    "result": "PASS",
+                    "evidence_refs": [
+                        f"strict://journey/{environment}/pass"
+                    ],
+                }
+            ],
+            "defects": [],
+            "improvements": [],
+            "release_blocked": False,
+            "summary": f"{environment} journey passed.",
+            "evidence_refs": [f"strict://product-test/{environment}"],
+        }
+    )
+
+
+def test_AUT_P0_027_real_service_path_completes_new_private_product(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    config.raw["telegram"]["allowed_user_ids"] = ["42"]
+    config.raw["controller"]["observation_seconds"] = 0
+    state = StateStore(config.database_path)
+    artifacts = ArtifactStore(config)
+    probe = MutableCapabilityProbe()
+    broker = CapabilityBroker(config, state, probe=probe)
+    capability_reconciler = CapabilityReconciler(
+        config,
+        state,
+        probe=probe,
+        ttl_seconds=0,
+        retry_seconds=0,
+    )
+    repository = RuntimeRepositoryAdapter()
+    runner = QueuedRuntimeRunner()
+    release = StrictLifecycleReleaseExecutor(config)
+    worker = AgentWorker(
+        config,
+        state,
+        runner=runner,
+        health_probe=lambda _: True,
+        repository_root=Path(__file__).resolve().parents[1],
+        release_executor=release,
+        repository_bootstrapper=RepositoryBootstrapper(
+            config,
+            state,
+            repository,
+        ),
+        worker_id="long-lived-runtime-worker",
+    )
+    telegram = RecordingTelegramApi()
+    gateway = TelegramGateway(
+        config,
+        state,
+        artifacts,
+        telegram,
+        capability_broker=broker,
+    )
+    try:
+        assert gateway.process_update(
+            {
+                "update_id": 27027,
+                "message": {
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": (
+                        "/idea Build and release a complete private runtime "
+                        "acceptance service"
+                    ),
+                },
+            }
+        )
+        assert telegram.messages
+        product = state.list_products()[0]
+        product_id = str(product["product_id"])
+        runner.outputs.extend(
+            [
+                product_contract(config, product_id),
+                requirements_package(config, product_id),
+                _architecture_output(config, product_id),
+            ]
+        )
+        for _ in range(3):
+            result = worker.run_once()
+            assert result is not None
+            assert result.status == "completed", (
+                result.reason_code,
+                result.detail,
+            )
+        task_specifier = next(
+            task
+            for task in state.list_tasks(product_id)
+            if task["role"] == "task-specifier"
+            and task["graph_status"] == "READY"
+        )
+        plan = _runtime_plan(
+            config,
+            state,
+            product_id=product_id,
+            root_task_id=str(task_specifier["task_id"]),
+        )
+        runner.outputs.extend(
+            [
+                json.dumps(plan),
+                _attempt_output(
+                    config,
+                    product_id,
+                    "T-AUT-P0-027-BUILDER",
+                ),
+                _test_output(
+                    config,
+                    product_id,
+                    "T-AUT-P0-027-TEST",
+                ),
+                _security_output(
+                    config,
+                    product_id,
+                    "T-AUT-P0-027-SECURITY",
+                ),
+                _review_output(
+                    config,
+                    product_id,
+                    "T-AUT-P0-027-REVIEW",
+                ),
+                _release_proposal(config, product_id, "staging"),
+                _product_test_output(
+                    config,
+                    product_id,
+                    environment="staging",
+                ),
+                _release_proposal(config, product_id, "production"),
+                _product_test_output(
+                    config,
+                    product_id,
+                    environment="production",
+                ),
+            ]
+        )
+        capability_reconciler.reconcile_once()
+        for _ in range(12):
+            if str(state.get_product(product_id)["status"]) == "COMPLETED":
+                break
+            result = worker.run_once()
+            assert result is not None
+            assert result.status == "completed", (
+                result.reason_code,
+                result.detail,
+            )
+        completed = state.get_product(product_id)
+        assert completed is not None
+        assert completed["status"] == "COMPLETED"
+        assert completed["repository_visibility"] == "private"
+        assert completed["completion_evidence_ref"]
+        assert [call[0] for call in repository.calls] == [
+            "create",
+            "clone",
+            "bootstrap",
+        ]
+        assert release.calls == [
+            "pull_request",
+            "checks",
+            "staging",
+            "merge",
+            "production",
+        ]
+        assert any(
+            task["stage_key"] == "observation"
+            and task["graph_status"] == "ACCEPTED"
+            for task in state.list_tasks(product_id)
+        )
+        assert not any(
+            event["event_type"] == "worker_restarted"
+            for event in state.events(product_id)
+        )
     finally:
         state.close()
 

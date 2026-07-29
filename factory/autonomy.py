@@ -118,6 +118,12 @@ CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+ALL_CAPABILITIES = frozenset(
+    capability
+    for capabilities in CAPABILITY_PROFILES.values()
+    for capability in capabilities
+)
+
 BUILTIN_CAPABILITIES = {
     capability
     for profile in (
@@ -129,6 +135,106 @@ BUILTIN_CAPABILITIES = {
     )
     for capability in CAPABILITY_PROFILES[profile]
 }
+
+_PLANNING_PROFILE_ROLES = {
+    "product-director",
+    "product-analyst",
+    "solution-architect",
+    "task-specifier",
+    "replanner",
+}
+_TEST_PROFILE_ROLES = {"test-engineer", "product-tester"}
+_REVIEW_PROFILE_ROLES = {"security-reviewer", "independent-reviewer"}
+_CONTROLLER_PROFILE_ROLES = {"incident-recovery", "controller-recovery"}
+_REPOSITORY_BOOTSTRAP_ROLES = {"repository-bootstrap", "repository_bootstrap"}
+
+
+def minimum_capability_profile(
+    role: str | None,
+    stage_key: str | None = None,
+    *,
+    requested_profile: str | None = None,
+) -> str:
+    """Return the controller-owned minimum profile for a task identity."""
+
+    normalized_role = str(role or "builder").strip().lower().replace("_", "-")
+    normalized_stage = str(stage_key or "").strip().lower().replace("_", "-")
+    if normalized_role in _PLANNING_PROFILE_ROLES:
+        return "planning_readonly"
+    if normalized_role in _CONTROLLER_PROFILE_ROLES:
+        return "controller_incident"
+    if normalized_role in _REPOSITORY_BOOTSTRAP_ROLES:
+        return "repository_bootstrap"
+    if normalized_role == "builder":
+        return "builder_workspace"
+    if normalized_role in _TEST_PROFILE_ROLES:
+        return "test_workspace"
+    if normalized_role in _REVIEW_PROFILE_ROLES:
+        return "reviewer_readonly"
+    if normalized_role == "release-operator":
+        if normalized_stage in {"release-production", "production"}:
+            return "release_production"
+        if normalized_stage in {"release-staging", "staging"}:
+            return "release_staging"
+        # Legacy controller-created release tasks predate canonical stage keys.
+        # Their persisted profile is accepted, but a canonical v2 plan must use
+        # a release stage key and is checked separately below.
+        if requested_profile in {"release_staging", "release_production"}:
+            return str(requested_profile)
+        raise ValueError("release-operator requires a canonical release stage")
+    return "builder_workspace"
+
+
+def validate_task_capability_contract(
+    *,
+    role: str | None,
+    stage_key: str | None,
+    capability_profile: str,
+    required_capabilities: list[str],
+    require_canonical_stage: bool = False,
+    coordinate: str = "task",
+) -> None:
+    """Reject profile downgrades and incomplete declarations before mutation."""
+
+    if capability_profile not in CAPABILITY_PROFILES:
+        raise ValueError(f"unknown capability profile: {capability_profile}")
+    normalized_role = str(role or "builder").strip().lower().replace("_", "-")
+    normalized_stage = str(stage_key or "").strip().lower().replace("_", "-")
+    if (
+        require_canonical_stage
+        and normalized_role == "release-operator"
+        and normalized_stage
+        not in {"release-staging", "staging", "release-production", "production"}
+    ):
+        raise ValueError(
+            f"{coordinate}.role release-operator requires release-staging "
+            "or release-production stage"
+        )
+    minimum = minimum_capability_profile(
+        role,
+        stage_key,
+        requested_profile=capability_profile,
+    )
+    if capability_profile != minimum:
+        raise ValueError(
+            f"{coordinate}.capability_profile cannot downgrade controller "
+            f"minimum {minimum}"
+        )
+    declared = {str(value) for value in required_capabilities}
+    unknown = declared - ALL_CAPABILITIES
+    if unknown:
+        raise ValueError(
+            f"{coordinate}.required_capabilities contains unknown capability: "
+            f"{min(unknown)}"
+        )
+    canonical = set(CAPABILITY_PROFILES[capability_profile])
+    omitted = sorted(canonical - declared)
+    if omitted:
+        raise ValueError(
+            f"{coordinate}.required_capabilities omits canonical capability: "
+            f"{omitted[0]}"
+        )
+
 
 OWNER_ACTION_REASONS = {
     "missing_credential",
@@ -536,11 +642,6 @@ class AutonomyStore:
         idempotency_keys: set[str] = set()
         acceptance_ids: set[str] = set()
         execution_roles: set[str] = set()
-        known_capabilities = {
-            capability
-            for capabilities in CAPABILITY_PROFILES.values()
-            for capability in capabilities
-        }
         for node_index, node in enumerate(nodes):
             if not isinstance(node, dict):
                 raise TypeError(
@@ -587,14 +688,25 @@ class AutonomyStore:
                 if isinstance(criterion, dict) and criterion.get("criterion_id"):
                     acceptance_ids.add(str(criterion["criterion_id"]))
             profile = str(contract.get("capability_profile", ""))
-            if profile not in CAPABILITY_PROFILES:
-                raise ValueError(f"unknown capability profile: {profile}")
             required = contract.get("required_capabilities", [])
-            if not isinstance(required, list) or any(
-                str(capability) not in known_capabilities
-                for capability in required
-            ):
-                raise ValueError("BacklogPlan contains an unknown capability")
+            if not isinstance(required, list):
+                raise TypeError(
+                    "BacklogPlan "
+                    f"nodes[{node_index}].task_contract.required_capabilities "
+                    "must be an array"
+                )
+            validate_task_capability_contract(
+                role=str(contract.get("role", "")),
+                stage_key=str(
+                    contract.get("stage_key")
+                    or contract.get("plan_node_id")
+                    or node_id
+                ),
+                capability_profile=profile,
+                required_capabilities=[str(value) for value in required],
+                require_canonical_stage=True,
+                coordinate=f"nodes[{node_index}].task_contract",
+            )
         if execution_roles.issubset(PLANNING_ONLY_ROLES):
             raise ValueError(
                 "BacklogPlan nodes must include a non-planning execution task"

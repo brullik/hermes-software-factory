@@ -830,6 +830,46 @@ def _migration_009_invalid_output_schema_incidents(
         )
 
 
+def _migration_010_durable_capability_reconciliation(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist sanitized probe results and durable capability blockers."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS capability_check_results (
+            product_id TEXT NOT NULL REFERENCES products(product_id),
+            capability TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            scope_json TEXT NOT NULL,
+            checked_at TEXT NOT NULL,
+            expires_at TEXT,
+            check_fingerprint TEXT NOT NULL,
+            PRIMARY KEY(product_id, capability)
+        );
+        CREATE TABLE IF NOT EXISTS capability_blocks (
+            block_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL REFERENCES products(product_id),
+            capability TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            status TEXT NOT NULL,
+            owner_action_ref TEXT,
+            failure_ref TEXT NOT NULL,
+            notification_outbox_id TEXT,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            UNIQUE(product_id, capability, reason_code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_capability_checks_due
+            ON capability_check_results(status, checked_at, product_id);
+        CREATE INDEX IF NOT EXISTS idx_capability_blocks_open
+            ON capability_blocks(product_id, status, capability);
+        """
+    )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -988,6 +1028,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         9,
         "invalid-output-schema-incident-resolution",
         _migration_009_invalid_output_schema_incidents,
+    ),
+    (
+        10,
+        "durable-capability-reconciliation",
+        _migration_010_durable_capability_reconciliation,
     ),
 )
 
