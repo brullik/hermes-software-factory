@@ -603,9 +603,33 @@ class FailureRouter:
 
     def route_open_failures(self, product_id: str) -> list[str]:
         failures = self.state.list_failures(product_id)
+        by_id = {
+            str(failure["failure_id"]): failure
+            for failure in failures
+        }
+        failures_with_live_descendants: set[str] = set()
+        for failure in failures:
+            if str(failure["status"]) == "RESOLVED":
+                continue
+            parent_id = str(failure.get("parent_failure_id") or "")
+            seen: set[str] = set()
+            while parent_id and parent_id not in seen:
+                seen.add(parent_id)
+                failures_with_live_descendants.add(parent_id)
+                parent = by_id.get(parent_id)
+                parent_id = (
+                    str(parent.get("parent_failure_id") or "")
+                    if parent is not None
+                    else ""
+                )
         routed: list[str] = []
         for failure in failures:
             if str(failure["status"]) != "OPEN":
+                continue
+            if str(failure["failure_id"]) in failures_with_live_descendants:
+                # Only a causal leaf may create recovery work. Its unresolved
+                # ancestors remain durable for audit and are closed atomically
+                # when the leaf's recovery succeeds.
                 continue
             task = self.state.get_task(str(failure["task_id"]))
             if (

@@ -576,6 +576,104 @@ def _migration_006_resolved_failure_lineage(
     )
 
 
+def _migration_007_causal_leaf_recovery(
+    connection: sqlite3.Connection,
+) -> None:
+    """Supersede recovery branches shadowed by a live causal descendant."""
+
+    active_statuses = (
+        "DRAFT",
+        "BLOCKED_DEPENDENCY",
+        "BLOCKED_CAPABILITY",
+        "READY",
+        "CLAIMED",
+        "WAITING_TIME",
+        "WAITING_EXTERNAL",
+    )
+    placeholders = ",".join("?" for _ in active_statuses)
+    rows = connection.execute(
+        f"""
+        WITH RECURSIVE ancestry(
+            ancestor_failure_id,
+            descendant_failure_id
+        ) AS (
+            SELECT parent_failure_id, failure_id
+              FROM failures
+             WHERE parent_failure_id IS NOT NULL
+            UNION
+            SELECT parent.parent_failure_id,
+                   ancestry.descendant_failure_id
+              FROM failures AS parent
+              JOIN ancestry
+                ON parent.failure_id=ancestry.ancestor_failure_id
+             WHERE parent.parent_failure_id IS NOT NULL
+        )
+        SELECT DISTINCT ancestor.task_id,
+               ancestor.product_id,
+               descendant.task_id
+          FROM tasks AS ancestor
+          JOIN ancestry
+            ON ancestry.ancestor_failure_id=ancestor.failure_id
+          JOIN tasks AS descendant
+            ON descendant.failure_id=ancestry.descendant_failure_id
+           AND descendant.product_id=ancestor.product_id
+         WHERE ancestor.graph_status IN ({placeholders})
+           AND descendant.graph_status IN ({placeholders})
+        ORDER BY ancestor.product_id, ancestor.created_at, ancestor.task_id
+        """,
+        (*active_statuses, *active_statuses),
+    ).fetchall()
+    if not rows:
+        return
+    now = utc_now()
+    by_product: dict[str, list[tuple[str, str]]] = {}
+    for row in rows:
+        task_id = str(row[0])
+        product_id = str(row[1])
+        descendant_task_id = str(row[2])
+        by_product.setdefault(product_id, []).append(
+            (task_id, descendant_task_id)
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+               SET status='DONE', graph_status='SUPERSEDED',
+                   lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                   heartbeat_at=NULL, available_at=NULL,
+                   blocked_reason='causal_leaf_superseded',
+                   blocked_ref=?, updated_at=?
+             WHERE task_id=?
+               AND graph_status NOT IN
+                   ('ACCEPTED','CANCELLED','SUPERSEDED')
+            """,
+            (descendant_task_id, now, task_id),
+        )
+    for product_id, pairs in by_product.items():
+        superseded = sorted({task_id for task_id, _ in pairs})
+        survivors = sorted({descendant for _, descendant in pairs})
+        connection.execute(
+            """
+            INSERT INTO events
+                (product_id, task_id, event_type, payload_json, created_at)
+            VALUES (?, ?, 'causal_recovery_deduplicated', ?, ?)
+            """,
+            (
+                product_id,
+                superseded[0],
+                json.dumps(
+                    {
+                        "superseded_task_ids": superseded,
+                        "surviving_descendant_task_ids": survivors,
+                        "reason_code": "causal_leaf_only",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -719,6 +817,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         6,
         "resolved-failure-lineage-recovery",
         _migration_006_resolved_failure_lineage,
+    ),
+    (
+        7,
+        "causal-leaf-recovery-deduplication",
+        _migration_007_causal_leaf_recovery,
     ),
 )
 

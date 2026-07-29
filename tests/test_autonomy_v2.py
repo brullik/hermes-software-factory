@@ -664,6 +664,73 @@ def test_AUT_P0_006_retryable_in_place_repair_is_not_double_routed(
         state.close()
 
 
+def test_AUT_P0_006_only_causal_leaf_failure_creates_recovery_work(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, parent_failure_id, _ = failed_two_node_graph(
+        tmp_path
+    )
+    child_failure_id = "failure-causal-leaf"
+    now = "2026-07-29T00:00:01Z"
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                """
+                INSERT INTO failures
+                    (failure_id, product_id, task_id, parent_failure_id,
+                     failure_class, reason_code, fingerprint, safe_message,
+                     evidence_ref, status, retryable,
+                     owner_action_eligible, expected_json, actual_json,
+                     failed_gate_ids_json, first_seen_at, last_seen_at)
+                VALUES (?, 'product-autonomy', 'T-FAILNODEA', ?,
+                        'semantic', 'needs_replan', ?,
+                        'The terminal repair needs a new executable plan.',
+                        'internal://causal-leaf', 'OPEN', 0, 0,
+                        '{}', '{}', '[]', ?, ?)
+                """,
+                (
+                    child_failure_id,
+                    parent_failure_id,
+                    sha256_text(child_failure_id),
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                "UPDATE tasks SET failure_id=? WHERE task_id='T-FAILNODEA'",
+                (child_failure_id,),
+            )
+
+        routed = FailureRouter(
+            config,
+            state,
+            artifacts,
+        ).route_open_failures("product-autonomy")
+
+        assert len(routed) == 1
+        recovery = state.get_task(routed[0])
+        assert recovery is not None
+        assert recovery["failure_id"] == child_failure_id
+        assert recovery["role"] == "replanner"
+        failures = {
+            failure["failure_id"]: failure["status"]
+            for failure in state.list_failures("product-autonomy")
+        }
+        assert failures[parent_failure_id] == "OPEN"
+        assert failures[child_failure_id] == "ROUTED"
+        assert len(
+            [
+                task
+                for task in state.list_tasks("product-autonomy")
+                if task["failure_id"]
+                in {parent_failure_id, child_failure_id}
+                and task["graph_status"] in {"READY", "CLAIMED"}
+            ]
+        ) == 1
+    finally:
+        state.close()
+
+
 def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
     tmp_path: Path,
 ) -> None:
@@ -1305,7 +1372,7 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3, 4, 5, 6]
+        assert versions == [1, 2, 3, 4, 5, 6, 7]
         assert database.with_suffix(
             database.suffix + ".pre-autonomy-v2.bak"
         ).is_file()
@@ -1544,7 +1611,7 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5, 6]
+        assert versions == [1, 2, 3, 4, 5, 6, 7]
     finally:
         restarted.close()
 
@@ -1650,6 +1717,106 @@ def test_AUT_P0_019_failure_lineage_migration_closes_proven_ancestors(
         restarted.close()
 
 
+def test_AUT_P0_019_causal_leaf_migration_supersedes_duplicate_recovery(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-autonomy"
+    now = "2026-07-29T00:00:00Z"
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-CAUSAL-PARENT-RECOVERY",
+            product_id=product_id,
+            title="Recovery for parent failure",
+            role="replanner",
+            failure_id="failure-causal-parent",
+        )
+        state.add_task(
+            task_id="T-CAUSAL-LEAF-RECOVERY",
+            product_id=product_id,
+            title="Recovery for leaf failure",
+            role="replanner",
+            failure_id="failure-causal-leaf",
+        )
+        with state._lock, state._connection:
+            for values in (
+                (
+                    "failure-causal-parent",
+                    "T-CAUSAL-PARENT-RECOVERY",
+                    None,
+                ),
+                (
+                    "failure-causal-leaf",
+                    "T-CAUSAL-LEAF-RECOVERY",
+                    "failure-causal-parent",
+                ),
+            ):
+                state._connection.execute(
+                    """
+                    INSERT INTO failures
+                        (failure_id, product_id, task_id, parent_failure_id,
+                         failure_class, reason_code, fingerprint, safe_message,
+                         evidence_ref, status, retryable,
+                         owner_action_eligible, expected_json, actual_json,
+                         failed_gate_ids_json, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, 'semantic', 'schema_validation', ?,
+                            'safe causal diagnostic', 'internal://causal',
+                            'ROUTED', 0, 0, '{}', '{}', '[]', ?, ?)
+                    """,
+                    (
+                        values[0],
+                        product_id,
+                        values[1],
+                        values[2],
+                        sha256_text(str(values)),
+                        now,
+                        now,
+                    ),
+                )
+            state._connection.execute(
+                "DELETE FROM schema_migrations WHERE version=7"
+            )
+    finally:
+        state.close()
+
+    restarted = StateStore(config.database_path)
+    try:
+        parent = restarted.get_task("T-CAUSAL-PARENT-RECOVERY")
+        leaf = restarted.get_task("T-CAUSAL-LEAF-RECOVERY")
+        assert parent is not None and leaf is not None
+        assert parent["graph_status"] == "SUPERSEDED"
+        assert parent["blocked_reason"] == "causal_leaf_superseded"
+        assert parent["blocked_ref"] == leaf["task_id"]
+        assert leaf["graph_status"] == "READY"
+        assert {
+            failure["status"]
+            for failure in restarted.list_failures(product_id)
+        } == {"ROUTED"}
+        event = next(
+            event
+            for event in restarted.events(product_id)
+            if event["event_type"] == "causal_recovery_deduplicated"
+        )
+        payload = json.loads(event["payload_json"])
+        assert payload["superseded_task_ids"] == [
+            "T-CAUSAL-PARENT-RECOVERY"
+        ]
+        assert payload["surviving_descendant_task_ids"] == [
+            "T-CAUSAL-LEAF-RECOVERY"
+        ]
+        versions = [
+            int(row[0])
+            for row in restarted._connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+        ]
+        assert versions == [1, 2, 3, 4, 5, 6, 7]
+    finally:
+        restarted.close()
+
+
 def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
     tmp_path: Path,
 ) -> None:
@@ -1722,7 +1889,7 @@ def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
         ]
     finally:
         verified.close()
-    assert versions == [1, 2, 3, 4, 5, 6]
+    assert versions == [1, 2, 3, 4, 5, 6, 7]
 
 
 def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(
