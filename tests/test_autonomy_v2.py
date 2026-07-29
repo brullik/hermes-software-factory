@@ -299,6 +299,70 @@ def test_AUT_P0_001_v2_intake_persists_products_beyond_execution_capacity(
         state.close()
 
 
+def test_AUT_P0_001_scheduler_rotates_products_before_task_priority(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=1,
+        max_active_products=1,
+    )
+    artifacts = ArtifactStore(config)
+    try:
+        service = IntakeService(config, state, artifacts)
+        first = service.submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Build the repeatedly repairing private service",
+            delivery_mode="new_repository",
+            repository_name="repairing-service",
+            idempotency_key="fair-scheduler-first",
+        )
+        second = service.submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Build the independently queued private service",
+            delivery_mode="new_repository",
+            repository_name="independent-service",
+            idempotency_key="fair-scheduler-second",
+        )
+
+        first_claim = state.claim_task(worker_id="worker-a")
+        assert first_claim is not None
+        assert first_claim["product_id"] == first.product_id
+        state.complete_task(str(first_claim["task_id"]), "worker-a")
+        PipelineCoordinator(config, state, artifacts).create_task(
+            first.product_id,
+            "builder-core",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET priority=1000 "
+                "WHERE product_id=? AND role='builder' AND status='PENDING'",
+                (first.product_id,),
+            )
+
+        rotated = state.claim_task(worker_id="worker-b")
+
+        assert rotated is not None
+        assert rotated["product_id"] == second.product_id
+        assert int(
+            state._connection.execute(
+                "SELECT priority FROM tasks "
+                "WHERE product_id=? AND role='builder' AND status='PENDING'",
+                (first.product_id,),
+            ).fetchone()[0]
+        ) == 1000
+        state.complete_task(str(rotated["task_id"]), "worker-b")
+        resumed = state.claim_task(worker_id="worker-c")
+        assert resumed is not None
+        assert resumed["product_id"] == first.product_id
+        assert resumed["role"] == "builder"
+    finally:
+        state.close()
+
+
 class FakeRepositoryAdapter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []

@@ -2099,6 +2099,14 @@ class WorkerTests(unittest.TestCase):
                 cycle=3,
             )
             superseded_id = str(json.loads(superseded_path.read_text(encoding="utf-8"))["task_id"])
+            claimed_fair_turn = state.claim_task(worker_id="deferred-test-worker")
+            self.assertIsNotNone(claimed_fair_turn)
+            assert claimed_fair_turn is not None
+            self.assertEqual(claimed_fair_turn["task_id"], test_id)
+            state.complete_task(
+                test_id,
+                "deferred-test-worker",
+            )
             claimed_superseded = state.claim_task(worker_id="superseded-builder-worker")
             self.assertIsNotNone(claimed_superseded)
             assert claimed_superseded is not None

@@ -761,11 +761,19 @@ class StateStore:
                     """SELECT tasks.* FROM tasks
                        JOIN products ON products.product_id = tasks.product_id
                        JOIN plans ON plans.plan_id=tasks.plan_id
+                       LEFT JOIN (
+                           SELECT product_id, MAX(rowid) AS last_claimed_sequence
+                             FROM events
+                            WHERE event_type='task_claimed'
+                            GROUP BY product_id
+                       ) AS scheduling
+                         ON scheduling.product_id=tasks.product_id
                        WHERE tasks.graph_status='READY'
                          AND tasks.status='PENDING'
                          AND plans.status='ACTIVE'
                          AND products.status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED_SAFE', 'PAUSED')
-                       ORDER BY tasks.priority DESC, tasks.critical_path_rank,
+                       ORDER BY COALESCE(scheduling.last_claimed_sequence, 0),
+                                tasks.priority DESC, tasks.critical_path_rank,
                                 tasks.created_at, tasks.rowid"""
                 ).fetchall()
                 claimed_rows = self._connection.execute(
