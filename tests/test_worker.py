@@ -808,6 +808,18 @@ class WorkerTests(unittest.TestCase):
                 "capability_profile=release_production",
                 identity_decision,
             )
+            self.assertIn(
+                "Use a new plan_id for every proposed immutable revision",
+                identity_decision,
+            )
+            self.assertIn(
+                "Every idempotency_key must be exactly 64 lowercase hexadecimal",
+                identity_decision,
+            )
+            self.assertIn(
+                "Every mandatory goal acceptance_ids list must be non-empty",
+                identity_decision,
+            )
 
             result = worker.run_once()
 

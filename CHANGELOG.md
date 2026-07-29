@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.23 - 2026-07-29
+
+- Add explicit immutable identity invariants to Task Specifier and Replanner
+  context: fresh plan and task IDs, unique 64-hex idempotency keys, and no
+  reuse of identities present in supplied context or failure evidence.
+- Require planning agents to keep every acceptance criterion unique and trace
+  each mandatory goal only to acceptance IDs that exist in proposed nodes.
+
 ## 2.1.22 - 2026-07-29
 
 - Give Task Specifier and Replanner the controller-owned executable identity
