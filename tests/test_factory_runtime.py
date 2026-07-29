@@ -529,6 +529,103 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertTrue(second.path.is_dir())
             self.assertFalse((second.path / ".lease.json").exists())
 
+    def test_persistent_workspace_reclaims_only_durably_stale_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active_leases = {("product", "builder", "worker-a")}
+
+            def initialize(_product_id: str, destination: Path) -> None:
+                destination.mkdir(parents=True)
+                (destination / "README.md").write_text(
+                    "target repository\n",
+                    encoding="utf-8",
+                )
+
+            manager = WorkspaceManager(
+                root / "worktrees",
+                persistent=True,
+                initializer=initialize,
+                lease_is_active=lambda product_id, task_id, worker_id: (
+                    product_id,
+                    task_id,
+                    worker_id,
+                )
+                in active_leases,
+            )
+            first = manager.acquire(
+                product_id="product",
+                task_id="builder",
+                worker_id="worker-a",
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "workspace already leased",
+            ):
+                manager.acquire(
+                    product_id="product",
+                    task_id="tests",
+                    worker_id="worker-b",
+                )
+
+            active_leases.clear()
+            second = manager.acquire(
+                product_id="product",
+                task_id="tests",
+                worker_id="worker-b",
+            )
+
+            self.assertEqual(second.path, first.path)
+            self.assertNotEqual(second.lease_id, first.lease_id)
+            manager.release(second)
+
+    def test_workspace_marker_activity_uses_durable_task_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = _make_config(Path(directory))
+            state = StateStore(config.database_path)
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="test",
+                idea="test durable workspace lease",
+                idempotency_key="workspace-lease",
+            )
+            state.add_task(
+                task_id="builder",
+                product_id="product",
+                title="Build",
+                role="builder",
+                stage_key="builder-core",
+            )
+            claimed = state.claim_task(worker_id="worker-a", lease_seconds=300)
+            self.assertIsNotNone(claimed)
+            self.assertTrue(
+                state.workspace_lease_is_active(
+                    "product",
+                    "builder",
+                    "worker-a",
+                )
+            )
+            self.assertFalse(
+                state.workspace_lease_is_active(
+                    "product",
+                    "builder",
+                    "worker-b",
+                )
+            )
+            with state._lock, state._connection:
+                state._connection.execute(
+                    "UPDATE tasks SET lease_until='2000-01-01T00:00:00Z' "
+                    "WHERE task_id='builder'"
+                )
+            self.assertFalse(
+                state.workspace_lease_is_active(
+                    "product",
+                    "builder",
+                    "worker-a",
+                )
+            )
+            state.close()
+
     def test_external_boundaries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = _make_config(Path(directory) / "state")

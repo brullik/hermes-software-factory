@@ -861,6 +861,28 @@ class StateStore:
                 self._connection.rollback()
                 raise
 
+    def workspace_lease_is_active(
+        self,
+        product_id: str,
+        task_id: str,
+        worker_id: str,
+    ) -> bool:
+        """Use the durable task lease as the authority for a workspace marker."""
+
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT 1
+                  FROM tasks
+                 WHERE product_id=? AND task_id=?
+                   AND status='CLAIMED' AND graph_status='CLAIMED'
+                   AND lease_owner=? AND lease_until IS NOT NULL
+                   AND lease_until>=?
+                """,
+                (product_id, task_id, worker_id, utc_now()),
+            ).fetchone()
+            return row is not None
+
     def heartbeat(self, task_id: str, worker_id: str, lease_seconds: int = 300) -> None:
         with self._lock, self._connection:
             updated = self._connection.execute(

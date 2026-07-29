@@ -35,6 +35,7 @@ class WorkspaceLease:
 
 
 WorkspaceInitializer = Callable[[str, Path], None]
+WorkspaceLeaseActivityProbe = Callable[[str, str, str], bool]
 
 
 class WorkspaceManager:
@@ -45,11 +46,13 @@ class WorkspaceManager:
         source_root: Path | None = None,
         persistent: bool = False,
         initializer: WorkspaceInitializer | None = None,
+        lease_is_active: WorkspaceLeaseActivityProbe | None = None,
     ) -> None:
         self.root = root.resolve()
         self.source_root = source_root.resolve() if source_root is not None else None
         self.persistent = persistent
         self.initializer = initializer
+        self.lease_is_active = lease_is_active
         if initializer is not None and source_root is not None:
             raise ValueError("workspace initializer and source root are mutually exclusive")
         if self.source_root == self.root:
@@ -91,8 +94,24 @@ class WorkspaceManager:
         if marker.exists():
             data = json.loads(marker.read_text(encoding="utf-8"))
             if data.get("worker_id") != worker_id or data.get("task_id") != task_id:
-                raise RuntimeError("workspace already leased by another worker")
-            return WorkspaceLease(str(data["lease_id"]), task_id, worker_id, path)
+                marker_task_id = str(data.get("task_id") or "")
+                marker_worker_id = str(data.get("worker_id") or "")
+                stale = (
+                    self.persistent
+                    and self.lease_is_active is not None
+                    and marker_task_id
+                    and marker_worker_id
+                    and not self.lease_is_active(
+                        product_id,
+                        marker_task_id,
+                        marker_worker_id,
+                    )
+                )
+                if not stale:
+                    raise RuntimeError("workspace already leased by another worker")
+                marker.unlink()
+            else:
+                return WorkspaceLease(str(data["lease_id"]), task_id, worker_id, path)
         lease = WorkspaceLease(new_id("lease"), task_id, worker_id, path)
         marker.write_text(
             json.dumps({"lease_id": lease.lease_id, "task_id": task_id, "worker_id": worker_id, "created_at": utc_now()}) + "\n",
