@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -203,6 +204,142 @@ def product_contract(config: FactoryConfig, product_id: str) -> str:
     artifact["status"] = "completed"
     artifact["created_at"] = "2026-01-01T00:00:00Z"
     return json.dumps(artifact, ensure_ascii=False)
+
+
+def replanner_task_contract(
+    config: FactoryConfig,
+    product_id: str,
+    task_id: str,
+) -> dict[str, Any]:
+    plan_id = f"PLAN-SYSTEM-{sha256_text(product_id)[:16].upper()}"
+    return {
+        "schema_version": "2.0",
+        "artifact_id": f"task-contract-{task_id}",
+        "product_id": product_id,
+        "task_id": task_id,
+        "root_task_id": task_id,
+        "parent_task_id": None,
+        "source_task_id": task_id,
+        "plan_id": plan_id,
+        "plan_node_id": "replanner",
+        "task_revision": 1,
+        "root_context_ref": f"evidence/intake-{product_id}.json",
+        "active_context_ref": f"evidence/task-{task_id}.json",
+        "failure_id": None,
+        "hypothesis_id": None,
+        "supersedes_task_id": None,
+        "title": "Replan the product graph",
+        "objective": "Create a corrected executable product graph revision",
+        "role": "replanner",
+        "output_schema": "backlog-plan-v2.schema.json",
+        "dependencies": [],
+        "conflict_keys": [f"{product_id}:planning"],
+        "acceptance": [
+            {
+                "criterion_id": "accept-replan",
+                "verification": "The corrected graph passes semantic validation",
+                "mandatory": True,
+            }
+        ],
+        "required_capabilities": [
+            "artifact.read",
+            "artifact.write",
+            "repository.read_bounded",
+            "state.read",
+            "plan.propose",
+        ],
+        "capability_profile": "planning_readonly",
+        "allowed_paths": ["artifacts/**"],
+        "forbidden_paths": ["secrets/**"],
+        "risk_tier": "medium",
+        "model_floor": "luna",
+        "idempotency_key": sha256_text(f"replanner:{product_id}:{task_id}"),
+        "status": "READY",
+        "priority": 100,
+        "critical_path_rank": 0,
+    }
+
+
+def backlog_plan_with_missing_edge(
+    config: FactoryConfig,
+    product_id: str,
+    replanner_task_id: str,
+) -> dict[str, Any]:
+    plan_id = "PLAN-SEMANTIC-REPAIR"
+    child_task_id = "T-SEMANTIC-CHILD"
+    child_contract = {
+        **replanner_task_contract(config, product_id, child_task_id),
+        "artifact_id": f"task-contract-{child_task_id}",
+        "root_task_id": replanner_task_id,
+        "parent_task_id": replanner_task_id,
+        "source_task_id": replanner_task_id,
+        "plan_id": plan_id,
+        "plan_node_id": "node-a",
+        "title": "Implement the corrected node",
+        "objective": "Implement and verify the corrected product behavior",
+        "role": "builder",
+        "output_schema": "attempt-result.schema.json",
+        "conflict_keys": [f"{product_id}:src"],
+        "required_capabilities": [
+            "artifact.read",
+            "artifact.write",
+            "repository.read",
+            "repository.write_scoped",
+            "command.execute_allowlisted",
+            "test.execute",
+        ],
+        "capability_profile": "builder_workspace",
+        "allowed_paths": ["src/**"],
+        "idempotency_key": sha256_text(
+            f"{plan_id}:node-a:{child_task_id}"
+        ),
+        "priority": 50,
+    }
+    return {
+        "schema_version": "2.0",
+        "artifact_id": "backlog-plan-semantic-repair",
+        "product_id": product_id,
+        "created_at": "2026-07-29T00:00:00Z",
+        "producer": {
+            "role": "replanner",
+            "tier": "luna",
+            "provider": "openai_codex_subscription",
+            "model": "gpt-5.6-luna",
+        },
+        "policy_digest": policy_digest(config),
+        "status": "completed",
+        "plan_id": plan_id,
+        "revision": 1,
+        "parent_plan_id": None,
+        "source_failure_id": None,
+        "goals": [
+            {
+                "goal_id": "root-goal",
+                "statement": "Deliver the corrected product",
+                "mandatory": True,
+                "acceptance_ids": ["accept-replan"],
+            }
+        ],
+        "nodes": [
+            {
+                "node_id": "node-a",
+                "mandatory": True,
+                "task_contract": child_contract,
+            }
+        ],
+        "edges": [
+            {
+                "from": "node-a",
+                "to": "missing-node",
+                "edge_type": "depends_on",
+                "required": True,
+            }
+        ],
+        "completion_criteria": [
+            "The mandatory corrected node has immutable PASS evidence"
+        ],
+        "summary": "A schema-valid plan with one missing semantic edge endpoint",
+    }
 
 
 def requirements_package(config: FactoryConfig, product_id: str) -> str:
@@ -556,6 +693,183 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(failure["stack_fingerprint"])
             actual = json.loads(str(failure["actual_json"]))
             self.assertIn("traceback_excerpt", actual)
+            state.close()
+
+    def test_semantic_backlog_error_schedules_exact_repair_without_worker_crash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            product_id = "P-SEMANTIC-PLAN"
+            task_id = "T-SEMANTIC-REPLANNER"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Repair a semantically invalid BacklogPlan",
+                idempotency_key="semantic-plan-product",
+            )
+            task_contract = replanner_task_contract(
+                config,
+                product_id,
+                task_id,
+            )
+            contract_path = artifacts.write(
+                "task-contract-v2.schema.json",
+                task_contract,
+                filename=f"task-{task_id}.json",
+            )
+            state.add_task(
+                task_id=task_id,
+                product_id=product_id,
+                title=str(task_contract["title"]),
+                role="replanner",
+                output_schema="backlog-plan-v2.schema.json",
+                contract_ref=f"evidence/{contract_path.name}",
+                conflict_keys=[f"{product_id}:planning"],
+                priority=100,
+                capability_profile="planning_readonly",
+                idempotency_key=str(task_contract["idempotency_key"]),
+                required_capabilities=[
+                    str(value)
+                    for value in task_contract["required_capabilities"]
+                ],
+            )
+            plan = backlog_plan_with_missing_edge(
+                config,
+                product_id,
+                task_id,
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(plan)),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "repair_scheduled")
+            self.assertEqual(result.reason_code, "schema_validation")
+            durable = state.get_task(task_id)
+            self.assertIsNotNone(durable)
+            assert durable is not None
+            self.assertEqual(durable["status"], "PENDING")
+            self.assertEqual(durable["graph_status"], "READY")
+            self.assertEqual(durable["next_attempt_kind"], "repair")
+            self.assertTrue(durable["repair_context_ref"])
+            repair = json.loads(
+                next(
+                    config.evidence_dir.glob(
+                        f"repair-brief-{task_id}-*.json"
+                    )
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                repair["failed_gate_ids"],
+                ["BACKLOG_PLAN_SEMANTIC_VALIDATION"],
+            )
+            self.assertIn(
+                "BacklogPlan edges[0].to endpoint is missing",
+                repair["expected_vs_actual"]["actual"],
+            )
+            diagnostic = json.loads(
+                next(
+                    config.evidence_dir.glob(
+                        "transport-diagnostic-*.json"
+                    )
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                diagnostic["parser_error_safe_message"],
+                "BacklogPlan edges[0].to endpoint is missing",
+            )
+            self.assertEqual(len(state.list_tasks(product_id)), 1)
+            self.assertFalse(
+                (
+                    config.evidence_dir
+                    / "task-T-SEMANTIC-CHILD.json"
+                ).exists()
+            )
+            state.close()
+
+    def test_outcome_commit_integrity_error_becomes_controller_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Persist a controller failure instead of crashing",
+            )
+            original_commit = state.commit_task_outcome
+            commit_calls = 0
+
+            def fail_first_commit(outcome: object) -> object:
+                nonlocal commit_calls
+                commit_calls += 1
+                if commit_calls == 1:
+                    raise sqlite3.IntegrityError(
+                        "UNIQUE constraint failed: tasks.idempotency_key"
+                    )
+                return original_commit(outcome)
+
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(
+                    product_contract(config, intake_result.product_id)
+                ),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            with patch.object(
+                state,
+                "commit_task_outcome",
+                side_effect=fail_first_commit,
+            ):
+                result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(
+                result.reason_code,
+                "controller_exception_integrity_error",
+            )
+            self.assertEqual(commit_calls, 2)
+            task = state.list_tasks(intake_result.product_id)[0]
+            self.assertEqual(task["status"], "FAILED_SAFE")
+            self.assertEqual(task["graph_status"], "FAILED_SEMANTIC")
+            failure = state.list_failures(intake_result.product_id)[-1]
+            self.assertEqual(failure["failure_class"], "controller")
+            self.assertEqual(
+                failure["reason_code"],
+                "controller_exception_integrity_error",
+            )
+            self.assertEqual(failure["exception_type"], "IntegrityError")
             state.close()
 
     def test_malformed_transport_is_requeued_at_same_tier_and_can_resume(self) -> None:

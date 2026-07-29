@@ -16,6 +16,7 @@
     "safe_head",
     "safe_tail",
     "parser_error_type",
+    "parser_error_safe_message",
     "redactions",
     "provider",
     "model",
@@ -34,6 +35,7 @@
     "safe_head": {"type": "string", "maxLength": 2000},
     "safe_tail": {"type": "string", "maxLength": 2000},
     "parser_error_type": {"type": "string", "minLength": 1},
+    "parser_error_safe_message": {"type": "string", "minLength": 1, "maxLength": 1000},
     "redactions": {
       "type": "array",
       "items": {

@@ -6,7 +6,7 @@ Source requirements:
 
 - package: `hermes_autonomy_fix_pack.zip`
 - SHA-256: `43CB5DC4E5DE987A07D6E3725F1BE2E3B5F6BB0B3290B32920D62F1CF35359C3`
-- target release: `2.1.3`
+- target release: `2.1.4`
 
 ## Required acceptance matrix
 
@@ -18,10 +18,13 @@ Source requirements:
 | AUT-P1-001..010 | before production-ready | PASS | `tests/test_autonomy_v2_e2e.py`; durable state and restart assertions included |
 | Cross-product conflict isolation | yes | PASS | AUT-P1-001 uses the same conflict key in two products while preserving same-product serialization |
 | Persistent workspace claim isolation | yes | PASS | AUT-P1-001 proves one CLAIMED task per product while a second product continues concurrently |
+| Concurrent migration startup | yes | PASS | AUT-P0-019 deterministically holds the writer lock while another process starts and proves post-lock version recheck |
+| Semantic plan precommit validation | yes | PASS | Worker regression proves exact safe edge coordinates schedule bounded repair; identity regression proves existing idempotency keys are rejected before mutation |
+| Outcome commit failure boundary | yes | PASS | Injected SQLite integrity error becomes a durable controller failure without process escape or partial successor ingestion |
 | In-place retry routing exclusivity | yes | PASS | `test_AUT_P0_006_retryable_in_place_repair_is_not_double_routed` proves one causal path and failure resolution |
 | Architecture anti-pattern assertions | yes | PASS | `tests/test_autonomy_v2_e2e.py::test_AUT_ARCH_001_canonical_v2_path_excludes_legacy_heuristics` |
 | Legacy 2.0.19 migration | yes | PASS | deterministic fixture SHA-256 `B6E1FE06EBC4DA35376D0640249B13D1ED66D23353C3BAAC875A9518CBE88736`; AUT-P0-019 verifies URL-only repository binding in v4 and bounded workspace-collision recovery in v5 |
-| Full existing suite | yes | PASS | 190 tests; `.venv\Scripts\python.exe -m pytest -q --tb=short` |
+| Full existing suite | yes | PASS | 194 tests; `.venv\Scripts\python.exe -m pytest -q --tb=short` |
 | Static lint | yes | PASS | `.venv\Scripts\python.exe -m ruff check factory scripts tests pilot` |
 | Type checking | yes | PASS | 60 source files; `.venv\Scripts\python.exe -m mypy factory scripts pilot` |
 | Schema/package validation | yes | PASS | `.venv\Scripts\python.exe scripts\validate_package.py` |

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.1.4 - 2026-07-29
+
+- Concurrent service startup now rechecks each migration after acquiring the
+  SQLite writer lock, preventing a stale pre-lock snapshot from inserting the
+  same migration version twice.
+- BacklogPlan semantic identities and edge endpoints are validated before
+  outcome commit. Safe diagnostics include the exact validator coordinate and
+  schedule a bounded repair instead of crashing the worker process.
+- Unexpected atomic outcome-commit failures are persisted as controller
+  failures with redacted diagnostics and no partial plan mutation.
+
 ## 2.1.3 - 2026-07-29
 
 - Task claiming is serialized per product because each product owns one persistent,

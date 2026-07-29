@@ -522,22 +522,43 @@ class AutonomyStore:
         if not isinstance(edges, list):
             raise TypeError("BacklogPlan v2 edges must be an array")
         node_ids: list[str] = []
+        task_ids: set[str] = set()
+        idempotency_keys: set[str] = set()
         acceptance_ids: set[str] = set()
         known_capabilities = {
             capability
             for capabilities in CAPABILITY_PROFILES.values()
             for capability in capabilities
         }
-        for node in nodes:
+        for node_index, node in enumerate(nodes):
             if not isinstance(node, dict):
-                raise TypeError("BacklogPlan node must be an object")
+                raise TypeError(
+                    f"BacklogPlan nodes[{node_index}] must be an object"
+                )
             node_id = str(node.get("node_id", ""))
             contract = node.get("task_contract")
             if not node_id or not isinstance(contract, dict):
-                raise ValueError("BacklogPlan node requires node_id and task_contract")
+                raise ValueError(
+                    f"BacklogPlan nodes[{node_index}] requires node_id and task_contract"
+                )
             if node_id in node_ids:
-                raise ValueError(f"duplicate plan node: {node_id}")
+                raise ValueError(
+                    f"BacklogPlan nodes[{node_index}].node_id is duplicated"
+                )
             node_ids.append(node_id)
+            task_id = str(contract.get("task_id", ""))
+            if task_id in task_ids:
+                raise ValueError(
+                    f"BacklogPlan nodes[{node_index}].task_contract.task_id is duplicated"
+                )
+            task_ids.add(task_id)
+            idempotency_key = str(contract.get("idempotency_key", ""))
+            if idempotency_key in idempotency_keys:
+                raise ValueError(
+                    "BacklogPlan "
+                    f"nodes[{node_index}].task_contract.idempotency_key is duplicated"
+                )
+            idempotency_keys.add(idempotency_key)
             for criterion in contract.get("acceptance", []):
                 if isinstance(criterion, dict) and criterion.get("criterion_id"):
                     acceptance_ids.add(str(criterion["criterion_id"]))
@@ -565,13 +586,24 @@ class AutonomyStore:
                 )
         adjacency: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
         indegree = {node_id: 0 for node_id in node_ids}
-        for edge in edges:
+        for edge_index, edge in enumerate(edges):
             if not isinstance(edge, dict):
-                raise TypeError("BacklogPlan edge must be an object")
+                raise TypeError(
+                    f"BacklogPlan edges[{edge_index}] must be an object"
+                )
             source = str(edge.get("from", ""))
             target = str(edge.get("to", ""))
             if source not in adjacency or target not in adjacency:
-                raise ValueError("BacklogPlan edge endpoint is missing")
+                missing = (
+                    "from and to"
+                    if source not in adjacency and target not in adjacency
+                    else "from"
+                    if source not in adjacency
+                    else "to"
+                )
+                raise ValueError(
+                    f"BacklogPlan edges[{edge_index}].{missing} endpoint is missing"
+                )
             adjacency[source].append(target)
             indegree[target] += 1
         frontier = [node for node, degree in indegree.items() if degree == 0]
@@ -585,6 +617,41 @@ class AutonomyStore:
                     frontier.append(target)
         if visited != len(node_ids):
             raise ValueError("BacklogPlan must be acyclic")
+
+    def validate_plan_candidate(self, plan: dict[str, Any]) -> None:
+        """Validate semantic identities without mutating durable graph state."""
+
+        self.validate_plan(plan)
+        plan_id = str(plan.get("plan_id", ""))
+        with self.lock:
+            if self.connection.execute(
+                "SELECT 1 FROM plans WHERE plan_id=?",
+                (plan_id,),
+            ).fetchone() is not None:
+                return
+            for node_index, node in enumerate(plan["nodes"]):
+                contract = dict(node["task_contract"])
+                task_id = str(contract["task_id"])
+                idempotency_key = str(contract["idempotency_key"])
+                existing_task = self.connection.execute(
+                    "SELECT 1 FROM tasks WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                if existing_task is not None:
+                    raise ValueError(
+                        "BacklogPlan "
+                        f"nodes[{node_index}].task_contract.task_id already exists"
+                    )
+                existing_key = self.connection.execute(
+                    "SELECT 1 FROM tasks WHERE idempotency_key=?",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing_key is not None:
+                    raise ValueError(
+                        "BacklogPlan "
+                        f"nodes[{node_index}].task_contract.idempotency_key "
+                        "already exists"
+                    )
 
     def ingest_plan(
         self,
@@ -657,6 +724,7 @@ class AutonomyStore:
                 (plan_id,),
             ).fetchall()
             return tuple(str(row[0]) for row in rows)
+        self.validate_plan_candidate(plan)
         active = connection.execute(
             "SELECT plan_id FROM plans WHERE product_id=? AND status='ACTIVE'",
             (product_id,),

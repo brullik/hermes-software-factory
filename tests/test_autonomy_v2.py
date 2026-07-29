@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from factory.common import sha256_file, sha256_text
 from factory.context_builder import ContextBuilder
 from factory.failure_router import FailureRouter
 from factory.intake import IntakeService
+from factory.migrations import MIGRATIONS, apply_migrations
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
 from factory.reconciler import PipelineReconciler
@@ -1475,6 +1477,120 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
         assert versions == [1, 2, 3, 4, 5]
     finally:
         restarted.close()
+
+
+def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "migration-race.db"
+    owner = sqlite3.connect(database, timeout=5)
+    owner.execute(
+        """
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    for version, name, _ in MIGRATIONS[:-1]:
+        owner.execute(
+            """
+            INSERT INTO schema_migrations(version, name, checksum, applied_at)
+            VALUES (?, ?, ?, '2026-07-29T00:00:00Z')
+            """,
+            (version, name, sha256_text(f"{version}:{name}")),
+        )
+    owner.commit()
+    owner.execute("BEGIN IMMEDIATE")
+
+    reached_writer_lock = threading.Event()
+    errors: list[Exception] = []
+
+    def concurrent_start() -> None:
+        contender = sqlite3.connect(database, timeout=5)
+        contender.set_trace_callback(
+            lambda sql: (
+                reached_writer_lock.set()
+                if sql.strip().upper() == "BEGIN IMMEDIATE"
+                else None
+            )
+        )
+        try:
+            apply_migrations(contender)
+        except (sqlite3.Error, RuntimeError) as error:
+            errors.append(error)
+        finally:
+            contender.close()
+
+    thread = threading.Thread(target=concurrent_start)
+    thread.start()
+    assert reached_writer_lock.wait(timeout=2)
+    version, name, _ = MIGRATIONS[-1]
+    owner.execute(
+        """
+        INSERT INTO schema_migrations(version, name, checksum, applied_at)
+        VALUES (?, ?, ?, '2026-07-29T00:00:01Z')
+        """,
+        (version, name, sha256_text(f"{version}:{name}")),
+    )
+    owner.commit()
+    thread.join(timeout=5)
+    owner.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    verified = sqlite3.connect(database)
+    try:
+        versions = [
+            int(row[0])
+            for row in verified.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+        ]
+    finally:
+        verified.close()
+    assert versions == [1, 2, 3, 4, 5]
+
+
+def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-EXISTING-IDENTITY",
+            product_id="product-autonomy",
+            title="Existing task identity",
+            idempotency_key=sha256_text("existing-plan-identity"),
+        )
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-IDENTITY-COLLISION",
+            root_task_id="T-EXISTING-IDENTITY",
+            node_specs=[("A", "T-NEW-IDENTITY", "accept-identity")],
+            edges=[],
+        )
+        plan["nodes"][0]["task_contract"]["idempotency_key"] = sha256_text(
+            "existing-plan-identity"
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"nodes\[0\]\.task_contract\.idempotency_key already exists"
+            ),
+        ):
+            state.validate_plan_candidate(plan)
+
+        assert state.list_plans("product-autonomy")[0]["revision"] == 0
+        assert state.get_task("T-EXISTING-IDENTITY")["graph_status"] == "READY"
+    finally:
+        state.close()
 
 
 def test_AUT_P0_020_secret_never_enters_prompt_or_durable_evidence(
