@@ -285,13 +285,19 @@ class SubprocessHermesRunner:
                 sha256_text(safe),
                 "process_crash_before_result",
             )
-        raw = (completed.stdout + "\n" + completed.stderr).strip()
-        safe, _ = redact_text(raw)
-        safe = safe[: self.max_output_chars]
         if completed.returncode == 0:
+            # stdout is the machine-readable provider contract. Hermes and
+            # tool adapters may emit progress diagnostics on stderr; mixing
+            # that channel into a successful JSON result corrupts transport.
+            raw = completed.stdout.strip()
+            safe, _ = redact_text(raw)
+            safe = safe[: self.max_output_chars]
             return HermesRunResult(
                 "PASS", safe, sha256_text(safe), None, str(usage_path) if usage_path else None
             )
+        raw = (completed.stdout + "\n" + completed.stderr).strip()
+        safe, _ = redact_text(raw)
+        safe = safe[: self.max_output_chars]
         return HermesRunResult("FAIL", safe, sha256_text(safe), "process_crash_before_result")
 
 

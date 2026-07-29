@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.24 - 2026-07-29
+
+- Preserve stdout as the sole machine-readable provider result when the Hermes
+  subprocess exits successfully.
+- Keep tool and progress diagnostics written to stderr out of successful JSON
+  contracts, while retaining both channels for fail-closed nonzero-exit
+  classification.
+
 ## 2.1.23 - 2026-07-29
 
 - Add explicit immutable identity invariants to Task Specifier and Replanner
