@@ -32,6 +32,13 @@ Outcome, attempt finalization, failure/hypothesis, successors, edges, frontier, 
 projection и outbox фиксируются одной SQLite transaction через `commit_task_outcome`.
 Идемпотентный replay возвращает существующий outcome; другой digest с тем же key блокируется.
 
+## Изоляция persistent workspace
+
+Каждый продукт имеет один постоянный repository workspace с эксклюзивной lease. Поэтому
+scheduler выдаёт не более одной `CLAIMED` task на продукт; следующая READY task этого же
+продукта ожидает освобождения workspace. Задачи разных продуктов продолжают выполняться
+параллельно, а одинаковые repository-relative `conflict_keys` между продуктами не конфликтуют.
+
 ## Безопасная диагностика
 
 Failure Envelope хранит тип исключения, reason code, deterministic fingerprint, safe message,

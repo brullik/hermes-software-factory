@@ -307,6 +307,201 @@ def _migration_004_legacy_repository_binding(
             )
 
 
+def _migration_005_persistent_workspace_claim_recovery(
+    connection: sqlite3.Connection,
+) -> None:
+    """Collapse workspace-contention incident trees and retry each causal root."""
+
+    collision_rows = connection.execute(
+        """
+        SELECT tasks.product_id, tasks.task_id, failures.failure_id,
+               tasks.created_at, tasks.rowid
+          FROM failures
+          JOIN tasks ON tasks.task_id=failures.task_id
+         WHERE failures.failure_class='controller'
+           AND failures.reason_code='controller_exception_runtime_error'
+           AND failures.exception_type='RuntimeError'
+           AND failures.safe_message='workspace already leased by another worker'
+           AND failures.status<>'RESOLVED'
+         ORDER BY tasks.product_id, tasks.created_at, tasks.rowid,
+                  failures.first_seen_at
+        """
+    ).fetchall()
+    product_ids = sorted({str(row[0]) for row in collision_rows})
+    now = utc_now()
+    for product_id in product_ids:
+        product_collisions = list(
+            dict.fromkeys(
+                str(row[1])
+                for row in collision_rows
+                if str(row[0]) == product_id
+            )
+        )
+        collision_set = set(product_collisions)
+        collision_failure_ids = {
+            task_id: [
+                str(row[2])
+                for row in collision_rows
+                if str(row[0]) == product_id and str(row[1]) == task_id
+            ]
+            for task_id in product_collisions
+        }
+        branches: dict[str, set[str]] = {}
+        branch_failures: dict[str, set[str]] = {}
+        descendant_collisions: set[str] = set()
+        for task_id in product_collisions:
+            seed_failure_ids = collision_failure_ids[task_id]
+            seed_placeholders = ",".join("?" for _ in seed_failure_ids)
+            causal_failure_rows = connection.execute(
+                f"""
+                WITH RECURSIVE causal_failures(failure_id) AS (
+                    SELECT failure_id FROM failures
+                     WHERE failure_id IN ({seed_placeholders})
+                    UNION
+                    SELECT child.failure_id
+                      FROM failures AS child
+                      JOIN causal_failures AS parent
+                        ON child.parent_failure_id=parent.failure_id
+                )
+                SELECT failure_id FROM causal_failures
+                """,
+                seed_failure_ids,
+            ).fetchall()
+            causal_failure_ids = {
+                str(row[0]) for row in causal_failure_rows
+            }
+            causal_placeholders = ",".join(
+                "?" for _ in causal_failure_ids
+            )
+            branch_rows = connection.execute(
+                f"""
+                SELECT task_id FROM tasks
+                 WHERE product_id=?
+                   AND (
+                       task_id=?
+                       OR failure_id IN ({causal_placeholders})
+                       OR task_id IN (
+                           SELECT task_id FROM failures
+                            WHERE failure_id IN ({causal_placeholders})
+                       )
+                   )
+                """,
+                (
+                    product_id,
+                    task_id,
+                    *sorted(causal_failure_ids),
+                    *sorted(causal_failure_ids),
+                ),
+            ).fetchall()
+            branch = {str(row[0]) for row in branch_rows}
+            branches[task_id] = branch
+            branch_failures[task_id] = causal_failure_ids
+            descendant_collisions.update((branch & collision_set) - {task_id})
+        survivors = [
+            task_id
+            for task_id in product_collisions
+            if task_id not in descendant_collisions
+        ]
+        affected = sorted(
+            {
+                affected_task_id
+                for survivor in survivors
+                for affected_task_id in branches[survivor]
+            }
+        )
+        if not affected:
+            continue
+        failure_ids = sorted(
+            {
+                failure_id
+                for survivor in survivors
+                for failure_id in branch_failures[survivor]
+            }
+        )
+        superseded_count = 0
+        for survivor in survivors:
+            superseded = sorted(branches[survivor] - set(survivors))
+            if not superseded:
+                continue
+            superseded_placeholders = ",".join("?" for _ in superseded)
+            cursor = connection.execute(
+                f"""
+                UPDATE tasks
+                   SET graph_status='SUPERSEDED', status='DONE',
+                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                       heartbeat_at=NULL, available_at=NULL,
+                       blocked_reason='workspace_collision_superseded',
+                       blocked_ref=?, updated_at=?
+                 WHERE task_id IN ({superseded_placeholders})
+                   AND graph_status NOT IN ('ACCEPTED','CANCELLED','SUPERSEDED')
+                """,
+                (survivor, now, *superseded),
+            )
+            superseded_count += cursor.rowcount
+        survivor_placeholders = ",".join("?" for _ in survivors)
+        connection.execute(
+            f"""
+            UPDATE tasks
+               SET graph_status='READY', status='PENDING',
+                   lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                   heartbeat_at=NULL, available_at=NULL, next_tier=NULL,
+                   next_attempt_kind='initial', repair_context_ref=NULL,
+                   blocked_reason=NULL, blocked_ref=NULL,
+                   terminal_reason=NULL, terminal_detail=NULL,
+                   failure_kind=NULL, result_ref=NULL, result_digest=NULL,
+                   updated_at=?
+             WHERE task_id IN ({survivor_placeholders})
+               AND graph_status NOT IN ('ACCEPTED','CANCELLED')
+            """,
+            (now, *survivors),
+        )
+        incident_task_ids = set(affected)
+        if failure_ids:
+            failure_placeholders = ",".join("?" for _ in failure_ids)
+            connection.execute(
+                f"""
+                UPDATE failures
+                   SET status='RESOLVED', last_seen_at=?
+                 WHERE failure_id IN ({failure_placeholders})
+                """,
+                (now, *failure_ids),
+            )
+        if incident_task_ids:
+            incident_placeholders = ",".join("?" for _ in incident_task_ids)
+            connection.execute(
+                f"""
+                UPDATE controller_incidents
+                   SET status='RESOLVED', resolved_at=?
+                 WHERE task_id IN ({incident_placeholders})
+                   AND status='OPEN'
+                """,
+                (now, *sorted(incident_task_ids)),
+            )
+        connection.execute(
+            """
+            INSERT INTO events
+                (product_id, task_id, event_type, payload_json, created_at)
+            VALUES (?, ?, 'workspace_collision_recovered', ?, ?)
+            """,
+            (
+                product_id,
+                survivors[0],
+                json.dumps(
+                    {
+                        "survivor_task_ids": survivors,
+                        "recovered_tasks": len(survivors),
+                        "superseded_tasks": superseded_count,
+                        "resolved_failures": len(failure_ids),
+                        "reason_code": "persistent_workspace_claim_collision",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -441,6 +636,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
     (2, "autonomy-v2-durable-graph", _migration_002_autonomy_v2),
     (3, "atomic-observation-release-binding", _migration_003_atomic_observation_binding),
     (4, "legacy-url-repository-binding", _migration_004_legacy_repository_binding),
+    (
+        5,
+        "persistent-workspace-claim-recovery",
+        _migration_005_persistent_workspace_claim_recovery,
+    ),
 )
 
 

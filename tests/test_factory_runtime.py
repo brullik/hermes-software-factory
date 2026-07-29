@@ -236,16 +236,25 @@ class FactoryRuntimeTests(unittest.TestCase):
 
     def test_max_active_workers_and_outbox_lease_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state = StateStore(Path(directory) / "controller.db", max_active_workers=2)
-            state.create_product(
-                product_id="product",
-                owner_id="owner",
-                source="cli",
-                idea="idea",
-                idempotency_key="worker-limit",
+            state = StateStore(
+                Path(directory) / "controller.db",
+                max_active_workers=2,
+                max_active_products=3,
             )
-            for task_id in ("first", "second", "third"):
-                state.add_task(task_id=task_id, product_id="product", title=task_id)
+            for index, task_id in enumerate(("first", "second", "third"), 1):
+                product_id = f"product-{index}"
+                state.create_product(
+                    product_id=product_id,
+                    owner_id="owner",
+                    source="cli",
+                    idea=task_id,
+                    idempotency_key=f"worker-limit-{index}",
+                )
+                state.add_task(
+                    task_id=task_id,
+                    product_id=product_id,
+                    title=task_id,
+                )
             self.assertEqual(state.claim_task(worker_id="worker-a")["task_id"], "first")
             self.assertEqual(state.claim_task(worker_id="worker-b")["task_id"], "second")
             self.assertIsNone(state.claim_task(worker_id="worker-c"))

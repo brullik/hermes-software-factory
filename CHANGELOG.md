@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.3 - 2026-07-29
+
+- Task claiming is serialized per product because each product owns one persistent,
+  exclusively leased repository workspace. Independent products still run concurrently,
+  regardless of matching repository-relative conflict keys.
+- Migration v5 resolves the exact historical workspace-lease controller failures and
+  incidents, supersedes their redundant recovery descendants, and requeues one earliest
+  causal task per affected product.
+
 ## 2.1.2 - 2026-07-29
 
 - A retryable failure with an already scheduled bounded in-place `repair` or

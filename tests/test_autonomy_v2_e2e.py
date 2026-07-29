@@ -604,8 +604,8 @@ def test_AUT_P1_001_parallel_frontier_respects_conflict_keys(
         state.add_task(
             task_id="T-PARALLELA2",
             product_id="parallel-product-a",
-            title="Second conflicting write",
-            conflict_keys=["shared-scope"],
+            title="Second write in the same persistent workspace",
+            conflict_keys=["independent-scope"],
             priority=20,
         )
         state.add_task(
