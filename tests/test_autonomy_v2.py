@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -1155,12 +1156,41 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3]
+        assert versions == [1, 2, 3, 4]
         assert database.with_suffix(
             database.suffix + ".pre-autonomy-v2.bak"
         ).is_file()
     finally:
         state.close()
+
+    repository_database = build_fixture(
+        tmp_path / "legacy_2_0_19_repository.db"
+    )
+    connection = sqlite3.connect(repository_database)
+    try:
+        connection.execute(
+            "UPDATE products SET idea=? WHERE product_id='legacy-product'",
+            ("https://github.com/example/legacy-product.git",),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    repository_state = StateStore(repository_database)
+    try:
+        product = repository_state.get_product("legacy-product")
+        assert product is not None
+        assert product["delivery_mode"] == "existing_repository"
+        assert product["repository_url"] == (
+            "https://github.com/example/legacy-product"
+        )
+        assert product["repository_name"] == "legacy-product"
+        assert product["goal_text"] != product["idea"]
+        plan = repository_state.list_plans("legacy-product")
+        assert json.loads(plan[0]["goals_json"])[0]["statement"] == (
+            product["goal_text"]
+        )
+    finally:
+        repository_state.close()
 
 
 def test_AUT_P0_020_secret_never_enters_prompt_or_durable_evidence(
