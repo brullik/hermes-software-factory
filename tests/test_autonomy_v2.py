@@ -1233,7 +1233,7 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3, 4]
+        assert versions == [1, 2, 3, 4, 5]
         assert database.with_suffix(
             database.suffix + ".pre-autonomy-v2.bak"
         ).is_file()
@@ -1268,6 +1268,213 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
         )
     finally:
         repository_state.close()
+
+
+def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-WORKSPACE-COLLISION-A",
+            product_id="product-autonomy",
+            title="Retry the first workspace collision",
+            role="replanner",
+            priority=100,
+        )
+        first_claim = state.claim_task(worker_id="worker-a")
+        assert first_claim is not None
+        assert first_claim["task_id"] == "T-WORKSPACE-COLLISION-A"
+        first = state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-WORKSPACE-COLLISION-A",
+                worker_id="worker-a",
+                lease_token=str(first_claim["lease_token"]),
+                expected_plan_revision=0,
+                idempotency_key=sha256_text("workspace-collision-a"),
+                result_ref="evidence/workspace-collision-a.json",
+                result_digest=sha256_text("workspace-collision-a"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="controller",
+                    reason_code="controller_exception_runtime_error",
+                    safe_message="workspace already leased by another worker",
+                    evidence_ref="evidence/workspace-collision-a.json",
+                    exception_type="RuntimeError",
+                    stack_fingerprint=sha256_text("workspace-acquire"),
+                ),
+            )
+        )
+        assert first.failure_id is not None
+        state.add_task(
+            task_id="T-WORKSPACE-COLLISION-E",
+            product_id="product-autonomy",
+            title="A second independent workspace collision",
+            role="builder",
+            priority=110,
+        )
+        independent_claim = state.claim_task(worker_id="worker-e")
+        assert independent_claim is not None
+        assert independent_claim["task_id"] == "T-WORKSPACE-COLLISION-E"
+        independent = state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-WORKSPACE-COLLISION-E",
+                worker_id="worker-e",
+                lease_token=str(independent_claim["lease_token"]),
+                expected_plan_revision=0,
+                idempotency_key=sha256_text("workspace-collision-e"),
+                result_ref="evidence/workspace-collision-e.json",
+                result_digest=sha256_text("workspace-collision-e"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="controller",
+                    reason_code="controller_exception_runtime_error",
+                    safe_message="workspace already leased by another worker",
+                    evidence_ref="evidence/workspace-collision-e.json",
+                    exception_type="RuntimeError",
+                    stack_fingerprint=sha256_text("workspace-acquire"),
+                ),
+            )
+        )
+        assert independent.failure_id is not None
+        state.add_task(
+            task_id="T-WORKSPACE-COLLISION-B",
+            product_id="product-autonomy",
+            title="Duplicate controller incident",
+            role="incident-recovery",
+            parent_task_id="T-WORKSPACE-COLLISION-A",
+            source_task_id="T-WORKSPACE-COLLISION-A",
+            failure_id=first.failure_id,
+            priority=100,
+        )
+        second_claim = state.claim_task(worker_id="worker-b")
+        assert second_claim is not None
+        assert second_claim["task_id"] == "T-WORKSPACE-COLLISION-B"
+        second = state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-WORKSPACE-COLLISION-B",
+                worker_id="worker-b",
+                lease_token=str(second_claim["lease_token"]),
+                expected_plan_revision=0,
+                idempotency_key=sha256_text("workspace-collision-b"),
+                result_ref="evidence/workspace-collision-b.json",
+                result_digest=sha256_text("workspace-collision-b"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="controller",
+                    reason_code="controller_exception_runtime_error",
+                    safe_message="workspace already leased by another worker",
+                    evidence_ref="evidence/workspace-collision-b.json",
+                    parent_failure_id=first.failure_id,
+                    exception_type="RuntimeError",
+                    stack_fingerprint=sha256_text("workspace-acquire"),
+                ),
+            )
+        )
+        assert second.failure_id is not None
+        state.add_task(
+            task_id="T-WORKSPACE-COLLISION-C",
+            product_id="product-autonomy",
+            title="Redundant collision descendant",
+            role="incident-recovery",
+            parent_task_id="T-WORKSPACE-COLLISION-B",
+            source_task_id="T-WORKSPACE-COLLISION-B",
+            failure_id=second.failure_id,
+            priority=90,
+        )
+        state.add_task(
+            task_id="T-WORKSPACE-UNRELATED-D",
+            product_id="product-autonomy",
+            title="Unrelated child sharing only a structural parent",
+            role="builder",
+            parent_task_id="T-WORKSPACE-COLLISION-A",
+            priority=80,
+        )
+        with state._lock, state._connection:
+            for index, (task_id, failure_id) in enumerate(
+                (
+                    ("T-WORKSPACE-COLLISION-A", first.failure_id),
+                    ("T-WORKSPACE-COLLISION-B", second.failure_id),
+                    ("T-WORKSPACE-COLLISION-E", independent.failure_id),
+                ),
+                1,
+            ):
+                state._connection.execute(
+                    """
+                    INSERT INTO controller_incidents
+                        (incident_id, product_id, task_id, reason_code,
+                         evidence_ref, status, created_at)
+                    VALUES (?, 'product-autonomy', ?,
+                            'controller_exception_runtime_error', ?,
+                            'OPEN', '2026-07-29T00:00:00Z')
+                    """,
+                    (
+                        f"incident-workspace-{index}",
+                        task_id,
+                        f"evidence/{failure_id}.json",
+                    ),
+                )
+            state._connection.execute(
+                "DELETE FROM schema_migrations WHERE version=5"
+            )
+    finally:
+        state.close()
+
+    restarted = StateStore(config.database_path)
+    try:
+        survivor = restarted.get_task("T-WORKSPACE-COLLISION-A")
+        duplicate = restarted.get_task("T-WORKSPACE-COLLISION-B")
+        descendant = restarted.get_task("T-WORKSPACE-COLLISION-C")
+        independent = restarted.get_task("T-WORKSPACE-COLLISION-E")
+        unrelated = restarted.get_task("T-WORKSPACE-UNRELATED-D")
+        assert survivor is not None
+        assert duplicate is not None
+        assert descendant is not None
+        assert independent is not None
+        assert unrelated is not None
+        assert survivor["graph_status"] == "READY"
+        assert survivor["status"] == "PENDING"
+        assert survivor["terminal_reason"] is None
+        assert independent["graph_status"] == "READY"
+        assert independent["status"] == "PENDING"
+        assert duplicate["graph_status"] == "SUPERSEDED"
+        assert descendant["graph_status"] == "SUPERSEDED"
+        assert unrelated["graph_status"] == "READY"
+        assert {
+            failure["status"]
+            for failure in restarted.list_failures("product-autonomy")
+        } == {"RESOLVED"}
+        incidents = restarted._connection.execute(
+            "SELECT status, resolved_at FROM controller_incidents "
+            "ORDER BY incident_id"
+        ).fetchall()
+        assert all(
+            row["status"] == "RESOLVED" and row["resolved_at"]
+            for row in incidents
+        )
+        event = next(
+            event
+            for event in restarted.events("product-autonomy")
+            if event["event_type"] == "workspace_collision_recovered"
+        )
+        payload = json.loads(event["payload_json"])
+        assert payload["survivor_task_ids"] == [
+            "T-WORKSPACE-COLLISION-A",
+            "T-WORKSPACE-COLLISION-E",
+        ]
+        assert payload["recovered_tasks"] == 2
+        assert payload["superseded_tasks"] == 2
+        versions = [
+            row[0]
+            for row in restarted._connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+        ]
+        assert versions == [1, 2, 3, 4, 5]
+    finally:
+        restarted.close()
 
 
 def test_AUT_P0_020_secret_never_enters_prompt_or_durable_evidence(

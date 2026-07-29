@@ -771,6 +771,10 @@ class StateStore:
                     for active_row in claimed_rows
                     if active_row["lease_owner"]
                 }
+                active_products = {
+                    str(active_row["product_id"])
+                    for active_row in claimed_rows
+                }
                 if worker_id in active_workers or len(active_workers) >= self.max_active_workers:
                     self._connection.commit()
                     return None
@@ -781,6 +785,11 @@ class StateStore:
                     ).update(json.loads(active_row["conflict_keys_json"]))
                 chosen = None
                 for row in rows:
+                    # The production workspace is persistent and exclusive per
+                    # product. Different products can run in parallel, but two
+                    # tasks from one product would contend for the same lease.
+                    if str(row["product_id"]) in active_products:
+                        continue
                     dependencies = self._connection.execute(
                         """SELECT upstream.graph_status
                            FROM task_edges AS edge
