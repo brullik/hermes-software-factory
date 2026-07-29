@@ -1513,16 +1513,10 @@ class StateStore:
         task_id: str,
         blocker_signature: str,
         blocker_ids: list[str],
-        max_replans: int = 3,
     ) -> bool:
-        """Grant one new bounded budget for a newly diagnosed blocker."""
+        """Grant one bounded budget per unique diagnosed blocker."""
 
-        if (
-            not blocker_signature
-            or not blocker_ids
-            or max_replans < 1
-            or max_replans > 3
-        ):
+        if not blocker_signature or not blocker_ids:
             raise ValueError("director root-cause replan contract is invalid")
         with self._lock, self._connection:
             row = self._connection.execute(
@@ -1566,7 +1560,6 @@ class StateStore:
                 or str(row["task_status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
                 or exhausted is None
                 or blocker_signature in signatures
-                or len(signatures) >= max_replans
             ):
                 return False
             now = utc_now()
@@ -1592,7 +1585,7 @@ class StateStore:
                     "blocker_signature": blocker_signature,
                     "blocker_ids": blocker_ids,
                     "replan_number": len(signatures) + 1,
-                    "max_replans": max_replans,
+                    "max_replans_per_hypothesis": 1,
                     "next_action": "new_bounded_builder_budget",
                 },
             )

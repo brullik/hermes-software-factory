@@ -1026,7 +1026,7 @@ def test_prior_builder_is_adopted_when_controller_gates_prove_completion() -> No
         state.close()
 
 
-def test_director_opens_new_bounded_budget_for_distinct_security_diagnosis() -> None:
+def test_director_opens_new_budget_after_three_prior_distinct_diagnoses() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -1130,6 +1130,19 @@ def test_director_opens_new_bounded_budget_for_distinct_security_diagnosis() -> 
         failed_product = state.get_product(product_id)
         assert failed_product is not None
         assert failed_product["status"] == "FAILED_SAFE"
+        for index in range(3):
+            state.record_event(
+                product_id=product_id,
+                task_id=f"historical-diagnosis-{index}",
+                event_type="director_root_cause_replan",
+                payload={
+                    "blocker_signature": f"historical-signature-{index}",
+                    "blocker_ids": [f"HISTORICAL-{index}"],
+                    "replan_number": index + 1,
+                    "max_replans": 3,
+                    "next_action": "new_bounded_builder_budget",
+                },
+            )
 
         replanned = PipelineReconciler(config, state).reconcile_once()
 
@@ -1153,9 +1166,11 @@ def test_director_opens_new_bounded_budget_for_distinct_security_diagnosis() -> 
             for event in state.events(product_id)
             if event["event_type"] == "director_root_cause_replan"
         ]
-        assert len(replan_events) == 1
-        payload = json.loads(replan_events[0]["payload_json"])
+        assert len(replan_events) == 4
+        payload = json.loads(replan_events[-1]["payload_json"])
         assert payload["blocker_ids"] == ["SEC-NEW-FAIL-OPEN"]
+        assert payload["replan_number"] == 4
+        assert payload["max_replans_per_hypothesis"] == 1
         notifications = [
             json.loads(item["payload_json"]) for item in state.list_outbox()
         ]
