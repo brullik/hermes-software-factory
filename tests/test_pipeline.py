@@ -98,6 +98,8 @@ class PipelineTests(unittest.TestCase):
                     "target-secret-scan",
                 ],
             )
+            self.assertIn("pyproject.toml", builder["allowed_paths"])
+            self.assertNotIn("pyproject.toml", builder["forbidden_paths"])
             self.assertEqual(builder["conflict_keys"], tester["conflict_keys"])
             self.assertEqual(tester["conflict_keys"], security["conflict_keys"])
             state.close()

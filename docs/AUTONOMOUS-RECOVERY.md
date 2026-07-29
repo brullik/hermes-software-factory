@@ -33,6 +33,11 @@ an incident, not a normal idle state.
 10. Only after the bounded diagnosis-reassessment policy is exhausted does the
     product remain `FAILED_SAFE` with the exact Russian reason notification.
 
+Default Builder scope includes the repository's Python project contract
+(`pyproject.toml`) because mandatory dependency and license gates require that
+file. A repository-supplied PM task still replaces the default scope completely;
+Hermes never widens frozen PM `allowed_paths`.
+
 The reconciler never restarts product planning when recovery can continue from
 the failed stage.
 

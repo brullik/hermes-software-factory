@@ -272,7 +272,7 @@ class PipelineCoordinator:
                 "low",
                 "Implement the smallest user-visible vertical slice in the leased worktree.",
                 "Run the task acceptance commands and report changed files and evidence.",
-                ("src/**", "tests/**", "README.md"),
+                ("src/**", "tests/**", "README.md", "pyproject.toml"),
                 workspace_conflict,
                 60,
                 implementation_gates,
