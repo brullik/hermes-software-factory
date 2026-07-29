@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.9 - 2026-07-29
+
+- Failure Router now creates recovery work only for unresolved causal leaves.
+  Ancestor failures remain durable audit evidence but cannot create a second
+  competing branch after a descendant failure is recorded.
+- Migration v7 supersedes historical recovery tasks shadowed by an active
+  descendant recovery task while preserving the full failure lineage for
+  atomic closure after success.
+
 ## 2.1.8 - 2026-07-29
 
 - Recovery work is always anchored to the product's current active plan, even
