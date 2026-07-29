@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.25 - 2026-07-29
+
+- Normalize every routed v2 repair brief to a non-empty blocker coordinate,
+  using the sanitized failure reason when no test or quality gate ID exists.
+- Preserve concrete required fixes while preventing policy and controller
+  failures from creating unusable recovery briefs with empty gate mappings.
+
 ## 2.1.24 - 2026-07-29
 
 - Preserve stdout as the sole machine-readable provider result when the Hermes
