@@ -557,6 +557,108 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("repair-brief-", runner.prompts[1])
             state.close()
 
+    def test_transient_retry_preserves_original_repair_hypothesis(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-luna",
+            )
+            config = make_config(root, registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Preserve the diagnosed repair across a transient retry",
+            )
+            repair = json.loads(product_contract(config, intake_result.product_id))
+            repair["status"] = "repair_required"
+            repair["summary"] = "The original security hypothesis needs one repair."
+            repair["findings"] = [
+                {
+                    "code": "SEC-ORIGINAL-HYPOTHESIS",
+                    "severity": "high",
+                    "text": "Add the exact original security regression.",
+                }
+            ]
+            completed = json.loads(product_contract(config, intake_result.product_id))
+            runner = SequenceRunner(
+                [
+                    json.dumps(repair),
+                    "not-json",
+                    json.dumps(completed),
+                ]
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            first = worker.run_once()
+
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertEqual(first.status, "repair_scheduled")
+            task = next(iter(state.list_tasks(intake_result.product_id)))
+            original_ref = str(task["repair_context_ref"])
+            original_brief = json.loads(
+                (config.evidence_dir / Path(original_ref).name).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                original_brief["failed_gate_ids"],
+                ["SEC-ORIGINAL-HYPOTHESIS"],
+            )
+
+            second = worker.run_once()
+
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertEqual(second.status, "repair_scheduled")
+            self.assertEqual(second.reason_code, "malformed_transport")
+            task = next(iter(state.list_tasks(intake_result.product_id)))
+            transient_ref = str(task["repair_context_ref"])
+            self.assertNotEqual(transient_ref, original_ref)
+            transient_brief = json.loads(
+                (config.evidence_dir / Path(transient_ref).name).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                transient_brief["failed_gate_ids"],
+                ["SEC-ORIGINAL-HYPOTHESIS"],
+            )
+            self.assertEqual(
+                transient_brief["required_fixes"],
+                ["Add the exact original security regression."],
+            )
+            self.assertEqual(
+                transient_brief["failure_class"],
+                "model_requested_repair",
+            )
+            self.assertIn("malformed_transport", transient_brief["relevant_log_fragment"])
+            self.assertIn(original_ref, transient_brief["evidence_refs"])
+
+            third = worker.run_once()
+
+            self.assertIsNotNone(third)
+            assert third is not None
+            self.assertEqual(third.status, "completed", third.reason_code)
+            self.assertIn("SEC-ORIGINAL-HYPOTHESIS", runner.prompts[2])
+            self.assertIn(
+                "Add the exact original security regression.",
+                runner.prompts[2],
+            )
+            state.close()
+
     def test_release_task_blocks_before_model_without_side_effect_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

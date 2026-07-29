@@ -20,12 +20,18 @@ an incident, not a normal idle state.
 6. Exceeding `max_repair_cycles` closes the current problem hypothesis,
    preserves evidence, and sends the exact reason to the owner in Russian.
 7. Director then compares provider findings with controller-owned evidence. A
-   controller-scope contradiction is resolved by orchestration; a distinct,
-   proven defect receives a new actionable repair brief and a fresh bounded
-   budget. The same diagnosis is never reopened twice, and at most three
-   Director root-cause replans are allowed per product.
-8. Only after the bounded Director re-diagnosis policy is exhausted does the
-   product remain `FAILED_SAFE`.
+   controller-scope contradiction is resolved by orchestration; every distinct,
+   proven defect receives its own actionable repair brief and bounded budget.
+8. One blocker signature may run at most three full repair cycles. If the same
+   signature still fails, Director opens a separate bounded
+   `DIAGNOSIS-REASSESSMENT` hypothesis. Its brief forbids repeating the previous
+   fix and first checks whether the task statement, allowed scope, controller
+   gate or environment, or the original implementation diagnosis is wrong.
+9. A transient provider interruption does not replace the active semantic
+   hypothesis. Hermes carries its blocker IDs, required fixes, definition of
+   done, and safe evidence references into the transient retry brief.
+10. Only after the bounded diagnosis-reassessment policy is exhausted does the
+    product remain `FAILED_SAFE` with the exact Russian reason notification.
 
 The reconciler never restarts product planning when recovery can continue from
 the failed stage.
