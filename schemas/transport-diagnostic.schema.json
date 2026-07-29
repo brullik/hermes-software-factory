@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/transport-diagnostic.schema.json",
+  "title": "Safe Provider Transport Diagnostic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "task_id",
+    "attempt_id",
+    "reason_code",
+    "raw_sha256",
+    "raw_chars",
+    "safe_head",
+    "safe_tail",
+    "parser_error_type",
+    "redactions",
+    "provider",
+    "model",
+    "context_ref",
+    "usage_ref"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "artifact_id": {"type": "string", "minLength": 8},
+    "product_id": {"type": "string", "minLength": 8},
+    "task_id": {"type": "string", "minLength": 4},
+    "attempt_id": {"type": "string", "minLength": 4},
+    "reason_code": {"enum": ["malformed_transport", "schema_validation"]},
+    "raw_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "raw_chars": {"type": "integer", "minimum": 0},
+    "safe_head": {"type": "string", "maxLength": 2000},
+    "safe_tail": {"type": "string", "maxLength": 2000},
+    "parser_error_type": {"type": "string", "minLength": 1},
+    "redactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["detector", "location"],
+        "properties": {
+          "detector": {"type": "string"},
+          "location": {"type": "string"}
+        }
+      }
+    },
+    "provider": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "context_ref": {"type": "string", "minLength": 1},
+    "usage_ref": {"type": ["string", "null"]}
+  }
+}

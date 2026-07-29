@@ -13,20 +13,33 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from scripts.model_router import Tier, classify_failure, next_tier
 from scripts.policy_guard import enforce_changed_paths
-from scripts.prompt_compiler import find_secret_candidates, redact_secret_candidates
+from scripts.prompt_compiler import (
+    find_secret_candidate_diagnostics,
+    find_secret_candidates,
+    redact_secret_candidates,
+)
 
 from .artifacts import ArtifactConflictError, ArtifactStore, artifact_metadata
 from .attempts import Attempt, AttemptManager, IdenticalAttemptError
+from .autonomy import (
+    OWNER_ACTION_REASONS,
+    FailureData,
+    HypothesisData,
+    TaskOutcome,
+    safe_exception_diagnostic,
+)
+from .capabilities import CapabilityBroker
 from .common import new_id, redact_text, sha256_file, sha256_text, stable_json
 from .config import FactoryConfig, load_config
 from .context_builder import ContextBuilder, ContextPackResult
-from .pipeline import PipelineCoordinator
+from .pipeline import PipelineCoordinator, PreparedPipelineOutcome
 from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine, QualityGateRun
@@ -44,6 +57,7 @@ from .repair_brief import (
     repair_finding_detail,
     repair_requirements,
 )
+from .repository import RepositoryBootstrapper, build_repository_bootstrapper
 from .state import StateStore
 from .workflow import WorkflowEngine
 from .workspace import WorkspaceManager
@@ -64,6 +78,7 @@ _PLANNING_ROLES = {
     "product-analyst",
     "solution-architect",
     "task-specifier",
+    "replanner",
 }
 _REPOSITORY_CONTEXT_CANDIDATES = (
     ("README.md", "target repository overview"),
@@ -296,6 +311,10 @@ class WorkerResult:
     next_attempt_kind: str | None = None
     repair_context_ref: str | None = None
     detail: str | None = None
+    retry_available_at: str | None = None
+    pipeline_outcome: PreparedPipelineOutcome | None = None
+    output_ref: str | None = None
+    failure_data: FailureData | None = None
 
 
 def _workspace_snapshot(root: Path) -> dict[str, str]:
@@ -417,6 +436,7 @@ class AgentWorker:
         health_probe: Callable[[ModelSelection], bool] | None = None,
         repository_root: Path | None = None,
         release_executor: ReleaseExecutor | None = None,
+        repository_bootstrapper: RepositoryBootstrapper | None = None,
         worker_id: str = "hermes-worker-1",
         poll_seconds: float = 2.0,
         lease_seconds: int = 300,
@@ -439,6 +459,7 @@ class AgentWorker:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.repository_root = (repository_root or Path.cwd()).resolve()
         self.release_executor = release_executor
+        self.repository_bootstrapper = repository_bootstrapper
         configured_worktrees = Path(str(config.raw["paths"]["worktrees"]))
         if os.name == "nt" and str(configured_worktrees).replace("\\", "/").startswith("/var/"):
             configured_worktrees = config.state_dir / "worktrees"
@@ -478,7 +499,28 @@ class AgentWorker:
         product = self.state.get_product(product_id)
         if product is None:
             raise ExternalBlocker(f"Product is missing for workspace {product_id}")
-        repository_url = public_github_repository_url(str(product.get("idea", "")))
+        if product.get("delivery_mode") in {
+            "new_repository",
+            "existing_repository",
+        }:
+            if self.repository_bootstrapper is None:
+                raise RuntimeError(
+                    "repository bootstrap capability is not configured"
+                )
+            self.repository_bootstrapper.ensure(product_id, destination)
+            return
+        repository_url = None
+        if product.get("delivery_mode") == "existing_repository":
+            repository_url = public_github_repository_url(
+                str(product.get("repository_url") or "")
+            )
+        elif product.get("delivery_mode") not in {
+            "new_repository",
+            "existing_repository",
+        }:
+            repository_url = public_github_repository_url(
+                str(product.get("idea", ""))
+            )
         if repository_url is None:
             shutil.copytree(
                 self.repository_root,
@@ -548,7 +590,12 @@ class AgentWorker:
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         if not isinstance(contract, dict):
             raise ExternalBlocker(f"Task Contract is not an object for {task_id}")
-        self.schemas.validate("task-contract.schema.json", contract)
+        contract_schema = (
+            "task-contract-v2.schema.json"
+            if str(contract.get("schema_version")) == "2.0"
+            else "task-contract.schema.json"
+        )
+        self.schemas.validate(contract_schema, contract)
         role = str(task.get("role") or contract.get("producer", {}).get("role", ""))
         output_schema = str(task.get("output_schema") or "")
         if not role or not output_schema:
@@ -559,7 +606,12 @@ class AgentWorker:
             subject_file = self.repository_root / "SHA256SUMS"
             subject_sha = sha256_file(subject_file) if subject_file.is_file() else sha256_text(stable_json(contract))
         product = self.state.get_product(str(task["product_id"])) or {}
-        idea = str(product.get("idea", "redacted owner idea"))
+        goal_text = str(
+            product.get("goal_text")
+            or product.get("idea")
+            or "redacted owner goal"
+        )
+        repository_url = str(product.get("repository_url") or "")
         requested_tier_value = str(task.get("next_tier") or contract.get("model_floor") or "")
         try:
             requested_tier = Tier(requested_tier_value)
@@ -572,7 +624,10 @@ class AgentWorker:
         evidence: list[dict[str, str]] = [
             {
                 "type": "idea-intake",
-                "summary": f"Owner idea is UNTRUSTED_DATA: {idea}",
+                "summary": (
+                    f"Owner goal is UNTRUSTED_DATA: {goal_text}. "
+                    f"Repository is separate metadata: {repository_url or 'new_repository'}."
+                ),
                 "artifact_ref": f"evidence/intake-{task['product_id']}.json",
             },
         ]
@@ -1250,7 +1305,12 @@ class AgentWorker:
             payload["allowed_paths"] = [
                 str(value) for value in contract.get("allowed_paths", [])
             ]
-        self.schemas.validate("repair-brief.schema.json", payload)
+        brief_schema = (
+            "repair-brief-v2.schema.json"
+            if str(payload.get("schema_version")) == "2.0"
+            else "repair-brief.schema.json"
+        )
+        self.schemas.validate(brief_schema, payload)
         if (
             str(payload.get("task_id")) != str(task["task_id"])
             or str(payload.get("product_id")) != str(task["product_id"])
@@ -1271,16 +1331,30 @@ class AgentWorker:
             repair_context_ref,
             contract,
         )
-        compact_payload = {
-            "failure_class": payload["failure_class"],
-            "failed_gate_ids": payload["failed_gate_ids"],
-            "required_fixes": payload["required_fixes"],
-            "allowed_paths": payload["allowed_paths"],
-            "relevant_log_fragment": payload["relevant_log_fragment"],
-            "expected_vs_actual": payload["expected_vs_actual"],
-            "previous_attempt_summary": payload["previous_attempt_summary"],
-            "definition_of_done": payload["definition_of_done"],
-        }
+        if str(payload.get("schema_version")) == "2.0":
+            compact_payload = {
+                "failure_id": payload["failure_id"],
+                "hypothesis_id": payload["hypothesis_id"],
+                "failed_task_id": payload["failed_task_id"],
+                "supersedes_task_id": payload["supersedes_task_id"],
+                "failed_gate_ids": payload["failed_gate_ids"],
+                "required_fixes": payload["required_fixes"],
+                "allowed_paths": payload["allowed_paths"],
+                "capability_gaps": payload["capability_gaps"],
+                "inherited_acceptance": payload["inherited_acceptance"],
+                "definition_of_done": payload["definition_of_done"],
+            }
+        else:
+            compact_payload = {
+                "failure_class": payload["failure_class"],
+                "failed_gate_ids": payload["failed_gate_ids"],
+                "required_fixes": payload["required_fixes"],
+                "allowed_paths": payload["allowed_paths"],
+                "relevant_log_fragment": payload["relevant_log_fragment"],
+                "expected_vs_actual": payload["expected_vs_actual"],
+                "previous_attempt_summary": payload["previous_attempt_summary"],
+                "definition_of_done": payload["definition_of_done"],
+            }
         compact = json.dumps(
             compact_payload,
             ensure_ascii=False,
@@ -1347,6 +1421,41 @@ class AgentWorker:
             repository_root or self.repository_root,
             self.artifacts,
         )
+        task_row = self.state.get_task(str(task["task_id"])) or {}
+        product = self.state.get_product(str(task["product_id"])) or {}
+        plans = self.state.list_plans(str(task["product_id"]))
+        active_plan = next(
+            (
+                plan
+                for plan in plans
+                if str(plan.get("plan_id")) == str(task_row.get("plan_id") or "")
+            ),
+            None,
+        )
+        failures = self.state.list_failures(str(task["product_id"]))
+        open_failure = next(
+            (
+                failure
+                for failure in reversed(failures)
+                if str(failure.get("task_id")) == str(task["task_id"])
+                and str(failure.get("status")) in {"OPEN", "ROUTED", "OWNER_BLOCKED"}
+            ),
+            None,
+        )
+        try:
+            required_capabilities = json.loads(
+                str(task_row.get("required_capabilities_json") or "[]")
+            )
+        except json.JSONDecodeError:
+            required_capabilities = []
+        missing_capabilities: list[str] = []
+        if str(task_row.get("blocked_reason") or "") == "missing_capability":
+            try:
+                missing_capabilities = json.loads(
+                    str(task_row.get("blocked_ref") or "[]")
+                )
+            except json.JSONDecodeError:
+                missing_capabilities = []
 
         def build_context(filename: str) -> ContextPackResult:
             return context_builder.build(
@@ -1359,6 +1468,48 @@ class AgentWorker:
                 allowed_paths=[str(path) for path in task["allowed_paths"]],
                 forbidden_actions=[str(path) for path in task["forbidden_paths"]],
                 output_schema=spec.output_schema,
+                root_goal=str(
+                    product.get("goal_text")
+                    or product.get("idea")
+                    or task["objective"]
+                ),
+                root_task_id=str(task_row.get("root_task_id") or task["task_id"]),
+                plan_summary=(
+                    {
+                        "plan_id": active_plan.get("plan_id"),
+                        "revision": active_plan.get("revision"),
+                        "status": active_plan.get("status"),
+                        "goals": json.loads(str(active_plan.get("goals_json") or "[]")),
+                    }
+                    if active_plan is not None
+                    else {}
+                ),
+                lineage={
+                    "root_task_id": str(
+                        task_row.get("root_task_id") or task["task_id"]
+                    ),
+                    "parent_task_id": task_row.get("parent_task_id"),
+                    "source_task_id": str(
+                        task_row.get("source_task_id") or task["task_id"]
+                    ),
+                    "plan_id": str(task_row.get("plan_id") or "legacy"),
+                    "plan_node_id": str(
+                        task_row.get("plan_node_id") or task["task_id"]
+                    ),
+                    "task_revision": int(task_row.get("task_revision") or 1),
+                },
+                open_failure=open_failure,
+                capability_contract={
+                    "profile": str(
+                        task_row.get("capability_profile") or "legacy"
+                    ),
+                    "required": [
+                        str(value) for value in required_capabilities
+                    ],
+                    "missing": [
+                        str(value) for value in missing_capabilities
+                    ],
+                },
                 evidence=spec.evidence,
                 decisions=list(spec.decisions),
                 filename=filename,
@@ -1430,6 +1581,104 @@ class AgentWorker:
         if not isinstance(payload, dict) or find_secret_candidates(raw):
             return None
         return f"evidence/{path.name}"
+
+    def _transport_diagnostic(
+        self,
+        spec: TaskExecutionSpec,
+        attempt: Attempt,
+        selection: ModelSelection,
+        *,
+        raw_output: str,
+        reason_code: str,
+        parser_error: BaseException,
+        context_path: Path,
+    ) -> Path:
+        diagnostics = find_secret_candidate_diagnostics(raw_output)
+        safe_output, _ = redact_text(raw_output)
+        safe_output, _ = redact_secret_candidates(safe_output)
+        artifact = {
+            "schema_version": "1.0",
+            "artifact_id": new_id("transport-diagnostic"),
+            "product_id": str(spec.task_contract["product_id"]),
+            "task_id": str(spec.task_contract["task_id"]),
+            "attempt_id": attempt.attempt_id,
+            "reason_code": reason_code,
+            "raw_sha256": sha256_text(raw_output),
+            "raw_chars": len(raw_output),
+            "safe_head": safe_output[:1800],
+            "safe_tail": safe_output[-1800:] if len(safe_output) > 1800 else safe_output,
+            "parser_error_type": type(parser_error).__name__,
+            "redactions": diagnostics,
+            "provider": selection.provider,
+            "model": selection.model,
+            "context_ref": f"evidence/{context_path.name}",
+            "usage_ref": self._usage_evidence_ref(attempt),
+        }
+        return self.artifacts.write(
+            "transport-diagnostic.schema.json",
+            artifact,
+            filename=f"transport-diagnostic-{attempt.attempt_id}.json",
+        )
+
+    @staticmethod
+    def _exception_reason_code(error: BaseException) -> str:
+        message = str(error).lower()
+        if "database migration checksum mismatch" in message:
+            return "migration_checksum_mismatch"
+        if isinstance(error, ArtifactConflictError):
+            return "artifact_immutable_conflict"
+        kind = re.sub(r"(?<!^)(?=[A-Z])", "_", type(error).__name__).lower()
+        return f"controller_exception_{kind}"
+
+    def _failure_envelope(
+        self,
+        task: Mapping[str, Any],
+        failure: FailureData,
+    ) -> tuple[FailureData, Path]:
+        safe_message, _ = redact_text(failure.safe_message)
+        safe_message, _ = redact_secret_candidates(safe_message)
+        sanitized = replace(failure, safe_message=safe_message[:4000])
+        fingerprint = sanitized.normalized_fingerprint(str(task["task_id"]))
+        failure_id = f"failure-{fingerprint[:20]}"
+        source_ref = sanitized.evidence_ref
+        source_path = Path(source_ref)
+        if source_path.is_file() and source_path.parent.resolve() == self.config.evidence_dir.resolve():
+            source_ref = f"evidence/{source_path.name}"
+        attempt_key = sanitized.attempt_id or fingerprint[:12]
+        artifact = {
+            "schema_version": "2.0",
+            "artifact_id": f"failure-envelope-{sha256_text(f'{failure_id}:{attempt_key}')[:20]}",
+            "product_id": str(task["product_id"]),
+            "task_id": str(task["task_id"]),
+            "attempt_id": sanitized.attempt_id,
+            "parent_failure_id": sanitized.parent_failure_id,
+            "failure_id": failure_id,
+            "failure_class": sanitized.failure_class,
+            "reason_code": sanitized.reason_code,
+            "fingerprint": fingerprint,
+            "safe_message": sanitized.safe_message,
+            "expected": sanitized.expected,
+            "actual": sanitized.actual,
+            "failed_gate_ids": list(sanitized.failed_gate_ids),
+            "evidence_refs": [source_ref],
+            "exception_type": sanitized.exception_type,
+            "stack_fingerprint": sanitized.stack_fingerprint,
+            "retryable": sanitized.retryable,
+            "owner_action_eligible": sanitized.owner_action_eligible,
+        }
+        path = self.artifacts.write(
+            "failure-envelope.schema.json",
+            artifact,
+            filename=f"failure-envelope-{failure_id}-{attempt_key}.json",
+        )
+        return (
+            replace(
+                sanitized,
+                evidence_ref=f"evidence/{path.name}",
+                fingerprint=fingerprint,
+            ),
+            path,
+        )
 
     def _attempt_artifact(
         self,
@@ -1509,6 +1758,7 @@ class AgentWorker:
         output_path: Path | None,
         output: Mapping[str, Any] | None,
         preserve_existing: bool = False,
+        additional_evidence_refs: list[str] | None = None,
     ) -> Path:
         output_status = str(output.get("status")) if output else "no_usable_provider_result"
         raw_summary = str(output.get("summary", "")) if output else "Provider did not return a schema-valid result."
@@ -1522,6 +1772,30 @@ class AgentWorker:
             if preserve_existing and spec.repair_context_ref
             else None
         )
+        if (
+            prior_brief is not None
+            and str(prior_brief.get("schema_version")) == "2.0"
+        ):
+            evidence_refs = [
+                *[str(value) for value in prior_brief["evidence_refs"]],
+                str(spec.repair_context_ref),
+                f"evidence/{context_path.name}",
+                *(additional_evidence_refs or []),
+            ]
+            artifact = {
+                **prior_brief,
+                "artifact_id": new_id("repair-brief"),
+                "evidence_refs": list(dict.fromkeys(evidence_refs)),
+            }
+            self.schemas.validate("repair-brief-v2.schema.json", artifact)
+            return self.artifacts.write(
+                "repair-brief-v2.schema.json",
+                artifact,
+                filename=(
+                    f"repair-brief-{spec.task_contract['task_id']}-"
+                    f"{attempt.attempt_id}.json"
+                ),
+            )
         failed_gate_ids: list[str] = []
         changed_files: list[dict[str, str]] = []
         if output:
@@ -1613,6 +1887,7 @@ class AgentWorker:
         ]
         if output_path is not None:
             evidence_refs.append(f"evidence/{output_path.name}")
+        evidence_refs.extend(additional_evidence_refs or [])
         artifact = {
             **artifact_metadata(self.config, "repair-coordinator", new_id("repair-brief"), str(spec.task_contract["product_id"])),
             "producer": {
@@ -1711,6 +1986,7 @@ class AgentWorker:
         context_path: Path,
         reason_code: str,
         output: Mapping[str, Any] | None = None,
+        diagnostic_ref: str | None = None,
     ) -> WorkerResult | None:
         """Persist a transient failure and return the task to the durable queue.
 
@@ -1722,6 +1998,27 @@ class AgentWorker:
 
         if route_action != "retry_same_tier":
             return None
+        transient_policy = self.attempts.policy["global"]["transient_retries"]
+        raw_backoff = transient_policy.get("backoff_seconds", [])
+        if (
+            not isinstance(raw_backoff, list)
+            or not raw_backoff
+            or any(not isinstance(value, int) or value < 0 for value in raw_backoff)
+        ):
+            raise RuntimeError("transient retry backoff policy is invalid")
+        _, transient_count = self.state.attempt_counts(
+            str(spec.task_contract["task_id"]),
+            tier.value,
+        )
+        backoff_index = min(transient_count, len(raw_backoff) - 1)
+        delay_seconds = int(raw_backoff[backoff_index])
+        retry_available_at = (
+            (
+                datetime.now(UTC) + timedelta(seconds=delay_seconds)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            if delay_seconds
+            else None
+        )
         repair_path = self._write_repair_brief(
             spec,
             attempt,
@@ -1731,6 +2028,7 @@ class AgentWorker:
             output_path=None,
             output=output,
             preserve_existing=True,
+            additional_evidence_refs=[diagnostic_ref] if diagnostic_ref else None,
         )
         result_path = self._attempt_artifact(
             spec,
@@ -1744,7 +2042,10 @@ class AgentWorker:
             command_ref=str(context_path),
             output_ref=None,
             reason_code=reason_code,
-            extra_evidence_refs=[f"evidence/{repair_path.name}"],
+            extra_evidence_refs=[
+                f"evidence/{repair_path.name}",
+                *([diagnostic_ref] if diagnostic_ref else []),
+            ],
         )
         return WorkerResult(
             str(spec.task_contract["task_id"]),
@@ -1755,6 +2056,7 @@ class AgentWorker:
             tier,
             "transient_retry",
             f"evidence/{repair_path.name}",
+            retry_available_at=retry_available_at,
         )
 
     def _route(
@@ -1771,7 +2073,10 @@ class AgentWorker:
             task_id=str(spec.task_contract["task_id"]),
             role=spec.role.replace("-", "_"),
             risk=str(spec.task_contract["risk_tier"]),
-            complexity_score=max(1, len(spec.task_contract["complexity_features"])),
+            complexity_score=max(
+                1,
+                len(spec.task_contract.get("complexity_features", [])),
+            ),
             tier=tier,
             success=success,
             reason_code=reason_code,
@@ -1781,7 +2086,12 @@ class AgentWorker:
         return decision.action
 
     def execute(self, spec: TaskExecutionSpec) -> WorkerResult:
-        self.schemas.validate("task-contract.schema.json", spec.task_contract)
+        contract_schema = (
+            "task-contract-v2.schema.json"
+            if str(spec.task_contract.get("schema_version")) == "2.0"
+            else "task-contract.schema.json"
+        )
+        self.schemas.validate(contract_schema, spec.task_contract)
         if spec.role == "release-operator" and self.release_executor is None:
             raise ExternalBlocker(
                 "release side-effect adapter is not configured",
@@ -1852,14 +2162,10 @@ class AgentWorker:
             if preflight is not None
             else []
         )
+        transport_diagnostic_ref: str | None = None
         try:
             if preflight is not None and not preflight.mandatory_passed:
                 gate_detail = _failed_gate_detail(list(preflight.results))
-                self.attempts.finish(
-                    attempt,
-                    status="failed",
-                    reason_code="mandatory_gate_failed",
-                )
                 route_action = self._route(
                     spec,
                     tier,
@@ -1902,7 +2208,6 @@ class AgentWorker:
             )
             if run.status != "PASS":
                 reason_code = run.reason_code or "process_crash_before_result"
-                self.attempts.finish(attempt, status="failed", reason_code=run.reason_code)
                 route_action = self._route(spec, tier, success=False, reason_code=reason_code, attempt=attempt)
                 scheduled = self._schedule_transient_retry(
                     spec,
@@ -1929,21 +2234,55 @@ class AgentWorker:
                     reason_code=reason_code,
                 )
                 return WorkerResult(str(spec.task_contract["task_id"]), "failed_safe", reason_code, str(result_path), attempt.attempt_id)
-            provider_output, secret_diagnostics = redact_secret_candidates(
-                run.output
-            )
+            # Locate candidates on the original in-memory response so the safe
+            # diagnostic retains JSON coordinates. Persist only the redacted
+            # representation.
+            secret_diagnostics = find_secret_candidate_diagnostics(run.output)
+            provider_output, _ = redact_secret_candidates(run.output)
+            provider_output, _ = redact_text(provider_output)
             provider_redaction_summary = _provider_redaction_summary(
                 secret_diagnostics
             )
             try:
                 output = json.loads(provider_output)
             except (json.JSONDecodeError, TypeError) as error:
+                diagnostic = self._transport_diagnostic(
+                    spec,
+                    attempt,
+                    selection,
+                    raw_output=run.output,
+                    reason_code="malformed_transport",
+                    parser_error=error,
+                    context_path=context_path,
+                )
+                transport_diagnostic_ref = f"evidence/{diagnostic.name}"
                 raise ValueError("malformed_transport") from error
             if not isinstance(output, dict):
+                root_error = TypeError("provider output root is not an object")
+                diagnostic = self._transport_diagnostic(
+                    spec,
+                    attempt,
+                    selection,
+                    raw_output=run.output,
+                    reason_code="malformed_transport",
+                    parser_error=root_error,
+                    context_path=context_path,
+                )
+                transport_diagnostic_ref = f"evidence/{diagnostic.name}"
                 raise TypeError("malformed_transport")
             try:
                 self.schemas.validate(spec.output_schema, output)
             except (TypeError, ValueError) as error:
+                diagnostic = self._transport_diagnostic(
+                    spec,
+                    attempt,
+                    selection,
+                    raw_output=run.output,
+                    reason_code="schema_validation",
+                    parser_error=error,
+                    context_path=context_path,
+                )
+                transport_diagnostic_ref = f"evidence/{diagnostic.name}"
                 raise ValueError("schema_validation") from error
             if spec.role == "release-operator":
                 proposal_snapshot = _workspace_snapshot(lease.path)
@@ -1975,11 +2314,6 @@ class AgentWorker:
                         expected_staging_digest=expected_staging_digest,
                     )
                 except CandidateChecksFailed as error:
-                    self.attempts.finish(
-                        attempt,
-                        status="failed",
-                        reason_code=error.reason_code,
-                    )
                     route_action = self._route(
                         spec,
                         tier,
@@ -2014,11 +2348,6 @@ class AgentWorker:
                         detail=str(error),
                     )
                 except CandidateChecksPending as error:
-                    self.attempts.finish(
-                        attempt,
-                        status="failed",
-                        reason_code=error.reason_code,
-                    )
                     route_action = self._route(
                         spec,
                         tier,
@@ -2060,11 +2389,6 @@ class AgentWorker:
                     )
                 except ExternalBlocker as error:
                     reason_code = error.reason_code
-                    self.attempts.finish(
-                        attempt,
-                        status="failed",
-                        reason_code=reason_code,
-                    )
                     route_action = self._route(
                         spec,
                         tier,
@@ -2097,7 +2421,6 @@ class AgentWorker:
                         detail=str(error),
                     )
                 except (OSError, RuntimeError, ValueError):
-                    self.attempts.finish(attempt, status="failed", reason_code="release_adapter_error")
                     route_action = self._route(spec, tier, success=False, reason_code="release_adapter_error", attempt=attempt)
                     result_path = self._attempt_artifact(
                         spec,
@@ -2152,7 +2475,6 @@ class AgentWorker:
                 [str(path) for path in spec.task_contract["forbidden_paths"]],
             )
             if scope_violations:
-                self.attempts.finish(attempt, status="failed", reason_code="scope_violation")
                 route_action = self._route(spec, tier, success=False, reason_code="scope_violation", attempt=attempt)
                 result_path = self._attempt_artifact(
                     spec,
@@ -2193,7 +2515,6 @@ class AgentWorker:
             )
             if not quality_run.mandatory_passed:
                 gate_detail = _failed_gate_detail(list(quality_run.results))
-                self.attempts.finish(attempt, status="failed", reason_code="mandatory_gate_failed")
                 route_action = self._route(spec, tier, success=False, reason_code="mandatory_gate_failed", attempt=attempt)
                 result_path = self._attempt_artifact(
                     spec,
@@ -2243,7 +2564,21 @@ class AgentWorker:
                 output_status = "repair_required"
             if output_status not in {"completed", "accepted"}:
                 repair_detail = _repair_request_detail(output)
-                self.attempts.finish(attempt, status="repair_required", reason_code="model_requested_repair")
+                reason_code = (
+                    "needs_replan"
+                    if output_status == "needs_replan"
+                    else "model_requested_repair"
+                )
+                blocker_ids, required_fixes = repair_requirements(
+                    output=output,
+                    reason_code=reason_code,
+                    detail=repair_detail,
+                    failed_gate_ids=(
+                        str(item.get("gate_id"))
+                        for item in quality_run.results
+                        if item.get("status") == "FAIL"
+                    ),
+                )
                 reviewer_handoff = (
                     output_status == "repair_required"
                     and spec.role == "security-reviewer"
@@ -2255,27 +2590,11 @@ class AgentWorker:
                         spec,
                         tier,
                         success=False,
-                        reason_code="model_requested_repair",
+                        reason_code=reason_code,
                         new_evidence=output_status == "repair_required",
                         attempt=attempt,
                     )
                 )
-                if output_status == "repair_required" and not reviewer_handoff:
-                    scheduled = self._schedule_repair(
-                        spec,
-                        attempt,
-                        selection,
-                        tier=tier,
-                        route_action=route_action,
-                        context_path=context_path,
-                        output_path=output_path,
-                        output=output,
-                        reason_code="model_requested_repair",
-                        gate_results=list(quality_run.results),
-                        changed_files=changed_files,
-                    )
-                    if scheduled is not None:
-                        return scheduled
                 result_path = self._attempt_artifact(
                     spec,
                     attempt,
@@ -2295,19 +2614,31 @@ class AgentWorker:
                     command_result="pass",
                     command_ref=str(context_path),
                     output_ref=str(output_path),
-                    reason_code="model_requested_repair",
+                    reason_code=reason_code,
                     gate_results=list(quality_run.results),
                     changed_files=changed_files,
                 )
                 return WorkerResult(
                     str(spec.task_contract["task_id"]),
                     output_status,
-                    "model_requested_repair",
+                    reason_code,
                     str(result_path),
                     attempt.attempt_id,
                     detail=repair_detail,
+                    failure_data=FailureData(
+                        failure_class="semantic",
+                        reason_code=reason_code,
+                        safe_message=repair_detail,
+                        evidence_ref=f"evidence/{result_path.name}",
+                        attempt_id=attempt.attempt_id,
+                        expected={"acceptance": spec.task_contract["acceptance"]},
+                        actual={
+                            "reported_status": output_status,
+                            "required_fixes": required_fixes,
+                        },
+                        failed_gate_ids=tuple(blocker_ids),
+                    ),
                 )
-            self.attempts.finish(attempt, status="completed")
             self._route(spec, tier, success=True, reason_code=None, attempt=attempt)
             result_path = self._attempt_artifact(
                 spec,
@@ -2341,8 +2672,18 @@ class AgentWorker:
             task_row = self.state.get_task(str(spec.task_contract["task_id"]))
             if task_row is None:
                 raise RuntimeError(f"Durable task disappeared: {spec.task_contract['task_id']}")
-            self.pipeline.advance_after(task_row, output, output_path)
-            return WorkerResult(str(spec.task_contract["task_id"]), "completed", None, str(result_path), attempt.attempt_id)
+            pipeline_outcome = self.pipeline.prepare_after(
+                task_row, output, output_path
+            )
+            return WorkerResult(
+                str(spec.task_contract["task_id"]),
+                "completed",
+                None,
+                str(result_path),
+                attempt.attempt_id,
+                pipeline_outcome=pipeline_outcome,
+                output_ref=f"evidence/{output_path.name}",
+            )
         except (json.JSONDecodeError, TypeError, ValueError) as error:
             reason = str(error) if str(error) in {
                 "secret_exposure",
@@ -2351,7 +2692,6 @@ class AgentWorker:
                 "release_policy_violation",
                 "scope_violation",
             } else "malformed_transport"
-            self.attempts.finish(attempt, status="failed", reason_code=reason)
             route_action = self._route(
                 spec,
                 tier,
@@ -2369,6 +2709,7 @@ class AgentWorker:
                     route_action=route_action,
                     context_path=context_path,
                     reason_code=reason,
+                    diagnostic_ref=transport_diagnostic_ref,
                 )
                 if scheduled is not None:
                     return scheduled
@@ -2398,6 +2739,11 @@ class AgentWorker:
                 command_ref=str(context_path),
                 output_ref=None,
                 reason_code=reason,
+                extra_evidence_refs=(
+                    [transport_diagnostic_ref]
+                    if transport_diagnostic_ref
+                    else None
+                ),
             )
             return WorkerResult(str(spec.task_contract["task_id"]), "failed_safe", reason, str(result_path), attempt.attempt_id)
         finally:
@@ -2446,16 +2792,34 @@ class AgentWorker:
             except ExternalBlocker as error:
                 result = WorkerResult(
                     task_id,
-                    "blocked_external",
+                    (
+                        "blocked_external"
+                        if error.reason_code in OWNER_ACTION_REASONS
+                        else "failed_safe"
+                    ),
                     error.reason_code,
                     detail=str(error),
                 )
-            except (OSError, RuntimeError, TypeError, ValueError):
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                diagnostic = safe_exception_diagnostic(error)
+                reason_code = self._exception_reason_code(error)
                 result = WorkerResult(
                     task_id,
                     "failed_safe",
-                    "worker_internal_error",
-                    detail="worker raised an internal exception",
+                    reason_code,
+                    detail=str(diagnostic["safe_message"]),
+                    failure_data=FailureData(
+                        failure_class="controller",
+                        reason_code=reason_code,
+                        safe_message=str(diagnostic["safe_message"]),
+                        evidence_ref=f"internal://task/{task_id}",
+                        exception_type=str(diagnostic["exception_type"]),
+                        stack_fingerprint=str(diagnostic["stack_fingerprint"]),
+                        actual={
+                            "traceback_excerpt": diagnostic["traceback_excerpt"],
+                            "redactions": diagnostic["redactions"],
+                        },
+                    ),
                 )
         finally:
             heartbeat_stop.set()
@@ -2467,44 +2831,176 @@ class AgentWorker:
                 "task_lease_lost",
                 detail="task lease ownership changed before terminal persistence",
             )
-        if result.status == "repair_scheduled":
-            if result.next_tier is None or result.next_attempt_kind is None or result.repair_context_ref is None:
-                result = WorkerResult(task_id, "failed_safe", "repair_schedule_incomplete")
-            else:
-                try:
-                    self.state.requeue_task(
-                        task_id,
-                        self.worker_id,
-                        next_tier=result.next_tier.value,
-                        attempt_kind=result.next_attempt_kind,
-                        repair_context_ref=result.repair_context_ref,
+        if result.status == "repair_scheduled" and (
+            result.next_tier is None
+            or result.next_attempt_kind is None
+            or result.repair_context_ref is None
+        ):
+            result = WorkerResult(
+                task_id,
+                "failed_safe",
+                "repair_schedule_incomplete",
+                detail="bounded retry metadata is incomplete",
+            )
+        artifact_ref = result.artifact_ref or f"internal://task/{task_id}"
+        artifact_path = Path(artifact_ref)
+        result_digest = (
+            sha256_file(artifact_path)
+            if artifact_path.is_file()
+            else sha256_text(
+                stable_json(
+                    {
+                        "task_id": task_id,
+                        "status": result.status,
+                        "reason_code": result.reason_code,
+                        "detail": result.detail,
+                    }
+                )
+            )
+        )
+        task_row = self.state.get_task(task_id)
+        if task_row is None:
+            raise RuntimeError(f"Durable task disappeared: {task_id}")
+        task_plan_revision = next(
+            (
+                int(plan["revision"])
+                for plan in self.state.list_plans(str(task_row["product_id"]))
+                if str(plan["plan_id"]) == str(task_row.get("plan_id") or "")
+            ),
+            None,
+        )
+        prepared = result.pipeline_outcome or PreparedPipelineOutcome()
+        if result.status in {"completed", "accepted"}:
+            durable_status = "ACCEPTED"
+            failure = None
+            hypothesis = None
+            attempt_status = "completed"
+        elif result.status == "repair_scheduled":
+            reason_code = result.reason_code or "transient_retry"
+            durable_status = "WAITING_TIME"
+            safe_detail, _ = redact_text(
+                result.detail or f"{reason_code} while executing task {task_id}"
+            )
+            failure = FailureData(
+                failure_class=(
+                    "transient"
+                    if result.next_attempt_kind == "transient_retry"
+                    else "semantic"
+                ),
+                reason_code=reason_code,
+                safe_message=safe_detail,
+                evidence_ref=artifact_ref,
+                attempt_id=result.attempt_id,
+                retryable=True,
+            )
+            hypothesis = None
+            attempt_status = "failed"
+        else:
+            reason_code = result.reason_code or "worker_internal_error"
+            classified = classify_failure(reason_code).value
+            owner_action = reason_code in OWNER_ACTION_REASONS
+            failure_class = (
+                "controller"
+                if result.failure_data is not None
+                or reason_code
+                in {
+                    "release_adapter_missing",
+                    "model_route_unapproved",
+                    "internal_task_route",
+                }
+                or reason_code.startswith(
+                    (
+                        "worker_",
+                        "controller_",
+                        "migration_",
+                        "artifact_",
+                        "repair_requeue_",
                     )
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    result = WorkerResult(task_id, "failed_safe", "repair_requeue_failed")
-                else:
-                    return result
-        terminal = {
-            "completed": "DONE",
-            "accepted": "DONE",
-            "blocked_external": "BLOCKED_EXTERNAL",
-            "repair_required": "BLOCKED_EXTERNAL",
-            "repair_handoff": "FAILED_SAFE",
-            "failed_safe": "FAILED_SAFE",
-        }.get(result.status, "FAILED_SAFE")
-        failure_kind = (
-            None
-            if terminal == "DONE"
-            else classify_failure(result.reason_code).value
+                )
+                or result.status == "blocked_external"
+                and not owner_action
+                else classified
+            )
+            external = classified == "external" and owner_action
+            durable_status = (
+                "WAITING_EXTERNAL"
+                if external
+                else "FAILED_TRANSIENT"
+                if classified == "transient"
+                else "FAILED_SEMANTIC"
+            )
+            safe_detail, _ = redact_text(
+                result.detail
+                or f"{reason_code} while executing task {task_id}"
+            )
+            failure = result.failure_data or FailureData(
+                failure_class=failure_class,
+                reason_code=reason_code,
+                safe_message=safe_detail,
+                evidence_ref=artifact_ref,
+                attempt_id=result.attempt_id,
+                retryable=classified == "transient",
+                owner_action_eligible=external,
+            )
+            hypothesis = (
+                HypothesisData(
+                    statement=failure.safe_message,
+                    signature=sha256_text(
+                        stable_json(
+                            [
+                                reason_code,
+                                failure.safe_message,
+                                failure.failed_gate_ids,
+                            ]
+                        )
+                    ),
+                    required_evidence=(artifact_ref,),
+                )
+                if failure_class in {"semantic", "policy"}
+                and not task_row.get("hypothesis_id")
+                else None
+            )
+            attempt_status = "failed"
+        if failure is not None:
+            if task_row.get("failure_id") and failure.parent_failure_id is None:
+                failure = replace(
+                    failure,
+                    parent_failure_id=str(task_row["failure_id"]),
+                )
+            failure, failure_path = self._failure_envelope(task_row, failure)
+            artifact_ref = str(failure_path)
+            result_digest = sha256_file(failure_path)
+        outcome = TaskOutcome(
+            task_id=task_id,
+            worker_id=self.worker_id,
+            lease_token=str(task.get("lease_token") or "") or None,
+            expected_task_revision=int(task_row.get("task_revision") or 1),
+            expected_plan_revision=task_plan_revision,
+            idempotency_key=sha256_text(
+                f"task-outcome:{task_id}:{result.attempt_id or result_digest}"
+            ),
+            result_ref=artifact_ref,
+            result_digest=result_digest,
+            status=durable_status,
+            attempt_id=result.attempt_id,
+            attempt_status=attempt_status,
+            available_at=result.retry_available_at,
+            next_tier=result.next_tier.value if result.next_tier else None,
+            next_attempt_kind=result.next_attempt_kind,
+            repair_context_ref=result.repair_context_ref,
+            product_status=prepared.product_status,
+            successors=prepared.successors,
+            edges=prepared.edges,
+            failure=failure,
+            hypothesis=hypothesis,
+            plan=prepared.plan,
         )
-        self.workflow.complete(
-            task_id,
-            self.worker_id,
-            terminal,
-            reason_code=result.reason_code if terminal != "DONE" else None,
-            detail=result.detail if terminal != "DONE" else None,
-            result_ref=result.artifact_ref,
-            failure_kind=failure_kind,
-        )
+        self.state.commit_task_outcome(outcome)
+        if prepared.run_completion_reducer:
+            self.state.reduce_completion(
+                str(task_row["product_id"]),
+                artifacts=self.artifacts,
+            )
         return result
 
     def run_forever(self) -> None:
@@ -2527,11 +3023,13 @@ def main() -> int:
         max_active_products=config.max_active_products,
     )
     state.recover_expired_leases()
+    CapabilityBroker(config, state).preflight_all()
     worker = AgentWorker(
         config,
         state,
         repository_root=Path.cwd(),
         release_executor=build_release_executor(config),
+        repository_bootstrapper=build_repository_bootstrapper(config, state),
         worker_id=args.worker_id,
     )
     try:

@@ -279,7 +279,7 @@ def test_repair_cycle_resumes_from_staging_without_restarting_planning() -> None
             task = state.claim_task(worker_id=worker_id)
             assert task is not None
             assert task["role"] == role
-            pipeline.advance_after(
+            pipeline.advance_after_legacy_v1(
                 task,
                 output or {"status": "completed"},
                 Path("unused.json"),

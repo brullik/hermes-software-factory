@@ -135,10 +135,20 @@ def intake_command(args: argparse.Namespace) -> int:
         max_active_products=config.max_active_products,
     )
     try:
+        goal_text = args.goal_text or args.idea
+        if not goal_text:
+            raise ValueError("--goal-text (or deprecated --idea) is required")
+        delivery_mode = args.delivery_mode or (
+            "existing_repository" if args.repository_url else "new_repository"
+        )
         result = IntakeService(config, state, ArtifactStore(config)).submit(
             source=str(args.source),
             owner_id=str(args.owner_id),
-            idea=str(args.idea),
+            goal_text=str(goal_text),
+            delivery_mode=str(delivery_mode),
+            repository_url=args.repository_url,
+            repository_name=args.repository_name,
+            repository_visibility=str(args.repository_visibility),
             idempotency_key=args.idempotency_key,
         )
         print(json.dumps({
@@ -470,7 +480,19 @@ def build_parser() -> argparse.ArgumentParser:
     intake.add_argument("--config", type=Path)
     intake.add_argument("--source", choices=["cli", "github", "telegram"], default="cli")
     intake.add_argument("--owner-id", required=True)
-    intake.add_argument("--idea", required=True)
+    intake.add_argument("--goal-text")
+    intake.add_argument("--idea", help="Deprecated alias for --goal-text")
+    intake.add_argument(
+        "--delivery-mode",
+        choices=["new_repository", "existing_repository"],
+    )
+    intake.add_argument("--repository-url")
+    intake.add_argument("--repository-name")
+    intake.add_argument(
+        "--repository-visibility",
+        choices=["private", "public"],
+        default="private",
+    )
     intake.add_argument("--idempotency-key")
     intake.set_defaults(function=intake_command)
     status = subparsers.add_parser("status")

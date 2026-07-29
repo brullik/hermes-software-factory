@@ -38,7 +38,7 @@ _TARGET_DEPENDENCY_COMMAND = "controller:target-dependency-audit"
 _TARGET_LICENSE_ADAPTER = "target_license_check"
 _TARGET_LICENSE_COMMAND = "controller:target-license-check"
 _TARGET_SECRET_PATTERN = re.compile(
-    rb"(?:ghp_|github_pat_|sk-[A-Za-z0-9_-]{20,}|"
+    rb"(?:ghp_|github_pat_|(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|"
     rb"BEGIN\s+(?:(?:RSA|EC|OPENSSH)\s+)?PRIVATE\s+KEY)"
 )
 _DENIED_LICENSE_PATTERN = re.compile(
@@ -768,14 +768,21 @@ def run_gate(
             argv = shlex.split(command)
             if python_executable and argv and argv[0].lower() in {"python", "python3", "python.exe"}:
                 argv[0] = python_executable
-            completed = subprocess.run(
-                argv,
-                cwd=cwd,
-                text=True,
-                capture_output=True,
-                timeout=int(gate.get("timeout_seconds", 600)),
-                check=False,
-            )
+            with tempfile.TemporaryDirectory(
+                prefix="hermes-gate-pycache-"
+            ) as pycache_directory:
+                gate_environment = os.environ.copy()
+                gate_environment["PYTHONPYCACHEPREFIX"] = pycache_directory
+                gate_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+                completed = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    env=gate_environment,
+                    text=True,
+                    capture_output=True,
+                    timeout=int(gate.get("timeout_seconds", 600)),
+                    check=False,
+                )
             output = (completed.stdout + "\n" + completed.stderr).strip()
             exit_code = completed.returncode
             success_exit_codes = gate.get("success_exit_codes", [0])

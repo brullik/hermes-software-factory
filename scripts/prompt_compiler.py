@@ -14,7 +14,10 @@ from typing import Any
 SECRET_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("github_classic_token", re.compile(r"ghp_[A-Za-z0-9]{20,}")),
     ("github_fine_grained_token", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
-    ("openai_style_key", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
+    (
+        "openai_style_key",
+        re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"),
+    ),
     (
         "private_key_header",
         re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -129,7 +132,15 @@ def compile_prompt(parts: Iterable[str]) -> tuple[str, str]:
     normalized = "\n\n".join(part.strip() for part in parts if part.strip()) + "\n"
     findings = find_secret_candidates(normalized)
     if findings:
-        raise ValueError(f"Secret-like content detected ({len(findings)} finding(s))")
+        diagnostics = find_secret_candidate_diagnostics(normalized)
+        coordinates = ", ".join(
+            f"{item['detector']}@{item['location']}"
+            for item in diagnostics
+        )
+        raise ValueError(
+            "Secret-like content detected "
+            f"({len(findings)} finding(s)); safe coordinates: {coordinates}"
+        )
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return normalized, digest
 

@@ -40,4 +40,7 @@ D0 шаблонизирует стандартные задачи. Luna форм
 
 ## Выход
 
-Массив объектов `schemas/task-contract.schema.json` плюс DAG summary по `schemas/backlog-plan.schema.json`.
+Один исполнимый `schemas/backlog-plan-v2.schema.json`. Каждый `nodes[]`
+содержит полный `schemas/task-contract-v2.schema.json`; голые task IDs
+запрещены. Все обязательные цели Product Contract должны иметь acceptance IDs
+и evidence-producing nodes. DAG обязан быть ацикличным.

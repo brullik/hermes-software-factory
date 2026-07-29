@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/idea-intake-v2.schema.json",
+  "title": "Idea Intake v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "created_at",
+    "source",
+    "owner_id",
+    "goal_text",
+    "delivery_mode",
+    "repository_url",
+    "repository_name",
+    "repository_visibility",
+    "constraints",
+    "attachments",
+    "idempotency_key",
+    "correlation_id",
+    "redactions",
+    "language"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "artifact_id": {"type": "string", "minLength": 8},
+    "product_id": {"type": "string", "minLength": 8},
+    "created_at": {"type": "string", "format": "date-time"},
+    "source": {"enum": ["telegram", "github", "cli"]},
+    "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "goal_text": {"type": "string", "minLength": 3},
+    "idea": {"type": "string", "minLength": 3, "description": "Deprecated compatibility alias for goal_text."},
+    "delivery_mode": {"enum": ["new_repository", "existing_repository"]},
+    "repository_url": {
+      "type": ["string", "null"],
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?/?$"
+    },
+    "repository_name": {"type": ["string", "null"]},
+    "repository_visibility": {"enum": ["private", "public"]},
+    "constraints": {"type": "object"},
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "digest"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "media_type": {"type": "string"}
+        }
+      }
+    },
+    "idempotency_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "correlation_id": {"type": "string", "minLength": 8},
+    "redactions": {"type": "array", "items": {"type": "object"}},
+    "language": {"type": "string", "minLength": 2}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"delivery_mode": {"const": "existing_repository"}}},
+      "then": {"properties": {"repository_url": {"type": "string"}}},
+      "else": {"properties": {"repository_url": {"type": "null"}}}
+    }
+  ]
+}

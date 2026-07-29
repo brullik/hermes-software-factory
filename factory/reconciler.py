@@ -16,6 +16,7 @@ from scripts.quality_gate import load_catalog
 from .artifacts import ArtifactStore, artifact_metadata
 from .common import new_id, sha256_text
 from .config import FactoryConfig
+from .failure_router import FailureRouter
 from .owner_actions import OwnerActionService
 from .pipeline import PipelineCoordinator
 from .policy import load_policies, owner_action_allowed
@@ -62,6 +63,8 @@ _REASON_RU = {
 class ReconcileResult:
     inspected: int = 0
     repaired: int = 0
+    replanned: int = 0
+    incidents: int = 0
     owner_actions: int = 0
     exhausted: int = 0
     recovered_successors: int = 0
@@ -80,6 +83,7 @@ class PipelineReconciler:
         self.state = state
         self.artifacts = artifacts or ArtifactStore(config)
         self.pipeline = PipelineCoordinator(config, state, self.artifacts)
+        self.failure_router = FailureRouter(config, state, self.artifacts)
         self.workflow = WorkflowEngine(state)
         self.owner_actions = OwnerActionService(config)
         routing = load_policies(config).get("model-routing", {})
@@ -538,11 +542,13 @@ class PipelineReconciler:
             ),
         )
 
-    def _recover_successor(
+    def _recover_successor_legacy_v1(
         self,
         product: dict[str, Any],
         task: dict[str, Any],
     ) -> bool:
+        """Recover a revision-0 v1 stage; executable v2 plans never call this."""
+
         product_id = str(product["product_id"])
         stage = str(task.get("stage_key") or "")
         role = str(task.get("role") or "")
@@ -622,7 +628,7 @@ class PipelineReconciler:
         """Do not charge Builder for a GitHub check owned by a later stage."""
 
         product_id = str(product["product_id"])
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         if (
             task is None
             or str(task.get("status")) != "BLOCKED_EXTERNAL"
@@ -684,7 +690,7 @@ class PipelineReconciler:
 
         product_id = str(product["product_id"])
         tasks = self.state.list_tasks(product_id)
-        latest = self.state.latest_task(product_id)
+        latest = self.state.legacy_latest_task_v1(product_id)
         if len(tasks) < 2 or latest is None:
             return False
         if (
@@ -755,7 +761,10 @@ class PipelineReconciler:
             ):
                 continue
             refreshed = self.state.get_product(product_id)
-            if refreshed is None or not self._recover_successor(refreshed, candidate):
+            if refreshed is None or not self._recover_successor_legacy_v1(
+                refreshed,
+                candidate,
+            ):
                 raise RuntimeError(
                     f"controller-valid Builder successor was not created for {task_id}"
                 )
@@ -779,7 +788,7 @@ class PipelineReconciler:
 
     def _recover_interrupted_product(self, product: dict[str, Any]) -> bool:
         product_id = str(product["product_id"])
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         if task is None:
             return False
         detail = str(task.get("terminal_detail") or "")
@@ -818,7 +827,7 @@ class PipelineReconciler:
         """Retry one old opaque rejection with deterministic output sanitizing."""
 
         product_id = str(product["product_id"])
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         if (
             task is None
             or str(task.get("status")) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
@@ -874,7 +883,7 @@ class PipelineReconciler:
         """Retry Test Engineer after a controller-accepted deferred Builder."""
 
         product_id = str(product["product_id"])
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         if (
             task is None
             or str(task.get("status")) != "BLOCKED_EXTERNAL"
@@ -925,7 +934,7 @@ class PipelineReconciler:
 
     def _recover_exhausted_builder_cycle(self, product: dict[str, Any]) -> bool:
         product_id = str(product["product_id"])
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         if (
             task is None
             or str(task.get("role")) != "builder"
@@ -936,7 +945,8 @@ class PipelineReconciler:
         reason, detail = self._task_reason(task)
         if (
             owner_action_allowed(self.config, reason)
-            or classify_failure(reason) is FailureClass.EXTERNAL
+            or classify_failure(reason)
+            in {FailureClass.EXTERNAL, FailureClass.TRANSIENT}
         ):
             return False
         resume_status = self._previous_status_before_failed_safe(product_id)
@@ -969,7 +979,7 @@ class PipelineReconciler:
 
     def _recover_extended_repair_budget(self, product: dict[str, Any]) -> bool:
         product_id = str(product["product_id"])
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         maximum_product_cycle = max(
             (
                 int(item.get("cycle") or 0)
@@ -1017,7 +1027,7 @@ class PipelineReconciler:
         """Treat a newly proven blocker as a new diagnosis, not an old failed attempt."""
 
         product_id = str(product["product_id"])
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         maximum_product_cycle = max(
             (
                 int(item.get("cycle") or 0)
@@ -1153,7 +1163,7 @@ class PipelineReconciler:
             raise RuntimeError(
                 f"Director root-cause replan did not create a Builder task for {task_id}"
             )
-        next_task = self.state.latest_task(product_id)
+        next_task = self.state.legacy_latest_task_v1(product_id)
         self._enqueue_notification(
             product_id=product_id,
             task_id=task_id,
@@ -1183,10 +1193,58 @@ class PipelineReconciler:
         status = str(product["status"])
         if status in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
             return "ignored"
+        plans = self.state.list_plans(product_id)
+        active_v2 = any(
+            str(plan.get("status")) == "ACTIVE"
+            and int(plan.get("revision") or 0) >= 1
+            for plan in plans
+        )
+        if active_v2 or self.state.list_failures(product_id):
+            routed = self.failure_router.route_open_failures(product_id)
+            if routed:
+                roles = {
+                    str((self.state.get_task(task_id) or {}).get("role") or "")
+                    for task_id in routed
+                }
+                if "replanner" in roles:
+                    return "replanned"
+                if "incident-recovery" in roles:
+                    return "incident"
+                return "repaired"
+            graph_active = [
+                task
+                for task in self.state.list_tasks(product_id)
+                if str(task.get("graph_status") or "")
+                in {"READY", "CLAIMED", "WAITING_TIME", "WAITING_EXTERNAL"}
+            ]
+            if graph_active:
+                return "active"
+            if self.state.has_bounded_progress_path(product_id):
+                return "active"
+            incident_id = f"incident-{sha256_text(f'liveness:{product_id}')[:20]}"
+            with self.state._lock, self.state._connection:
+                self.state._connection.execute(
+                    """INSERT OR IGNORE INTO controller_incidents
+                       (incident_id, product_id, task_id, reason_code,
+                        evidence_ref, status, created_at)
+                       VALUES (?, ?, NULL, 'liveness_invariant_violation',
+                               'state://graph-frontier', 'OPEN', ?)""",
+                    (incident_id, product_id, datetime.now(UTC).isoformat()),
+                )
+                self.state._record_event(
+                    product_id,
+                    None,
+                    "controller_incident",
+                    {
+                        "incident_id": incident_id,
+                        "reason_code": "liveness_invariant_violation",
+                    },
+                )
+            return "incident"
         if self.state.active_tasks(product_id):
             return "active"
 
-        task = self.state.latest_task(product_id)
+        task = self.state.legacy_latest_task_v1(product_id)
         self._watchdog_incident(product, task)
         if task is None:
             self.pipeline.seed_initial(product_id)
@@ -1219,7 +1277,11 @@ class PipelineReconciler:
                     "Product Tester не разрешил production release.",
                 )
                 return "exhausted"
-            return "successor" if self._recover_successor(product, task) else "unresolved"
+            return (
+                "successor"
+                if self._recover_successor_legacy_v1(product, task)
+                else "unresolved"
+            )
         if task_status not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}:
             return "unresolved"
 
@@ -1289,6 +1351,8 @@ class PipelineReconciler:
         counts = {
             "inspected": 0,
             "repaired": 0,
+            "replanned": 0,
+            "incidents": 0,
             "owner_actions": 0,
             "exhausted": 0,
             "recovered_successors": 0,
@@ -1367,6 +1431,10 @@ class PipelineReconciler:
             action = self.reconcile_product(product)
             if action == "repaired":
                 counts["repaired"] += 1
+            elif action == "replanned":
+                counts["replanned"] += 1
+            elif action == "incident":
+                counts["incidents"] += 1
             elif action == "owner_action":
                 counts["owner_actions"] += 1
             elif action == "exhausted":

@@ -375,7 +375,7 @@ class FactoryRuntimeTests(unittest.TestCase):
                 output_schema="attempt-result.schema.json",
                 evidence=[{"type": "test", "summary": "passed", "artifact_ref": "registered-intake.json"}],
             )
-            selected_file = context.artifact["selected_files"][0]
+            selected_file = context.artifact["file_excerpts"][0]
             self.assertIn("[REDACTED]", selected_file["content"])
             self.assertNotIn(fake_credential, selected_file["content"])
             self.assertEqual(

@@ -132,7 +132,9 @@ class TelegramGateway:
             result = IntakeService(self.config, self.state, self.artifacts).submit(
                 source="telegram",
                 owner_id=str(owner_id),
-                idea=argument,
+                goal_text=argument,
+                delivery_mode="new_repository",
+                repository_visibility="private",
                 idempotency_key=f"telegram-update:{update_id}",
             )
             verb = "создан" if result.created else "уже существует"

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,33 @@ from scripts.quality_gate import run_gate
 
 
 class QualityGateTests(unittest.TestCase):
+    def test_compile_gate_redirects_bytecode_outside_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src" / "sample.py"
+            test_file = root / "tests" / "test_sample.py"
+            source.parent.mkdir()
+            test_file.parent.mkdir()
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            test_file.write_text("from src.sample import VALUE\n", encoding="utf-8")
+            gate = {
+                "id": "target-compile",
+                "command": "python3 -m compileall -q src tests",
+                "allowlist_prefixes": ["python3 -m compileall"],
+                "mandatory": True,
+            }
+
+            result = run_gate(
+                gate,
+                root,
+                "a" * 64,
+                python_executable=sys.executable,
+            )
+
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(list(root.rglob("*.pyc")), [])
+            self.assertEqual(list(root.rglob("__pycache__")), [])
+
     def test_allowlisted_gates_persist_evidence_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

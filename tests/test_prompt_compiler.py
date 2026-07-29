@@ -35,6 +35,16 @@ class PromptCompilerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compile_prompt(["token=" + "abcdefghijklmnopqrstuvwxyz" + "123456"])
 
+    def test_task_identifiers_are_not_openai_key_false_positives(self) -> None:
+        task_artifact = (
+            '{"artifact_id":"task-contract-T-31C85BFFB34EBC8E",'
+            '"contract_ref":"evidence/task-T-31C85BFFB34EBC8E.json"}'
+        )
+
+        compiled, _ = compile_prompt([task_artifact])
+
+        self.assertEqual(find_secret_candidates(compiled), [])
+
     def test_secret_diagnostics_and_redaction_never_return_value(self) -> None:
         marker = "ghp_" + ("A" * 24)
         text = '{"findings":[{"description":"' + marker + '"}]}'

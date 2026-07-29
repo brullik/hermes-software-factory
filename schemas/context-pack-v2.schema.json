@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/context-pack-v2.schema.json",
+  "title": "Context Pack v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "product_id",
+    "task_id",
+    "root_task_id",
+    "subject_sha",
+    "root_goal",
+    "objective",
+    "acceptance",
+    "plan_summary",
+    "lineage",
+    "open_failure",
+    "capability_contract",
+    "constraints",
+    "file_excerpts",
+    "evidence",
+    "decisions",
+    "output_schema",
+    "redaction_count"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "product_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "root_task_id": {"type": "string", "minLength": 1},
+    "subject_sha": {"type": "string", "pattern": "^[a-f0-9]{7,64}$"},
+    "root_goal": {"type": "string", "minLength": 3},
+    "objective": {"type": "string", "minLength": 1},
+    "acceptance": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "plan_summary": {"type": "object"},
+    "lineage": {
+      "type": "object",
+      "required": ["root_task_id", "parent_task_id", "source_task_id", "plan_id", "plan_node_id", "task_revision"],
+      "properties": {
+        "root_task_id": {"type": "string"},
+        "parent_task_id": {"type": ["string", "null"]},
+        "source_task_id": {"type": "string"},
+        "plan_id": {"type": "string"},
+        "plan_node_id": {"type": "string"},
+        "task_revision": {"type": "integer", "minimum": 1}
+      }
+    },
+    "open_failure": {"type": ["object", "null"]},
+    "capability_contract": {
+      "type": "object",
+      "required": ["profile", "required", "missing"],
+      "properties": {
+        "profile": {"type": "string"},
+        "required": {"type": "array", "items": {"type": "string"}},
+        "missing": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "constraints": {"type": "object"},
+    "file_excerpts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "digest", "reason", "content", "truncated", "binary", "redactions"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "reason": {"type": "string", "minLength": 1},
+          "content": {"type": "string"},
+          "truncated": {"type": "boolean"},
+          "binary": {"type": "boolean"},
+          "redactions": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    },
+    "evidence": {"type": "array", "items": {"type": "object"}},
+    "decisions": {"type": "array", "items": {"type": "string"}},
+    "output_schema": {"type": "string", "minLength": 1},
+    "redaction_count": {"type": "integer", "minimum": 0}
+  }
+}

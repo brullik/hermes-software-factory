@@ -1,0 +1,410 @@
+"""Explicit, ordered SQLite migrations for the durable autonomy model."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Callable
+
+from .common import sha256_text, utc_now
+
+Migration = Callable[[sqlite3.Connection], None]
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _add_columns(
+    connection: sqlite3.Connection,
+    table: str,
+    definitions: tuple[tuple[str, str], ...],
+) -> None:
+    existing = _columns(connection, table)
+    for name, definition in definitions:
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def _migration_001_baseline(connection: sqlite3.Connection) -> None:
+    """Record the pre-v2 schema as an explicit migration baseline."""
+
+
+def _migration_002_autonomy_v2(connection: sqlite3.Connection) -> None:
+    _add_columns(
+        connection,
+        "products",
+        (
+            ("goal_text", "TEXT"),
+            ("repository_url", "TEXT"),
+            ("repository_name", "TEXT"),
+            ("delivery_mode", "TEXT"),
+            ("repository_visibility", "TEXT"),
+            ("root_goal_ref", "TEXT"),
+            ("constraints_ref", "TEXT"),
+            ("owner_defaults_ref", "TEXT"),
+            ("active_plan_id", "TEXT"),
+            ("active_plan_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("completion_evidence_ref", "TEXT"),
+            ("terminal_reason", "TEXT"),
+            ("repository_bootstrap_state", "TEXT"),
+            ("default_branch", "TEXT"),
+            ("starting_sha", "TEXT"),
+            ("bootstrap_sha", "TEXT"),
+        ),
+    )
+    _add_columns(
+        connection,
+        "tasks",
+        (
+            ("root_task_id", "TEXT"),
+            ("parent_task_id", "TEXT"),
+            ("source_task_id", "TEXT"),
+            ("plan_id", "TEXT"),
+            ("plan_node_id", "TEXT"),
+            ("task_revision", "INTEGER NOT NULL DEFAULT 1"),
+            ("root_context_ref", "TEXT"),
+            ("active_context_ref", "TEXT"),
+            ("failure_id", "TEXT"),
+            ("hypothesis_id", "TEXT"),
+            ("capability_profile", "TEXT"),
+            ("idempotency_key", "TEXT"),
+            ("supersedes_task_id", "TEXT"),
+            ("blocked_reason", "TEXT"),
+            ("blocked_ref", "TEXT"),
+            ("graph_status", "TEXT"),
+            ("required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("mandatory", "INTEGER NOT NULL DEFAULT 1"),
+            ("result_digest", "TEXT"),
+            ("lease_token", "TEXT"),
+            ("critical_path_rank", "INTEGER NOT NULL DEFAULT 0"),
+            ("required_predecessor_digest", "TEXT"),
+        ),
+    )
+    _add_columns(
+        connection,
+        "attempts",
+        (
+            ("completed_at", "TEXT"),
+            ("failure_id", "TEXT"),
+            ("result_digest", "TEXT"),
+        ),
+    )
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS plans (
+            plan_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL REFERENCES products(product_id),
+            revision INTEGER NOT NULL,
+            parent_plan_id TEXT,
+            source_failure_id TEXT,
+            status TEXT NOT NULL,
+            plan_artifact_ref TEXT NOT NULL,
+            plan_digest TEXT NOT NULL,
+            goals_json TEXT NOT NULL DEFAULT '[]',
+            completion_criteria_json TEXT NOT NULL DEFAULT '[]',
+            created_by_task_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            activated_at TEXT,
+            completed_at TEXT,
+            UNIQUE(product_id, revision)
+        );
+        CREATE TABLE IF NOT EXISTS task_edges (
+            plan_id TEXT NOT NULL,
+            from_task_id TEXT NOT NULL,
+            to_task_id TEXT NOT NULL,
+            edge_type TEXT NOT NULL,
+            required INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(plan_id, from_task_id, to_task_id, edge_type)
+        );
+        CREATE TABLE IF NOT EXISTS failures (
+            failure_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            attempt_id TEXT,
+            parent_failure_id TEXT,
+            failure_class TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            safe_message TEXT NOT NULL,
+            exception_type TEXT,
+            stack_fingerprint TEXT,
+            evidence_ref TEXT NOT NULL,
+            status TEXT NOT NULL,
+            retryable INTEGER NOT NULL DEFAULT 0,
+            owner_action_eligible INTEGER NOT NULL DEFAULT 0,
+            expected_json TEXT NOT NULL DEFAULT '{}',
+            actual_json TEXT NOT NULL DEFAULT '{}',
+            failed_gate_ids_json TEXT NOT NULL DEFAULT '[]',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            occurrence_count INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS hypotheses (
+            hypothesis_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            failure_id TEXT NOT NULL,
+            parent_hypothesis_id TEXT,
+            signature TEXT NOT NULL,
+            statement TEXT NOT NULL,
+            required_evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            semantic_budget INTEGER NOT NULL,
+            attempts_used INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS capability_grants (
+            grant_id TEXT PRIMARY KEY,
+            product_id TEXT,
+            task_id TEXT,
+            capability TEXT NOT NULL,
+            scope_json TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expires_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS task_outcomes (
+            outcome_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            result_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            committed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS product_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            evidence_type TEXT NOT NULL,
+            goal_id TEXT,
+            artifact_ref TEXT NOT NULL,
+            artifact_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(product_id, evidence_type, goal_id, artifact_digest)
+        );
+        CREATE TABLE IF NOT EXISTS controller_incidents (
+            incident_id TEXT PRIMARY KEY,
+            product_id TEXT,
+            task_id TEXT,
+            reason_code TEXT NOT NULL,
+            evidence_ref TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS repository_sagas (
+            product_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            repository_url TEXT,
+            repository_name TEXT,
+            visibility TEXT NOT NULL,
+            state TEXT NOT NULL,
+            default_branch TEXT,
+            bootstrap_sha TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_graph_status
+            ON tasks(graph_status, priority, critical_path_rank, created_at);
+        CREATE INDEX IF NOT EXISTS idx_tasks_plan_node
+            ON tasks(plan_id, plan_node_id, task_revision);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_v2_idempotency
+            ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_edges_to ON task_edges(plan_id, to_task_id);
+        CREATE INDEX IF NOT EXISTS idx_failures_open
+            ON failures(product_id, status, task_id);
+        CREATE INDEX IF NOT EXISTS idx_hypotheses_active
+            ON hypotheses(product_id, status, signature);
+        CREATE INDEX IF NOT EXISTS idx_capability_lookup
+            ON capability_grants(product_id, task_id, capability, status);
+        """
+    )
+    _migrate_legacy_rows(connection)
+
+
+def _migration_003_atomic_observation_binding(
+    connection: sqlite3.Connection,
+) -> None:
+    _add_columns(
+        connection,
+        "tasks",
+        (("required_predecessor_digest", "TEXT"),),
+    )
+
+
+def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
+    if status == "CLAIMED":
+        return "CLAIMED"
+    if status == "WAITING":
+        return "WAITING_TIME"
+    if status == "DONE":
+        return "ACCEPTED"
+    if status == "BLOCKED_EXTERNAL":
+        return "WAITING_EXTERNAL"
+    if status == "FAILED_SAFE":
+        return "FAILED_SEMANTIC"
+    if any(value in {"FAILED_SAFE", "BLOCKED_EXTERNAL"} for value in dependency_statuses):
+        return "BLOCKED_DEPENDENCY"
+    if dependency_statuses and any(value != "DONE" for value in dependency_statuses):
+        return "BLOCKED_DEPENDENCY"
+    return "READY"
+
+
+def _migrate_legacy_rows(connection: sqlite3.Connection) -> None:
+    now = utc_now()
+    products = connection.execute(
+        "SELECT product_id, idea FROM products ORDER BY created_at, rowid"
+    ).fetchall()
+    for product in products:
+        product_id = str(product[0])
+        idea = str(product[1])
+        plan_id = f"PLAN-LEGACY-{sha256_text(product_id)[:16].upper()}"
+        tasks = connection.execute(
+            "SELECT task_id, dependencies_json, status, role FROM tasks "
+            "WHERE product_id=? ORDER BY created_at, rowid",
+            (product_id,),
+        ).fetchall()
+        root_task_id = str(tasks[0][0]) if tasks else f"T-ROOT-{sha256_text(product_id)[:12].upper()}"
+        connection.execute(
+            """UPDATE products
+               SET goal_text=COALESCE(goal_text, idea),
+                   delivery_mode=COALESCE(delivery_mode, 'new_repository'),
+                   repository_visibility=COALESCE(repository_visibility, 'private'),
+                   root_goal_ref=COALESCE(root_goal_ref, ?),
+                   active_plan_id=COALESCE(active_plan_id, ?),
+                   active_plan_revision=COALESCE(active_plan_revision, 0)
+               WHERE product_id=?""",
+            (f"evidence/intake-{product_id}.json", plan_id, product_id),
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO plans
+               (plan_id, product_id, revision, parent_plan_id, source_failure_id,
+                status, plan_artifact_ref, plan_digest, goals_json,
+                completion_criteria_json, created_by_task_id, created_at, activated_at)
+               VALUES (?, ?, 0, NULL, NULL, 'ACTIVE', ?, ?, ?, '[]', ?, ?, ?)""",
+            (
+                plan_id,
+                product_id,
+                f"legacy://plan/{product_id}/0",
+                sha256_text(f"legacy:{product_id}:0"),
+                json.dumps([{"goal_id": "legacy-goal", "statement": idea}], ensure_ascii=False),
+                root_task_id,
+                now,
+                now,
+            ),
+        )
+        known_statuses = {
+            str(row[0]): str(row[2])
+            for row in tasks
+        }
+        previous_task_id: str | None = None
+        for index, task in enumerate(tasks):
+            task_id = str(task[0])
+            try:
+                dependencies = json.loads(str(task[1] or "[]"))
+            except json.JSONDecodeError:
+                dependencies = []
+            source_task_id = (
+                str(dependencies[0])
+                if dependencies
+                else previous_task_id
+                if previous_task_id is not None
+                else task_id
+            )
+            dependency_statuses = [
+                known_statuses.get(str(dependency), "MISSING")
+                for dependency in dependencies
+            ]
+            graph_status = _legacy_graph_status(str(task[2]), dependency_statuses)
+            role = str(task[3] or "legacy")
+            profile = (
+                "planning_readonly"
+                if role in {"product-director", "product-analyst", "solution-architect", "task-specifier"}
+                else "reviewer_readonly"
+                if role in {"independent-reviewer", "security-reviewer"}
+                else "builder_workspace"
+            )
+            connection.execute(
+                """UPDATE tasks
+                   SET root_task_id=COALESCE(root_task_id, ?),
+                       parent_task_id=COALESCE(parent_task_id, ?),
+                       source_task_id=COALESCE(source_task_id, ?),
+                       plan_id=COALESCE(plan_id, ?),
+                       plan_node_id=COALESCE(plan_node_id, ?),
+                       task_revision=COALESCE(task_revision, 1),
+                       root_context_ref=COALESCE(root_context_ref, ?),
+                       active_context_ref=COALESCE(active_context_ref, contract_ref),
+                       capability_profile=COALESCE(capability_profile, ?),
+                       idempotency_key=COALESCE(idempotency_key, ?),
+                       graph_status=COALESCE(graph_status, ?)
+                   WHERE task_id=?""",
+                (
+                    root_task_id,
+                    previous_task_id,
+                    source_task_id,
+                    plan_id,
+                    f"legacy-{index:04d}",
+                    f"evidence/intake-{product_id}.json",
+                    profile,
+                    sha256_text(f"legacy-task:{task_id}"),
+                    graph_status,
+                    task_id,
+                ),
+            )
+            for dependency in dependencies:
+                connection.execute(
+                    """INSERT OR IGNORE INTO task_edges
+                       (plan_id, from_task_id, to_task_id, edge_type, required, created_at)
+                       VALUES (?, ?, ?, 'depends_on', 1, ?)""",
+                    (plan_id, str(dependency), task_id, now),
+                )
+            previous_task_id = task_id
+
+
+MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
+    (1, "legacy-schema-baseline", _migration_001_baseline),
+    (2, "autonomy-v2-durable-graph", _migration_002_autonomy_v2),
+    (3, "atomic-observation-release-binding", _migration_003_atomic_observation_binding),
+)
+
+
+def apply_migrations(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+               version INTEGER PRIMARY KEY,
+               name TEXT NOT NULL,
+               checksum TEXT NOT NULL,
+               applied_at TEXT NOT NULL
+           )"""
+    )
+    applied = {
+        int(row[0]): str(row[2])
+        for row in connection.execute(
+            "SELECT version, name, checksum FROM schema_migrations"
+        ).fetchall()
+    }
+    for version, name, migration in MIGRATIONS:
+        checksum = sha256_text(f"{version}:{name}")
+        if version in applied:
+            if applied[version] != checksum:
+                raise RuntimeError(f"database migration checksum mismatch: {version}")
+            continue
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            migration(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name, checksum, applied_at) "
+                "VALUES (?, ?, ?, ?)",
+                (version, name, checksum, utc_now()),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise

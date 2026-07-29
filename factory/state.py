@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .common import utc_now
+from .common import sha256_text, utc_now
+from .migrations import apply_migrations
 
 
 class ProductCapacityError(ValueError):
@@ -57,11 +58,15 @@ class StateStore:
         self.max_active_workers = max_active_workers
         self.max_active_products = max_active_products
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._database_existed = (
+            self.database_path.is_file() and self.database_path.stat().st_size > 0
+        )
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(self.database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
+        self._backup_before_autonomy_migration()
         self._initialize()
 
     def _initialize(self) -> None:
@@ -173,6 +178,32 @@ class StateStore:
                     self._connection.execute(f"ALTER TABLE outbox ADD COLUMN {column} {definition}")
                 except sqlite3.OperationalError:
                     pass
+        apply_migrations(self._connection)
+
+    def _backup_before_autonomy_migration(self) -> None:
+        """Create one recoverable pre-v2 backup before the first v2 migration."""
+
+        if not self._database_existed:
+            return
+        migration_table = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        if migration_table is not None:
+            applied = self._connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=2"
+            ).fetchone()
+            if applied is not None:
+                return
+        target = self.database_path.with_suffix(
+            self.database_path.suffix + ".pre-autonomy-v2.bak"
+        )
+        if target.exists():
+            return
+        destination = sqlite3.connect(target)
+        try:
+            self._connection.backup(destination)
+        finally:
+            destination.close()
 
     def close(self) -> None:
         with self._lock:
@@ -249,6 +280,13 @@ class StateStore:
                 self._connection.rollback()
                 raise
 
+    def create_product_v2(self, **values: Any) -> tuple[dict[str, Any], bool]:
+        """Create a canonical v2 product without mixing goal and repository."""
+
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).create_product(**values)
+
     def get_product(self, product_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._connection.execute(
@@ -263,7 +301,7 @@ class StateStore:
 
     def transition_product(self, product_id: str, status: str) -> dict[str, Any]:
         allowed = {
-            "IDEA_RECEIVED": {"CONTRACT_DRAFTED", "CANCELLED"},
+            "IDEA_RECEIVED": {"CONTRACT_DRAFTED", "PAUSED", "CANCELLED"},
             "CONTRACT_DRAFTED": {"CONTRACT_VALIDATED", "PAUSED", "CANCELLED"},
             "CONTRACT_VALIDATED": {"RISK_CLASSIFIED", "PAUSED", "CANCELLED"},
             "RISK_CLASSIFIED": {"ARCHITECTED", "PAUSED", "CANCELLED"},
@@ -326,20 +364,152 @@ class StateStore:
         dependencies: list[str] | None = None,
         conflict_keys: list[str] | None = None,
         priority: int = 0,
+        root_task_id: str | None = None,
+        parent_task_id: str | None = None,
+        source_task_id: str | None = None,
+        plan_id: str | None = None,
+        plan_node_id: str | None = None,
+        task_revision: int = 1,
+        root_context_ref: str | None = None,
+        active_context_ref: str | None = None,
+        failure_id: str | None = None,
+        hypothesis_id: str | None = None,
+        capability_profile: str | None = None,
+        idempotency_key: str | None = None,
+        supersedes_task_id: str | None = None,
+        required_capabilities: list[str] | None = None,
+        mandatory: bool = True,
+        graph_status: str | None = None,
+        critical_path_rank: int = 0,
     ) -> None:
         if priority < 0:
             raise ValueError("priority cannot be negative")
         if cycle < 0:
             raise ValueError("cycle cannot be negative")
+        if task_revision < 1:
+            raise ValueError("task_revision must be positive")
         now = utc_now()
-        initial_status = "WAITING" if available_at is not None and available_at > now else "PENDING"
+        dependency_values = dependencies or []
+        inferred_graph_status = (
+            "WAITING_TIME"
+            if available_at is not None and available_at > now
+            else "BLOCKED_DEPENDENCY"
+            if dependency_values
+            else "READY"
+        )
+        canonical_status = graph_status or inferred_graph_status
+        if canonical_status not in {
+            "DRAFT",
+            "BLOCKED_DEPENDENCY",
+            "BLOCKED_CAPABILITY",
+            "READY",
+            "CLAIMED",
+            "WAITING_TIME",
+            "WAITING_EXTERNAL",
+            "SUCCEEDED",
+            "ACCEPTED",
+            "REJECTED",
+            "FAILED_TRANSIENT",
+            "FAILED_SEMANTIC",
+            "SUPERSEDED",
+            "CANCELLED",
+        }:
+            raise ValueError("graph task status is invalid")
+        initial_status = {
+            "DRAFT": "WAITING",
+            "BLOCKED_DEPENDENCY": "PENDING",
+            "BLOCKED_CAPABILITY": "WAITING",
+            "READY": "PENDING",
+            "CLAIMED": "CLAIMED",
+            "WAITING_TIME": "WAITING",
+            "WAITING_EXTERNAL": "BLOCKED_EXTERNAL",
+            "SUCCEEDED": "DONE",
+            "ACCEPTED": "DONE",
+            "SUPERSEDED": "DONE",
+            "REJECTED": "FAILED_SAFE",
+            "FAILED_TRANSIENT": "FAILED_SAFE",
+            "FAILED_SEMANTIC": "FAILED_SAFE",
+            "CANCELLED": "FAILED_SAFE",
+        }[canonical_status]
         with self._lock, self._connection:
+            product = self._connection.execute(
+                "SELECT active_plan_id, root_goal_ref FROM products WHERE product_id=?",
+                (product_id,),
+            ).fetchone()
+            if product is None:
+                raise KeyError(product_id)
+            selected_plan_id = plan_id or str(product["active_plan_id"] or "")
+            if not selected_plan_id:
+                selected_plan_id = (
+                    f"PLAN-SYSTEM-{sha256_text(product_id)[:16].upper()}"
+                )
+                self._connection.execute(
+                    """INSERT OR IGNORE INTO plans
+                       (plan_id, product_id, revision, status, plan_artifact_ref,
+                        plan_digest, goals_json, completion_criteria_json,
+                        created_by_task_id, created_at, activated_at)
+                       VALUES (?, ?, 0, 'ACTIVE', ?, ?, '[]', '[]', ?, ?, ?)""",
+                    (
+                        selected_plan_id,
+                        product_id,
+                        f"system://plan/{product_id}/0",
+                        sha256_text(f"system:{product_id}:0"),
+                        task_id,
+                        now,
+                        now,
+                    ),
+                )
+                self._connection.execute(
+                    """UPDATE products SET active_plan_id=?,
+                           active_plan_revision=0, updated_at=? WHERE product_id=?""",
+                    (selected_plan_id, now, product_id),
+                )
+            selected_root_task_id = root_task_id
+            if not selected_root_task_id and dependency_values:
+                dependency = self._connection.execute(
+                    "SELECT root_task_id FROM tasks WHERE task_id=?",
+                    (dependency_values[0],),
+                ).fetchone()
+                if dependency is not None and dependency[0]:
+                    selected_root_task_id = str(dependency[0])
+            selected_root_task_id = selected_root_task_id or task_id
+            selected_parent = (
+                parent_task_id
+                if parent_task_id is not None
+                else str(dependency_values[0])
+                if dependency_values
+                else None
+            )
+            selected_source = (
+                source_task_id
+                or (str(dependency_values[0]) if dependency_values else task_id)
+            )
+            selected_profile = capability_profile or (
+                "planning_readonly"
+                if role
+                in {
+                    "product-director",
+                    "product-analyst",
+                    "solution-architect",
+                    "task-specifier",
+                }
+                else "reviewer_readonly"
+                if role in {"independent-reviewer", "security-reviewer"}
+                else "builder_workspace"
+            )
             self._connection.execute(
                 """INSERT INTO tasks
                 (task_id, product_id, title, role, output_schema, contract_ref, stage_key, cycle,
                  priority, status, available_at, dependencies_json, conflict_keys_json,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 created_at, updated_at, root_task_id, parent_task_id, source_task_id,
+                 plan_id, plan_node_id, task_revision, root_context_ref,
+                 active_context_ref, failure_id, hypothesis_id, capability_profile,
+                 idempotency_key, supersedes_task_id, graph_status,
+                 required_capabilities_json, mandatory, critical_path_rank)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
@@ -352,13 +522,41 @@ class StateStore:
                     priority,
                     initial_status,
                     available_at,
-                    json.dumps(dependencies or []),
+                    json.dumps(dependency_values),
                     json.dumps(conflict_keys or []),
                     now,
                     now,
+                    selected_root_task_id,
+                    selected_parent,
+                    selected_source,
+                    selected_plan_id,
+                    plan_node_id or stage_key or task_id,
+                    task_revision,
+                    root_context_ref
+                    or str(product["root_goal_ref"] or f"evidence/intake-{product_id}.json"),
+                    active_context_ref or contract_ref,
+                    failure_id,
+                    hypothesis_id,
+                    selected_profile,
+                    idempotency_key or sha256_text(f"task:{task_id}:{task_revision}"),
+                    supersedes_task_id,
+                    canonical_status,
+                    json.dumps(required_capabilities or []),
+                    int(mandatory),
+                    critical_path_rank,
                 ),
             )
+            for dependency_id in dependency_values:
+                self._connection.execute(
+                    """INSERT OR IGNORE INTO task_edges
+                       (plan_id, from_task_id, to_task_id, edge_type, required, created_at)
+                       VALUES (?, ?, ?, 'depends_on', 1, ?)""",
+                    (selected_plan_id, dependency_id, task_id, now),
+                )
             self._record_event(product_id, task_id, "task_created", {"title": title})
+            from .autonomy import AutonomyStore
+
+            AutonomyStore(self)._recompute_frontier(self._connection, product_id)
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -390,7 +588,100 @@ class StateStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def runnable_tasks(self, product_id: str) -> list[dict[str, Any]]:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).runnable_tasks(product_id)
+
+    def has_bounded_progress_path(self, product_id: str) -> bool:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).has_bounded_progress_path(product_id)
+
+    def ingest_plan(
+        self,
+        plan: dict[str, Any],
+        *,
+        plan_artifact_ref: str,
+        plan_digest: str,
+        created_by_task_id: str,
+    ) -> tuple[str, ...]:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).ingest_plan(
+            plan,
+            plan_artifact_ref=plan_artifact_ref,
+            plan_digest=plan_digest,
+            created_by_task_id=created_by_task_id,
+        )
+
+    def grant_capability(self, **values: Any) -> str:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).grant_capability(**values)
+
+    def commit_task_outcome(
+        self,
+        outcome: Any,
+        *,
+        fault_injector: Any | None = None,
+    ) -> Any:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).commit_task_outcome(
+            outcome,
+            fault_injector=fault_injector,
+        )
+
+    def record_product_evidence(self, **values: Any) -> str:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).record_product_evidence(**values)
+
+    def reduce_completion(
+        self,
+        product_id: str,
+        *,
+        artifacts: Any | None = None,
+    ) -> Any:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).reduce_completion(
+            product_id,
+            artifacts=artifacts,
+        )
+
+    def list_plans(self, product_id: str) -> list[dict[str, Any]]:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).list_plans(product_id)
+
+    def list_edges(self, plan_id: str) -> list[dict[str, Any]]:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).list_edges(plan_id)
+
+    def list_failures(self, product_id: str) -> list[dict[str, Any]]:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).list_failures(product_id)
+
+    def list_hypotheses(self, product_id: str) -> list[dict[str, Any]]:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).list_hypotheses(product_id)
+
     def latest_task(self, product_id: str) -> dict[str, Any] | None:
+        """Compatibility read API; never use this row as v2 causal truth."""
+
+        return self.legacy_latest_task_v1(product_id)
+
+    def legacy_latest_task_v1(
+        self,
+        product_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the last inserted v1 task for bounded migration recovery."""
+
         with self._lock:
             row = self._connection.execute(
                 "SELECT * FROM tasks WHERE product_id=? ORDER BY rowid DESC LIMIT 1",
@@ -429,7 +720,8 @@ class StateStore:
                 previous_status = str(row["status"])
                 self._connection.execute(
                     """UPDATE tasks
-                       SET status='FAILED_SAFE', lease_owner=NULL, lease_until=NULL,
+                       SET status='FAILED_SAFE', graph_status='CANCELLED',
+                           lease_owner=NULL, lease_until=NULL, lease_token=NULL,
                            heartbeat_at=NULL, updated_at=?
                        WHERE task_id=? AND product_id=? AND status=?""",
                     (now, task_id, product_id, previous_status),
@@ -447,24 +739,32 @@ class StateStore:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 self._connection.execute(
-                    "UPDATE tasks SET status='PENDING', lease_owner=NULL, lease_until=NULL "
-                    "WHERE status='CLAIMED' AND lease_until < ?",
+                    """UPDATE tasks SET status='PENDING', graph_status='READY',
+                           lease_owner=NULL, lease_until=NULL, lease_token=NULL
+                       WHERE status='CLAIMED' AND lease_until < ?""",
                     (utc_now(),),
                 )
                 self._connection.execute(
-                    """UPDATE tasks SET status='PENDING', updated_at=?
-                       WHERE status='WAITING' AND available_at IS NOT NULL AND available_at <= ?""",
+                    """UPDATE tasks SET status='PENDING', graph_status='READY',
+                           updated_at=?
+                       WHERE status='WAITING' AND graph_status='WAITING_TIME'
+                         AND available_at IS NOT NULL AND available_at <= ?""",
                     (utc_now(), utc_now()),
                 )
                 rows = self._connection.execute(
                     """SELECT tasks.* FROM tasks
                        JOIN products ON products.product_id = tasks.product_id
-                       WHERE tasks.status='PENDING'
+                       JOIN plans ON plans.plan_id=tasks.plan_id
+                       WHERE tasks.graph_status='READY'
+                         AND tasks.status='PENDING'
+                         AND plans.status='ACTIVE'
                          AND products.status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED_SAFE', 'PAUSED')
-                       ORDER BY tasks.priority DESC, tasks.created_at"""
+                       ORDER BY tasks.priority DESC, tasks.critical_path_rank,
+                                tasks.created_at, tasks.rowid"""
                 ).fetchall()
                 claimed_rows = self._connection.execute(
-                    "SELECT lease_owner, conflict_keys_json FROM tasks WHERE status='CLAIMED'"
+                    """SELECT lease_owner, conflict_keys_json FROM tasks
+                       WHERE graph_status='CLAIMED' AND status='CLAIMED'"""
                 ).fetchall()
                 active_workers = {
                     str(active_row["lease_owner"])
@@ -481,14 +781,18 @@ class StateStore:
                 }
                 chosen = None
                 for row in rows:
-                    dependencies = json.loads(row["dependencies_json"])
-                    dependency_statuses = [
-                        self._connection.execute(
-                            "SELECT status FROM tasks WHERE task_id = ?", (dependency,)
-                        ).fetchone()
-                        for dependency in dependencies
-                    ]
-                    if not all(status is not None and status[0] == "DONE" for status in dependency_statuses):
+                    dependencies = self._connection.execute(
+                        """SELECT upstream.graph_status
+                           FROM task_edges AS edge
+                           JOIN tasks AS upstream ON upstream.task_id=edge.from_task_id
+                           WHERE edge.plan_id=? AND edge.to_task_id=?
+                             AND edge.required=1""",
+                        (row["plan_id"], row["task_id"]),
+                    ).fetchall()
+                    if not all(
+                        str(status[0]) in {"ACCEPTED", "SUPERSEDED"}
+                        for status in dependencies
+                    ):
                         continue
                     conflict_keys = set(json.loads(row["conflict_keys_json"]))
                     if conflict_keys & claimed_conflicts:
@@ -500,15 +804,34 @@ class StateStore:
                     return None
                 now = utc_now()
                 lease_until = utc_now_from_seconds(lease_seconds)
+                lease_token = sha256_text(
+                    f"{chosen['task_id']}:{worker_id}:{now}:{chosen['attempts']}"
+                )
                 self._connection.execute(
-                    "UPDATE tasks SET status='CLAIMED', lease_owner=?, lease_until=?, heartbeat_at=?, "
-                    "attempts=attempts+1, updated_at=? WHERE task_id=?",
-                    (worker_id, lease_until, now, now, chosen["task_id"]),
+                    """UPDATE tasks SET status='CLAIMED', graph_status='CLAIMED',
+                           lease_owner=?, lease_until=?, lease_token=?, heartbeat_at=?,
+                           attempts=attempts+1, updated_at=? WHERE task_id=?""",
+                    (
+                        worker_id,
+                        lease_until,
+                        lease_token,
+                        now,
+                        now,
+                        chosen["task_id"],
+                    ),
                 )
                 self._record_event(chosen["product_id"], chosen["task_id"], "task_claimed", {"worker": worker_id})
                 self._connection.commit()
                 result = dict(chosen)
-                result.update({"status": "CLAIMED", "lease_owner": worker_id, "lease_until": lease_until})
+                result.update(
+                    {
+                        "status": "CLAIMED",
+                        "graph_status": "CLAIMED",
+                        "lease_owner": worker_id,
+                        "lease_until": lease_until,
+                        "lease_token": lease_token,
+                    }
+                )
                 return result
             except Exception:
                 self._connection.rollback()
@@ -542,6 +865,11 @@ class StateStore:
         ):
             raise ValueError("completed task cannot have a terminal failure")
         safe_detail = detail.strip()[:4000] if detail else None
+        graph_status = {
+            "DONE": "ACCEPTED",
+            "FAILED_SAFE": "FAILED_SEMANTIC",
+            "BLOCKED_EXTERNAL": "WAITING_EXTERNAL",
+        }[status]
         with self._lock, self._connection:
             row = self._connection.execute(
                 "SELECT product_id FROM tasks WHERE task_id=? AND status='CLAIMED' AND lease_owner=?",
@@ -551,12 +879,14 @@ class StateStore:
                 raise ValueError("Task lease is missing or owned by another worker")
             self._connection.execute(
                 """UPDATE tasks
-                   SET status=?, lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
+                   SET status=?, graph_status=?, lease_owner=NULL, lease_until=NULL,
+                       lease_token=NULL, heartbeat_at=NULL,
                        terminal_reason=?, terminal_detail=?, result_ref=?,
                        failure_kind=?, updated_at=?
                    WHERE task_id=?""",
                 (
                     status,
+                    graph_status,
                     reason_code,
                     safe_detail,
                     result_ref,
@@ -577,6 +907,11 @@ class StateStore:
                     "failure_kind": failure_kind,
                 },
             )
+            from .autonomy import AutonomyStore
+
+            AutonomyStore(self)._recompute_frontier(
+                self._connection, str(row["product_id"])
+            )
 
     def requeue_task(
         self,
@@ -586,6 +921,7 @@ class StateStore:
         next_tier: str,
         attempt_kind: str,
         repair_context_ref: str,
+        available_at: str | None = None,
     ) -> None:
         """Return a leased task to the queue with explicit repair routing."""
 
@@ -593,6 +929,11 @@ class StateStore:
             raise ValueError("requeued task must be a repair or transient retry")
         if next_tier not in {"luna", "terra", "sol"}:
             raise ValueError("requeued task tier is invalid")
+        now = utc_now()
+        waiting = available_at is not None and available_at > now
+        next_status = "WAITING" if waiting else "PENDING"
+        next_graph_status = "WAITING_TIME" if waiting else "READY"
+        next_available_at = available_at if waiting else None
         with self._lock, self._connection:
             row = self._connection.execute(
                 "SELECT product_id FROM tasks WHERE task_id=? AND status='CLAIMED' AND lease_owner=?",
@@ -602,12 +943,22 @@ class StateStore:
                 raise ValueError("Task lease is missing or owned by another worker")
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='PENDING', lease_owner=NULL, lease_until=NULL,
+                   SET status=?, graph_status=?, available_at=?,
+                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
                        heartbeat_at=NULL, next_tier=?, next_attempt_kind=?,
                        repair_context_ref=?, terminal_reason=NULL, terminal_detail=NULL,
                        result_ref=NULL, failure_kind=NULL, updated_at=?
                  WHERE task_id=?""",
-                (next_tier, attempt_kind, repair_context_ref, utc_now(), task_id),
+                (
+                    next_status,
+                    next_graph_status,
+                    next_available_at,
+                    next_tier,
+                    attempt_kind,
+                    repair_context_ref,
+                    now,
+                    task_id,
+                ),
             )
             self._record_event(
                 row["product_id"],
@@ -617,6 +968,7 @@ class StateStore:
                     "next_tier": next_tier,
                     "attempt_kind": attempt_kind,
                     "repair_context_ref": repair_context_ref,
+                    "available_at": next_available_at,
                 },
             )
 
@@ -640,7 +992,8 @@ class StateStore:
                 raise ValueError("waiting repair task is missing")
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='PENDING', available_at=NULL, next_tier=?,
+                   SET status='PENDING', graph_status='READY',
+                       available_at=NULL, next_tier=?,
                        next_attempt_kind='repair', repair_context_ref=?, updated_at=?
                    WHERE task_id=?""",
                 (next_tier, repair_context_ref, utc_now(), task_id),
@@ -709,7 +1062,8 @@ class StateStore:
             previous_status = str(row["status"])
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='PENDING', lease_owner=NULL, lease_until=NULL,
+                   SET status='PENDING', graph_status='READY',
+                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
                        heartbeat_at=NULL, next_tier=?, next_attempt_kind='repair',
                        repair_context_ref=?, terminal_reason=NULL, terminal_detail=NULL,
                        result_ref=NULL, failure_kind=NULL, updated_at=?
@@ -751,7 +1105,8 @@ class StateStore:
                 previous_status = str(row["status"])
                 self._connection.execute(
                     """UPDATE tasks
-                       SET status='PENDING', lease_owner=NULL, lease_until=NULL,
+                       SET status='PENDING', graph_status='READY',
+                           lease_owner=NULL, lease_until=NULL, lease_token=NULL,
                            heartbeat_at=NULL, next_tier=NULL, next_attempt_kind='initial',
                            repair_context_ref=NULL, terminal_reason=NULL, terminal_detail=NULL,
                            result_ref=NULL, failure_kind=NULL, updated_at=?
@@ -888,7 +1243,7 @@ class StateStore:
             )
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='PENDING', available_at=NULL,
+                   SET status='PENDING', graph_status='READY', available_at=NULL,
                        lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
                        terminal_reason=NULL, terminal_detail=NULL,
                        result_ref=NULL, failure_kind=NULL, updated_at=?
@@ -966,7 +1321,8 @@ class StateStore:
             )
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='DONE', lease_owner=NULL, lease_until=NULL,
+                   SET status='DONE', graph_status='ACCEPTED',
+                       lease_owner=NULL, lease_until=NULL,
                        heartbeat_at=NULL, terminal_reason=NULL,
                        terminal_detail=NULL, failure_kind=NULL, updated_at=?
                    WHERE task_id=?""",
@@ -1054,7 +1410,7 @@ class StateStore:
             )
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='PENDING', available_at=NULL,
+                   SET status='PENDING', graph_status='READY', available_at=NULL,
                        lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
                        next_tier='sol', next_attempt_kind='repair',
                        repair_context_ref=?, terminal_reason=NULL,
@@ -1163,7 +1519,8 @@ class StateStore:
             )
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='DONE', lease_owner=NULL, lease_until=NULL,
+                   SET status='DONE', graph_status='ACCEPTED',
+                       lease_owner=NULL, lease_until=NULL,
                        heartbeat_at=NULL, terminal_reason=NULL,
                        terminal_detail=NULL, failure_kind=NULL, updated_at=?
                    WHERE task_id=?""",
@@ -1298,7 +1655,7 @@ class StateStore:
             )
             self._connection.execute(
                 """UPDATE tasks
-                   SET status='PENDING', available_at=NULL,
+                   SET status='PENDING', graph_status='READY', available_at=NULL,
                        lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL,
                        next_tier=NULL, next_attempt_kind='initial',
                        repair_context_ref=NULL, terminal_reason=NULL,
@@ -1640,7 +1997,9 @@ class StateStore:
             ).fetchall()
             for row in rows:
                 self._connection.execute(
-                    "UPDATE tasks SET status='PENDING', lease_owner=NULL, lease_until=NULL, updated_at=? WHERE task_id=?",
+                    """UPDATE tasks SET status='PENDING', graph_status='READY',
+                           lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                           heartbeat_at=NULL, updated_at=? WHERE task_id=?""",
                     (utc_now(), row["task_id"]),
                 )
                 self._record_event(row["product_id"], row["task_id"], "lease_recovered", {})
