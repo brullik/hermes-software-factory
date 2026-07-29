@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from scripts.model_router import RouteDecision, RouteState, Tier, decide, initial_tier, load_policy
@@ -23,6 +23,7 @@ class Attempt:
     attempt_kind: str
     prompt_digest: str
     semantic_counted: bool
+    resumed: bool = field(default=False, compare=False)
 
 
 class AttemptManager:
@@ -42,7 +43,9 @@ class AttemptManager:
         prompt_digest: str,
     ) -> Attempt:
         semantic_counted = attempt_kind != "transient_retry"
-        attempt = Attempt(new_id("attempt"), task_id, tier, attempt_kind, prompt_digest, semantic_counted)
+        attempt = Attempt(
+            new_id("attempt"), task_id, tier, attempt_kind, prompt_digest, semantic_counted
+        )
         inserted = self.state.record_attempt(
             attempt_id=attempt.attempt_id,
             task_id=task_id,
@@ -74,6 +77,7 @@ class AttemptManager:
                     attempt_kind,
                     prompt_digest,
                     bool(existing["semantic_counted"]),
+                    resumed=True,
                 )
             raise IdenticalAttemptError(f"Prompt digest already attempted for task {task_id}")
         return attempt

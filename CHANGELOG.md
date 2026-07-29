@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.5 - 2026-07-29
+
+- A restarted worker now detects a valid immutable result left by an
+  interrupted `started` attempt and replays that evidence into the atomic
+  outcome transaction instead of invoking the provider again.
+- Legacy planning attempts that persisted a completed provider result before
+  semantic graph validation are safely revalidated after restart. Invalid
+  plans receive the exact bounded repair path without overwriting the original
+  attempt artifact or opening a false artifact-conflict incident.
+
 ## 2.1.4 - 2026-07-29
 
 - Concurrent service startup now rechecks each migration after acquiring the

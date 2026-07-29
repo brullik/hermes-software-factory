@@ -50,7 +50,9 @@ def make_retry_due(state: StateStore, task_id: str) -> None:
 
 
 def make_config(root: Path, registry: Path | None = None) -> FactoryConfig:
-    raw = yaml.safe_load((ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8"))
+    raw = yaml.safe_load(
+        (ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8")
+    )
     raw["paths"]["state"] = str(root)
     raw["paths"]["policies"] = str(ROOT / "policies")
     raw["paths"]["schemas"] = str(ROOT / "schemas")
@@ -77,7 +79,9 @@ class FakeRunner:
         usage_path: Path | None = None,
     ) -> HermesRunResult:
         self.calls.append((selection.model, selection.provider, cwd))
-        return HermesRunResult("PASS", self.output, "fake-output-digest", None, str(usage_path) if usage_path else None)
+        return HermesRunResult(
+            "PASS", self.output, "fake-output-digest", None, str(usage_path) if usage_path else None
+        )
 
 
 class SequenceRunner:
@@ -98,7 +102,9 @@ class SequenceRunner:
         if not self.outputs:
             raise AssertionError("SequenceRunner was called more times than expected")
         output = self.outputs.pop(0)
-        return HermesRunResult("PASS", output, "sequence-output-digest", None, str(usage_path) if usage_path else None)
+        return HermesRunResult(
+            "PASS", output, "sequence-output-digest", None, str(usage_path) if usage_path else None
+        )
 
 
 class UsageRunner(FakeRunner):
@@ -183,7 +189,11 @@ class RecordingReleaseExecutor:
 
 
 def selected_registry(path: Path, *, selected: str | None) -> Path:
-    data = yaml.safe_load((ROOT / "config" / "model-routing" / "model-registry.template.yaml").read_text(encoding="utf-8"))
+    data = yaml.safe_load(
+        (ROOT / "config" / "model-routing" / "model-registry.template.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
     for alias in ("economy", "standard", "expert"):
         data["aliases"][alias]["selected"] = selected
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
@@ -191,7 +201,9 @@ def selected_registry(path: Path, *, selected: str | None) -> Path:
 
 
 def product_contract(config: FactoryConfig, product_id: str) -> str:
-    artifact = json.loads((ROOT / "templates" / "product-contract.example.json").read_text(encoding="utf-8"))
+    artifact = json.loads(
+        (ROOT / "templates" / "product-contract.example.json").read_text(encoding="utf-8")
+    )
     artifact["artifact_id"] = "product-contract-worker-test"
     artifact["product_id"] = product_id
     artifact["policy_digest"] = policy_digest(config)
@@ -290,9 +302,7 @@ def backlog_plan_with_missing_edge(
         ],
         "capability_profile": "builder_workspace",
         "allowed_paths": ["src/**"],
-        "idempotency_key": sha256_text(
-            f"{plan_id}:node-a:{child_task_id}"
-        ),
+        "idempotency_key": sha256_text(f"{plan_id}:node-a:{child_task_id}"),
         "priority": 50,
     }
     return {
@@ -335,9 +345,7 @@ def backlog_plan_with_missing_edge(
                 "required": True,
             }
         ],
-        "completion_criteria": [
-            "The mandatory corrected node has immutable PASS evidence"
-        ],
+        "completion_criteria": ["The mandatory corrected node has immutable PASS evidence"],
         "summary": "A schema-valid plan with one missing semantic edge endpoint",
     }
 
@@ -358,7 +366,9 @@ def requirements_package(config: FactoryConfig, product_id: str) -> str:
             }
         ],
         "edge_cases": [],
-        "traceability": [{"requirement_id": "REQ-001", "story_ids": ["US-001"], "acceptance_ids": ["AC-001"]}],
+        "traceability": [
+            {"requirement_id": "REQ-001", "story_ids": ["US-001"], "acceptance_ids": ["AC-001"]}
+        ],
         "assumptions": ["The owner can inspect the result locally."],
         "findings": [],
         "evidence_refs": ["evidence/product-contract-worker-test.json"],
@@ -389,7 +399,9 @@ def release_operation(
     }
 
 
-def staging_release_task(config: FactoryConfig, state: Any, artifacts: ArtifactStore) -> tuple[str, Path]:
+def staging_release_task(
+    config: FactoryConfig, state: Any, artifacts: ArtifactStore
+) -> tuple[str, Path]:
     product_id = "P-RELEASE-001"
     state.create_product(
         product_id=product_id,
@@ -408,7 +420,9 @@ def staging_release_task(config: FactoryConfig, state: Any, artifacts: ArtifactS
         "INTEGRATING",
     ):
         state.transition_product(product_id, status)
-    return product_id, PipelineCoordinator(config, state, artifacts).create_task(product_id, "release-staging")
+    return product_id, PipelineCoordinator(config, state, artifacts).create_task(
+        product_id, "release-staging"
+    )
 
 
 class WorkerTests(unittest.TestCase):
@@ -431,9 +445,7 @@ class WorkerTests(unittest.TestCase):
                 idea="Sanitize provider transport without blocking the product",
             )
             marker = "ghp_" + ("A" * 24)
-            payload = json.loads(
-                product_contract(config, intake_result.product_id)
-            )
+            payload = json.loads(product_contract(config, intake_result.product_id))
             payload["summary"] = f"Example credential {marker}"
             worker = AgentWorker(
                 config,
@@ -450,9 +462,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertIsNone(result.reason_code)
             self.assertIsNotNone(result.artifact_ref)
-            attempt = json.loads(
-                Path(str(result.artifact_ref)).read_text(encoding="utf-8")
-            )
+            attempt = json.loads(Path(str(result.artifact_ref)).read_text(encoding="utf-8"))
             self.assertIn(
                 "$.summary (github_classic_token)",
                 attempt["summary"],
@@ -561,9 +571,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(recovery.repaired, 1)
             tasks = state.list_tasks(intake_result.product_id)
             self.assertEqual(len(tasks), 2)
-            task = next(
-                item for item in tasks if item["task_id"] != source_task["task_id"]
-            )
+            task = next(item for item in tasks if item["task_id"] != source_task["task_id"])
             self.assertEqual(task["status"], "PENDING")
             self.assertEqual(task["graph_status"], "READY")
             self.assertEqual(task["parent_task_id"], source_task["task_id"])
@@ -602,9 +610,7 @@ class WorkerTests(unittest.TestCase):
     def test_partial_repair_brief_fails_internally_before_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            registry_path = selected_registry(
-                root / "registry.yaml", selected="gpt-5.6-luna"
-            )
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
             config = make_config(root, registry_path)
             state = StateStore(
                 config.database_path,
@@ -656,9 +662,7 @@ class WorkerTests(unittest.TestCase):
                 "definition_of_done": ["The brief passes schema validation."],
                 "evidence_refs": [f"evidence/task-{task['task_id']}.json"],
             }
-            brief_path = config.evidence_dir / (
-                f"repair-brief-{task['task_id']}-partial.json"
-            )
+            brief_path = config.evidence_dir / (f"repair-brief-{task['task_id']}-partial.json")
             brief_path.write_text(json.dumps(bad_brief), encoding="utf-8")
             state.requeue_terminal_task(
                 str(task["task_id"]),
@@ -740,8 +744,7 @@ class WorkerTests(unittest.TestCase):
                 capability_profile="planning_readonly",
                 idempotency_key=str(task_contract["idempotency_key"]),
                 required_capabilities=[
-                    str(value)
-                    for value in task_contract["required_capabilities"]
+                    str(value) for value in task_contract["required_capabilities"]
                 ],
             )
             plan = backlog_plan_with_missing_edge(
@@ -771,11 +774,9 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(durable["next_attempt_kind"], "repair")
             self.assertTrue(durable["repair_context_ref"])
             repair = json.loads(
-                next(
-                    config.evidence_dir.glob(
-                        f"repair-brief-{task_id}-*.json"
-                    )
-                ).read_text(encoding="utf-8")
+                next(config.evidence_dir.glob(f"repair-brief-{task_id}-*.json")).read_text(
+                    encoding="utf-8"
+                )
             )
             self.assertEqual(
                 repair["failed_gate_ids"],
@@ -786,23 +787,133 @@ class WorkerTests(unittest.TestCase):
                 repair["expected_vs_actual"]["actual"],
             )
             diagnostic = json.loads(
-                next(
-                    config.evidence_dir.glob(
-                        "transport-diagnostic-*.json"
-                    )
-                ).read_text(encoding="utf-8")
+                next(config.evidence_dir.glob("transport-diagnostic-*.json")).read_text(
+                    encoding="utf-8"
+                )
             )
             self.assertEqual(
                 diagnostic["parser_error_safe_message"],
                 "BacklogPlan edges[0].to endpoint is missing",
             )
             self.assertEqual(len(state.list_tasks(product_id)), 1)
-            self.assertFalse(
-                (
-                    config.evidence_dir
-                    / "task-T-SEMANTIC-CHILD.json"
-                ).exists()
+            self.assertFalse((config.evidence_dir / "task-T-SEMANTIC-CHILD.json").exists())
+            state.close()
+
+    def test_interrupted_attempt_replays_immutable_repair_without_provider_call(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
             )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            product_id = "P-INTERRUPTED-PLAN"
+            task_id = "T-INTERRUPTED-REPLANNER"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Resume an interrupted planning attempt",
+                idempotency_key="interrupted-plan-product",
+            )
+            task_contract = replanner_task_contract(
+                config,
+                product_id,
+                task_id,
+            )
+            contract_path = artifacts.write(
+                "task-contract-v2.schema.json",
+                task_contract,
+                filename=f"task-{task_id}.json",
+            )
+            state.add_task(
+                task_id=task_id,
+                product_id=product_id,
+                title=str(task_contract["title"]),
+                role="replanner",
+                output_schema="backlog-plan-v2.schema.json",
+                contract_ref=f"evidence/{contract_path.name}",
+                conflict_keys=[f"{product_id}:planning"],
+                priority=100,
+                capability_profile="planning_readonly",
+                idempotency_key=str(task_contract["idempotency_key"]),
+                required_capabilities=[
+                    str(value) for value in task_contract["required_capabilities"]
+                ],
+            )
+            plan = backlog_plan_with_missing_edge(
+                config,
+                product_id,
+                task_id,
+            )
+            first_runner = FakeRunner(json.dumps(plan))
+            first_worker = AgentWorker(
+                config,
+                state,
+                runner=first_runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            task = state.get_task(task_id)
+            self.assertIsNotNone(task)
+            assert task is not None
+
+            interrupted = first_worker.execute(first_worker.default_spec(task))
+
+            self.assertEqual(interrupted.status, "repair_scheduled")
+            attempts = state.attempts_for_task(task_id)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0]["status"], "started")
+            attempt_path = Path(str(interrupted.artifact_ref))
+            self.assertTrue(attempt_path.is_file())
+            # Releases before the semantic-plan boundary fix could persist a
+            # schema-valid provider result as completed and crash while
+            # preparing the graph. Reproduce that exact restart window.
+            legacy_attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+            legacy_attempt["status"] = "completed"
+            legacy_attempt["summary"] = "Provider execution completed before graph validation."
+            legacy_attempt["findings"] = []
+            attempt_path.write_text(
+                json.dumps(
+                    legacy_attempt,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            second_runner = FakeRunner("{}")
+            restarted_worker = AgentWorker(
+                config,
+                state,
+                runner=second_runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            recovered = restarted_worker.run_once()
+
+            self.assertIsNotNone(recovered)
+            assert recovered is not None
+            self.assertEqual(recovered.status, "repair_scheduled")
+            self.assertEqual(recovered.reason_code, "schema_validation")
+            self.assertEqual(recovered.artifact_ref, str(attempt_path))
+            self.assertEqual(second_runner.calls, [])
+            self.assertEqual(len(state.attempts_for_task(task_id)), 1)
+            durable = state.get_task(task_id)
+            self.assertIsNotNone(durable)
+            assert durable is not None
+            self.assertEqual(durable["status"], "PENDING")
+            self.assertEqual(durable["graph_status"], "READY")
+            self.assertEqual(durable["next_attempt_kind"], "repair")
             state.close()
 
     def test_outcome_commit_integrity_error_becomes_controller_failure(
@@ -831,17 +942,13 @@ class WorkerTests(unittest.TestCase):
                 nonlocal commit_calls
                 commit_calls += 1
                 if commit_calls == 1:
-                    raise sqlite3.IntegrityError(
-                        "UNIQUE constraint failed: tasks.idempotency_key"
-                    )
+                    raise sqlite3.IntegrityError("UNIQUE constraint failed: tasks.idempotency_key")
                 return original_commit(outcome)
 
             worker = AgentWorker(
                 config,
                 state,
-                runner=FakeRunner(
-                    product_contract(config, intake_result.product_id)
-                ),
+                runner=FakeRunner(product_contract(config, intake_result.product_id)),
                 health_probe=lambda _: True,
                 repository_root=ROOT,
             )
@@ -882,7 +989,9 @@ class WorkerTests(unittest.TestCase):
             intake_result = IntakeService(config, state, artifacts).submit(
                 source="cli", owner_id="owner", idea="Resume after transient provider failure"
             )
-            runner = SequenceRunner(["not-json", product_contract(config, intake_result.product_id)])
+            runner = SequenceRunner(
+                ["not-json", product_contract(config, intake_result.product_id)]
+            )
             worker = AgentWorker(
                 config,
                 state,
@@ -977,9 +1086,7 @@ class WorkerTests(unittest.TestCase):
             )
             original_ref = str(task["repair_context_ref"])
             original_brief = json.loads(
-                (config.evidence_dir / Path(original_ref).name).read_text(
-                    encoding="utf-8"
-                )
+                (config.evidence_dir / Path(original_ref).name).read_text(encoding="utf-8")
             )
             self.assertEqual(
                 original_brief["failed_gate_ids"],
@@ -1000,9 +1107,7 @@ class WorkerTests(unittest.TestCase):
             transient_ref = str(task["repair_context_ref"])
             self.assertNotEqual(transient_ref, original_ref)
             transient_brief = json.loads(
-                (config.evidence_dir / Path(transient_ref).name).read_text(
-                    encoding="utf-8"
-                )
+                (config.evidence_dir / Path(transient_ref).name).read_text(encoding="utf-8")
             )
             self.assertEqual(
                 transient_brief["failed_gate_ids"],
@@ -1201,7 +1306,9 @@ class WorkerTests(unittest.TestCase):
             state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
             artifacts = ArtifactStore(config)
             intake = IntakeService(config, state, artifacts)
-            intake_result = intake.submit(source="cli", owner_id="owner", idea="Build a safe product")
+            intake_result = intake.submit(
+                source="cli", owner_id="owner", idea="Build a safe product"
+            )
             runner = UsageRunner(product_contract(config, intake_result.product_id))
             worker = AgentWorker(
                 config,
@@ -1238,9 +1345,13 @@ class WorkerTests(unittest.TestCase):
             attempts = state.attempts_for_task(task_id)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0]["status"], "completed")
-            attempt_artifact = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
+            attempt_artifact = json.loads(
+                Path(result.artifact_ref or "").read_text(encoding="utf-8")
+            )
             self.assertEqual(artifacts.validate("attempt-result.schema.json", attempt_artifact), [])
-            self.assertTrue(any(ref.startswith("evidence/usage-") for ref in attempt_artifact["evidence_refs"]))
+            self.assertTrue(
+                any(ref.startswith("evidence/usage-") for ref in attempt_artifact["evidence_refs"])
+            )
             state.close()
 
     def test_completed_dependency_output_is_in_next_context_pack(self) -> None:
@@ -1279,7 +1390,9 @@ class WorkerTests(unittest.TestCase):
             stale_spec = replace(
                 current_spec,
                 evidence=tuple(
-                    item for item in current_spec.evidence if item.get("type") != "dependency-result"
+                    item
+                    for item in current_spec.evidence
+                    if item.get("type") != "dependency-result"
                 ),
             )
             worker._context_and_prompt(stale_spec)
@@ -1292,12 +1405,16 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(runner.prompts), 2)
             self.assertIn("UNTRUSTED_DATA accepted output for dependency", runner.prompts[1])
             self.assertIn("product-contract-worker-test", runner.prompts[1])
-            self.assertIn("Do not run repository commands such as pytest or make", runner.prompts[1])
+            self.assertIn(
+                "Do not run repository commands such as pytest or make", runner.prompts[1]
+            )
             completed_task = state.get_task(str(analyst_task["task_id"]))
             self.assertIsNotNone(completed_task)
             assert completed_task is not None
             self.assertEqual(completed_task["status"], "DONE")
-            context_paths = list(config.evidence_dir.glob(f"context-{analyst_task['task_id']}*.json"))
+            context_paths = list(
+                config.evidence_dir.glob(f"context-{analyst_task['task_id']}*.json")
+            )
             self.assertEqual(len(context_paths), 2)
             self.assertEqual(len(health_checks), 1)
             state.close()
@@ -1409,9 +1526,7 @@ class WorkerTests(unittest.TestCase):
                 "builder-core",
                 cycle=3,
             )
-            builder_id = str(
-                json.loads(builder_path.read_text(encoding="utf-8"))["task_id"]
-            )
+            builder_id = str(json.loads(builder_path.read_text(encoding="utf-8"))["task_id"])
             attempt_id = "attempt-deferred-builder"
             changed_files = [
                 {
@@ -1578,9 +1693,7 @@ class WorkerTests(unittest.TestCase):
                 dependencies=(builder_id,),
                 cycle=3,
             )
-            test_id = str(
-                json.loads(test_path.read_text(encoding="utf-8"))["task_id"]
-            )
+            test_id = str(json.loads(test_path.read_text(encoding="utf-8"))["task_id"])
             test_task = state.get_task(test_id)
             self.assertIsNotNone(test_task)
             assert test_task is not None
@@ -1592,19 +1705,15 @@ class WorkerTests(unittest.TestCase):
                 repository_root=ROOT,
             )
 
-            result_path, result_payload, controller_payload = (
-                worker._accepted_task_artifacts(builder_id)
+            result_path, result_payload, controller_payload = worker._accepted_task_artifacts(
+                builder_id
             )
             spec = worker.default_spec(test_task)
 
             self.assertEqual(result_path, output_path)
             self.assertEqual(result_payload["status"], "blocked_external")
             self.assertEqual(controller_payload["status"], "blocked_external")
-            dependency = next(
-                item
-                for item in spec.evidence
-                if item["type"] == "dependency-result"
-            )
+            dependency = next(item for item in spec.evidence if item["type"] == "dependency-result")
             self.assertIn(
                 "Implementation and local PM acceptance are complete.",
                 dependency["summary"],
@@ -1637,9 +1746,7 @@ class WorkerTests(unittest.TestCase):
                 cycle=2,
             )
             adopted_builder_id = str(
-                json.loads(
-                    adopted_builder_path.read_text(encoding="utf-8")
-                )["task_id"]
+                json.loads(adopted_builder_path.read_text(encoding="utf-8"))["task_id"]
             )
             adopted_attempt_id = "attempt-controller-adopted-builder"
             adopted_changed_files = [
@@ -1785,9 +1892,7 @@ class WorkerTests(unittest.TestCase):
                 "builder-core",
                 cycle=3,
             )
-            superseded_id = str(
-                json.loads(superseded_path.read_text(encoding="utf-8"))["task_id"]
-            )
+            superseded_id = str(json.loads(superseded_path.read_text(encoding="utf-8"))["task_id"])
             claimed_superseded = state.claim_task(worker_id="superseded-builder-worker")
             self.assertIsNotNone(claimed_superseded)
             assert claimed_superseded is not None
@@ -1887,7 +1992,9 @@ class WorkerTests(unittest.TestCase):
                 source="cli", owner_id="owner", idea="Build a scoped product"
             )
             runner = ScopeViolatingRunner(product_contract(config, intake_result.product_id))
-            worker = AgentWorker(config, state, runner=runner, health_probe=lambda _: True, repository_root=ROOT)
+            worker = AgentWorker(
+                config, state, runner=runner, health_probe=lambda _: True, repository_root=ROOT
+            )
 
             result = worker.run_once()
 
@@ -1913,7 +2020,9 @@ class WorkerTests(unittest.TestCase):
                 source="cli", owner_id="owner", idea="Build a malformed output product"
             )
             runner = FakeRunner("not-json")
-            worker = AgentWorker(config, state, runner=runner, health_probe=lambda _: True, repository_root=ROOT)
+            worker = AgentWorker(
+                config, state, runner=runner, health_probe=lambda _: True, repository_root=ROOT
+            )
 
             result = worker.run_once()
 
@@ -2054,10 +2163,7 @@ class WorkerTests(unittest.TestCase):
                 independent_candidates,
             )
             self.assertTrue(
-                any(
-                    "exact read-only workspace" in item
-                    for item in independent_decisions
-                )
+                any("exact read-only workspace" in item for item in independent_decisions)
             )
             state.close()
 
@@ -2253,8 +2359,10 @@ class WorkerTests(unittest.TestCase):
             attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
             self.assertEqual(attempt["commands"][0]["result"], "not_run")
             self.assertTrue(
-                any(item["gate_id"] == "secret-scan" and item["status"] == "FAIL"
-                    for item in attempt["test_results"])
+                any(
+                    item["gate_id"] == "secret-scan" and item["status"] == "FAIL"
+                    for item in attempt["test_results"]
+                )
             )
             state.close()
 
