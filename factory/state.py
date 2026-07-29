@@ -615,6 +615,11 @@ class StateStore:
             created_by_task_id=created_by_task_id,
         )
 
+    def validate_plan_candidate(self, plan: dict[str, Any]) -> None:
+        from .autonomy import AutonomyStore
+
+        AutonomyStore(self).validate_plan_candidate(plan)
+
     def grant_capability(self, **values: Any) -> str:
         from .autonomy import AutonomyStore
 

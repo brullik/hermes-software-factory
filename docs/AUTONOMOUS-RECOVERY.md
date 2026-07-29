@@ -21,7 +21,9 @@ timers, leases, OPEN failures, controller incidents и completion conditions.
 3. `needs_replan`, scope contradiction или невозможная architecture создают роль `replanner`
    с capability profile `planning_readonly`. Результат — полный `backlog-plan-v2` revision N+1
    с явными supersession edges; принятые незатронутые nodes переиспользуются по task identity
-   и immutable result digest.
+   и immutable result digest. Edge endpoints, task identities и глобальные idempotency keys
+   проверяются до атомарного commit; ошибка получает точную безопасную JSON-координату и
+   bounded repair, не завершая worker process.
 4. Controller/schema/migration/artifact invariant failure создаёт controller incident. Модель
    продукта не должна гадать, как чинить контроллер.
 5. Одна hypothesis имеет не более трёх semantic attempts. После исчерпания Director закрывает
@@ -31,6 +33,12 @@ timers, leases, OPEN failures, controller incidents и completion conditions.
 Outcome, attempt finalization, failure/hypothesis, successors, edges, frontier, product
 projection и outbox фиксируются одной SQLite transaction через `commit_task_outcome`.
 Идемпотентный replay возвращает существующий outcome; другой digest с тем же key блокируется.
+Если сама граница commit неожиданно отклоняет prepared outcome, worker повторно фиксирует
+только санитизированный controller failure без plan/successor side effects.
+
+Все процессы применяют migrations под SQLite writer lock и перечитывают version/checksum
+после его получения. Поэтому одновременный старт controller и двух workers не может дважды
+записать одну migration version.
 
 ## Изоляция persistent workspace
 

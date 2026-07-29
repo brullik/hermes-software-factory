@@ -1596,6 +1596,7 @@ class AgentWorker:
         diagnostics = find_secret_candidate_diagnostics(raw_output)
         safe_output, _ = redact_text(raw_output)
         safe_output, _ = redact_secret_candidates(safe_output)
+        parser_diagnostic = safe_exception_diagnostic(parser_error)
         artifact = {
             "schema_version": "1.0",
             "artifact_id": new_id("transport-diagnostic"),
@@ -1608,6 +1609,9 @@ class AgentWorker:
             "safe_head": safe_output[:1800],
             "safe_tail": safe_output[-1800:] if len(safe_output) > 1800 else safe_output,
             "parser_error_type": type(parser_error).__name__,
+            "parser_error_safe_message": str(
+                parser_diagnostic["safe_message"]
+            ),
             "redactions": diagnostics,
             "provider": selection.provider,
             "model": selection.model,
@@ -2163,6 +2167,8 @@ class AgentWorker:
             else []
         )
         transport_diagnostic_ref: str | None = None
+        repair_diagnostic_output: Mapping[str, Any] | None = None
+        repair_output_path: Path | None = None
         try:
             if preflight is not None and not preflight.mandatory_passed:
                 gate_detail = _failed_gate_detail(list(preflight.results))
@@ -2273,6 +2279,23 @@ class AgentWorker:
             try:
                 self.schemas.validate(spec.output_schema, output)
             except (TypeError, ValueError) as error:
+                parser_diagnostic = safe_exception_diagnostic(error)
+                safe_message = str(parser_diagnostic["safe_message"])
+                repair_diagnostic_output = {
+                    "status": "repair_required",
+                    "summary": safe_message,
+                    "findings": [
+                        {
+                            "id": "OUTPUT_SCHEMA_VALIDATION",
+                            "severity": "high",
+                            "description": safe_message,
+                            "required_fix": (
+                                "Correct the provider output at the validator "
+                                "location reported in the safe diagnostic."
+                            ),
+                        }
+                    ],
+                }
                 diagnostic = self._transport_diagnostic(
                     spec,
                     attempt,
@@ -2506,6 +2529,7 @@ class AgentWorker:
                 output,
                 filename=f"{spec.output_schema.removesuffix('.schema.json')}-{spec.task_contract['product_id']}-{attempt.attempt_id}.json",
             )
+            repair_output_path = output_path
             quality_run = self.quality.run(
                 cwd=lease.path,
                 subject_sha=spec.subject_sha,
@@ -2639,6 +2663,48 @@ class AgentWorker:
                         failed_gate_ids=tuple(blocker_ids),
                     ),
                 )
+            task_row = self.state.get_task(str(spec.task_contract["task_id"]))
+            if task_row is None:
+                raise RuntimeError(
+                    f"Durable task disappeared: {spec.task_contract['task_id']}"
+                )
+            try:
+                if spec.role in {"replanner", "task-specifier"}:
+                    # Validate the provider plan before prepare_after writes
+                    # immutable child Task Contract artifacts.
+                    self.state.validate_plan_candidate(output)
+                pipeline_outcome = self.pipeline.prepare_after(
+                    task_row, output, output_path
+                )
+            except (TypeError, ValueError) as error:
+                parser_diagnostic = safe_exception_diagnostic(error)
+                safe_message = str(parser_diagnostic["safe_message"])
+                repair_diagnostic_output = {
+                    "status": "repair_required",
+                    "summary": safe_message,
+                    "findings": [
+                        {
+                            "id": "BACKLOG_PLAN_SEMANTIC_VALIDATION",
+                            "severity": "high",
+                            "description": safe_message,
+                            "required_fix": (
+                                "Correct the exact BacklogPlan field identified "
+                                "by the safe validator diagnostic."
+                            ),
+                        }
+                    ],
+                }
+                diagnostic = self._transport_diagnostic(
+                    spec,
+                    attempt,
+                    selection,
+                    raw_output=run.output,
+                    reason_code="schema_validation",
+                    parser_error=error,
+                    context_path=context_path,
+                )
+                transport_diagnostic_ref = f"evidence/{diagnostic.name}"
+                raise ValueError("schema_validation") from error
             self._route(spec, tier, success=True, reason_code=None, attempt=attempt)
             result_path = self._attempt_artifact(
                 spec,
@@ -2668,12 +2734,6 @@ class AgentWorker:
                 gate_results=list(quality_run.results),
                 changed_files=changed_files,
                 extra_evidence_refs=preflight_refs,
-            )
-            task_row = self.state.get_task(str(spec.task_contract["task_id"]))
-            if task_row is None:
-                raise RuntimeError(f"Durable task disappeared: {spec.task_contract['task_id']}")
-            pipeline_outcome = self.pipeline.prepare_after(
-                task_row, output, output_path
             )
             return WorkerResult(
                 str(spec.task_contract["task_id"]),
@@ -2721,8 +2781,8 @@ class AgentWorker:
                     tier=tier,
                     route_action=route_action,
                     context_path=context_path,
-                    output_path=None,
-                    output=None,
+                    output_path=repair_output_path,
+                    output=repair_diagnostic_output,
                     reason_code=reason,
                 )
                 if scheduled is not None:
@@ -2995,7 +3055,71 @@ class AgentWorker:
             hypothesis=hypothesis,
             plan=prepared.plan,
         )
-        self.state.commit_task_outcome(outcome)
+        try:
+            self.state.commit_task_outcome(outcome)
+        except (
+            sqlite3.IntegrityError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            diagnostic = safe_exception_diagnostic(error)
+            reason_code = self._exception_reason_code(error)
+            controller_failure = FailureData(
+                failure_class="controller",
+                reason_code=reason_code,
+                safe_message=str(diagnostic["safe_message"]),
+                evidence_ref=f"internal://task/{task_id}",
+                attempt_id=result.attempt_id,
+                parent_failure_id=(
+                    str(task_row["failure_id"])
+                    if task_row.get("failure_id")
+                    else None
+                ),
+                exception_type=str(diagnostic["exception_type"]),
+                stack_fingerprint=str(diagnostic["stack_fingerprint"]),
+                actual={
+                    "traceback_excerpt": diagnostic["traceback_excerpt"],
+                    "redactions": diagnostic["redactions"],
+                },
+            )
+            controller_failure, controller_path = self._failure_envelope(
+                task_row,
+                controller_failure,
+            )
+            controller_digest = sha256_file(controller_path)
+            fallback = replace(
+                outcome,
+                idempotency_key=sha256_text(
+                    f"task-outcome:{task_id}:commit:{controller_digest}"
+                ),
+                result_ref=str(controller_path),
+                result_digest=controller_digest,
+                status="FAILED_SEMANTIC",
+                attempt_status="failed",
+                available_at=None,
+                next_tier=None,
+                next_attempt_kind=None,
+                repair_context_ref=None,
+                product_status=None,
+                successors=(),
+                edges=(),
+                failure=controller_failure,
+                hypothesis=None,
+                plan=None,
+                outbox_events=(),
+            )
+            self.state.commit_task_outcome(fallback)
+            return WorkerResult(
+                task_id,
+                "failed_safe",
+                reason_code,
+                str(controller_path),
+                result.attempt_id,
+                detail=str(diagnostic["safe_message"]),
+                failure_data=controller_failure,
+            )
         if prepared.run_completion_reducer:
             self.state.reduce_completion(
                 str(task_row["product_id"]),

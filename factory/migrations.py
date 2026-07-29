@@ -653,20 +653,24 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                applied_at TEXT NOT NULL
            )"""
     )
-    applied = {
-        int(row[0]): str(row[2])
-        for row in connection.execute(
-            "SELECT version, name, checksum FROM schema_migrations"
-        ).fetchall()
-    }
     for version, name, migration in MIGRATIONS:
         checksum = sha256_text(f"{version}:{name}")
-        if version in applied:
-            if applied[version] != checksum:
-                raise RuntimeError(f"database migration checksum mismatch: {version}")
-            continue
         connection.execute("BEGIN IMMEDIATE")
         try:
+            # Re-read after acquiring the database writer lock. Multiple
+            # services start together after a release; a pre-lock snapshot can
+            # become stale while another process applies this same migration.
+            applied = connection.execute(
+                "SELECT checksum FROM schema_migrations WHERE version=?",
+                (version,),
+            ).fetchone()
+            if applied is not None:
+                if str(applied[0]) != checksum:
+                    raise RuntimeError(
+                        f"database migration checksum mismatch: {version}"
+                    )
+                connection.commit()
+                continue
             migration(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, checksum, applied_at) "
