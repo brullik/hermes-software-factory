@@ -188,7 +188,7 @@ def canonical_plan_identity_catalog() -> str:
             "release_production",
         ),
     )
-    return "\n".join(
+    catalog = "\n".join(
         (
             f"{role}: output_schema={output_schema}; "
             f"capability_profile={profile}; "
@@ -198,6 +198,20 @@ def canonical_plan_identity_catalog() -> str:
         )
         for role, output_schema, profile in identities
     )
+    invariants = (
+        "PLAN_IDENTITY_INVARIANTS:\n"
+        "- Use a new plan_id for every proposed immutable revision; never reuse a "
+        "plan_id present in context or failure evidence.\n"
+        "- Every task_id must be new and unique across the proposed DAG and supplied "
+        "context.\n"
+        "- Every idempotency_key must be exactly 64 lowercase hexadecimal characters, "
+        "unique across all proposed nodes, and absent from supplied context. Do not "
+        "copy one template key between nodes.\n"
+        "- Every acceptance criterion_id must be unique across the proposed DAG. "
+        "Every mandatory goal acceptance_ids list must be non-empty and contain only "
+        "criterion IDs that exist in proposed node task_contract.acceptance arrays."
+    )
+    return f"{catalog}\n{invariants}"
 
 
 def minimum_capability_profile(
