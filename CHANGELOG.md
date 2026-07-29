@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.13 - 2026-07-29
+
+- Split mandatory local recovery from best-effort offsite replication so a
+  free-tier provider download cap cannot block controller, builder, staging,
+  or the pre-migration rollback point.
+- Added a fail-closed offsite retry timer that checks every two hours but
+  skips provider calls for 26 hours after a successful offsite proof, allowing
+  free-tier download counters to reset before the next refresh.
+- Serialized local and offsite restic operations with a shared lock, moved the
+  SQLite backup input to a stable path for correct retention grouping, and
+  separated local and offsite sanitized proof files.
+
 ## 2.1.12 - 2026-07-29
 
 - Added a durable capability reconciler that preflights newly created

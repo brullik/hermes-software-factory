@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write a sanitized, atomic proof for a successful offsite restic run."""
+"""Write a sanitized, atomic proof for a successful restic run."""
 
 from __future__ import annotations
 
