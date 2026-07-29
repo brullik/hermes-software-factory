@@ -12,6 +12,7 @@ from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
 from .registry import SchemaRegistry
+from .repair_brief import repair_requirements
 from .state import StateStore
 
 _REPLAN_REASONS = {
@@ -247,6 +248,25 @@ class FailureRouter:
         required_fixes = actual.get("required_fixes", [])
         if not isinstance(required_fixes, list):
             required_fixes = []
+        try:
+            raw_failed_gate_ids = json.loads(
+                str(failure.get("failed_gate_ids_json") or "[]")
+            )
+        except json.JSONDecodeError:
+            raw_failed_gate_ids = []
+        if not isinstance(raw_failed_gate_ids, list):
+            raw_failed_gate_ids = []
+        failed_gate_ids, fallback_fixes = repair_requirements(
+            output=None,
+            reason_code=str(failure.get("reason_code") or "internal_blocker"),
+            detail=str(failure.get("safe_message") or "repair required"),
+            failed_gate_ids=raw_failed_gate_ids,
+        )
+        actionable_fixes = [
+            str(value) for value in required_fixes if str(value).strip()
+        ]
+        if not actionable_fixes:
+            actionable_fixes = fallback_fixes
         brief = {
             "schema_version": "2.0",
             "artifact_id": (
@@ -272,11 +292,9 @@ class FailureRouter:
             "plan_node_id": str(failed["plan_node_id"]),
             "inherited_goal_ref": str(failed["root_context_ref"]),
             "inherited_acceptance": acceptance,
-            "failed_gate_ids": json.loads(
-                str(failure.get("failed_gate_ids_json") or "[]")
-            ),
+            "failed_gate_ids": failed_gate_ids,
             "required_fixes": [
-                *[str(value) for value in required_fixes if str(value).strip()],
+                *actionable_fixes,
                 str(failure["safe_message"]),
                 "Prove every inherited acceptance criterion with fresh evidence.",
             ],

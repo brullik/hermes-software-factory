@@ -1067,6 +1067,54 @@ def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
         state.close()
 
 
+def test_AUT_P0_010_repair_brief_maps_non_gate_failure_to_safe_reason_code(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                """
+                UPDATE failures
+                   SET reason_code='scope_violation',
+                       failed_gate_ids_json='[]',
+                       actual_json=?
+                 WHERE failure_id=?
+                """,
+                (
+                    json.dumps(
+                        {
+                            "required_fixes": [
+                                "Restrict changes to the task allowlisted paths."
+                            ]
+                        }
+                    ),
+                    failure_id,
+                ),
+            )
+
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        brief = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(repair["repair_context_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert brief["failed_gate_ids"] == ["scope_violation"]
+        assert (
+            "Restrict changes to the task allowlisted paths."
+            in brief["required_fixes"]
+        )
+        assert ArtifactStore(config).validate(
+            "repair-brief-v2.schema.json",
+            brief,
+        ) == []
+    finally:
+        state.close()
+
+
 def test_AUT_P0_011_needs_replan_activates_real_plan_revision(
     tmp_path: Path,
 ) -> None:
