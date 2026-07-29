@@ -439,6 +439,18 @@ class FactoryRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(len(prompt.digest), 64)
             self.assertGreater(prompt.size_chars, 100)
+            planning_prompt = PromptCompiler(config).compile(
+                role="task-specifier",
+                context_pack=context.artifact,
+                output_schema="backlog-plan-v2.schema.json",
+            )
+            self.assertIn(
+                "OUTPUT_SCHEMA_DEPENDENCY task-contract-v2.schema.json",
+                planning_prompt.prompt,
+            )
+            self.assertIn('"root_context_ref"', planning_prompt.prompt)
+            self.assertIn('"idempotency_key"', planning_prompt.prompt)
+            self.assertIn('"FAILED_SEMANTIC"', planning_prompt.prompt)
 
             (root / "task-marker").write_text("", encoding="utf-8")
             state.transition_product(intake_result.product_id, "CANCELLED")
@@ -487,6 +499,25 @@ class FactoryRuntimeTests(unittest.TestCase):
                     prompt_digest=prompt.digest,
                 )
             state.close()
+
+    def test_prompt_compiler_rejects_path_escaping_schema_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            schema_root = root / "schemas"
+            schema_root.mkdir()
+            (schema_root / "unsafe.schema.json").write_text(
+                json.dumps({"$ref": "../outside.schema.json"}),
+                encoding="utf-8",
+            )
+            config = _make_config(root / "state")
+            config.raw["paths"]["schemas"] = str(schema_root)
+
+            with self.assertRaisesRegex(ValueError, "unsafe reference"):
+                PromptCompiler(config).compile(
+                    role="builder",
+                    context_pack={"safe": True},
+                    output_schema="unsafe.schema.json",
+                )
 
     def test_tool_adapter_and_workspace_scope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
