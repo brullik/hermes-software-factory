@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.21 - 2026-07-29
+
+- Include every safe local JSON Schema dependency referenced by an output
+  contract in the compiled provider prompt.
+- Give Task Specifier and Replanner the complete `task-contract-v2` field,
+  status, and enum contract embedded by `backlog-plan-v2`, preventing agents
+  from guessing required node metadata.
+- Reject path-escaping, missing, non-schema, or symlinked local schema
+  references fail-closed.
+
 ## 2.1.20 - 2026-07-29
 
 - Bound causal `incident-recovery` chains to three failed recovery tasks.
