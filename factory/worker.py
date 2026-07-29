@@ -1090,13 +1090,13 @@ class AgentWorker:
         )
         return evidence, tuple(candidate_files), decisions
 
-    def _repair_evidence(
+    def _validated_repair_brief_payload(
         self,
         task: Mapping[str, Any],
         repair_context_ref: str,
         contract: Mapping[str, Any],
-    ) -> dict[str, str]:
-        """Load the validated repair brief instead of passing an unusable reference."""
+    ) -> dict[str, Any]:
+        """Load, validate, and bind one repair brief to its durable task."""
 
         name = Path(repair_context_ref).name
         if (
@@ -1143,6 +1143,21 @@ class AgentWorker:
             or str(payload.get("product_id")) != str(task["product_id"])
         ):
             raise RuntimeError(f"repair brief does not belong to {task['task_id']}")
+        return payload
+
+    def _repair_evidence(
+        self,
+        task: Mapping[str, Any],
+        repair_context_ref: str,
+        contract: Mapping[str, Any],
+    ) -> dict[str, str]:
+        """Load the validated repair brief instead of passing an unusable reference."""
+
+        payload = self._validated_repair_brief_payload(
+            task,
+            repair_context_ref,
+            contract,
+        )
         compact_payload = {
             "failure_class": payload["failure_class"],
             "failed_gate_ids": payload["failed_gate_ids"],
@@ -1380,10 +1395,20 @@ class AgentWorker:
         context_path: Path,
         output_path: Path | None,
         output: Mapping[str, Any] | None,
+        preserve_existing: bool = False,
     ) -> Path:
         output_status = str(output.get("status")) if output else "no_usable_provider_result"
         raw_summary = str(output.get("summary", "")) if output else "Provider did not return a schema-valid result."
         summary, _ = redact_text(raw_summary)
+        prior_brief = (
+            self._validated_repair_brief_payload(
+                spec.task_contract,
+                spec.repair_context_ref,
+                spec.task_contract,
+            )
+            if preserve_existing and spec.repair_context_ref
+            else None
+        )
         failed_gate_ids: list[str] = []
         changed_files: list[dict[str, str]] = []
         if output:
@@ -1401,14 +1426,78 @@ class AgentWorker:
                         path, _ = redact_text(str(item["path"]))
                         change, _ = redact_text(str(item.get("change", "reported change")))
                         changed_files.append({"path": path, "change": change})
-        failed_gate_ids, required_fixes = repair_requirements(
-            output=output,
-            reason_code=reason_code,
-            detail=summary or output_status,
-            failed_gate_ids=failed_gate_ids,
+        transient_note = (
+            f"Transient provider interruption ({reason_code}) ended the previous "
+            "call without new semantic evidence. Preserve the current hypothesis "
+            "and continue the unchanged task contract."
         )
+        if prior_brief is not None:
+            failure_class = str(prior_brief["failure_class"])
+            failed_gate_ids = [
+                str(value) for value in prior_brief["failed_gate_ids"]
+            ]
+            required_fixes = [
+                str(value) for value in prior_brief["required_fixes"]
+            ]
+            changed_files = [
+                {
+                    "path": str(item["path"]),
+                    "change": str(item["change"]),
+                }
+                for item in prior_brief["changed_files"]
+                if isinstance(item, Mapping)
+            ]
+            relevant_log_fragment = (
+                f"{prior_brief['relevant_log_fragment']}\n{transient_note}"
+            )[:4000]
+            expected_vs_actual = dict(prior_brief["expected_vs_actual"])
+            previous_attempt_summary = (
+                f"{prior_brief['previous_attempt_summary']}\n{transient_note}"
+            )[:2000]
+        elif preserve_existing:
+            failure_class = reason_code
+            failed_gate_ids = ["transient-provider-interruption"]
+            required_fixes = [
+                (
+                    "Retry the unchanged task contract. Do not modify code solely "
+                    f"because the provider call ended with {reason_code}."
+                )
+            ]
+            relevant_log_fragment = transient_note
+            expected_vs_actual = {
+                "expected": "the unchanged task continues after a transient interruption",
+                "actual": f"provider call ended with {reason_code}",
+            }
+            previous_attempt_summary = transient_note
+        else:
+            failure_class = reason_code
+            failed_gate_ids, required_fixes = repair_requirements(
+                output=output,
+                reason_code=reason_code,
+                detail=summary or output_status,
+                failed_gate_ids=failed_gate_ids,
+            )
+            relevant_log_fragment = (
+                f"provider_status={output_status}; reason_code={reason_code}"
+            )
+            expected_vs_actual = {
+                "expected": (
+                    "schema-valid completed result satisfying the task "
+                    "acceptance contract"
+                ),
+                "actual": summary[:1000] or output_status,
+            }
+            previous_attempt_summary = summary[:2000] or output_status
         context_ref = f"evidence/{context_path.name}"
-        evidence_refs = [context_ref]
+        evidence_refs = [
+            *(
+                [str(value) for value in prior_brief["evidence_refs"]]
+                if prior_brief is not None
+                else []
+            ),
+            *([spec.repair_context_ref] if spec.repair_context_ref else []),
+            context_ref,
+        ]
         if output_path is not None:
             evidence_refs.append(f"evidence/{output_path.name}")
         artifact = {
@@ -1421,22 +1510,19 @@ class AgentWorker:
             },
             "task_id": str(spec.task_contract["task_id"]),
             "attempt_id": attempt.attempt_id,
-            "failure_class": reason_code,
+            "failure_class": failure_class,
             "failed_gate_ids": failed_gate_ids,
             "required_fixes": required_fixes,
             "allowed_paths": [
                 str(path) for path in spec.task_contract["allowed_paths"]
             ],
-            "relevant_log_fragment": f"provider_status={output_status}; reason_code={reason_code}",
-            "expected_vs_actual": {
-                "expected": "schema-valid completed result satisfying the task acceptance contract",
-                "actual": summary[:1000] or output_status,
-            },
+            "relevant_log_fragment": relevant_log_fragment,
+            "expected_vs_actual": expected_vs_actual,
             "changed_files": changed_files,
             "forbidden_actions": [str(path) for path in spec.task_contract["forbidden_paths"]],
-            "previous_attempt_summary": summary[:2000] or output_status,
+            "previous_attempt_summary": previous_attempt_summary,
             "definition_of_done": [str(item["verification"]) for item in spec.task_contract["acceptance"]],
-            "evidence_refs": evidence_refs,
+            "evidence_refs": list(dict.fromkeys(evidence_refs)),
         }
         self.schemas.validate("repair-brief.schema.json", artifact)
         return self.artifacts.write(
@@ -1531,6 +1617,7 @@ class AgentWorker:
             context_path=context_path,
             output_path=None,
             output=output,
+            preserve_existing=True,
         )
         result_path = self._attempt_artifact(
             spec,
