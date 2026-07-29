@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.17 - 2026-07-29
+
+- Propagate sanitized validator coordinates from transport diagnostics into
+  repair briefs, attempt evidence, and failure envelopes so the next agent
+  receives a concrete field-level correction without raw provider output,
+  prompts, or secret values.
+- Restrict Telegram gateway outbox claims atomically to owner-notification
+  events, preventing unrelated durable events from starving Russian progress
+  and owner-action messages.
+- Added regressions for output-schema and semantic-plan diagnostic continuity,
+  structured failure evidence, and delivery past an older generic outbox event.
+
 ## 2.1.16 - 2026-07-29
 
 - Product intake now persists every valid idempotent request in the durable

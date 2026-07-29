@@ -208,6 +208,50 @@ class GatewayTests(unittest.TestCase):
             self.assertIsNotNone(outbox[0]["delivered_at"])
             state.close()
 
+    def test_gateway_claims_only_telegram_events_without_blocking_on_generic_outbox(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = make_config(Path(directory))
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            state.enqueue_outbox(
+                outbox_id="outbox-generic-first",
+                idempotency_key="outbox-generic-first-key",
+                event_type="task_result_committed",
+                payload={"task_id": "T-GENERIC"},
+            )
+            state.enqueue_outbox(
+                outbox_id="outbox-telegram-second",
+                idempotency_key="outbox-telegram-second-key",
+                event_type="telegram.owner_notification",
+                payload={
+                    "kind": "autonomous_progress",
+                    "product_id": "product-notification",
+                    "task_id": "T-NOTIFY",
+                    "text": "Hermes продолжил проект автоматически.",
+                },
+            )
+            api = FakeTelegramApi()
+            gateway = TelegramGateway(
+                config,
+                state,
+                ArtifactStore(config),
+                api,  # type: ignore[arg-type]
+                offset_path=Path(directory) / "offset",
+            )
+
+            self.assertEqual(gateway.deliver_outbox(), 1)
+
+            self.assertEqual(
+                api.sent,
+                [("42", "Hermes продолжил проект автоматически.")],
+            )
+            outbox = {item["outbox_id"]: item for item in state.list_outbox()}
+            self.assertEqual(outbox["outbox-generic-first"]["status"], "PENDING")
+            self.assertEqual(outbox["outbox-generic-first"]["attempts"], 0)
+            self.assertEqual(outbox["outbox-telegram-second"]["status"], "DONE")
+            state.close()
+
 
 if __name__ == "__main__":
     unittest.main()
