@@ -20,8 +20,8 @@ global:
       - external_nondeterminism
     requires_new_evidence: true
   transient_retries:
-    max: 3
-    backoff_seconds: [15, 60, 180]
+    max: 2
+    backoff_seconds: [15, 60]
     count_as_semantic_attempt: false
   forbid_identical_prompt_retry: true
   max_spawn_depth: 1

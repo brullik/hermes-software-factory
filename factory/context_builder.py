@@ -14,7 +14,7 @@ from scripts.prompt_compiler import (
 )
 
 from .artifacts import ArtifactStore
-from .common import redact_text, sha256_text
+from .common import redact_text
 from .config import FactoryConfig
 
 
@@ -42,6 +42,12 @@ class ContextBuilder:
         allowed_paths: list[str],
         forbidden_actions: list[str],
         output_schema: str,
+        root_goal: str | None = None,
+        root_task_id: str | None = None,
+        plan_summary: dict[str, Any] | None = None,
+        lineage: dict[str, Any] | None = None,
+        open_failure: dict[str, Any] | None = None,
+        capability_contract: dict[str, Any] | None = None,
         evidence: Iterable[dict[str, str]] = (),
         decisions: list[str] | None = None,
         max_files: int = 20,
@@ -75,7 +81,8 @@ class ContextBuilder:
                     "reason": selected_file.reason,
                     "digest": selected_file.digest,
                     "content": safe_content,
-                    "content_digest": sha256_text(safe_content),
+                    "truncated": selected_file.truncated,
+                    "binary": selected_file.binary,
                     "redactions": diagnostics,
                 }
             )
@@ -107,24 +114,39 @@ class ContextBuilder:
                 }
             )
         artifact = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "product_id": product_id,
             "task_id": task_id,
+            "root_task_id": root_task_id or task_id,
             "subject_sha": subject_sha,
+            "root_goal": root_goal or objective,
             "objective": objective,
             "acceptance": acceptance,
+            "plan_summary": plan_summary or {},
+            "lineage": lineage
+            or {
+                "root_task_id": root_task_id or task_id,
+                "parent_task_id": None,
+                "source_task_id": task_id,
+                "plan_id": "legacy",
+                "plan_node_id": task_id,
+                "task_revision": 1,
+            },
+            "open_failure": open_failure,
+            "capability_contract": capability_contract
+            or {"profile": "legacy", "required": [], "missing": []},
             "constraints": {
                 "allowed_paths": allowed_paths,
                 "forbidden_actions": sorted(set(forbidden_actions)),
             },
-            "selected_files": selected_files,
+            "file_excerpts": selected_files,
             "evidence": safe_evidence,
             "decisions": decisions or [],
             "output_schema": output_schema,
             "redaction_count": redaction_count,
         }
         path = self.artifacts.write(
-            "context-pack.schema.json",
+            "context-pack-v2.schema.json",
             artifact,
             filename=filename or f"context-{task_id}.json",
         )

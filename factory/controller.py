@@ -79,7 +79,21 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 ).submit(
                     source=str(payload.get("source", "cli")),
                     owner_id=str(payload["owner_id"]),
-                    idea=str(payload["idea"]),
+                    goal_text=str(payload.get("goal_text") or payload["idea"]),
+                    delivery_mode=str(
+                        payload.get("delivery_mode")
+                        or (
+                            "existing_repository"
+                            if payload.get("repository_url")
+                            else "new_repository"
+                        )
+                    ),
+                    repository_url=payload.get("repository_url"),
+                    repository_name=payload.get("repository_name"),
+                    repository_visibility=str(
+                        payload.get("repository_visibility", "private")
+                    ),
+                    constraints=payload.get("constraints", {}),
                     idempotency_key=payload.get("idempotency_key"),
                     attachments=payload.get("attachments", []),
                 )

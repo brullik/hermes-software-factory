@@ -80,7 +80,7 @@ MARKER_PATTERN = re.compile(r"\b(?:TODO|TBD|FIXME)\s*:", re.IGNORECASE)
 SECRET_PATTERNS = [
     re.compile(r"ghp_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 ]
 

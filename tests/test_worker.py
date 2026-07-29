@@ -22,6 +22,7 @@ from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
 from factory.providers import ModelSelection
 from factory.quality import QualityGateRun
+from factory.reconciler import PipelineReconciler
 from factory.state import StateStore
 from factory.worker import (
     AgentWorker,
@@ -34,6 +35,17 @@ from factory.worker import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def make_retry_due(state: StateStore, task_id: str) -> None:
+    """Advance one durable retry timer without sleeping in a unit test."""
+
+    with state._lock, state._connection:
+        state._connection.execute(
+            "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' "
+            "WHERE task_id=? AND graph_status='WAITING_TIME'",
+            (task_id,),
+        )
 
 
 def make_config(root: Path, registry: Path | None = None) -> FactoryConfig:
@@ -401,15 +413,32 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(first)
             assert first is not None
-            self.assertEqual(first.status, "repair_scheduled")
-            task = next(iter(state.list_tasks(intake_result.product_id)))
+            self.assertEqual(first.status, "repair_required")
+            source_task = next(iter(state.list_tasks(intake_result.product_id)))
+            self.assertEqual(source_task["status"], "FAILED_SAFE")
+            self.assertEqual(source_task["graph_status"], "FAILED_SEMANTIC")
+            self.assertEqual(len(state.list_failures(intake_result.product_id)), 1)
+
+            recovery = PipelineReconciler(config, state).reconcile_once()
+
+            self.assertEqual(recovery.repaired, 1)
+            tasks = state.list_tasks(intake_result.product_id)
+            self.assertEqual(len(tasks), 2)
+            task = next(
+                item for item in tasks if item["task_id"] != source_task["task_id"]
+            )
             self.assertEqual(task["status"], "PENDING")
-            self.assertEqual(task["next_tier"], "luna")
-            self.assertEqual(task["next_attempt_kind"], "repair")
+            self.assertEqual(task["graph_status"], "READY")
+            self.assertEqual(task["parent_task_id"], source_task["task_id"])
+            self.assertEqual(task["source_task_id"], source_task["task_id"])
+            self.assertEqual(task["root_task_id"], source_task["root_task_id"])
+            self.assertEqual(task["next_attempt_kind"], "initial")
             brief_paths = list(config.evidence_dir.glob("repair-brief-*.json"))
             self.assertEqual(len(brief_paths), 1)
             brief = json.loads(brief_paths[0].read_text(encoding="utf-8"))
-            self.assertEqual(brief["failure_class"], "model_requested_repair")
+            self.assertEqual(brief["schema_version"], "2.0")
+            self.assertEqual(brief["failed_task_id"], source_task["task_id"])
+            self.assertEqual(brief["hypothesis_id"], task["hypothesis_id"])
             self.assertTrue(brief["failed_gate_ids"])
             self.assertTrue(brief["required_fixes"])
             self.assertEqual(brief["allowed_paths"], ["artifacts/**"])
@@ -419,11 +448,18 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(second)
             assert second is not None
             self.assertEqual(second.status, "completed", second.reason_code)
-            self.assertEqual(state.list_tasks(intake_result.product_id)[0]["status"], "DONE")
-            self.assertEqual(len(state.attempts_for_task(str(task["task_id"]))), 2)
+            repaired = state.get_task(str(task["task_id"]))
+            self.assertIsNotNone(repaired)
+            assert repaired is not None
+            self.assertEqual(repaired["status"], "DONE")
+            superseded = state.get_task(str(source_task["task_id"]))
+            self.assertIsNotNone(superseded)
+            assert superseded is not None
+            self.assertEqual(superseded["graph_status"], "SUPERSEDED")
+            self.assertEqual(len(state.attempts_for_task(str(task["task_id"]))), 1)
             self.assertIn("repair-brief-", runner.prompts[1])
             self.assertIn("UNTRUSTED_DATA targeted repair brief", runner.prompts[1])
-            self.assertIn("model_requested_repair", runner.prompts[1])
+            self.assertIn(str(brief["failure_id"]), runner.prompts[1])
             state.close()
 
     def test_partial_repair_brief_fails_internally_before_provider_call(self) -> None:
@@ -506,12 +542,20 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(result)
             assert result is not None
             self.assertEqual(result.status, "failed_safe")
-            self.assertEqual(result.reason_code, "worker_internal_error")
+            self.assertEqual(
+                result.reason_code,
+                "controller_exception_value_error",
+            )
             self.assertEqual(runner.calls, [])
             durable = state.get_task(str(task["task_id"]))
             self.assertIsNotNone(durable)
             assert durable is not None
             self.assertEqual(durable["status"], "FAILED_SAFE")
+            failure = state.list_failures(intake_result.product_id)[-1]
+            self.assertEqual(failure["exception_type"], "ValueError")
+            self.assertTrue(failure["stack_fingerprint"])
+            actual = json.loads(str(failure["actual_json"]))
+            self.assertIn("traceback_excerpt", actual)
             state.close()
 
     def test_malformed_transport_is_requeued_at_same_tier_and_can_resume(self) -> None:
@@ -540,11 +584,14 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(first.status, "repair_scheduled")
             self.assertEqual(first.reason_code, "malformed_transport")
             task = next(iter(state.list_tasks(intake_result.product_id)))
-            self.assertEqual(task["status"], "PENDING")
+            self.assertEqual(task["status"], "WAITING")
+            self.assertEqual(task["graph_status"], "WAITING_TIME")
+            self.assertTrue(task["available_at"])
             attempts = state.attempts_for_task(str(task["task_id"]))
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0]["attempt_kind"], "initial")
 
+            make_retry_due(state, str(task["task_id"]))
             second = worker.run_once()
 
             self.assertIsNotNone(second)
@@ -605,8 +652,15 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(first)
             assert first is not None
-            self.assertEqual(first.status, "repair_scheduled")
-            task = next(iter(state.list_tasks(intake_result.product_id)))
+            self.assertEqual(first.status, "repair_required")
+            source_task = next(iter(state.list_tasks(intake_result.product_id)))
+            recovery = PipelineReconciler(config, state).reconcile_once()
+            self.assertEqual(recovery.repaired, 1)
+            task = next(
+                item
+                for item in state.list_tasks(intake_result.product_id)
+                if item["task_id"] != source_task["task_id"]
+            )
             original_ref = str(task["repair_context_ref"])
             original_brief = json.loads(
                 (config.evidence_dir / Path(original_ref).name).read_text(
@@ -624,7 +678,11 @@ class WorkerTests(unittest.TestCase):
             assert second is not None
             self.assertEqual(second.status, "repair_scheduled")
             self.assertEqual(second.reason_code, "malformed_transport")
-            task = next(iter(state.list_tasks(intake_result.product_id)))
+            task = state.get_task(str(task["task_id"]))
+            self.assertIsNotNone(task)
+            assert task is not None
+            self.assertEqual(task["status"], "WAITING")
+            self.assertEqual(task["graph_status"], "WAITING_TIME")
             transient_ref = str(task["repair_context_ref"])
             self.assertNotEqual(transient_ref, original_ref)
             transient_brief = json.loads(
@@ -638,15 +696,15 @@ class WorkerTests(unittest.TestCase):
             )
             self.assertEqual(
                 transient_brief["required_fixes"],
-                ["Add the exact original security regression."],
+                original_brief["required_fixes"],
             )
             self.assertEqual(
-                transient_brief["failure_class"],
-                "model_requested_repair",
+                transient_brief["hypothesis_id"],
+                original_brief["hypothesis_id"],
             )
-            self.assertIn("malformed_transport", transient_brief["relevant_log_fragment"])
             self.assertIn(original_ref, transient_brief["evidence_refs"])
 
+            make_retry_due(state, str(task["task_id"]))
             third = worker.run_once()
 
             self.assertIsNotNone(third)
@@ -689,13 +747,20 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "blocked_external")
+            self.assertEqual(result.status, "failed_safe")
             self.assertEqual(result.reason_code, "release_adapter_missing")
             self.assertEqual(result.detail, "release side-effect adapter is not configured")
             self.assertEqual(runner.calls, [])
             task = next(iter(state.list_tasks(product_id)))
-            self.assertEqual(task["status"], "BLOCKED_EXTERNAL")
+            self.assertEqual(task["status"], "FAILED_SAFE")
+            self.assertEqual(task["graph_status"], "FAILED_SEMANTIC")
             self.assertEqual(state.attempts_for_task(str(task["task_id"])), [])
+            failure = state.list_failures(product_id)[0]
+            self.assertEqual(failure["failure_class"], "controller")
+            self.assertEqual(
+                list(config.evidence_dir.glob("owner-action-*.json")),
+                [],
+            )
             state.close()
 
     def test_completed_duplicate_prompt_is_internal_not_external(self) -> None:
@@ -1476,17 +1541,26 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "blocked_external")
+            self.assertEqual(result.status, "failed_safe")
             self.assertEqual(runner.calls, [])
             task_file = next(config.evidence_dir.glob("task-T-*.json"))
             task = state.get_task(json.loads(task_file.read_text(encoding="utf-8"))["task_id"])
             self.assertIsNotNone(task)
             assert task is not None
-            self.assertEqual(task["status"], "BLOCKED_EXTERNAL")
+            self.assertEqual(task["status"], "FAILED_SAFE")
+            self.assertEqual(task["graph_status"], "FAILED_SEMANTIC")
             self.assertEqual(state.attempts_for_task(str(task["task_id"])), [])
             self.assertEqual(result.reason_code, "model_route_unapproved")
             self.assertIn("not approved", result.detail or "")
             self.assertEqual(intake_result.product_id, task["product_id"])
+            self.assertEqual(
+                state.list_failures(intake_result.product_id)[0]["failure_class"],
+                "controller",
+            )
+            self.assertEqual(
+                list(config.evidence_dir.glob("owner-action-*.json")),
+                [],
+            )
             state.close()
 
     def test_workspace_scope_violation_is_failed_safe(self) -> None:
@@ -1536,7 +1610,10 @@ class WorkerTests(unittest.TestCase):
             task_file = next(config.evidence_dir.glob("task-T-*.json"))
             task_id = str(json.loads(task_file.read_text(encoding="utf-8"))["task_id"])
             self.assertEqual(len(state.attempts_for_task(task_id)), 1)
-            self.assertEqual(state.list_tasks(intake_result.product_id)[0]["status"], "PENDING")
+            task = state.list_tasks(intake_result.product_id)[0]
+            self.assertEqual(task["status"], "WAITING")
+            self.assertEqual(task["graph_status"], "WAITING_TIME")
+            self.assertTrue(task["available_at"])
             product = state.get_product(intake_result.product_id)
             self.assertIsNotNone(product)
             assert product is not None

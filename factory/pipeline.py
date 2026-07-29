@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -34,6 +35,15 @@ class StageDefinition:
     quality_gates: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PreparedPipelineOutcome:
+    product_status: str | None = None
+    successors: tuple[dict[str, Any], ...] = ()
+    edges: tuple[dict[str, Any], ...] = ()
+    plan: dict[str, Any] | None = None
+    run_completion_reducer: bool = False
+
+
 def _task_id(product_id: str, stage: str, cycle: int = 0) -> str:
     suffix = stage if cycle == 0 else f"{stage}:repair:{cycle}"
     return f"T-{sha256_text(f'{product_id}:{suffix}')[:12].upper()}"
@@ -46,6 +56,18 @@ def _external_github_repository(value: str) -> bool:
             value.strip(),
         )
     )
+
+
+def _product_repository_url(product: dict[str, Any]) -> str | None:
+    """Return the canonical existing-repository URL, with legacy read compatibility."""
+
+    if product.get("delivery_mode") == "existing_repository":
+        value = str(product.get("repository_url") or "")
+        return value if _external_github_repository(value) else None
+    if product.get("delivery_mode") in {"new_repository", "existing_repository"}:
+        return None
+    legacy = str(product.get("idea", ""))
+    return legacy if _external_github_repository(legacy) else None
 
 
 class PipelineCoordinator:
@@ -73,7 +95,7 @@ class PipelineCoordinator:
 
     def _pm_active_task(self, product_id: str) -> dict[str, Any] | None:
         product = self.state.get_product(product_id) or {}
-        if not _external_github_repository(str(product.get("idea", ""))):
+        if _product_repository_url(product) is None:
             return None
         workspace = (self.config.worktrees_dir / product_id / "repository").resolve()
         expected_parent = (self.config.worktrees_dir / product_id).resolve()
@@ -113,7 +135,7 @@ class PipelineCoordinator:
         """Discard a failed published candidate before a new scoped repair."""
 
         product = self.state.get_product(product_id) or {}
-        if not _external_github_repository(str(product.get("idea", ""))):
+        if _product_repository_url(product) is None:
             return
         role = str(failed_task.get("role") or "")
         if role not in {"release-operator", "product-tester"}:
@@ -165,7 +187,7 @@ class PipelineCoordinator:
     def _definition(self, product_id: str, stage: str) -> StageDefinition:
         workspace_conflict = f"product:{product_id}:workspace"
         product = self.state.get_product(product_id) or {}
-        external_repository = _external_github_repository(str(product.get("idea", "")))
+        external_repository = _product_repository_url(product) is not None
         implementation_gates = (
             (
                 "target-environment",
@@ -254,11 +276,11 @@ class PipelineCoordinator:
                 "task-specifier",
                 "Create Backlog DAG",
                 "task-specifier",
-                "backlog-plan.schema.json",
+                "backlog-plan-v2.schema.json",
                 "luna",
                 "low",
                 "Turn the accepted architecture into a small dependency-aware backlog DAG.",
-                "Validate task IDs, edges, parallel groups, and critical path in backlog-plan.schema.json.",
+                "Validate executable nodes, edges, goal traceability, and completion criteria in backlog-plan-v2.schema.json.",
                 ("artifacts/**",),
                 workspace_conflict,
                 70,
@@ -272,7 +294,19 @@ class PipelineCoordinator:
                 "low",
                 "Implement the smallest user-visible vertical slice in the leased worktree.",
                 "Run the task acceptance commands and report changed files and evidence.",
-                ("src/**", "tests/**", "README.md", "pyproject.toml"),
+                (
+                    "src/**",
+                    "tests/**",
+                    "README.md",
+                    "pyproject.toml",
+                    ".gitignore",
+                    "uv.lock",
+                    "poetry.lock",
+                    "pdm.lock",
+                    "Pipfile",
+                    "Pipfile.lock",
+                    "requirements*.txt",
+                ),
                 workspace_conflict,
                 60,
                 implementation_gates,
@@ -384,6 +418,7 @@ class PipelineCoordinator:
         dependencies: tuple[str, ...] = (),
         cycle: int = 0,
         available_at: str | None = None,
+        persist_state: bool = True,
     ) -> Path:
         definition = self._definition(product_id, stage)
         if cycle < 0:
@@ -488,26 +523,92 @@ class PipelineCoordinator:
         self.schemas.validate("task-contract.schema.json", contract)
         if not path.is_file():
             self.artifacts.write("task-contract.schema.json", contract, filename=filename)
-        self.state.add_task(
-            task_id=task_id,
-            product_id=product_id,
-            title=definition.title,
-            role=definition.role,
-            output_schema=definition.output_schema,
-            contract_ref=f"evidence/{filename}",
-            stage_key=stage,
+        if persist_state:
+            self.state.add_task(
+                task_id=task_id,
+                product_id=product_id,
+                title=definition.title,
+                role=definition.role,
+                output_schema=definition.output_schema,
+                contract_ref=f"evidence/{filename}",
+                stage_key=stage,
+                cycle=cycle,
+                available_at=available_at,
+                dependencies=list(dependencies),
+                conflict_keys=[definition.conflict_key],
+                priority=definition.priority,
+            )
+        return path
+
+    def prepare_task(
+        self,
+        product_id: str,
+        stage: str,
+        *,
+        dependencies: tuple[str, ...] = (),
+        cycle: int = 0,
+        available_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Write an immutable successor contract without mutating SQLite."""
+
+        path = self.create_task(
+            product_id,
+            stage,
+            dependencies=dependencies,
             cycle=cycle,
             available_at=available_at,
-            dependencies=list(dependencies),
-            conflict_keys=[definition.conflict_key],
-            priority=definition.priority,
+            persist_state=False,
         )
-        return path
+        contract = json.loads(path.read_text(encoding="utf-8"))
+        definition = self._definition(product_id, stage)
+        task_id = str(contract["task_id"])
+        return {
+            "task_id": task_id,
+            "title": definition.title,
+            "role": definition.role,
+            "output_schema": definition.output_schema,
+            "contract_ref": f"evidence/{path.name}",
+            "stage_key": stage,
+            "cycle": cycle,
+            "available_at": available_at,
+            "dependencies": list(dependencies),
+            "conflict_keys": [definition.conflict_key],
+            "priority": definition.priority,
+            "graph_status": (
+                "WAITING_TIME"
+                if available_at is not None and available_at > "0000"
+                else "DRAFT"
+            ),
+            "capability_profile": (
+                "planning_readonly"
+                if definition.role
+                in {
+                    "product-director",
+                    "product-analyst",
+                    "solution-architect",
+                    "task-specifier",
+                }
+                else "reviewer_readonly"
+                if definition.role
+                in {"independent-reviewer", "security-reviewer"}
+                else "release_staging"
+                if stage == "release-staging"
+                else "release_production"
+                if stage == "release-production"
+                else "test_workspace"
+                if definition.role in {"test-engineer", "product-tester"}
+                else "builder_workspace"
+            ),
+            "required_capabilities": [],
+            "mandatory": True,
+        }
 
     def seed_initial(self, product_id: str) -> Path:
         return self.create_task(product_id, "product-director")
 
-    def next_repair_cycle(self, product_id: str) -> int:
+    def legacy_next_repair_cycle_v1(self, product_id: str) -> int:
+        """Return the v1 product-global cycle for migration compatibility only."""
+
         return (
             max(
                 (int(task.get("cycle") or 0) for task in self.state.list_tasks(product_id)),
@@ -608,7 +709,7 @@ class PipelineCoordinator:
         """Start a bounded build-to-staging repair cycle from the current state."""
 
         product_id = str(failed_task["product_id"])
-        cycle = self.next_repair_cycle(product_id)
+        cycle = self.legacy_next_repair_cycle_v1(product_id)
         if cycle > self.config.max_repair_cycles and not director_replan:
             return None
         product = self.state.get_product(product_id)
@@ -743,8 +844,196 @@ class PipelineCoordinator:
         self.artifacts.write("risk-assessment.schema.json", artifact, filename=path.name)
         return path
 
-    def advance_after(self, task: dict[str, Any], output: dict[str, Any], output_path: Path) -> list[Path]:
-        """Advance lifecycle and enqueue the next stage after a valid result."""
+    def prepare_after(
+        self,
+        task: dict[str, Any],
+        output: dict[str, Any],
+        output_path: Path,
+    ) -> PreparedPipelineOutcome:
+        """Prepare immutable successors; SQLite mutation happens in outcome commit."""
+
+        if output.get("status") not in {"completed", "accepted"}:
+            return PreparedPipelineOutcome()
+        product_id = str(task["product_id"])
+        role = str(task.get("role") or "")
+        task_id = str(task["task_id"])
+        stage_key = str(task.get("stage_key") or "")
+        cycle = int(task.get("cycle") or 0)
+        if role == "replanner":
+            if str(output.get("schema_version")) != "2.0":
+                raise ValueError("replanner must return BacklogPlan v2")
+            for node in output.get("nodes", []):
+                if not isinstance(node, dict) or not isinstance(
+                    node.get("task_contract"), dict
+                ):
+                    raise TypeError("replanned BacklogPlan contains an invalid node")
+                contract = dict(node["task_contract"])
+                self.schemas.validate("task-contract-v2.schema.json", contract)
+                self.artifacts.write(
+                    "task-contract-v2.schema.json",
+                    contract,
+                    filename=f"task-{contract['task_id']}.json",
+                )
+            plan = dict(output)
+            plan["plan_artifact_ref"] = f"evidence/{output_path.name}"
+            plan["plan_digest"] = self.artifacts.digest(output)
+            return PreparedPipelineOutcome("IMPLEMENTING", plan=plan)
+        if role == "product-director":
+            self._write_risk_assessment(
+                product_id, output, f"evidence/{output_path.name}"
+            )
+            successor = self.prepare_task(
+                product_id, "product-analyst", dependencies=(task_id,)
+            )
+            return PreparedPipelineOutcome("RISK_CLASSIFIED", (successor,))
+        if role == "product-analyst":
+            successor = self.prepare_task(
+                product_id, "solution-architect", dependencies=(task_id,)
+            )
+            return PreparedPipelineOutcome(successors=(successor,))
+        if role == "solution-architect":
+            successor = self.prepare_task(
+                product_id, "task-specifier", dependencies=(task_id,)
+            )
+            return PreparedPipelineOutcome("ARCHITECTED", (successor,))
+        if role == "task-specifier":
+            if str(output.get("schema_version")) != "2.0":
+                raise ValueError("task-specifier must return BacklogPlan v2")
+            for node in output.get("nodes", []):
+                if not isinstance(node, dict) or not isinstance(
+                    node.get("task_contract"), dict
+                ):
+                    raise TypeError("BacklogPlan v2 contains an invalid node")
+                contract = dict(node["task_contract"])
+                self.schemas.validate("task-contract-v2.schema.json", contract)
+                self.artifacts.write(
+                    "task-contract-v2.schema.json",
+                    contract,
+                    filename=f"task-{contract['task_id']}.json",
+                )
+            plan = dict(output)
+            plan["plan_artifact_ref"] = f"evidence/{output_path.name}"
+            plan["plan_digest"] = self.artifacts.digest(output)
+            return PreparedPipelineOutcome("IMPLEMENTING", plan=plan)
+        task_plan_id = str(task.get("plan_id") or "")
+        active_plans = self.state.list_plans(product_id)
+        if any(
+            str(plan.get("plan_id")) == task_plan_id
+            and int(plan.get("revision") or 0) >= 1
+            for plan in active_plans
+        ):
+            if stage_key == "release-production":
+                release = output.get("release")
+                release_digest = (
+                    str(release.get("image_digest") or "")
+                    if isinstance(release, dict)
+                    else ""
+                )
+                if not re.fullmatch(r"sha256:[a-f0-9]{64}", release_digest):
+                    raise ValueError(
+                        "production release must bind observation to an immutable digest"
+                    )
+                available_at = (
+                    datetime.now(UTC)
+                    + timedelta(seconds=self.config.observation_seconds)
+                ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                successor = self.prepare_task(
+                    product_id,
+                    "observation",
+                    dependencies=(task_id,),
+                    cycle=cycle,
+                    available_at=available_at,
+                )
+                successor["required_predecessor_digest"] = release_digest
+                return PreparedPipelineOutcome(
+                    product_status="OBSERVATION",
+                    successors=(successor,),
+                )
+            product_status = {
+                "release-staging": "STAGING_DEPLOYED",
+                "product-tester": "RELEASE_READY",
+                "observation": "OBSERVATION",
+            }.get(stage_key)
+            return PreparedPipelineOutcome(
+                product_status=product_status,
+                run_completion_reducer=stage_key == "observation",
+            )
+        if role == "builder":
+            successor = self.prepare_task(
+                product_id,
+                "test-engineer",
+                dependencies=(task_id,),
+                cycle=cycle,
+            )
+            return PreparedPipelineOutcome("IMPLEMENTING", (successor,))
+        if role == "test-engineer":
+            successor = self.prepare_task(
+                product_id,
+                "security-reviewer",
+                dependencies=(task_id,),
+                cycle=cycle,
+            )
+            return PreparedPipelineOutcome(successors=(successor,))
+        if role == "security-reviewer":
+            successor = self.prepare_task(
+                product_id,
+                "independent-reviewer",
+                dependencies=(task_id,),
+                cycle=cycle,
+            )
+            return PreparedPipelineOutcome(successors=(successor,))
+        if role == "independent-reviewer":
+            successor = self.prepare_task(
+                product_id,
+                "release-staging",
+                dependencies=(task_id,),
+                cycle=cycle,
+            )
+            return PreparedPipelineOutcome("INTEGRATING", (successor,))
+        if stage_key == "release-staging":
+            successor = self.prepare_task(
+                product_id,
+                "product-tester",
+                dependencies=(task_id,),
+                cycle=cycle,
+            )
+            return PreparedPipelineOutcome("STAGING_DEPLOYED", (successor,))
+        if role == "product-tester" and stage_key != "observation":
+            if bool(output.get("release_blocked")):
+                return PreparedPipelineOutcome()
+            successor = self.prepare_task(
+                product_id,
+                "release-production",
+                dependencies=(task_id,),
+                cycle=cycle,
+            )
+            return PreparedPipelineOutcome("RELEASE_READY", (successor,))
+        if stage_key == "release-production":
+            available_at = (
+                datetime.now(UTC)
+                + timedelta(seconds=self.config.observation_seconds)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            successor = self.prepare_task(
+                product_id,
+                "observation",
+                dependencies=(task_id,),
+                cycle=cycle,
+                available_at=available_at,
+            )
+            return PreparedPipelineOutcome("OBSERVATION", (successor,))
+        if stage_key == "observation":
+            return PreparedPipelineOutcome(
+                "OBSERVATION", run_completion_reducer=True
+            )
+        return PreparedPipelineOutcome()
+
+    def advance_after_legacy_v1(
+        self,
+        task: dict[str, Any],
+        output: dict[str, Any],
+        output_path: Path,
+    ) -> list[Path]:
+        """Deprecated v1 role pipeline retained only for migrated revision-0 work."""
         if output.get("status") not in {"completed", "accepted"}:
             return []
         product_id = str(task["product_id"])
@@ -765,7 +1054,43 @@ class PipelineCoordinator:
             return [self.create_task(product_id, "task-specifier", dependencies=(task_id,))]
         if role == "task-specifier":
             self._transition_if(product_id, "ARCHITECTED", "BACKLOG_READY")
-            return [self.create_task(product_id, "builder-core", dependencies=(task_id,))]
+            if str(output.get("schema_version")) != "2.0":
+                raise ValueError("task-specifier must return BacklogPlan v2")
+            node_paths: list[Path] = []
+            for node in output.get("nodes", []):
+                if not isinstance(node, dict) or not isinstance(
+                    node.get("task_contract"), dict
+                ):
+                    raise TypeError("BacklogPlan v2 contains an invalid node")
+                contract = dict(node["task_contract"])
+                self.schemas.validate("task-contract-v2.schema.json", contract)
+                contract_task_id = str(contract["task_id"])
+                node_paths.append(
+                    self.artifacts.write(
+                        "task-contract-v2.schema.json",
+                        contract,
+                        filename=f"task-{contract_task_id}.json",
+                    )
+                )
+            self.state.ingest_plan(
+                output,
+                plan_artifact_ref=f"evidence/{output_path.name}",
+                plan_digest=self.artifacts.digest(output),
+                created_by_task_id=task_id,
+            )
+            self._transition_if(product_id, "BACKLOG_READY", "IMPLEMENTING")
+            return node_paths
+        task_plan_id = str(task.get("plan_id") or "")
+        active_plans = self.state.list_plans(product_id)
+        if any(
+            str(plan.get("plan_id")) == task_plan_id
+            and int(plan.get("revision") or 0) >= 1
+            for plan in active_plans
+        ):
+            # Executable v2 plans own their complete successor graph. The
+            # controller only recomputes the frontier after this node commits;
+            # role/title heuristics must not invent another task.
+            return []
         if role == "builder":
             if cycle > 0:
                 self._transition_if(product_id, "REPAIRING", "IMPLEMENTING")

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 from .common import sha256_text, stable_json, utc_now
 from .config import FactoryConfig
@@ -27,7 +28,20 @@ class ArtifactStore:
     def validate(self, schema_name: str, artifact: dict[str, Any]) -> list[str]:
         schema_path = self.config.schema_root() / schema_name
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        resources: list[tuple[str, Resource[Any]]] = []
+        for candidate in self.config.schema_root().glob("*.json"):
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+            resource = Resource.from_contents(document)
+            resources.append((candidate.name, resource))
+            schema_id = document.get("$id")
+            if isinstance(schema_id, str):
+                resources.append((schema_id, resource))
+        registry = Registry().with_resources(resources)
+        validator = Draft202012Validator(
+            schema,
+            registry=registry,
+            format_checker=FormatChecker(),
+        )
         return [error.message for error in validator.iter_errors(artifact)]
 
     def write(self, schema_name: str, artifact: dict[str, Any], *, filename: str | None = None) -> Path:

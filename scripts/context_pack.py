@@ -16,6 +16,8 @@ class SelectedFile:
     digest: str
     chars: int
     content: str
+    truncated: bool
+    binary: bool
 
 
 def sha256_file(path: Path) -> str:
@@ -43,10 +45,32 @@ def select_files(
         if not path.is_file():
             continue
         raw = path.read_bytes()
-        content = raw.decode("utf-8", errors="replace")
-        size = len(content)
-        if len(selected) >= max_files or total + size > max_chars:
+        if len(selected) >= max_files:
             continue
+        binary = b"\x00" in raw
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded = ""
+            binary = True
+        if not binary and total >= max_chars:
+            continue
+        remaining = max_chars - total
+        if binary:
+            content = ""
+            truncated = False
+        elif len(decoded) <= remaining:
+            content = decoded
+            truncated = False
+        else:
+            marker = "\n... [TRUNCATED BY CONTEXT LIMIT] ...\n"
+            if remaining <= len(marker):
+                continue
+            head = (remaining - len(marker)) // 2
+            tail = remaining - len(marker) - head
+            content = decoded[:head] + marker + decoded[-tail:]
+            truncated = True
+        size = len(content)
         selected.append(
             SelectedFile(
                 relative,
@@ -54,6 +78,8 @@ def select_files(
                 hashlib.sha256(raw).hexdigest(),
                 size,
                 content,
+                truncated,
+                binary,
             )
         )
         total += size

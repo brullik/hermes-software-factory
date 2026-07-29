@@ -1,4 +1,4 @@
-# Hermes Software Factory 2.0
+# Hermes Software Factory 2.1
 
 Финальное техническое задание и machine-readable пакет для создания автономного конвейера разработки программ на базе Nous Research Hermes Agent.
 
@@ -39,6 +39,19 @@ Controller постоянно сверяет lifecycle с durable-очередь
 ошибка, упавшая проверка или `pm-acceptance` запускает ограниченный repair cycle с сохранённой
 диагностикой и повышением уровня модели до Terra, затем Sol. После исправления все обязательные
 проверки запускаются повторно. Владелец не используется как диспетчер внутренних сбоев.
+
+Начиная с 2.1, источником истины служит durable Product Execution Graph. `Backlog Plan v2`
+атомарно создаёт все задачи и зависимости, а worker атомарно фиксирует результат, failure,
+repair/replan successors, frontier и outbox. Временный сбой продолжает ту же гипотезу после
+bounded backoff; локальный дефект получает отдельную repair-задачу; архитектурное противоречие
+запускает настоящий Replanner и новую ревизию плана. Проект становится `COMPLETED` только через
+completion reducer после доказательств всех целей, mandatory nodes, checks, staging, production,
+rollback readiness и observation.
+
+Цель продукта и repository metadata принимаются раздельно. Для `new_repository` контроллер
+создаёт собственный private repository и нейтральный bootstrap commit. Private credentials
+остаются внутри deterministic adapters и никогда не передаются модели, Context Pack,
+артефактам или Telegram.
 
 ## Как передать пакет агенту
 
@@ -93,8 +106,13 @@ python3 -m factory acceptance --full
 python3 -m factory disaster-recovery-test
 python3 -m pytest
 
-# Local admin intake and lifecycle controls
-python3 -m factory intake --owner-id owner --idea "Build a safe internal tool"
+# Local admin intake and lifecycle controls: create a private repository by default
+python3 -m factory intake --owner-id owner --goal-text "Build a safe internal tool"
+
+# Or attach an explicitly named existing repository
+python3 -m factory intake --owner-id owner --goal-text "Finish the product" \
+  --delivery-mode existing_repository \
+  --repository-url "https://github.com/example/product"
 python3 -m factory status
 python3 scripts/verify_manifest.py
 python3 scripts/secret_scan.py
@@ -107,7 +125,8 @@ python3 scripts/build_sbom.py --check
 замены релиза:
 
 ```bash
-factory intake --config /etc/hermes-factory/config.yaml --owner-id owner --idea "Build a safe internal tool"
+factory intake --config /etc/hermes-factory/config.yaml --owner-id owner \
+  --goal-text "Build a safe internal tool"
 ```
 
 `acceptance --full` возвращает `BLOCKED_EXTERNAL`, пока не закрыты внешние
@@ -121,8 +140,13 @@ governance: независимый reviewer не имитируется, а owne
 `evidence/external-acceptance.json`. Offsite backup подключён и подтверждён
 Restic check/fresh backup; публичные артефакты не содержат bucket name или ключи.
 
-## Durable role pipeline
+## Durable Product Execution Graph
 
-После intake Controller создаёт schema-validated task contract с durable role metadata. Provider-backed worker выполняет роли последовательно: Product Director, Product Analyst, Solution Architect, Task Specifier, параллельные Builder/Test Engineer/Security Reviewer, Independent Reviewer, Staging Release, Product Tester и Production Release. Каждая следующая задача появляется только после принятого результата предыдущей, а SQLite lease проверяет зависимости и конфликтные worktree.
+После intake Controller создаёт root context, подключает или создаёт repository, а Task
+Specifier возвращает полный `backlog-plan-v2`. SQLite хранит plan revisions, все nodes,
+dependency/supersession edges, lineage, capabilities, failures и hypothesis budgets.
+Параллельные frontier nodes могут исполняться одновременно только при непересекающихся
+`conflict_keys`. Старый role-derived pipeline сохранён исключительно как явно обозначенная
+`legacy_v1` совместимость для мигрированных revision-0 продуктов.
 
 Builder и Test Engineer получают immutable quality-gate list из controller policy. Gates выполняются без shell через allowlist, сохраняют `gate-evidence.schema.json`, а изменение файла вне `allowed_paths` немедленно переводит задачу в `FAILED_SAFE`.

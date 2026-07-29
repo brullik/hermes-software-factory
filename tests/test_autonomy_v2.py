@@ -1,0 +1,1329 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from test_worker import make_config, selected_registry
+
+from factory.artifacts import ArtifactStore
+from factory.autonomy import (
+    FailureData,
+    HypothesisData,
+    TaskOutcome,
+    safe_exception_diagnostic,
+)
+from factory.capabilities import CapabilityBroker, CapabilityCheck
+from factory.common import sha256_file, sha256_text
+from factory.context_builder import ContextBuilder
+from factory.failure_router import FailureRouter
+from factory.intake import IntakeService
+from factory.pipeline import PipelineCoordinator
+from factory.policy import policy_digest
+from factory.reconciler import PipelineReconciler
+from factory.repository import RepositoryBootstrapper
+from factory.state import StateStore
+from scripts.build_legacy_2_0_19_fixture import build_fixture
+
+
+def configured(tmp_path: Path):
+    return make_config(
+        tmp_path,
+        selected_registry(tmp_path / "registry.yaml", selected="gpt-5.6-luna"),
+    )
+
+
+def create_v2_product(
+    state: StateStore,
+    *,
+    product_id: str = "product-autonomy",
+) -> dict[str, Any]:
+    product, _ = state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="cli",
+        goal_text="Build a durable task service with verified release evidence",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="durable-task-service",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    return product
+
+
+def task_contract(
+    *,
+    product_id: str,
+    plan_id: str,
+    node_id: str,
+    task_id: str,
+    root_task_id: str,
+    criterion_id: str,
+    role: str = "builder",
+    capabilities: list[str] | None = None,
+    profile: str = "builder_workspace",
+    supersedes_task_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "2.0",
+        "artifact_id": f"task-contract-{task_id}",
+        "product_id": product_id,
+        "task_id": task_id,
+        "root_task_id": root_task_id,
+        "parent_task_id": root_task_id,
+        "source_task_id": root_task_id,
+        "plan_id": plan_id,
+        "plan_node_id": node_id,
+        "task_revision": 1,
+        "root_context_ref": f"evidence/intake-{product_id}.json",
+        "active_context_ref": f"evidence/task-{task_id}.json",
+        "failure_id": None,
+        "hypothesis_id": None,
+        "supersedes_task_id": supersedes_task_id,
+        "title": f"Execute node {node_id}",
+        "objective": f"Implement and verify the complete behavior for node {node_id}",
+        "role": role,
+        "output_schema": "attempt-result.schema.json",
+        "dependencies": [],
+        "conflict_keys": [f"{product_id}:src/{node_id.lower()}"],
+        "acceptance": [
+            {
+                "criterion_id": criterion_id,
+                "verification": f"Automated evidence proves {criterion_id}",
+                "mandatory": True,
+            }
+        ],
+        "required_capabilities": capabilities
+        if capabilities is not None
+        else ["repository.read", "repository.write_scoped"],
+        "capability_profile": profile,
+        "allowed_paths": [f"src/{node_id.lower()}/**"],
+        "forbidden_paths": ["secrets/**"],
+        "risk_tier": "medium",
+        "model_floor": "luna",
+        "idempotency_key": sha256_text(f"{plan_id}:{node_id}:{task_id}"),
+        "status": "DRAFT",
+        "priority": 10,
+        "critical_path_rank": 0,
+    }
+
+
+def executable_plan(
+    config,
+    *,
+    product_id: str,
+    plan_id: str,
+    root_task_id: str,
+    revision: int = 1,
+    parent_plan_id: str | None = None,
+    source_failure_id: str | None = None,
+    node_specs: list[tuple[str, str, str]] | None = None,
+    edges: list[tuple[str, str]] | None = None,
+    supersedes: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    specs = node_specs or [
+        ("A", "T-NODEA001", "accept-a"),
+        ("B", "T-NODEB001", "accept-b"),
+        ("C", "T-NODEC001", "accept-c"),
+        ("D", "T-NODED001", "accept-d"),
+    ]
+    edge_values = (
+        edges
+        if edges is not None
+        else [("A", "B"), ("A", "C"), ("B", "C"), ("B", "D")]
+    )
+    acceptance_ids = [criterion for _, _, criterion in specs]
+    return {
+        "schema_version": "2.0",
+        "artifact_id": f"backlog-plan-{plan_id}",
+        "product_id": product_id,
+        "created_at": "2026-07-29T00:00:00Z",
+        "producer": {
+            "role": "task-specifier",
+            "tier": "terra",
+            "provider": "fake",
+            "model": "fake",
+        },
+        "policy_digest": policy_digest(config),
+        "status": "completed",
+        "plan_id": plan_id,
+        "revision": revision,
+        "parent_plan_id": parent_plan_id,
+        "source_failure_id": source_failure_id,
+        "goals": [
+            {
+                "goal_id": "root-goal",
+                "statement": "Deliver the complete verified service",
+                "mandatory": True,
+                "acceptance_ids": acceptance_ids,
+            }
+        ],
+        "nodes": [
+            {
+                "node_id": node,
+                "mandatory": True,
+                "task_contract": task_contract(
+                    product_id=product_id,
+                    plan_id=plan_id,
+                    node_id=node,
+                    task_id=task_id,
+                    root_task_id=root_task_id,
+                    criterion_id=criterion,
+                    supersedes_task_id=(supersedes or {}).get(node),
+                ),
+            }
+            for node, task_id, criterion in specs
+        ],
+        "edges": [
+            {
+                "from": source,
+                "to": target,
+                "edge_type": "depends_on",
+                "required": True,
+            }
+            for source, target in edge_values
+        ],
+        "completion_criteria": [
+            "Every mandatory node and root goal has immutable PASS evidence"
+        ],
+        "summary": "Executable multi-node product graph",
+    }
+
+
+def persist_and_ingest_plan(
+    config,
+    state: StateStore,
+    plan: dict[str, Any],
+    *,
+    created_by_task_id: str,
+) -> tuple[str, ...]:
+    artifacts = ArtifactStore(config)
+    for node in plan["nodes"]:
+        contract = node["task_contract"]
+        artifacts.write(
+            "task-contract-v2.schema.json",
+            contract,
+            filename=f"task-{contract['task_id']}.json",
+        )
+        node["task_contract_ref"] = f"evidence/task-{contract['task_id']}.json"
+    plan_path = artifacts.write(
+        "backlog-plan-v2.schema.json",
+        plan,
+        filename=f"backlog-plan-{plan['plan_id']}.json",
+    )
+    return state.ingest_plan(
+        plan,
+        plan_artifact_ref=f"evidence/{plan_path.name}",
+        plan_digest=artifacts.digest(plan),
+        created_by_task_id=created_by_task_id,
+    )
+
+
+def test_AUT_P0_001_intake_separates_goal_and_repository(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path, max_active_products=2)
+    try:
+        service = IntakeService(config, state, ArtifactStore(config))
+        result = service.submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Создать сервис учёта задач с API и документацией",
+            delivery_mode="existing_repository",
+            repository_url="https://github.com/brullik/example-private",
+            idempotency_key="aut-p0-001",
+        )
+        replay = service.submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Создать сервис учёта задач с API и документацией",
+            delivery_mode="existing_repository",
+            repository_url="https://github.com/brullik/example-private",
+            idempotency_key="aut-p0-001",
+        )
+        product = state.get_product(result.product_id)
+        assert product is not None
+        assert product["goal_text"].startswith("Создать сервис")
+        assert product["repository_url"] == "https://github.com/brullik/example-private"
+        assert product["delivery_mode"] == "existing_repository"
+        assert replay.product_id == result.product_id
+        artifact = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+        assert artifact["goal_text"] != artifact["repository_url"]
+    finally:
+        state.close()
+
+
+class FakeRepositoryAdapter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def create_repository(self, **values: Any) -> str:
+        self.calls.append(("create", str(values["idempotency_key"])))
+        return "https://github.com/brullik/durable-task-service"
+
+    def clone(self, **values: Any) -> tuple[str, str]:
+        self.calls.append(("clone", str(values["idempotency_key"])))
+        destination = Path(values["destination"])
+        (destination / ".git").mkdir(parents=True, exist_ok=True)
+        return "main", ""
+
+    def bootstrap_commit(self, **values: Any) -> str:
+        self.calls.append(("bootstrap", str(values["idempotency_key"])))
+        return "a" * 40
+
+
+def test_AUT_P0_002_new_product_bootstrap_is_durable_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    adapter = FakeRepositoryAdapter()
+    try:
+        create_v2_product(state)
+        bootstrapper = RepositoryBootstrapper(config, state, adapter)
+        workspace = tmp_path / "product-workspace"
+        first = bootstrapper.ensure("product-autonomy", workspace)
+        second = bootstrapper.ensure("product-autonomy", workspace)
+        assert [call[0] for call in adapter.calls].count("create") == 1
+        assert first["repository_url"] == second["repository_url"]
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        assert product["repository_visibility"] == "private"
+        assert product["bootstrap_sha"] == "a" * 40
+        assert product["repository_bootstrap_state"] == "READY"
+    finally:
+        state.close()
+
+
+class FakePrivateRepositoryAdapter(FakeRepositoryAdapter):
+    def __init__(self, credential: str) -> None:
+        super().__init__()
+        self.credential = credential
+
+    def create_repository(self, **values: Any) -> str:
+        raise AssertionError("existing repository must not be created")
+
+    def clone(self, **values: Any) -> tuple[str, str]:
+        assert self.credential
+        self.calls.append(("clone", str(values["idempotency_key"])))
+        destination = Path(values["destination"])
+        (destination / ".git").mkdir(parents=True, exist_ok=True)
+        return "main", "b" * 40
+
+
+def test_AUT_P0_003_private_repository_credential_stays_outside_agent_boundary(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    credential = "github_pat_" + "A" * 24
+    try:
+        state.create_product_v2(
+            product_id="private-product",
+            owner_id="owner",
+            source="cli",
+            goal_text="Repair and verify the existing private service",
+            delivery_mode="existing_repository",
+            repository_url="https://github.com/brullik/private-service",
+            repository_name=None,
+            repository_visibility="private",
+            root_goal_ref="evidence/intake-private-product.json",
+            constraints_ref=None,
+            owner_defaults_ref=None,
+            idempotency_key=sha256_text("private-product"),
+            rate_limit=None,
+        )
+        adapter = FakePrivateRepositoryAdapter(credential)
+        result = RepositoryBootstrapper(config, state, adapter).ensure(
+            "private-product",
+            tmp_path / "private-workspace",
+        )
+        assert result["starting_sha"] == "b" * 40
+        assert adapter.calls == [
+            (
+                "clone",
+                sha256_text("repository-bootstrap:private-product") + ":clone",
+            )
+        ]
+        persisted = "\n".join(
+            json.dumps(row, ensure_ascii=False, default=str)
+            for row in [
+                *state.list_products(),
+                *state.list_tasks(),
+                *state.events(),
+            ]
+        )
+        assert credential not in persisted
+    finally:
+        state.close()
+
+
+def test_AUT_P0_004_plan_ingestion_creates_complete_dag(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        root_id = "T-ROOTAUTONOMY"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Root planner",
+            role="task-specifier",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-AUTONOMY-1",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+        )
+        errors = ArtifactStore(config).validate("backlog-plan-v2.schema.json", plan)
+        assert errors == []
+        task_ids = state.ingest_plan(
+            plan,
+            plan_artifact_ref="evidence/backlog-plan.json",
+            plan_digest=sha256_text(json.dumps(plan, sort_keys=True)),
+            created_by_task_id=root_id,
+        )
+        assert len(task_ids) == 4
+        tasks = {
+            str(task["plan_node_id"]): str(task["graph_status"])
+            for task in state.list_tasks("product-autonomy")
+            if task["plan_id"] == "PLAN-AUTONOMY-1"
+        }
+        assert tasks == {
+            "A": "READY",
+            "B": "BLOCKED_DEPENDENCY",
+            "C": "BLOCKED_DEPENDENCY",
+            "D": "BLOCKED_DEPENDENCY",
+        }
+        assert len(state.list_edges("PLAN-AUTONOMY-1")) == 4
+    finally:
+        state.close()
+
+
+def failed_two_node_graph(
+    tmp_path: Path,
+    *,
+    reason_code: str = "model_requested_repair",
+) -> tuple[Any, StateStore, ArtifactStore, str, str]:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    artifacts = ArtifactStore(config)
+    create_v2_product(state)
+    root_id = "T-ROOTFAILURE"
+    state.add_task(
+        task_id=root_id,
+        product_id="product-autonomy",
+        title="Root task specifier",
+        role="task-specifier",
+    )
+    product = state.get_product("product-autonomy")
+    assert product is not None
+    plan = executable_plan(
+        config,
+        product_id="product-autonomy",
+        plan_id="PLAN-FAILURE-1",
+        root_task_id=root_id,
+        parent_plan_id=str(product["active_plan_id"]),
+        node_specs=[
+            ("A", "T-FAILNODEA", "accept-a"),
+            ("B", "T-FAILNODEB", "accept-b"),
+        ],
+        edges=[("A", "B")],
+    )
+    persist_and_ingest_plan(
+        config,
+        state,
+        plan,
+        created_by_task_id=root_id,
+    )
+    claimed = state.claim_task(worker_id="worker")
+    assert claimed is not None
+    assert claimed["task_id"] == "T-FAILNODEA"
+    failure = FailureData(
+        failure_class="semantic",
+        reason_code=reason_code,
+        safe_message=(
+            "Persistence contract is incompatible with the allowed scope; "
+            "add the exact transaction boundary and regression proof."
+        ),
+        evidence_ref="internal://failure-evidence",
+        expected={"acceptance": ["accept-a"]},
+        actual={
+            "required_fixes": [
+                "Implement the transaction boundary in src/a/**.",
+                "Add the exact regression test for the failed write.",
+            ]
+        },
+        failed_gate_ids=("target-tests", "target-lint"),
+    )
+    state.commit_task_outcome(
+        TaskOutcome(
+            task_id="T-FAILNODEA",
+            worker_id="worker",
+            lease_token=str(claimed["lease_token"]),
+            expected_plan_revision=1,
+            idempotency_key=sha256_text(f"failure:{reason_code}"),
+            result_ref="internal://failure-evidence",
+            result_digest=sha256_text("failure-evidence"),
+            status="FAILED_SEMANTIC",
+            failure=failure,
+            hypothesis=HypothesisData(
+                statement=failure.safe_message,
+                signature=sha256_text(f"hypothesis:{reason_code}"),
+                required_evidence=(failure.evidence_ref,),
+            ),
+        )
+    )
+    failure_id = str(state.get_task("T-FAILNODEA")["failure_id"])
+    return config, state, artifacts, failure_id, root_id
+
+
+def test_AUT_P0_005_lineage_is_preserved_through_repair(tmp_path: Path) -> None:
+    config, state, artifacts, failure_id, root_id = failed_two_node_graph(
+        tmp_path
+    )
+    try:
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+        failed = state.get_task("T-FAILNODEA")
+        repair = state.get_task(repair_id)
+        assert failed is not None and repair is not None
+        assert repair["root_task_id"] == root_id
+        assert repair["parent_task_id"] == failed["task_id"]
+        assert repair["source_task_id"] == failed["task_id"]
+        assert repair["failure_id"] == failure_id
+        assert repair["hypothesis_id"] == failed["hypothesis_id"]
+        assert repair["plan_id"] == failed["plan_id"]
+        assert str(repair["plan_node_id"]).startswith("A:")
+    finally:
+        state.close()
+
+
+def test_AUT_P0_006_failed_dependency_routes_and_unblocks_after_repair(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, _, _ = failed_two_node_graph(tmp_path)
+    try:
+        assert state.runnable_tasks("product-autonomy") == []
+        reconciled = PipelineReconciler(config, state, artifacts).reconcile_once()
+        assert reconciled.repaired + reconciled.replanned + reconciled.incidents == 1
+        assert state.has_bounded_progress_path("product-autonomy")
+        repair = next(
+            task
+            for task in state.list_tasks("product-autonomy")
+            if task["supersedes_task_id"] == "T-FAILNODEA"
+        )
+        claimed = state.claim_task(worker_id="repair-worker")
+        assert claimed is not None
+        assert claimed["task_id"] == repair["task_id"]
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=str(repair["task_id"]),
+                worker_id="repair-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(repair["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("accepted-repair"),
+                result_ref="internal://accepted-repair",
+                result_digest=sha256_text("accepted-repair"),
+                status="ACCEPTED",
+            )
+        )
+        assert state.get_task("T-FAILNODEA")["graph_status"] == "SUPERSEDED"
+        assert state.get_task("T-FAILNODEB")["graph_status"] == "READY"
+    finally:
+        state.close()
+
+
+def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        brief = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(repair["repair_context_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert brief["failed_task_id"] == "T-FAILNODEA"
+        assert brief["failure_id"] == failure_id
+        assert brief["hypothesis_id"] == repair["hypothesis_id"]
+        assert brief["inherited_goal_ref"] == repair["root_context_ref"]
+        assert brief["allowed_paths"] == ["src/a/**"]
+        assert "target-tests" in brief["failed_gate_ids"]
+        assert any(
+            "transaction boundary" in fix for fix in brief["required_fixes"]
+        )
+        assert ArtifactStore(config).validate(
+            "repair-brief-v2.schema.json",
+            brief,
+        ) == []
+    finally:
+        state.close()
+
+
+def test_AUT_P0_011_needs_replan_activates_real_plan_revision(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, root_id = failed_two_node_graph(
+        tmp_path,
+        reason_code="needs_replan",
+    )
+    try:
+        result = PipelineReconciler(config, state, artifacts).reconcile_once()
+        assert result.replanned == 1
+        replanner = next(
+            task
+            for task in state.list_tasks("product-autonomy")
+            if task["role"] == "replanner"
+        )
+        assert replanner["capability_profile"] == "planning_readonly"
+        claimed = state.claim_task(worker_id="replanner-worker")
+        assert claimed is not None
+        assert claimed["task_id"] == replanner["task_id"]
+        replacement_plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-FAILURE-2",
+            root_task_id=root_id,
+            revision=2,
+            parent_plan_id="PLAN-FAILURE-1",
+            source_failure_id=failure_id,
+            node_specs=[
+                ("A2", "T-REPLACEMENTA", "accept-a2"),
+                ("B2", "T-REPLACEMENTB", "accept-b2"),
+            ],
+            edges=[("A2", "B2")],
+            supersedes={"A2": "T-FAILNODEA"},
+        )
+        for node in replacement_plan["nodes"]:
+            contract = node["task_contract"]
+            contract["failure_id"] = failure_id
+            contract["hypothesis_id"] = replanner["hypothesis_id"]
+            artifacts.write(
+                "task-contract-v2.schema.json",
+                contract,
+                filename=f"task-{contract['task_id']}.json",
+            )
+            node["task_contract_ref"] = (
+                f"evidence/task-{contract['task_id']}.json"
+            )
+        plan_path = artifacts.write(
+            "backlog-plan-v2.schema.json",
+            replacement_plan,
+            filename="backlog-plan-PLAN-FAILURE-2.json",
+        )
+        committed_plan = {
+            **replacement_plan,
+            "plan_artifact_ref": f"evidence/{plan_path.name}",
+            "plan_digest": artifacts.digest(replacement_plan),
+        }
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=str(replanner["task_id"]),
+                worker_id="replanner-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(replanner["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("replan-outcome"),
+                result_ref=f"evidence/{plan_path.name}",
+                result_digest=sha256_file(plan_path),
+                status="ACCEPTED",
+                plan=committed_plan,
+            )
+        )
+        plans = state.list_plans("product-autonomy")
+        assert [(plan["revision"], plan["status"]) for plan in plans][-2:] == [
+            (1, "SUPERSEDED"),
+            (2, "ACTIVE"),
+        ]
+        assert state.get_task("T-REPLACEMENTA")["graph_status"] == "READY"
+        assert all(
+            task["graph_status"] != "READY"
+            for task in state.list_tasks("product-autonomy")
+            if task["plan_id"] == "PLAN-FAILURE-1"
+        )
+        replacement_edges = state.list_edges("PLAN-FAILURE-2")
+        assert any(
+            edge["edge_type"] == "supersedes"
+            and edge["from_task_id"] == "T-FAILNODEA"
+            and edge["to_task_id"] == "T-REPLACEMENTA"
+            for edge in replacement_edges
+        )
+    finally:
+        state.close()
+
+
+def test_AUT_P0_012_hypothesis_budget_exhaustion_changes_hypothesis(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        router = FailureRouter(config, state, artifacts)
+        router.route(failure_id)
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        old_hypothesis_id = str(failed["hypothesis_id"])
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE hypotheses SET attempts_used=3 WHERE hypothesis_id=?",
+                (old_hypothesis_id,),
+            )
+            state._connection.execute(
+                "UPDATE failures SET status='OPEN' WHERE failure_id=?",
+                (failure_id,),
+            )
+        reassessment_task_id = router.route(failure_id)
+        reassessment = state.get_task(reassessment_task_id)
+        assert reassessment is not None
+        assert reassessment["role"] == "replanner"
+        hypotheses = state.list_hypotheses("product-autonomy")
+        exhausted = next(
+            item for item in hypotheses if item["hypothesis_id"] == old_hypothesis_id
+        )
+        active = next(item for item in hypotheses if item["status"] == "ACTIVE")
+        assert exhausted["status"] == "EXHAUSTED"
+        assert active["parent_hypothesis_id"] == old_hypothesis_id
+        assert active["signature"] != exhausted["signature"]
+        assert reassessment["hypothesis_id"] == active["hypothesis_id"]
+    finally:
+        state.close()
+
+
+def test_AUT_P0_013_context_pack_has_bounded_safe_file_excerpts(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    token = "ghp_" + "B" * 24
+    (repository / "large.py").write_text(
+        f"token = '{token}'\n" + ("print('bounded')\n" * 500),
+        encoding="utf-8",
+    )
+    (repository / "binary.bin").write_bytes(b"\x00\x01\x02secret")
+    result = ContextBuilder(config, repository).build(
+        product_id="context-product",
+        task_id="T-CONTEXT001",
+        subject_sha="c" * 64,
+        objective="Inspect only bounded repository evidence",
+        acceptance=["No secret crosses the planning boundary"],
+        candidates=[
+            ("large.py", "implementation evidence"),
+            ("binary.bin", "binary metadata"),
+        ],
+        allowed_paths=["src/**"],
+        forbidden_actions=["secret.read", "repository.write"],
+        output_schema="backlog-plan-v2.schema.json",
+        root_goal="Create a verified service without exposing credentials",
+        root_task_id="T-CONTEXT001",
+        plan_summary={"plan_id": "PLAN-CONTEXT", "revision": 1},
+        max_chars=800,
+    )
+    excerpts = {item["path"]: item for item in result.artifact["file_excerpts"]}
+    assert excerpts["large.py"]["truncated"] is True
+    assert token not in excerpts["large.py"]["content"]
+    assert excerpts["large.py"]["redactions"][0]["location"].startswith("line ")
+    assert excerpts["binary.bin"]["binary"] is True
+    assert excerpts["binary.bin"]["content"] == ""
+    assert ArtifactStore(config).validate(
+        "context-pack-v2.schema.json",
+        result.artifact,
+    ) == []
+
+
+def test_AUT_P0_014_capability_preflight_controls_ready_frontier(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        root_id = "T-ROOTCAPABILITY"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Capability planner",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-CAPABILITY-1",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[("R", "T-RELEASECAP", "accept-release")],
+            edges=[],
+        )
+        contract = plan["nodes"][0]["task_contract"]
+        contract["role"] = "release-operator"
+        contract["capability_profile"] = "release_staging"
+        contract["required_capabilities"] = ["github.pull_request.create"]
+        persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=root_id,
+        )
+        assert state.get_task("T-RELEASECAP")["graph_status"] == "BLOCKED_CAPABILITY"
+        assert state.claim_task(worker_id="worker") is None
+        state.grant_capability(
+            product_id="product-autonomy",
+            task_id=None,
+            capability="github.pull_request.create",
+            provider="fake-github",
+            scope={"repository": "brullik/durable-task-service"},
+            status="AVAILABLE",
+        )
+        assert state.get_task("T-RELEASECAP")["graph_status"] == "READY"
+        assert state.claim_task(worker_id="worker")["task_id"] == "T-RELEASECAP"
+    finally:
+        state.close()
+
+
+class InternalGapProbe:
+    def check(
+        self,
+        capability: str,
+        *,
+        product: dict[str, Any],
+    ) -> CapabilityCheck:
+        del product
+        return CapabilityCheck(
+            capability=capability,
+            status="DENIED_POLICY",
+            provider="fake-host",
+            reason_code="controller_adapter_unconfigured",
+        )
+
+
+def test_AUT_P0_015_routine_technical_gaps_never_require_owner(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        checks = CapabilityBroker(
+            config,
+            state,
+            probe=InternalGapProbe(),
+        ).preflight_product("product-autonomy")
+        assert checks
+        events = state.events("product-autonomy")
+        assert not any(
+            event["event_type"] == "owner_action_required" for event in events
+        )
+        incidents = state._connection.execute(
+            "SELECT * FROM controller_incidents WHERE product_id=?",
+            ("product-autonomy",),
+        ).fetchall()
+        assert incidents
+    finally:
+        state.close()
+
+
+def test_AUT_P0_016_observation_is_atomic_with_production_release(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    artifacts = ArtifactStore(config)
+    try:
+        create_v2_product(state)
+        root_id = "T-ROOTRELEASE"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Release planner",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-RELEASE-1",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[
+                (
+                    "release-production",
+                    "T-PRODUCTION01",
+                    "accept-production",
+                )
+            ],
+            edges=[],
+        )
+        contract = plan["nodes"][0]["task_contract"]
+        contract["role"] = "release-operator"
+        contract["output_schema"] = "release-operation-result.schema.json"
+        contract["capability_profile"] = "release_production"
+        contract["required_capabilities"] = []
+        persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=root_id,
+        )
+        claimed = state.claim_task(worker_id="release-worker")
+        assert claimed is not None
+        release_digest = "sha256:" + "d" * 64
+        output = {
+            "status": "completed",
+            "release": {"image_digest": release_digest},
+        }
+        task = state.get_task("T-PRODUCTION01")
+        assert task is not None
+        prepared = PipelineCoordinator(
+            config,
+            state,
+            artifacts,
+        ).prepare_after(task, output, tmp_path / "release-result.json")
+        outcome = TaskOutcome(
+            task_id="T-PRODUCTION01",
+            worker_id="release-worker",
+            lease_token=str(claimed["lease_token"]),
+            expected_plan_revision=1,
+            idempotency_key=sha256_text("production-release-outcome"),
+            result_ref="internal://production-release",
+            result_digest=sha256_text("production-release"),
+            status="ACCEPTED",
+            product_status=prepared.product_status,
+            successors=prepared.successors,
+            edges=prepared.edges,
+        )
+
+        def crash(point: str) -> None:
+            if point == "after_successor_write":
+                raise RuntimeError(point)
+
+        with pytest.raises(RuntimeError, match="after_successor_write"):
+            state.commit_task_outcome(outcome, fault_injector=crash)
+        assert not any(
+            task["stage_key"] == "observation"
+            for task in state.list_tasks("product-autonomy")
+        )
+        state.commit_task_outcome(outcome)
+        observations = [
+            task
+            for task in state.list_tasks("product-autonomy")
+            if task["stage_key"] == "observation"
+        ]
+        assert len(observations) == 1
+        observation = observations[0]
+        assert observation["graph_status"] == "WAITING_TIME"
+        assert observation["required_predecessor_digest"] == release_digest
+        edges = state.list_edges("PLAN-RELEASE-1")
+        assert any(
+            edge["from_task_id"] == "T-PRODUCTION01"
+            and edge["to_task_id"] == observation["task_id"]
+            for edge in edges
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' "
+                "WHERE task_id=?",
+                (observation["task_id"],),
+            )
+        next_task = state.claim_task(worker_id="observer")
+        assert next_task is not None
+        assert next_task["task_id"] == observation["task_id"]
+    finally:
+        state.close()
+
+
+def test_AUT_P0_017_completion_reducer_requires_all_evidence_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    artifacts = ArtifactStore(config)
+    try:
+        create_v2_product(state)
+        root_id = "T-ROOTCOMPLETE"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Completion planner",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-COMPLETE-1",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[
+                ("observation", "T-OBSERVATION1", "accept-observation")
+            ],
+            edges=[],
+        )
+        persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=root_id,
+        )
+        claimed = state.claim_task(worker_id="observer")
+        assert claimed is not None
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-OBSERVATION1",
+                worker_id="observer",
+                lease_token=str(claimed["lease_token"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("observation-accepted"),
+                result_ref="internal://observation-result",
+                result_digest=sha256_text("observation-result"),
+                status="ACCEPTED",
+            )
+        )
+        incomplete = state.reduce_completion(
+            "product-autonomy",
+            artifacts=artifacts,
+        )
+        assert not incomplete.completed
+        assert any(
+            condition.startswith("goal_without_pass_evidence")
+            for condition in incomplete.unmet_conditions
+        )
+        release_digest = "e" * 64
+        state.record_product_evidence(
+            product_id="product-autonomy",
+            evidence_type="goal",
+            goal_id="root-goal",
+            artifact_ref="internal://goal-proof",
+            artifact_digest=sha256_text("goal-proof"),
+        )
+        for evidence_type in (
+            "independent_review",
+            "required_checks",
+            "staging",
+            "production",
+            "rollback",
+            "observation",
+        ):
+            state.record_product_evidence(
+                product_id="product-autonomy",
+                evidence_type=evidence_type,
+                artifact_ref=f"internal://{evidence_type}",
+                artifact_digest=(
+                    release_digest
+                    if evidence_type in {"staging", "production"}
+                    else sha256_text(evidence_type)
+                ),
+            )
+        completed = state.reduce_completion(
+            "product-autonomy",
+            artifacts=artifacts,
+        )
+        assert completed.completed
+        assert completed.completion_evidence_ref is not None
+        completion_path = (
+            config.evidence_dir
+            / Path(completed.completion_evidence_ref).name
+        )
+        completion = json.loads(completion_path.read_text(encoding="utf-8"))
+        assert artifacts.validate(
+            "completion-evidence.schema.json",
+            completion,
+        ) == []
+        replay = state.reduce_completion(
+            "product-autonomy",
+            artifacts=artifacts,
+        )
+        assert replay == completed
+        completion_outbox = [
+            row
+            for row in state.list_outbox()
+            if row["event_type"] == "product_completed"
+        ]
+        assert len(completion_outbox) == 1
+    finally:
+        state.close()
+
+
+def test_AUT_P0_018_restart_and_lease_loss_preserve_graph_lineage(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    create_v2_product(state)
+    root_id = "T-ROOTRESTART"
+    state.add_task(
+        task_id=root_id,
+        product_id="product-autonomy",
+        title="Restart planner",
+    )
+    product = state.get_product("product-autonomy")
+    assert product is not None
+    plan = executable_plan(
+        config,
+        product_id="product-autonomy",
+        plan_id="PLAN-RESTART-1",
+        root_task_id=root_id,
+        parent_plan_id=str(product["active_plan_id"]),
+        node_specs=[
+            ("A", "T-RESTARTA1", "accept-a"),
+            ("B", "T-RESTARTB1", "accept-b"),
+        ],
+        edges=[("A", "B")],
+    )
+    persist_and_ingest_plan(
+        config,
+        state,
+        plan,
+        created_by_task_id=root_id,
+    )
+    first = state.claim_task(worker_id="lost-worker", lease_seconds=1)
+    assert first is not None
+    lineage_before = tuple(
+        first[key]
+        for key in (
+            "root_task_id",
+            "parent_task_id",
+            "source_task_id",
+            "plan_id",
+            "plan_node_id",
+        )
+    )
+    with state._lock, state._connection:
+        state._connection.execute(
+            "UPDATE tasks SET lease_until='2000-01-01T00:00:00Z' "
+            "WHERE task_id=?",
+            (first["task_id"],),
+        )
+    state.close()
+    restarted = StateStore(config.database_path)
+    try:
+        assert restarted.recover_expired_leases() == 1
+        reclaimed = restarted.claim_task(worker_id="recovery-worker")
+        assert reclaimed is not None
+        lineage_after = tuple(
+            reclaimed[key]
+            for key in (
+                "root_task_id",
+                "parent_task_id",
+                "source_task_id",
+                "plan_id",
+                "plan_node_id",
+            )
+        )
+        assert lineage_after == lineage_before
+        assert restarted.get_task("T-RESTARTB1")["graph_status"] == "BLOCKED_DEPENDENCY"
+    finally:
+        restarted.close()
+
+
+def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
+    tmp_path: Path,
+) -> None:
+    database = build_fixture(tmp_path / "legacy_2_0_19.db")
+    state = StateStore(database)
+    try:
+        product = state.get_product("legacy-product")
+        assert product is not None
+        assert product["goal_text"] == "Build a sanitized legacy service"
+        assert product["active_plan_revision"] == 0
+        predecessor = state.get_task("legacy-predecessor")
+        active = state.get_task("legacy-active-repair")
+        assert predecessor is not None and active is not None
+        assert predecessor["graph_status"] == "ACCEPTED"
+        assert active["graph_status"] == "READY"
+        assert active["root_task_id"] == predecessor["task_id"]
+        assert state.list_edges(str(product["active_plan_id"]))
+        assert state.attempts_for_task("legacy-active-repair")
+        assert state.events("legacy-product")
+        assert state.list_outbox()
+        versions = [
+            row[0]
+            for row in state._connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        ]
+        assert versions == [1, 2, 3]
+        assert database.with_suffix(
+            database.suffix + ".pre-autonomy-v2.bak"
+        ).is_file()
+    finally:
+        state.close()
+
+
+def test_AUT_P0_020_secret_never_enters_prompt_or_durable_evidence(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    artifacts = ArtifactStore(config)
+    secret = "ghp_" + "C" * 24
+    try:
+        result = IntakeService(config, state, artifacts).submit(
+            source="cli",
+            owner_id="owner",
+            goal_text=f"Build a safe service; accidental sample {secret}",
+            delivery_mode="new_repository",
+            repository_name="safe-service",
+        )
+        repository = tmp_path / "secret-repository"
+        repository.mkdir()
+        (repository / "settings.py").write_text(
+            f"TOKEN = '{secret}'\n",
+            encoding="utf-8",
+        )
+        context = ContextBuilder(config, repository, artifacts).build(
+            product_id=result.product_id,
+            task_id="T-SECRETBOUNDARY",
+            subject_sha="f" * 64,
+            objective="Inspect configuration without exposing credentials",
+            acceptance=["Persist only redacted configuration evidence"],
+            candidates=[("settings.py", "configuration")],
+            allowed_paths=["settings.py"],
+            forbidden_actions=["secret.read"],
+            output_schema="attempt-result.schema.json",
+        )
+        assert secret not in json.dumps(context.artifact)
+        assert secret not in config.database_path.read_bytes().decode(
+            "utf-8",
+            errors="ignore",
+        )
+        assert all(
+            secret not in path.read_text(encoding="utf-8")
+            for path in config.evidence_dir.glob("*.json")
+        )
+    finally:
+        state.close()
+
+
+def _atomic_state(tmp_path: Path) -> tuple[StateStore, dict[str, Any]]:
+    state = StateStore(tmp_path / "controller.db")
+    create_v2_product(state)
+    state.add_task(
+        task_id="T-ATOMIC-A",
+        product_id="product-autonomy",
+        title="Atomic predecessor",
+    )
+    claimed = state.claim_task(worker_id="worker")
+    assert claimed is not None
+    return state, claimed
+
+
+def _outcome(claimed: dict[str, Any]) -> TaskOutcome:
+    successor = {
+        "task_id": "T-ATOMIC-B",
+        "title": "Atomic successor",
+        "contract_ref": "evidence/task-T-ATOMIC-B.json",
+        "graph_status": "DRAFT",
+        "dependencies": ["T-ATOMIC-A"],
+    }
+    return TaskOutcome(
+        task_id="T-ATOMIC-A",
+        worker_id="worker",
+        lease_token=str(claimed["lease_token"]),
+        idempotency_key=sha256_text("atomic-outcome"),
+        result_ref="internal://accepted-result",
+        result_digest=sha256_text("accepted-result"),
+        status="ACCEPTED",
+        successors=(successor,),
+        edges=(
+            {
+                "from_task_id": "T-ATOMIC-A",
+                "to_task_id": "T-ATOMIC-B",
+                "edge_type": "depends_on",
+                "required": True,
+            },
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    [
+        "before_transaction",
+        "after_task_write",
+        "after_failure_write",
+        "after_successor_write",
+        "after_frontier_recompute",
+        "after_outbox_write",
+        "after_commit_before_return",
+    ],
+)
+def test_AUT_P0_007_atomic_outcome_survives_faults(
+    tmp_path: Path,
+    fault_point: str,
+) -> None:
+    state, claimed = _atomic_state(tmp_path)
+    outcome = _outcome(claimed)
+
+    def inject(point: str) -> None:
+        if point == fault_point:
+            raise RuntimeError(point)
+
+    try:
+        with pytest.raises(RuntimeError, match=fault_point):
+            state.commit_task_outcome(outcome, fault_injector=inject)
+    finally:
+        state.close()
+    restarted = StateStore(tmp_path / "controller.db")
+    try:
+        predecessor = restarted.get_task("T-ATOMIC-A")
+        successor = restarted.get_task("T-ATOMIC-B")
+        assert predecessor is not None
+        if fault_point == "after_commit_before_return":
+            assert predecessor["graph_status"] == "ACCEPTED"
+            assert successor is not None
+            replay = restarted.commit_task_outcome(outcome)
+            assert replay.replayed
+        else:
+            assert predecessor["graph_status"] == "CLAIMED"
+            assert successor is None
+    finally:
+        restarted.close()
+
+
+def test_AUT_P0_008_outcome_replay_is_idempotent(tmp_path: Path) -> None:
+    state, claimed = _atomic_state(tmp_path)
+    try:
+        outcome = _outcome(claimed)
+        first = state.commit_task_outcome(outcome)
+        second = state.commit_task_outcome(outcome)
+        assert first.outcome_id == second.outcome_id
+        assert second.replayed
+        assert len([task for task in state.list_tasks() if task["task_id"] == "T-ATOMIC-B"]) == 1
+        conflicting = TaskOutcome(
+            **{
+                **outcome.__dict__,
+                "result_digest": sha256_text("different-result"),
+            }
+        )
+        with pytest.raises(ValueError, match="digest conflict"):
+            state.commit_task_outcome(conflicting)
+    finally:
+        state.close()
+
+
+def test_AUT_P0_009_safe_internal_diagnostic_is_precise_and_redacted() -> None:
+    token = "ghp_" + "A" * 24
+    try:
+        raise RuntimeError(
+            f"database migration checksum mismatch; credential={token}"
+        )
+    except RuntimeError as error:
+        diagnostic = safe_exception_diagnostic(error)
+    assert diagnostic["exception_type"] == "RuntimeError"
+    assert "database migration checksum mismatch" in diagnostic["safe_message"]
+    assert token not in json.dumps(diagnostic)
+    assert len(str(diagnostic["stack_fingerprint"])) == 64

@@ -1,62 +1,72 @@
-# Autonomous recovery
+# Autonomous recovery v2
 
-## Invariant
+## Основной инвариант
 
-Every non-terminal, non-paused product must have a runnable or waiting durable
-task. `PipelineReconciler` checks this invariant continuously. An empty queue is
-an incident, not a normal idle state.
+Каждый активный, не приостановленный продукт обязан иметь bounded progress path в активной
+ревизии Product Execution Graph. Наличие произвольной строки `PENDING` не является
+доказательством прогресса. Reconciler проверяет READY frontier, dependency/capability blockers,
+timers, leases, OPEN failures, controller incidents и completion conditions.
 
-## Failure routing
+## Причинная маршрутизация
 
-1. A transient infrastructure or quota failure requeues the same task with a
-   bounded delay.
-2. An internal semantic, implementation, test, CI, release, or acceptance
-   failure creates a repair task with the previous reason and evidence.
-3. A failed release candidate is closed and the target worktree is restored to
-   the configured base branch before repair.
-4. The repair pipeline runs Builder, Test Engineer, Security Reviewer,
-   Independent Reviewer, Staging Release, and Product Tester again.
-5. Repair cycle 1 uses at least Terra; cycle 2 uses Sol.
-6. Exceeding `max_repair_cycles` closes the current problem hypothesis,
-   preserves evidence, and sends the exact reason to the owner in Russian.
-7. Director then compares provider findings with controller-owned evidence. A
-   controller-scope contradiction is resolved by orchestration; every distinct,
-   proven defect receives its own actionable repair brief and bounded budget.
-8. One blocker signature may run at most three full repair cycles. If the same
-   signature still fails, Director opens a separate bounded
-   `DIAGNOSIS-REASSESSMENT` hypothesis. Its brief forbids repeating the previous
-   fix and first checks whether the task statement, allowed scope, controller
-   gate or environment, or the original implementation diagnosis is wrong.
-9. A transient provider interruption does not replace the active semantic
-   hypothesis. Hermes carries its blocker IDs, required fixes, definition of
-   done, and safe evidence references into the transient retry brief.
-10. Only after the bounded diagnosis-reassessment policy is exhausted does the
-    product remain `FAILED_SAFE` with the exact Russian reason notification.
+1. `FAILED_TRANSIENT` оставляет ту же task и hypothesis, записывает `available_at` и
+   возобновляется после bounded backoff. Transient retry не расходует semantic budget.
+2. Локальный implementation/test/review failure создаёт repair child того же plan node.
+   Child наследует root goal, acceptance, exact allowed scope, `failure_id`, `hypothesis_id`,
+   `parent_task_id` и `source_task_id`.
+3. `needs_replan`, scope contradiction или невозможная architecture создают роль `replanner`
+   с capability profile `planning_readonly`. Результат — полный `backlog-plan-v2` revision N+1
+   с явными supersession edges; принятые незатронутые nodes переиспользуются по task identity
+   и immutable result digest.
+4. Controller/schema/migration/artifact invariant failure создаёт controller incident. Модель
+   продукта не должна гадать, как чинить контроллер.
+5. Одна hypothesis имеет не более трёх semantic attempts. После исчерпания Director закрывает
+   её как `EXHAUSTED` и создаёт новую diagnosis-reassessment hypothesis с другой signature
+   или явным parent.
 
-Default Builder scope includes the repository's Python project contract
-(`pyproject.toml`) because mandatory dependency and license gates require that
-file. A repository-supplied PM task still replaces the default scope completely;
-Hermes never widens frozen PM `allowed_paths`.
+Outcome, attempt finalization, failure/hypothesis, successors, edges, frontier, product
+projection и outbox фиксируются одной SQLite transaction через `commit_task_outcome`.
+Идемпотентный replay возвращает существующий outcome; другой digest с тем же key блокируется.
 
-Independent review receives the subject-bound candidate contents, upstream Task
-Contracts, and complete controller gate records. Missing controller-owned
-review evidence is an internal factory defect, not a product-code hypothesis.
-See `docs/REVIEW-EVIDENCE.md`.
+## Безопасная диагностика
 
-The reconciler never restarts product planning when recovery can continue from
-the failed stage.
+Failure Envelope хранит тип исключения, reason code, deterministic fingerprint, safe message,
+expected/actual, failed gate IDs, bounded redacted traceback и stack fingerprint. Provider
+Transport Diagnostic хранит только размер/digest raw ответа, санитизированные head/tail,
+parser type и безопасные detector coordinates. Raw credential не записывается.
+
+Полное значение потенциального секрета не передаётся агенту, потому что prompt, SQLite,
+артефакты, logs и Telegram имеют более широкую поверхность доступа, чем protected adapter.
+Для точного исправления достаточно detector ID, JSON path или line/column, failed gate,
+expected/actual и bounded surrounding evidence после redaction.
 
 ## OWNER_ACTION boundary
 
-`OWNER_ACTION` is allowed only for a machine-classified external blocker such
-as an absent credential, 2FA/CAPTCHA, purchase, legal decision, or an explicitly
-irreversible production action. An unknown or internal error remains a factory
-incident and consumes the bounded repair policy; it is not delegated to the
-owner.
+`OWNER_ACTION` разрешён только для действующей allowlist: отсутствующий credential, OAuth
+device flow, 2FA, CAPTCHA, создание внешнего account, покупка ресурса, DNS без доступа,
+юридическое решение или неодобренное необратимое production-действие.
 
-## Durable notification delivery
+Missing adapter/model route, ошибка кода, теста, CI, Git, deployment script, schema, migration,
+artifact conflict и неизвестное условие — внутренние incidents. Они не делегируются владельцу.
+После появления разрешённого capability grant WAITING_EXTERNAL task автоматически возвращается
+во frontier без нового intake.
 
-Notifications are committed to SQLite before Telegram delivery. The gateway
-claims each outbox row with a lease, delivers it to every configured owner, and
-marks it complete only after successful sends. A transport error records a
-sanitized failure and leaves the item available for retry.
+## Completion
+
+Продукт становится `COMPLETED` только через reducer, когда:
+
+- все mandatory root goals имеют PASS evidence;
+- все mandatory nodes активного plan ACCEPTED или корректно SUPERSEDED;
+- нет OPEN/ROUTED failures и graph blockers;
+- independent review и required checks прошли;
+- staging и production ссылаются на один immutable digest;
+- backup/rollback readiness и production transaction доказаны;
+- observation task принята после заданного интервала.
+
+Completion evidence immutable и notification создаётся логически один раз через outbox.
+
+## Legacy compatibility
+
+Revision-0 продукты 2.0.x мигрируют в system plan и обслуживаются явно названными
+`legacy_v1` recovery API. Канонический v2 worker не вызывает role/title-derived successor,
+`latest_task()` или старый `advance_after`.

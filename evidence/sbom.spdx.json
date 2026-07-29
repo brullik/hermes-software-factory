@@ -7,8 +7,8 @@
     ]
   },
   "dataLicense": "CC0-1.0",
-  "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.0.20",
-  "name": "hermes-software-factory-2.0.20",
+  "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.1.0",
+  "name": "hermes-software-factory-2.1.0",
   "packages": [
     {
       "SPDXID": "SPDXRef-Package-hermes-software-factory-spec",
@@ -16,7 +16,7 @@
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "hermes-software-factory-spec",
-      "versionInfo": "2.0.20"
+      "versionInfo": "2.1.0"
     },
     {
       "SPDXID": "SPDXRef-Package-hermes-agent",

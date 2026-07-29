@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/task-contract-v2.schema.json",
+  "title": "Task Envelope v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "task_id",
+    "root_task_id",
+    "parent_task_id",
+    "source_task_id",
+    "plan_id",
+    "plan_node_id",
+    "task_revision",
+    "root_context_ref",
+    "active_context_ref",
+    "title",
+    "objective",
+    "role",
+    "output_schema",
+    "dependencies",
+    "conflict_keys",
+    "acceptance",
+    "required_capabilities",
+    "capability_profile",
+    "allowed_paths",
+    "forbidden_paths",
+    "risk_tier",
+    "model_floor",
+    "idempotency_key",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "artifact_id": {"type": "string", "minLength": 8},
+    "product_id": {"type": "string", "minLength": 8},
+    "task_id": {"type": "string", "pattern": "^T-[A-Z0-9_-]{4,}$"},
+    "root_task_id": {"type": "string", "minLength": 4},
+    "parent_task_id": {"type": ["string", "null"]},
+    "source_task_id": {"type": "string", "minLength": 4},
+    "plan_id": {"type": "string", "minLength": 4},
+    "plan_node_id": {"type": "string", "minLength": 1},
+    "task_revision": {"type": "integer", "minimum": 1},
+    "root_context_ref": {"type": "string", "minLength": 1},
+    "active_context_ref": {"type": "string", "minLength": 1},
+    "failure_id": {"type": ["string", "null"]},
+    "hypothesis_id": {"type": ["string", "null"]},
+    "supersedes_task_id": {"type": ["string", "null"]},
+    "title": {"type": "string", "minLength": 1},
+    "objective": {"type": "string", "minLength": 10},
+    "role": {"type": "string", "minLength": 1},
+    "output_schema": {"type": "string", "minLength": 1},
+    "dependencies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "conflict_keys": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "acceptance": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion_id", "verification", "mandatory"],
+        "properties": {
+          "criterion_id": {"type": "string", "minLength": 1},
+          "verification": {"type": "string", "minLength": 1},
+          "mandatory": {"type": "boolean"}
+        }
+      }
+    },
+    "required_capabilities": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "capability_profile": {
+      "enum": [
+        "planning_readonly",
+        "builder_workspace",
+        "test_workspace",
+        "reviewer_readonly",
+        "repository_bootstrap",
+        "release_staging",
+        "release_production",
+        "controller_incident"
+      ]
+    },
+    "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "forbidden_paths": {"type": "array", "items": {"type": "string"}},
+    "risk_tier": {"enum": ["low", "medium", "high"]},
+    "model_floor": {"enum": ["deterministic", "luna", "terra", "sol"]},
+    "idempotency_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "status": {
+      "enum": [
+        "DRAFT",
+        "BLOCKED_DEPENDENCY",
+        "BLOCKED_CAPABILITY",
+        "READY",
+        "CLAIMED",
+        "WAITING_TIME",
+        "WAITING_EXTERNAL",
+        "SUCCEEDED",
+        "ACCEPTED",
+        "REJECTED",
+        "FAILED_TRANSIENT",
+        "FAILED_SEMANTIC",
+        "SUPERSEDED",
+        "CANCELLED"
+      ]
+    },
+    "priority": {"type": "integer", "minimum": 0},
+    "critical_path_rank": {"type": "integer", "minimum": 0},
+    "quality_gates": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  }
+}
