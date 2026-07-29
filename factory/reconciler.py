@@ -1079,17 +1079,60 @@ class PipelineReconciler:
                 sort_keys=True,
             )
         )
+        prior_hypothesis_attempts = 0
+        for event in self.state.events(product_id):
+            if str(event.get("event_type") or "") != "director_root_cause_replan":
+                continue
+            try:
+                payload = json.loads(str(event.get("payload_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and str(payload.get("blocker_signature") or "")
+                == blocker_signature
+            ):
+                prior_hypothesis_attempts += 1
+        diagnosis_reassessment = prior_hypothesis_attempts >= 3
+        effective_signature = (
+            sha256_text(f"diagnosis-reassessment-v1:{blocker_signature}")
+            if diagnosis_reassessment
+            else blocker_signature
+        )
+        effective_blocker_ids = (
+            ["DIAGNOSIS-REASSESSMENT", *blocker_ids]
+            if diagnosis_reassessment
+            else blocker_ids
+        )
         if not self.state.reopen_for_director_root_cause(
             product_id=product_id,
             task_id=task_id,
-            blocker_signature=blocker_signature,
-            blocker_ids=blocker_ids,
+            blocker_signature=effective_signature,
+            blocker_ids=effective_blocker_ids,
         ):
             return False
         attempts = self.state.attempts_for_task(task_id)
+        reassessment_instruction = (
+            "Three repair cycles returned the same blocker. Do not repeat the "
+            "previous fix. First prove whether the task statement, allowed scope, "
+            "controller gate/environment, or implementation diagnosis is wrong; "
+            "then apply the smallest correction supported by that evidence and "
+            "rerun every failed gate."
+            if diagnosis_reassessment
+            else None
+        )
         diagnosed_summary = (
-            "Director root-cause diagnosis: the previous bounded budget is closed, "
-            "but this evidence identifies a distinct problem hypothesis. "
+            (
+                "Director diagnosis reassessment: three bounded repair cycles for "
+                "the same hypothesis failed. The next task must challenge the "
+                "problem statement before changing code. "
+            )
+            if diagnosis_reassessment
+            else (
+                "Director root-cause diagnosis: the previous bounded budget is "
+                "closed, but this evidence identifies a distinct problem hypothesis. "
+            )
+        ) + (
             f"Blockers: {', '.join(blocker_ids)}. Exact evidence: {detail}"
         )
         path = self.pipeline.begin_repair_cycle(
@@ -1104,6 +1147,7 @@ class PipelineReconciler:
                 str(attempts[-1]["attempt_id"]) if attempts else None
             ),
             director_replan=True,
+            director_instruction=reassessment_instruction,
         )
         if path is None:
             raise RuntimeError(
@@ -1114,11 +1158,18 @@ class PipelineReconciler:
             product_id=product_id,
             task_id=task_id,
             kind="automatic_recovery",
-            discriminator=f"director-root-cause:{blocker_signature}",
+            discriminator=f"director-root-cause:{effective_signature}",
             text=(
-                "🧭 Director пересмотрел постановку после исчерпания прежних попыток.\n"
-                f"Проект: {product_id}\n"
-                f"Новая гипотеза проблемы: {', '.join(blocker_ids)}.\n"
+                (
+                    "🧭 Director меняет диагноз после трёх неудачных repair-cycles.\n"
+                    if diagnosis_reassessment
+                    else (
+                        "🧭 Director пересмотрел постановку после исчерпания "
+                        "прежних попыток.\n"
+                    )
+                )
+                + f"Проект: {product_id}\n"
+                f"Problem hypothesis: {', '.join(effective_blocker_ids)}.\n"
                 "Создан новый ограниченный repair budget с отдельным доказательным brief.\n"
                 f"Следующая задача Builder: "
                 f"{next_task.get('task_id') if next_task else 'создана'}.\n"

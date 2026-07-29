@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from factory.artifacts import ArtifactStore
+from factory.common import sha256_text
 from factory.config import FactoryConfig
 from factory.pipeline import PipelineCoordinator
 from factory.reconciler import PipelineReconciler
@@ -1170,7 +1171,8 @@ def test_director_opens_new_budget_after_three_prior_distinct_diagnoses() -> Non
         payload = json.loads(replan_events[-1]["payload_json"])
         assert payload["blocker_ids"] == ["SEC-NEW-FAIL-OPEN"]
         assert payload["replan_number"] == 4
-        assert payload["max_replans_per_hypothesis"] == 1
+        assert payload["hypothesis_attempt"] == 1
+        assert payload["max_replans_per_hypothesis"] == 3
         notifications = [
             json.loads(item["payload_json"]) for item in state.list_outbox()
         ]
@@ -1181,6 +1183,118 @@ def test_director_opens_new_budget_after_three_prior_distinct_diagnoses() -> Non
             for item in notifications
         )
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+        state.close()
+
+
+def test_director_reassesses_diagnosis_after_three_same_hypothesis_repairs() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "director-diagnosis-reassessment-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="Reassess a repeatedly failing controller gate",
+            idempotency_key="director-diagnosis-reassessment-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+        ):
+            state.transition_product(product_id, status)
+        task_path = PipelineCoordinator(config, state).create_task(
+            product_id,
+            "security-reviewer",
+            cycle=3,
+        )
+        task_id = str(
+            json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        )
+        assert state.claim_task(worker_id="security-worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-repeated-hypothesis",
+            task_id=task_id,
+            tier="sol",
+            attempt_kind="repair",
+            prompt_digest="d" * 64,
+            status="failed",
+            semantic_counted=True,
+            reason_code="mandatory_gate_failed",
+        )
+        state.complete_task(
+            task_id,
+            "security-worker",
+            "FAILED_SAFE",
+            reason_code="mandatory_gate_failed",
+            detail="failed mandatory gates: target-license-check",
+            failure_kind="semantic",
+        )
+        state.transition_product(product_id, "FAILED_SAFE")
+        state.record_event(
+            product_id=product_id,
+            task_id=task_id,
+            event_type="repair_budget_exhausted",
+            payload={"reason_code": "mandatory_gate_failed", "attempts": 1},
+        )
+        blocker_signature = sha256_text(
+            json.dumps(
+                {
+                    "role": "security-reviewer",
+                    "stage": "security-reviewer",
+                    "reason": "mandatory_gate_failed",
+                    "blocker_ids": ["mandatory_gate_failed"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        for index in range(3):
+            state.record_event(
+                product_id=product_id,
+                task_id=f"prior-repair-{index}",
+                event_type="director_root_cause_replan",
+                payload={
+                    "blocker_signature": blocker_signature,
+                    "blocker_ids": ["mandatory_gate_failed"],
+                    "replan_number": index + 1,
+                    "hypothesis_attempt": index + 1,
+                    "max_replans_per_hypothesis": 3,
+                    "next_action": "new_bounded_builder_budget",
+                },
+            )
+
+        result = PipelineReconciler(config, state).reconcile_once()
+
+        assert result.repaired == 1
+        active = state.active_tasks(product_id)
+        assert len(active) == 1
+        assert active[0]["stage_key"] == "builder-core"
+        brief = json.loads(
+            (
+                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
+            ).read_text(encoding="utf-8")
+        )
+        assert brief["failed_gate_ids"] == ["mandatory_gate_failed"]
+        assert "Do not repeat the previous fix" in brief["required_fixes"][0]
+        assert "challenge the problem statement" in brief["relevant_log_fragment"]
+        events = [
+            json.loads(event["payload_json"])
+            for event in state.events(product_id)
+            if event["event_type"] == "director_root_cause_replan"
+        ]
+        assert len(events) == 4
+        assert events[-1]["blocker_ids"] == [
+            "DIAGNOSIS-REASSESSMENT",
+            "mandatory_gate_failed",
+        ]
+        assert events[-1]["hypothesis_attempt"] == 1
+        assert events[-1]["max_replans_per_hypothesis"] == 3
+        assert events[-1]["blocker_signature"] != blocker_signature
         state.close()
 
 
