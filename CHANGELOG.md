@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.20 - 2026-07-29
+
+- Bound causal `incident-recovery` chains to three failed recovery tasks.
+- Route the third failed controller recovery to a Product Director/Replanner
+  diagnosis reassessment with a fresh child hypothesis instead of recursively
+  creating a fourth recovery task.
+- Preserve successful early controller recovery and its zero product-semantic
+  budget behavior, with regression coverage for both paths.
+
 ## 2.1.19 - 2026-07-29
 
 - Changed durable task claiming to product-level least-recently-served rotation

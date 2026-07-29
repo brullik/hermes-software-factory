@@ -1087,6 +1087,120 @@ def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
         state.close()
 
 
+def test_AUT_P1_008_three_failed_controller_recoveries_force_diagnosis_reassessment(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-CONTROOT2",
+            product_id="product-autonomy",
+            title="Controller recovery depth planner",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-CONTROLLER-2",
+            root_task_id="T-CONTROOT2",
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[
+                ("controller", "T-CONTROLLER2", "accept-controller-depth")
+            ],
+            edges=[],
+        )
+        persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id="T-CONTROOT2",
+        )
+        claimed = state.claim_task(worker_id="controller-depth-fault")
+        assert claimed is not None
+        failed = state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-CONTROLLER2",
+                worker_id="controller-depth-fault",
+                lease_token=str(claimed["lease_token"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("controller-depth-fault"),
+                result_ref="internal://controller/depth-fault",
+                result_digest=sha256_text("controller-depth-fault"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="controller",
+                    reason_code="controller_depth_fault",
+                    safe_message="Controller recovery requires bounded reassessment",
+                    evidence_ref="internal://controller/depth-fault",
+                    exception_type="RuntimeError",
+                    stack_fingerprint=sha256_text("controller-depth-stack"),
+                ),
+            )
+        )
+        assert failed.failure_id is not None
+        routed = FailureRouter(config, state).route_open_failures(
+            "product-autonomy"
+        )
+        assert len(routed) == 1
+
+        for recovery_number in range(1, 4):
+            recovery = state.claim_task(
+                worker_id=f"incident-depth-{recovery_number}"
+            )
+            assert recovery is not None
+            assert recovery["task_id"] == routed[0]
+            assert recovery["role"] == "incident-recovery"
+            outcome = state.commit_task_outcome(
+                TaskOutcome(
+                    task_id=str(recovery["task_id"]),
+                    worker_id=f"incident-depth-{recovery_number}",
+                    lease_token=str(recovery["lease_token"]),
+                    expected_task_revision=int(recovery["task_revision"]),
+                    expected_plan_revision=1,
+                    idempotency_key=sha256_text(
+                        f"incident-depth-failure-{recovery_number}"
+                    ),
+                    result_ref=(
+                        f"internal://incident/depth-failure-{recovery_number}"
+                    ),
+                    result_digest=sha256_text(
+                        f"incident-depth-failure-{recovery_number}"
+                    ),
+                    status="FAILED_SEMANTIC",
+                    failure=FailureData(
+                        failure_class="semantic",
+                        reason_code="model_requested_repair",
+                        safe_message=(
+                            "The current controller recovery hypothesis did not "
+                            "restore the invariant"
+                        ),
+                        evidence_ref=(
+                            f"internal://incident/depth-failure-{recovery_number}"
+                        ),
+                        parent_failure_id=str(recovery["failure_id"]),
+                    ),
+                )
+            )
+            assert outcome.failure_id is not None
+            routed = FailureRouter(config, state).route_open_failures(
+                "product-autonomy"
+            )
+            assert len(routed) == 1
+            routed_task = state.get_task(routed[0])
+            assert routed_task is not None
+            if recovery_number < 3:
+                assert routed_task["role"] == "incident-recovery"
+            else:
+                assert routed_task["role"] == "replanner"
+                assert routed_task["stage_key"] == "diagnosis-reassessment"
+                assert routed_task["capability_profile"] == "planning_readonly"
+    finally:
+        state.close()
+
+
 def test_AUT_P1_009_artifact_conflict_commits_controller_failure_only(
     tmp_path: Path,
 ) -> None:
