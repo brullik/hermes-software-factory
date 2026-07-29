@@ -29,6 +29,7 @@ _CONTROLLER_PREFIXES = (
     "artifact_",
     "repair_requeue_",
 )
+_MAX_CONTROLLER_RECOVERY_DEPTH = 3
 
 
 class FailureRouter:
@@ -307,6 +308,34 @@ class FailureRouter:
         ).fetchone()
         return str(row[0]) if row is not None and row[0] else None
 
+    def _controller_recovery_depth(self, task: dict[str, Any]) -> int:
+        """Count the bounded causal chain of controller-recovery tasks."""
+
+        depth = 0
+        current = task
+        visited: set[str] = set()
+        while str(current.get("role") or "") == "incident-recovery":
+            task_id = str(current.get("task_id") or "")
+            if not task_id or task_id in visited:
+                break
+            visited.add(task_id)
+            depth += 1
+            parent_id = str(
+                current.get("parent_task_id")
+                or current.get("source_task_id")
+                or ""
+            )
+            if not parent_id:
+                break
+            parent = self.state._connection.execute(
+                "SELECT * FROM tasks WHERE task_id=? AND product_id=?",
+                (parent_id, current["product_id"]),
+            ).fetchone()
+            if parent is None:
+                break
+            current = dict(parent)
+        return depth
+
     def _invalid_plan_output_schema(
         self,
         *,
@@ -504,9 +533,14 @@ class FailureRouter:
                             "resolved_incidents": resolved_incidents,
                         },
                     )
-            controller_fault = not invalid_plan_output_schema and (
-                str(failure["failure_class"]) in {"controller", "transient"}
-                or reason.startswith(_CONTROLLER_PREFIXES)
+            controller_recovery_depth = self._controller_recovery_depth(failed)
+            controller_fault = (
+                not invalid_plan_output_schema
+                and controller_recovery_depth < _MAX_CONTROLLER_RECOVERY_DEPTH
+                and (
+                    str(failure["failure_class"]) in {"controller", "transient"}
+                    or reason.startswith(_CONTROLLER_PREFIXES)
+                )
             )
             hypothesis = None
             hypothesis_id: str | None = None
@@ -562,6 +596,7 @@ class FailureRouter:
                 invalid_plan_output_schema
                 or reason in _REPLAN_REASONS
                 or attempts_used >= 3
+                or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
             )
             if controller_fault:
                 incident_id = f"incident-{sha256_text(failure_id)[:20]}"
@@ -588,7 +623,10 @@ class FailureRouter:
                     "evidence; do not consume a product semantic budget."
                 )
             elif needs_replan:
-                if attempts_used >= 3:
+                if (
+                    attempts_used >= 3
+                    or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
+                ):
                     assert hypothesis_id is not None
                     self.state._connection.execute(
                         """UPDATE hypotheses SET status='EXHAUSTED', closed_at=?
