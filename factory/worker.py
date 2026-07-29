@@ -482,6 +482,7 @@ class AgentWorker:
             configured_worktrees,
             persistent=True,
             initializer=self._initialize_product_workspace,
+            lease_is_active=state.workspace_lease_is_active,
         )
         self.artifacts = ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)

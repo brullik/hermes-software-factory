@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.14 - 2026-07-29
+
+- Made the durable task lease authoritative for persistent workspace markers:
+  workers now reclaim a marker only after SQLite proves its former task lease
+  is no longer active, while a genuinely active lease remains fail-closed.
+- Added migration v11 to collapse workspace-contention incident trees created
+  after the original one-time recovery and resume their causal root tasks.
+- Added regression coverage for active-marker protection, stale-marker
+  recovery, durable lease expiry, and post-deployment collision-tree repair.
+
 ## 2.1.13 - 2026-07-29
 
 - Split mandatory local recovery from best-effort offsite replication so a

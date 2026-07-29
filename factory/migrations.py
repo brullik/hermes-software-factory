@@ -870,6 +870,14 @@ def _migration_010_durable_capability_reconciliation(
     )
 
 
+def _migration_011_recurring_workspace_claim_recovery(
+    connection: sqlite3.Connection,
+) -> None:
+    """Collapse collision trees created after the original one-time repair."""
+
+    _migration_005_persistent_workspace_claim_recovery(connection)
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -1033,6 +1041,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         10,
         "durable-capability-reconciliation",
         _migration_010_durable_capability_reconciliation,
+    ),
+    (
+        11,
+        "recurring-workspace-claim-recovery",
+        _migration_011_recurring_workspace_claim_recovery,
     ),
 )
 

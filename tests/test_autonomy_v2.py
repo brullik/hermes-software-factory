@@ -1638,7 +1638,8 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
                     ),
                 )
             state._connection.execute(
-                "DELETE FROM schema_migrations WHERE version=5"
+                "DELETE FROM schema_migrations WHERE version=?",
+                (MIGRATIONS[-1][0],),
             )
     finally:
         state.close()
