@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.2 - 2026-07-29
+
+- A retryable failure with an already scheduled bounded in-place `repair` or
+  `transient_retry` is now owned by that single retry path. Failure Router waits
+  for its outcome instead of creating a competing child task for the same
+  failure; success resolves the open envelope, while exhausted retries return
+  to normal causal routing.
+
 ## 2.1.1 - 2026-07-29
 
 - Conflict keys теперь изолированы `product_id`: одинаковые относительные пути в разных repositories не блокируют независимые workers, при этом конфликт внутри одного продукта по-прежнему сериализуется.

@@ -460,14 +460,16 @@ class FailureRouter:
                 continue
             task = self.state.get_task(str(failure["task_id"]))
             if (
-                str(failure["failure_class"]) == "transient"
-                and bool(failure["retryable"])
+                bool(failure["retryable"])
                 and task is not None
                 and str(task.get("next_attempt_kind") or "")
-                == "transient_retry"
+                in {"transient_retry", "repair"}
                 and str(task.get("graph_status") or "")
                 in {"WAITING_TIME", "READY", "CLAIMED"}
             ):
+                # The worker has already scheduled a bounded, in-place retry.
+                # Routing the same open FailureEnvelope at the same time would
+                # create a second causal branch for one failed attempt.
                 continue
             routed.append(self.route(str(failure["failure_id"])))
         return routed

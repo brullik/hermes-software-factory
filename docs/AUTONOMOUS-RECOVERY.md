@@ -11,6 +11,10 @@ timers, leases, OPEN failures, controller incidents и completion conditions.
 
 1. `FAILED_TRANSIENT` оставляет ту же task и hypothesis, записывает `available_at` и
    возобновляется после bounded backoff. Transient retry не расходует semantic budget.
+   Пока bounded in-place `repair` или `transient_retry` находится в `WAITING_TIME`,
+   `READY` или `CLAIMED`, Failure Router не создаёт конкурирующую child task для того же
+   Failure Envelope. Успех закрывает failure как `RESOLVED`; исчерпание retry снова
+   передаёт причину обычной causal routing.
 2. Локальный implementation/test/review failure создаёт repair child того же plan node.
    Child наследует root goal, acceptance, exact allowed scope, `failure_id`, `hypothesis_id`,
    `parent_task_id` и `source_task_id`.
