@@ -263,6 +263,70 @@ def staging_release_task(config: FactoryConfig, state: Any, artifacts: ArtifactS
 
 
 class WorkerTests(unittest.TestCase):
+    def test_provider_output_secret_is_redacted_and_task_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-luna",
+            )
+            config = make_config(root, registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            artifacts = ArtifactStore(config)
+            intake_result = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Sanitize provider transport without blocking the product",
+            )
+            marker = "ghp_" + ("A" * 24)
+            payload = json.loads(
+                product_contract(config, intake_result.product_id)
+            )
+            payload["summary"] = f"Example credential {marker}"
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(payload)),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.status, "completed")
+            self.assertIsNone(result.reason_code)
+            self.assertIsNotNone(result.artifact_ref)
+            attempt = json.loads(
+                Path(str(result.artifact_ref)).read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "$.summary (github_classic_token)",
+                attempt["summary"],
+            )
+            output_ref = next(
+                item["evidence_ref"]
+                for item in attempt["test_results"]
+                if item["gate_id"] == "schema-validation"
+            )
+            output = json.loads(Path(output_ref).read_text(encoding="utf-8"))
+            self.assertEqual(
+                output["summary"],
+                "Example credential [REDACTED]",
+            )
+            self.assertNotIn(marker, attempt["summary"])
+            self.assertTrue(
+                all(
+                    marker not in path.read_text(encoding="utf-8")
+                    for path in config.evidence_dir.glob("*.json")
+                )
+            )
+            state.close()
+
     def test_run_once_renews_lease_during_long_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

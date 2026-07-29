@@ -1290,3 +1290,93 @@ def test_exhausted_builder_opens_next_cycle_with_exact_gate_traceback() -> None:
         assert second.repaired == 0
         assert len(state.active_tasks(product_id)) == 1
         state.close()
+
+
+def test_legacy_secret_exposure_is_retried_once_with_sanitizer_v2() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory))
+        state = StateStore(config.database_path)
+        product_id = "legacy-secret-sanitizer-product"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="cli",
+            idea="Continue after an opaque provider-output rejection",
+            idempotency_key="legacy-secret-sanitizer-key",
+        )
+        for status in (
+            "CONTRACT_DRAFTED",
+            "CONTRACT_VALIDATED",
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "BACKLOG_READY",
+            "IMPLEMENTING",
+        ):
+            state.transition_product(product_id, status)
+        task_path = PipelineCoordinator(config, state).create_task(
+            product_id,
+            "builder-core",
+            cycle=5,
+        )
+        task_id = str(
+            json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        )
+        assert state.claim_task(worker_id="legacy-worker") is not None
+        assert state.record_attempt(
+            attempt_id="attempt-legacy-secret",
+            task_id=task_id,
+            tier="sol",
+            attempt_kind="repair",
+            prompt_digest="f" * 64,
+            status="failed",
+            semantic_counted=True,
+            reason_code="secret_exposure",
+        )
+        state.complete_task(
+            task_id,
+            "legacy-worker",
+            "FAILED_SAFE",
+            reason_code="secret_exposure",
+            failure_kind="policy",
+        )
+        state.transition_product(product_id, "FAILED_SAFE")
+
+        recovered = PipelineReconciler(config, state).reconcile_once()
+
+        assert recovered.repaired == 1
+        product = state.get_product(product_id)
+        task = state.get_task(task_id)
+        assert product is not None and product["status"] == "IMPLEMENTING"
+        assert task is not None and task["status"] == "PENDING"
+        assert task["next_tier"] == "sol"
+        assert task["next_attempt_kind"] == "repair"
+        brief = json.loads(
+            (
+                config.evidence_dir / Path(task["repair_context_ref"]).name
+            ).read_text(encoding="utf-8")
+        )
+        assert brief["failed_gate_ids"] == ["secret_exposure"]
+        assert "provider-output sanitizer v2" in brief["required_fixes"][0]
+        events = [
+            event
+            for event in state.events(product_id)
+            if event["event_type"] == "secret_sanitizer_retry_scheduled"
+        ]
+        assert len(events) == 1
+        notification = next(
+            json.loads(item["payload_json"])
+            for item in state.list_outbox()
+            if json.loads(item["payload_json"])["kind"] == "automatic_recovery"
+        )
+        assert "Действие владельца: не требуется." in notification["text"]
+        assert list(config.evidence_dir.glob("owner-action-*.json")) == []
+
+        PipelineReconciler(config, state).reconcile_once()
+        assert len(
+            [
+                event
+                for event in state.events(product_id)
+                if event["event_type"] == "secret_sanitizer_retry_scheduled"
+            ]
+        ) == 1
+        state.close()
