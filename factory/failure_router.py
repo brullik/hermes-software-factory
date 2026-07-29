@@ -394,6 +394,31 @@ class FailureRouter:
                 failure=failure,
                 failed=failed,
             )
+            if invalid_plan_output_schema:
+                resolved_incidents = self.state._connection.execute(
+                    """
+                    UPDATE controller_incidents
+                       SET status='RESOLVED', resolved_at=?
+                     WHERE product_id=? AND task_id=? AND reason_code=?
+                       AND status='OPEN'
+                    """,
+                    (
+                        failure["last_seen_at"],
+                        failed["product_id"],
+                        failed["task_id"],
+                        reason,
+                    ),
+                ).rowcount
+                if resolved_incidents:
+                    self.state._record_event(
+                        str(failed["product_id"]),
+                        str(failed["task_id"]),
+                        "invalid_output_schema_incident_resolved",
+                        {
+                            "failure_id": failure_id,
+                            "resolved_incidents": resolved_incidents,
+                        },
+                    )
             controller_fault = not invalid_plan_output_schema and (
                 str(failure["failure_class"]) in {"controller", "transient"}
                 or reason.startswith(_CONTROLLER_PREFIXES)

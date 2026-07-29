@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.11 - 2026-07-29
+
+- Reclassifying a missing planned output schema now also resolves the matching
+  stale controller incident, keeping liveness and operator diagnostics aligned
+  with the active Replanner path.
+- Migration v9 closes historical controller incidents left open after
+  migration v8 converted their failures into autonomous plan repair.
+
 ## 2.1.10 - 2026-07-29
 
 - Backlog plan precommit validation now rejects output schemas that are not

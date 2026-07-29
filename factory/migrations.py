@@ -756,6 +756,80 @@ def _migration_008_invalid_output_schema_replan(
         )
 
 
+def _migration_009_invalid_output_schema_incidents(
+    connection: sqlite3.Connection,
+) -> None:
+    """Close stale controller incidents for failures reclassified as plan defects."""
+
+    rows = connection.execute(
+        """
+        SELECT DISTINCT failures.failure_id,
+                        failures.product_id,
+                        failures.task_id
+          FROM failures
+          JOIN tasks
+            ON tasks.task_id=failures.task_id
+           AND tasks.product_id=failures.product_id
+         WHERE failures.reason_code=
+                   'controller_exception_file_not_found_error'
+           AND failures.failure_class='controller'
+           AND tasks.output_schema IS NOT NULL
+           AND tasks.output_schema LIKE '%.schema.json'
+           AND REPLACE(failures.safe_message, '\', '/')
+               LIKE '%/schemas/' || tasks.output_schema
+        ORDER BY failures.failure_id
+        """
+    ).fetchall()
+    if not rows:
+        return
+    now = utc_now()
+    task_coordinates = sorted(
+        {(str(row[1]), str(row[2])) for row in rows}
+    )
+    resolved_by_product: dict[str, int] = {}
+    for product_id, task_id in task_coordinates:
+        resolved_by_product[product_id] = (
+            resolved_by_product.get(product_id, 0)
+            + connection.execute(
+                """
+                UPDATE controller_incidents
+                   SET status='RESOLVED', resolved_at=?
+                 WHERE product_id=? AND task_id=?
+                   AND reason_code='controller_exception_file_not_found_error'
+                   AND status='OPEN'
+                """,
+                (now, product_id, task_id),
+            ).rowcount
+        )
+    for product_id in sorted({str(row[1]) for row in rows}):
+        failure_ids = sorted(
+            str(row[0]) for row in rows if str(row[1]) == product_id
+        )
+        connection.execute(
+            """
+            INSERT INTO events
+                (product_id, task_id, event_type, payload_json, created_at)
+            VALUES (?, ?, 'invalid_output_schema_incident_resolved', ?, ?)
+            """,
+            (
+                product_id,
+                str(next(row[2] for row in rows if str(row[1]) == product_id)),
+                json.dumps(
+                    {
+                        "failure_ids": failure_ids,
+                        "resolved_incidents": resolved_by_product.get(
+                            product_id,
+                            0,
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -909,6 +983,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         8,
         "invalid-output-schema-replan",
         _migration_008_invalid_output_schema_replan,
+    ),
+    (
+        9,
+        "invalid-output-schema-incident-resolution",
+        _migration_009_invalid_output_schema_incidents,
     ),
 )
 

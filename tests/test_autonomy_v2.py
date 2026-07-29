@@ -755,6 +755,18 @@ def test_AUT_P0_006_missing_plan_output_schema_routes_replanner(
                     failure_id,
                 ),
             )
+            state._connection.execute(
+                """
+                INSERT INTO controller_incidents
+                    (incident_id, product_id, task_id, reason_code,
+                     evidence_ref, status, created_at)
+                VALUES ('incident-missing-plan-schema', 'product-autonomy',
+                        'T-FAILNODEA',
+                        'controller_exception_file_not_found_error',
+                        'internal://missing-plan-schema', 'OPEN',
+                        '2026-07-29T00:00:00Z')
+                """
+            )
 
         routed_id = FailureRouter(config, state, artifacts).route(failure_id)
 
@@ -763,10 +775,13 @@ def test_AUT_P0_006_missing_plan_output_schema_routes_replanner(
         assert routed["role"] == "replanner"
         assert routed["output_schema"] == "backlog-plan-v2.schema.json"
         assert routed["graph_status"] == "READY"
-        assert state._connection.execute(
-            "SELECT COUNT(*) FROM controller_incidents WHERE product_id=?",
+        incident = state._connection.execute(
+            "SELECT status, resolved_at FROM controller_incidents WHERE product_id=?",
             ("product-autonomy",),
-        ).fetchone()[0] == 0
+        ).fetchone()
+        assert incident is not None
+        assert incident["status"] == "RESOLVED"
+        assert incident["resolved_at"]
     finally:
         state.close()
 
@@ -1412,7 +1427,7 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
         assert database.with_suffix(
             database.suffix + ".pre-autonomy-v2.bak"
         ).is_file()
@@ -1651,7 +1666,7 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     finally:
         restarted.close()
 
@@ -1852,7 +1867,7 @@ def test_AUT_P0_019_causal_leaf_migration_supersedes_duplicate_recovery(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     finally:
         restarted.close()
 
@@ -1882,6 +1897,18 @@ def test_AUT_P0_019_invalid_output_schema_migration_reopens_replan(
                     failure_id,
                 ),
             )
+            state._connection.execute(
+                """
+                INSERT INTO controller_incidents
+                    (incident_id, product_id, task_id, reason_code,
+                     evidence_ref, status, created_at)
+                VALUES ('incident-historical-schema', 'product-autonomy',
+                        'T-FAILNODEA',
+                        'controller_exception_file_not_found_error',
+                        'internal://historical-schema', 'OPEN',
+                        '2026-07-29T00:00:00Z')
+                """
+            )
         state.add_task(
             task_id=recovery_id,
             product_id="product-autonomy",
@@ -1895,7 +1922,7 @@ def test_AUT_P0_019_invalid_output_schema_migration_reopens_replan(
         )
         with state._lock, state._connection:
             state._connection.execute(
-                "DELETE FROM schema_migrations WHERE version=8"
+                "DELETE FROM schema_migrations WHERE version IN (8,9)"
             )
     finally:
         state.close()
@@ -1913,6 +1940,16 @@ def test_AUT_P0_019_invalid_output_schema_migration_reopens_replan(
         assert recovery is not None
         assert recovery["graph_status"] == "SUPERSEDED"
         assert recovery["blocked_reason"] == "invalid_output_schema_replan"
+        incident = restarted._connection.execute(
+            """
+            SELECT status, resolved_at
+              FROM controller_incidents
+             WHERE incident_id='incident-historical-schema'
+            """
+        ).fetchone()
+        assert incident is not None
+        assert incident["status"] == "RESOLVED"
+        assert incident["resolved_at"]
         assert any(
             event["event_type"] == "invalid_output_schema_replan_required"
             for event in restarted.events("product-autonomy")
@@ -2001,7 +2038,7 @@ def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
         ]
     finally:
         verified.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 
 def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(
