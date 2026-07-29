@@ -1931,6 +1931,43 @@ def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
         assert len(active) == 1
         assert active[0]["role"] == "replanner"
         assert active[0]["failure_id"]
+        current_product = state.get_product("product-autonomy")
+        assert current_product is not None
+        assert active[0]["plan_id"] == current_product["active_plan_id"]
+        claimed_replanner = state.claim_task(worker_id="liveness-replanner")
+        assert claimed_replanner is not None
+        assert claimed_replanner["task_id"] == active[0]["task_id"]
+
+        stale_plan_id = str(plan["parent_plan_id"])
+        with state._lock, state._connection:
+            state._connection.execute(
+                """
+                UPDATE tasks
+                   SET plan_id=?, status='PENDING', graph_status='READY',
+                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                       heartbeat_at=NULL
+                 WHERE task_id=?
+                """,
+                (stale_plan_id, active[0]["task_id"]),
+            )
+        assert not state.has_bounded_progress_path("product-autonomy")
+        third = PipelineReconciler(config, state).reconcile_once()
+        fourth = PipelineReconciler(config, state).reconcile_once()
+        assert third.replanned == 1
+        assert fourth.replanned == 0
+        reanchored = [
+            task
+            for task in state.list_tasks("product-autonomy")
+            if task["graph_status"] in {"READY", "CLAIMED"}
+        ]
+        assert len(reanchored) == 1
+        assert reanchored[0]["plan_id"] == current_product["active_plan_id"]
+        assert reanchored[0]["supersedes_task_id"] == active[0]["task_id"]
+        claimed_reanchored = state.claim_task(
+            worker_id="reanchored-liveness-replanner"
+        )
+        assert claimed_reanchored is not None
+        assert claimed_reanchored["task_id"] == reanchored[0]["task_id"]
         failures = state.list_failures("product-autonomy")
         assert len(failures) == 1
         assert failures[0]["reason_code"] == "liveness_invariant_violation"

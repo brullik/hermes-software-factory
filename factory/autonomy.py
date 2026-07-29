@@ -1069,11 +1069,26 @@ class AutonomyStore:
     def has_bounded_progress_path(self, product_id: str) -> bool:
         with self.lock:
             row = self.connection.execute(
-                """SELECT 1 FROM tasks
-                   WHERE product_id=? AND (
-                       graph_status IN ('READY','CLAIMED')
-                       OR (graph_status='WAITING_TIME' AND available_at IS NOT NULL)
-                       OR (graph_status='WAITING_EXTERNAL' AND blocked_ref IS NOT NULL)
+                """SELECT 1
+                     FROM tasks
+                     JOIN products
+                       ON products.product_id=tasks.product_id
+                     JOIN plans
+                       ON plans.plan_id=tasks.plan_id
+                      AND plans.product_id=tasks.product_id
+                    WHERE tasks.product_id=?
+                      AND plans.status='ACTIVE'
+                      AND products.active_plan_id=tasks.plan_id
+                      AND (
+                       tasks.graph_status IN ('READY','CLAIMED')
+                       OR (
+                           tasks.graph_status='WAITING_TIME'
+                           AND tasks.available_at IS NOT NULL
+                       )
+                       OR (
+                           tasks.graph_status='WAITING_EXTERNAL'
+                           AND tasks.blocked_ref IS NOT NULL
+                       )
                    ) LIMIT 1""",
                 (product_id,),
             ).fetchone()
