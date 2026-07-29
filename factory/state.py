@@ -1514,7 +1514,7 @@ class StateStore:
         blocker_signature: str,
         blocker_ids: list[str],
     ) -> bool:
-        """Grant one bounded budget per unique diagnosed blocker."""
+        """Grant at most three bounded repair cycles per diagnosed hypothesis."""
 
         if not blocker_signature or not blocker_ids:
             raise ValueError("director root-cause replan contract is invalid")
@@ -1546,20 +1546,24 @@ class StateStore:
                    ORDER BY event_id""",
                 (product_id,),
             ).fetchall()
-            signatures: set[str] = set()
+            signature_attempts: dict[str, int] = {}
             for replan_row in replan_rows:
                 try:
                     payload = json.loads(str(replan_row["payload_json"] or "{}"))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
                 if isinstance(payload, dict) and payload.get("blocker_signature"):
-                    signatures.add(str(payload["blocker_signature"]))
+                    signature = str(payload["blocker_signature"])
+                    signature_attempts[signature] = (
+                        signature_attempts.get(signature, 0) + 1
+                    )
+            hypothesis_attempt = signature_attempts.get(blocker_signature, 0) + 1
             if (
                 row is None
                 or str(row["product_status"]) != "FAILED_SAFE"
                 or str(row["task_status"]) not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}
                 or exhausted is None
-                or blocker_signature in signatures
+                or hypothesis_attempt > 3
             ):
                 return False
             now = utc_now()
@@ -1584,8 +1588,9 @@ class StateStore:
                 {
                     "blocker_signature": blocker_signature,
                     "blocker_ids": blocker_ids,
-                    "replan_number": len(signatures) + 1,
-                    "max_replans_per_hypothesis": 1,
+                    "replan_number": len(replan_rows) + 1,
+                    "hypothesis_attempt": hypothesis_attempt,
+                    "max_replans_per_hypothesis": 3,
                     "next_action": "new_bounded_builder_budget",
                 },
             )

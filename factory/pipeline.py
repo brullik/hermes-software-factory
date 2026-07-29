@@ -603,6 +603,7 @@ class PipelineCoordinator:
         evidence_refs: list[str],
         attempt_id: str | None = None,
         director_replan: bool = False,
+        director_instruction: str | None = None,
     ) -> Path | None:
         """Start a bounded build-to-staging repair cycle from the current state."""
 
@@ -630,6 +631,10 @@ class PipelineCoordinator:
             evidence_refs,
             summary,
         )
+        if director_instruction:
+            required_fixes = list(
+                dict.fromkeys([director_instruction, *required_fixes])
+            )
         brief = {
             **artifact_metadata(
                 self.config,
@@ -691,6 +696,7 @@ class PipelineCoordinator:
                 "reason_code": reason_code,
                 "failed_task_id": failed_task["task_id"],
                 "director_replan": director_replan,
+                "director_reassessment": bool(director_instruction),
             },
         )
         return task_path
