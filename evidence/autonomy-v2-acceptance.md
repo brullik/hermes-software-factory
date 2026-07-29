@@ -6,7 +6,7 @@ Source requirements:
 
 - package: `hermes_autonomy_fix_pack.zip`
 - SHA-256: `43CB5DC4E5DE987A07D6E3725F1BE2E3B5F6BB0B3290B32920D62F1CF35359C3`
-- target release: `2.1.4`
+- target release: `2.1.5`
 
 ## Required acceptance matrix
 
@@ -24,7 +24,7 @@ Source requirements:
 | In-place retry routing exclusivity | yes | PASS | `test_AUT_P0_006_retryable_in_place_repair_is_not_double_routed` proves one causal path and failure resolution |
 | Architecture anti-pattern assertions | yes | PASS | `tests/test_autonomy_v2_e2e.py::test_AUT_ARCH_001_canonical_v2_path_excludes_legacy_heuristics` |
 | Legacy 2.0.19 migration | yes | PASS | deterministic fixture SHA-256 `B6E1FE06EBC4DA35376D0640249B13D1ED66D23353C3BAAC875A9518CBE88736`; AUT-P0-019 verifies URL-only repository binding in v4 and bounded workspace-collision recovery in v5 |
-| Full existing suite | yes | PASS | 194 tests; `.venv\Scripts\python.exe -m pytest -q --tb=short` |
+| Full existing suite | yes | PASS | 195 tests; `.venv\Scripts\python.exe -m pytest -q --tb=short` |
 | Static lint | yes | PASS | `.venv\Scripts\python.exe -m ruff check factory scripts tests pilot` |
 | Type checking | yes | PASS | 60 source files; `.venv\Scripts\python.exe -m mypy factory scripts pilot` |
 | Schema/package validation | yes | PASS | `.venv\Scripts\python.exe scripts\validate_package.py` |

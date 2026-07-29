@@ -33,7 +33,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _make_config(state_dir: Path) -> FactoryConfig:
-    raw = yaml.safe_load((ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8"))
+    raw = yaml.safe_load(
+        (ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8")
+    )
     raw["paths"]["policies"] = str(ROOT / "policies")
     raw["paths"]["schemas"] = str(ROOT / "schemas")
     raw["paths"]["prompts"] = str(ROOT / "prompts")
@@ -80,8 +82,12 @@ class FactoryRuntimeTests(unittest.TestCase):
             config.raw["intake"]["rate_limit_requests"] = 1
             state = StateStore(config.database_path, max_active_products=2)
             intake = IntakeService(config, state, ArtifactStore(config))
-            first = intake.submit(source="cli", owner_id="owner", idea="first", idempotency_key="one")
-            duplicate = intake.submit(source="cli", owner_id="owner", idea="different", idempotency_key="one")
+            first = intake.submit(
+                source="cli", owner_id="owner", idea="first", idempotency_key="one"
+            )
+            duplicate = intake.submit(
+                source="cli", owner_id="owner", idea="different", idempotency_key="one"
+            )
             self.assertFalse(duplicate.created)
             self.assertEqual(first.product_id, duplicate.product_id)
             with self.assertRaises(IntakeRateLimitError):
@@ -134,11 +140,17 @@ class FactoryRuntimeTests(unittest.TestCase):
                 idempotency_key="key",
             )
             workflow = WorkflowEngine(state)
-            self.assertEqual(workflow.transition("product", "CONTRACT_DRAFTED")["status"], "CONTRACT_DRAFTED")
+            self.assertEqual(
+                workflow.transition("product", "CONTRACT_DRAFTED")["status"], "CONTRACT_DRAFTED"
+            )
             self.assertEqual(workflow.pause("product")["status"], "PAUSED")
-            self.assertEqual(workflow.resume("product", "CONTRACT_DRAFTED")["status"], "CONTRACT_DRAFTED")
+            self.assertEqual(
+                workflow.resume("product", "CONTRACT_DRAFTED")["status"], "CONTRACT_DRAFTED"
+            )
             state.add_task(task_id="first", product_id="product", title="First")
-            state.add_task(task_id="second", product_id="product", title="Second", dependencies=["first"])
+            state.add_task(
+                task_id="second", product_id="product", title="Second", dependencies=["first"]
+            )
             claimed = state.claim_task(worker_id="worker")
             self.assertIsNotNone(claimed)
             assert claimed is not None
@@ -150,24 +162,30 @@ class FactoryRuntimeTests(unittest.TestCase):
             assert blocked_claim is not None
             self.assertEqual(blocked_claim["task_id"], "second")
             state.complete_task("second", "worker", "BLOCKED_EXTERNAL")
-            self.assertEqual(workflow.resume("product", "IMPLEMENTING")["status"], "CONTRACT_DRAFTED")
+            self.assertEqual(
+                workflow.resume("product", "IMPLEMENTING")["status"], "CONTRACT_DRAFTED"
+            )
             self.assertEqual(state.get_task("second")["status"], "PENDING")
             next_task = state.claim_task(worker_id="other")
             self.assertIsNotNone(next_task)
             assert next_task is not None
             self.assertEqual(next_task["task_id"], "second")
-            self.assertTrue(state.enqueue_outbox(
-                outbox_id="outbox-1",
-                idempotency_key="effect-1",
-                event_type="github_pr_create",
-                payload={"subject": "sha"},
-            ))
-            self.assertFalse(state.enqueue_outbox(
-                outbox_id="outbox-duplicate",
-                idempotency_key="effect-1",
-                event_type="github_pr_create",
-                payload={"subject": "sha"},
-            ))
+            self.assertTrue(
+                state.enqueue_outbox(
+                    outbox_id="outbox-1",
+                    idempotency_key="effect-1",
+                    event_type="github_pr_create",
+                    payload={"subject": "sha"},
+                )
+            )
+            self.assertFalse(
+                state.enqueue_outbox(
+                    outbox_id="outbox-duplicate",
+                    idempotency_key="effect-1",
+                    event_type="github_pr_create",
+                    payload={"subject": "sha"},
+                )
+            )
             outbox = state.claim_outbox("worker")
             self.assertEqual(len(outbox), 1)
             state.mark_outbox_done("outbox-1", "worker")
@@ -260,12 +278,14 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertIsNone(state.claim_task(worker_id="worker-c"))
             state.complete_task("first", "worker-a")
             self.assertEqual(state.claim_task(worker_id="worker-c")["task_id"], "third")
-            self.assertTrue(state.enqueue_outbox(
-                outbox_id="lease-outbox",
-                idempotency_key="lease-outbox-key",
-                event_type="test",
-                payload={},
-            ))
+            self.assertTrue(
+                state.enqueue_outbox(
+                    outbox_id="lease-outbox",
+                    idempotency_key="lease-outbox-key",
+                    event_type="test",
+                    payload={},
+                )
+            )
             claimed = state.claim_outbox("worker-a", lease_seconds=1)
             self.assertEqual(len(claimed), 1)
             state._connection.execute(
@@ -331,7 +351,9 @@ class FactoryRuntimeTests(unittest.TestCase):
                 self.assertIsNone(task["lease_until"])
             self.assertIsNone(state.claim_task(worker_id="other"))
             cancelled_events = [
-                event for event in state.events("product") if event["event_type"] == "task_cancelled"
+                event
+                for event in state.events("product")
+                if event["event_type"] == "task_cancelled"
             ]
             self.assertEqual(len(cancelled_events), 2)
             state.close()
@@ -359,7 +381,9 @@ class FactoryRuntimeTests(unittest.TestCase):
             artifacts = ArtifactStore(config)
             intake = IntakeService(config, state, artifacts)
             intake_result = intake.submit(source="cli", owner_id="owner", idea="A safe product")
-            intake_artifact = json.loads(Path(intake_result.artifact_path).read_text(encoding="utf-8"))
+            intake_artifact = json.loads(
+                Path(intake_result.artifact_path).read_text(encoding="utf-8")
+            )
             registered = SchemaRegistry(config, artifacts).register(
                 "idea-intake.schema.json", intake_artifact, filename="registered-intake.json"
             )
@@ -382,7 +406,9 @@ class FactoryRuntimeTests(unittest.TestCase):
                 allowed_paths=["main.py"],
                 forbidden_actions=["deploy"],
                 output_schema="attempt-result.schema.json",
-                evidence=[{"type": "test", "summary": "passed", "artifact_ref": "registered-intake.json"}],
+                evidence=[
+                    {"type": "test", "summary": "passed", "artifact_ref": "registered-intake.json"}
+                ],
             )
             selected_file = context.artifact["file_excerpts"][0]
             self.assertIn("[REDACTED]", selected_file["content"])
@@ -423,6 +449,8 @@ class FactoryRuntimeTests(unittest.TestCase):
                 prompt_digest=prompt.digest,
             )
             self.assertEqual(resumed, attempt)
+            self.assertFalse(attempt.resumed)
+            self.assertTrue(resumed.resumed)
             self.assertEqual(len(state.attempts_for_task("attempt-task")), 1)
             manager.finish(attempt, status="repair_required", reason_code="unit_test_failure")
             decision = manager.route(
@@ -530,16 +558,19 @@ class FactoryRuntimeTests(unittest.TestCase):
             artifact_store = ArtifactStore(config)
             artifact = json.loads(owner_action.read_text(encoding="utf-8"))
             self.assertEqual(artifact_store.validate("owner-action.schema.json", artifact), [])
-            self.assertEqual(OwnerActionService(config).create(
-                reason="missing_credential",
-                title="Connect credential",
-                why_blocked="External credential is absent",
-                single_action="Connect the credential through the secure VPS path",
-                safe_instruction=["Use the existing secure credential flow."],
-                unblock_probe="credential health probe",
-                unblock_expected="PASS",
-                independent_work_continues=["Keep local validation available"],
-            ), owner_action)
+            self.assertEqual(
+                OwnerActionService(config).create(
+                    reason="missing_credential",
+                    title="Connect credential",
+                    why_blocked="External credential is absent",
+                    single_action="Connect the credential through the secure VPS path",
+                    safe_instruction=["Use the existing secure credential flow."],
+                    unblock_probe="credential health probe",
+                    unblock_expected="PASS",
+                    independent_work_continues=["Keep local validation available"],
+                ),
+                owner_action,
+            )
 
             self.assertEqual(parse_command("/idea Build a safe tool").name, "idea")
             with self.assertRaises(GatewayCommandError):
@@ -571,7 +602,10 @@ class FactoryRuntimeTests(unittest.TestCase):
 
             backup = BackupAdapter().backup("/var/lib/hermes-factory")
             self.assertNotIn("RESTIC_PASSWORD", " ".join(backup.argv))
-            with patch.dict(os.environ, {"GH_TOKEN": ""}, clear=False), self.assertRaises(ExternalBlocker):
+            with (
+                patch.dict(os.environ, {"GH_TOKEN": ""}, clear=False),
+                self.assertRaises(ExternalBlocker),
+            ):
                 GitHubAdapter("brullik", "hermes-software-factory").require_authentication()
 
     def test_transactional_deployer_promotes_and_retains_previous_release(self) -> None:
@@ -585,14 +619,20 @@ class FactoryRuntimeTests(unittest.TestCase):
 
             deployer = TransactionalDeployer(
                 root,
-                health_probe=lambda current: (current / "VERSION").read_text(encoding="utf-8").strip() == "new",
+                health_probe=lambda current: (
+                    (current / "VERSION").read_text(encoding="utf-8").strip() == "new"
+                ),
             )
             result = deployer.promote("candidate-1", source)
 
             self.assertEqual(result.status, "PROMOTED")
-            self.assertEqual((root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "new")
             self.assertEqual(
-                (root / "backup-candidate-1-previous" / "VERSION").read_text(encoding="utf-8").strip(),
+                (root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "new"
+            )
+            self.assertEqual(
+                (root / "backup-candidate-1-previous" / "VERSION")
+                .read_text(encoding="utf-8")
+                .strip(),
                 "old",
             )
 
@@ -626,8 +666,12 @@ class FactoryRuntimeTests(unittest.TestCase):
             result = deployer.promote("candidate-2", source)
 
             self.assertEqual(result.status, "ROLLED_BACK")
-            self.assertEqual((root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "safe")
-            self.assertEqual((root / "failed-candidate-2" / "VERSION").read_text(encoding="utf-8").strip(), "bad")
+            self.assertEqual(
+                (root / "current" / "VERSION").read_text(encoding="utf-8").strip(), "safe"
+            )
+            self.assertEqual(
+                (root / "failed-candidate-2" / "VERSION").read_text(encoding="utf-8").strip(), "bad"
+            )
 
     def test_transactional_deployer_rejects_existing_backup_before_swap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -637,7 +681,9 @@ class FactoryRuntimeTests(unittest.TestCase):
             (root / "backup-candidate-3-previous").mkdir(parents=True)
 
             with self.assertRaises(DeploymentError):
-                TransactionalDeployer(root, health_probe=lambda _current: True).promote("candidate-3", source)
+                TransactionalDeployer(root, health_probe=lambda _current: True).promote(
+                    "candidate-3", source
+                )
 
     def test_github_cli_boundary_is_allowlisted_and_sha_guarded(self) -> None:
         calls: list[list[str]] = []
@@ -646,7 +692,9 @@ class FactoryRuntimeTests(unittest.TestCase):
             calls.append(argv)
             from subprocess import CompletedProcess
 
-            output = "{\"headRefOid\":\"" + "a" * 40 + "\"}" if "pr" in argv and "view" in argv else "ok"
+            output = (
+                '{"headRefOid":"' + "a" * 40 + '"}' if "pr" in argv and "view" in argv else "ok"
+            )
             return CompletedProcess(argv, 0, output, "")
 
         adapter = GitHubAdapter("brullik", "hermes-software-factory", runner=runner)
@@ -661,7 +709,10 @@ class FactoryRuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.merge_pull_request("17", expected_sha="bad")
         self.assertTrue(all("token-is-not-used-in-argv" not in str(call) for call in calls))
-        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(GitHubCommandError):
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False),
+            self.assertRaises(GitHubCommandError),
+        ):
             adapter.merge_pull_request("17", expected_sha="b" * 40)
 
     def test_github_release_lookup_requires_unique_head_and_reads_merge_sha(self) -> None:
@@ -715,7 +766,9 @@ class FactoryRuntimeTests(unittest.TestCase):
             )
             self.assertTrue(gate.approved)
             self.assertEqual(gate.approval_mode, "independent")
-            self.assertEqual(adapter.merge_pull_request_checked("17", expected_sha="a" * 40).status, "PASS")
+            self.assertEqual(
+                adapter.merge_pull_request_checked("17", expected_sha="a" * 40).status, "PASS"
+            )
 
         def blocked_runner(argv: list[str]):
             from subprocess import CompletedProcess
@@ -736,7 +789,10 @@ class FactoryRuntimeTests(unittest.TestCase):
             )
 
         blocked = GitHubAdapter("brullik", "hermes-software-factory", runner=blocked_runner)
-        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(GitHubCommandError):
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False),
+            self.assertRaises(GitHubCommandError),
+        ):
             blocked.merge_pull_request_checked("17", expected_sha="a" * 40)
 
     def test_single_owner_override_is_explicit_and_audited(self) -> None:
@@ -764,8 +820,9 @@ class FactoryRuntimeTests(unittest.TestCase):
 
         reason = "Owner explicitly enabled single-owner release for this VPS"
         normal = GitHubAdapter("brullik", "hermes-software-factory", runner=runner)
-        with patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False), self.assertRaises(
-            GitHubCommandError
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token-is-not-used-in-argv"}, clear=False),
+            self.assertRaises(GitHubCommandError),
         ):
             normal.merge_pull_request_checked(
                 "17",
