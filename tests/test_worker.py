@@ -795,6 +795,10 @@ class WorkerTests(unittest.TestCase):
             assert result is not None
             self.assertEqual(result.status, "repair_scheduled")
             self.assertEqual(result.reason_code, "schema_validation")
+            self.assertEqual(
+                result.detail,
+                "BacklogPlan edges[0].to endpoint is missing",
+            )
             durable = state.get_task(task_id)
             self.assertIsNotNone(durable)
             assert durable is not None
@@ -824,8 +828,121 @@ class WorkerTests(unittest.TestCase):
                 diagnostic["parser_error_safe_message"],
                 "BacklogPlan edges[0].to endpoint is missing",
             )
+            self.assertIn(
+                f"evidence/transport-diagnostic-{result.attempt_id}.json",
+                repair["evidence_refs"],
+            )
+            envelope = json.loads(
+                next(config.evidence_dir.glob("failure-envelope-*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                envelope["safe_message"],
+                "BacklogPlan edges[0].to endpoint is missing",
+            )
+            self.assertEqual(
+                envelope["actual"]["validator_diagnostic"],
+                "BacklogPlan edges[0].to endpoint is missing",
+            )
+            self.assertEqual(
+                envelope["failed_gate_ids"],
+                ["BACKLOG_PLAN_SEMANTIC_VALIDATION"],
+            )
             self.assertEqual(len(state.list_tasks(product_id)), 1)
             self.assertFalse((config.evidence_dir / "task-T-SEMANTIC-CHILD.json").exists())
+            state.close()
+
+    def test_output_schema_coordinate_reaches_repair_and_failure_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            product_id = "P-SCHEMA-PLAN"
+            task_id = "T-SCHEMA-REPLANNER"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Repair an output-schema coordinate",
+                idempotency_key="schema-plan-product",
+            )
+            task_contract = replanner_task_contract(
+                config,
+                product_id,
+                task_id,
+            )
+            contract_path = artifacts.write(
+                "task-contract-v2.schema.json",
+                task_contract,
+                filename=f"task-{task_id}.json",
+            )
+            state.add_task(
+                task_id=task_id,
+                product_id=product_id,
+                title=str(task_contract["title"]),
+                role="replanner",
+                output_schema="backlog-plan-v2.schema.json",
+                contract_ref=f"evidence/{contract_path.name}",
+                conflict_keys=[f"{product_id}:planning"],
+                priority=100,
+                capability_profile="planning_readonly",
+                idempotency_key=str(task_contract["idempotency_key"]),
+                required_capabilities=[
+                    str(value) for value in task_contract["required_capabilities"]
+                ],
+            )
+            plan = backlog_plan_with_missing_edge(
+                config,
+                product_id,
+                task_id,
+            )
+            del plan["nodes"][0]["task_contract"]["forbidden_paths"]
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(plan)),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            expected = (
+                "Invalid backlog-plan-v2.schema.json: "
+                "'forbidden_paths' is a required property"
+            )
+            self.assertEqual(result.status, "repair_scheduled")
+            self.assertEqual(result.reason_code, "schema_validation")
+            self.assertEqual(result.detail, expected)
+            repair = json.loads(
+                next(config.evidence_dir.glob(f"repair-brief-{task_id}-*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(repair["expected_vs_actual"]["actual"], expected)
+            self.assertIn(expected, repair["previous_attempt_summary"])
+            envelope = json.loads(
+                next(config.evidence_dir.glob("failure-envelope-*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(envelope["safe_message"], expected)
+            self.assertEqual(envelope["actual"]["validator_diagnostic"], expected)
+            self.assertEqual(envelope["failed_gate_ids"], ["OUTPUT_SCHEMA_VALIDATION"])
+            diagnostic_ref = f"evidence/transport-diagnostic-{result.attempt_id}.json"
+            self.assertIn(diagnostic_ref, repair["evidence_refs"])
+            attempt = json.loads(Path(str(result.artifact_ref)).read_text(encoding="utf-8"))
+            self.assertIn(diagnostic_ref, attempt["evidence_refs"])
             state.close()
 
     def test_interrupted_attempt_replays_immutable_repair_without_provider_call(

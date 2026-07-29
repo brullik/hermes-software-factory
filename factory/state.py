@@ -2061,11 +2061,27 @@ class StateStore:
             )
             return True
 
-    def claim_outbox(self, worker_id: str, limit: int = 10, lease_seconds: int = 300) -> list[dict[str, Any]]:
+    def claim_outbox(
+        self,
+        worker_id: str,
+        limit: int = 10,
+        lease_seconds: int = 300,
+        *,
+        event_types: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
         if limit < 1:
             return []
         if lease_seconds < 1:
             raise ValueError("lease_seconds must be positive")
+        normalized_event_types = tuple(
+            dict.fromkeys(
+                value.strip()
+                for value in event_types or ()
+                if isinstance(value, str) and value.strip()
+            )
+        )
+        if event_types is not None and not normalized_event_types:
+            return []
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2075,9 +2091,19 @@ class StateStore:
                     "WHERE status='CLAIMED' AND lease_until IS NOT NULL AND lease_until < ?",
                     (now,),
                 )
-                rows = self._connection.execute(
-                    "SELECT * FROM outbox WHERE status='PENDING' ORDER BY created_at LIMIT ?", (limit,)
-                ).fetchall()
+                if normalized_event_types:
+                    placeholders = ",".join("?" for _ in normalized_event_types)
+                    rows = self._connection.execute(
+                        "SELECT * FROM outbox WHERE status='PENDING' "
+                        f"AND event_type IN ({placeholders}) ORDER BY created_at LIMIT ?",
+                        (*normalized_event_types, limit),
+                    ).fetchall()
+                else:
+                    rows = self._connection.execute(
+                        "SELECT * FROM outbox WHERE status='PENDING' "
+                        "ORDER BY created_at LIMIT ?",
+                        (limit,),
+                    ).fetchall()
                 lease_until = utc_now_from_seconds(lease_seconds)
                 result = []
                 for row in rows:

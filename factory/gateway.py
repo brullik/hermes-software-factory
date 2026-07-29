@@ -191,7 +191,12 @@ class TelegramGateway:
         delivered = 0
         recipients = sorted(self.config.allowed_telegram_user_ids)
         for _ in range(max(0, limit)):
-            claimed = self.state.claim_outbox(self.outbox_worker_id, limit=1, lease_seconds=60)
+            claimed = self.state.claim_outbox(
+                self.outbox_worker_id,
+                limit=1,
+                lease_seconds=60,
+                event_types=("telegram.owner_notification",),
+            )
             if not claimed:
                 break
             item = claimed[0]

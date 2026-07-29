@@ -1769,6 +1769,7 @@ class AgentWorker:
             else "Provider did not return a schema-valid result."
         )
         summary, _ = redact_text(raw_summary)
+        summary, _ = redact_secret_candidates(summary)
         prior_brief = (
             self._validated_repair_brief_payload(
                 spec.task_contract,
@@ -1933,12 +1934,29 @@ class AgentWorker:
         reason_code: str,
         gate_results: list[dict[str, Any]] | None = None,
         changed_files: list[dict[str, str]] | None = None,
+        diagnostic_ref: str | None = None,
     ) -> WorkerResult | None:
         if route_action not in {"repair_same_tier", "escalate"}:
             return None
         target_tier = tier if route_action == "repair_same_tier" else next_tier(tier)
         if target_tier is None:
             return None
+        output_status = str(output.get("status")) if output else "no_usable_provider_result"
+        raw_detail = str(output.get("summary", "")) if output else reason_code
+        safe_detail, _ = redact_text(raw_detail)
+        safe_detail, _ = redact_secret_candidates(safe_detail)
+        safe_detail = (safe_detail.strip() or reason_code)[:4000]
+        blocker_ids, required_fixes = repair_requirements(
+            output=output,
+            reason_code=reason_code,
+            detail=safe_detail,
+            failed_gate_ids=(
+                str(item["gate_id"])
+                for item in gate_results or []
+                if item.get("gate_id") and item.get("status") not in {"PASS", "NOT_RUN"}
+            ),
+        )
+        diagnostic_refs = [diagnostic_ref] if diagnostic_ref else []
         repair_path = self._write_repair_brief(
             spec,
             attempt,
@@ -1947,13 +1965,17 @@ class AgentWorker:
             context_path=context_path,
             output_path=output_path,
             output=output,
+            additional_evidence_refs=diagnostic_refs,
         )
         result_path = self._attempt_artifact(
             spec,
             attempt,
             selection,
             status="repair_required",
-            summary=f"Targeted repair scheduled at {target_tier.value}; routing={route_action}.",
+            summary=(
+                f"{safe_detail} Targeted repair scheduled at {target_tier.value}; "
+                f"routing={route_action}."
+            )[:4000],
             prompt_digest=attempt.prompt_digest,
             subject_sha=spec.subject_sha,
             command_result="pass" if output_path else "fail",
@@ -1962,7 +1984,10 @@ class AgentWorker:
             reason_code=reason_code,
             gate_results=gate_results,
             changed_files=changed_files,
-            extra_evidence_refs=[f"evidence/{repair_path.name}"],
+            extra_evidence_refs=[
+                f"evidence/{repair_path.name}",
+                *diagnostic_refs,
+            ],
         )
         return WorkerResult(
             str(spec.task_contract["task_id"]),
@@ -1973,6 +1998,22 @@ class AgentWorker:
             target_tier,
             "repair",
             f"evidence/{repair_path.name}",
+            detail=safe_detail,
+            failure_data=FailureData(
+                failure_class="semantic",
+                reason_code=reason_code,
+                safe_message=safe_detail,
+                evidence_ref=f"evidence/{result_path.name}",
+                attempt_id=attempt.attempt_id,
+                expected={"acceptance": spec.task_contract["acceptance"]},
+                actual={
+                    "reported_status": output_status,
+                    "validator_diagnostic": safe_detail,
+                    "required_fixes": required_fixes,
+                },
+                failed_gate_ids=tuple(blocker_ids),
+                retryable=True,
+            ),
         )
 
     def _schedule_transient_retry(
@@ -3086,6 +3127,7 @@ class AgentWorker:
                     output_path=repair_output_path,
                     output=repair_diagnostic_output,
                     reason_code=reason,
+                    diagnostic_ref=transport_diagnostic_ref,
                 )
                 if scheduled is not None:
                     return scheduled
@@ -3247,7 +3289,8 @@ class AgentWorker:
             safe_detail, _ = redact_text(
                 result.detail or f"{reason_code} while executing task {task_id}"
             )
-            failure = FailureData(
+            safe_detail, _ = redact_secret_candidates(safe_detail)
+            failure = result.failure_data or FailureData(
                 failure_class=(
                     "transient" if result.next_attempt_kind == "transient_retry" else "semantic"
                 ),
