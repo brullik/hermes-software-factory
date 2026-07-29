@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.19 - 2026-07-29
+
+- Changed durable task claiming to product-level least-recently-served rotation
+  before task priority, preventing high-priority Replanner loops in two older
+  products from starving a lower-priority ready task in an independent product.
+- Preserved task priority and critical-path ordering inside each selected
+  product and added a regression where an unclaimed product runs before a
+  priority-1000 task from the product that just consumed the worker.
+
 ## 2.1.18 - 2026-07-29
 
 - Preserve the final sanitized validator coordinate, structured required fixes,
