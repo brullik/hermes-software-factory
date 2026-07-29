@@ -15,7 +15,6 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/hermes-factory/venv/bin/python -m factory.worker --worker-id hermes-worker-2
 Restart=on-failure
 RestartSec=10
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

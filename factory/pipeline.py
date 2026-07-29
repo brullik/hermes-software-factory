@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .artifacts import ArtifactStore, artifact_metadata
+from .autonomy import CAPABILITY_PROFILES
 from .common import new_id, sha256_text
 from .config import FactoryConfig
 from .registry import SchemaRegistry
@@ -562,6 +563,26 @@ class PipelineCoordinator:
         contract = json.loads(path.read_text(encoding="utf-8"))
         definition = self._definition(product_id, stage)
         task_id = str(contract["task_id"])
+        capability_profile = (
+            "planning_readonly"
+            if definition.role
+            in {
+                "product-director",
+                "product-analyst",
+                "solution-architect",
+                "task-specifier",
+            }
+            else "reviewer_readonly"
+            if definition.role
+            in {"independent-reviewer", "security-reviewer"}
+            else "release_staging"
+            if stage == "release-staging"
+            else "release_production"
+            if stage == "release-production"
+            else "test_workspace"
+            if definition.role in {"test-engineer", "product-tester"}
+            else "builder_workspace"
+        )
         return {
             "task_id": task_id,
             "title": definition.title,
@@ -579,27 +600,10 @@ class PipelineCoordinator:
                 if available_at is not None and available_at > "0000"
                 else "DRAFT"
             ),
-            "capability_profile": (
-                "planning_readonly"
-                if definition.role
-                in {
-                    "product-director",
-                    "product-analyst",
-                    "solution-architect",
-                    "task-specifier",
-                }
-                else "reviewer_readonly"
-                if definition.role
-                in {"independent-reviewer", "security-reviewer"}
-                else "release_staging"
-                if stage == "release-staging"
-                else "release_production"
-                if stage == "release-production"
-                else "test_workspace"
-                if definition.role in {"test-engineer", "product-tester"}
-                else "builder_workspace"
+            "capability_profile": capability_profile,
+            "required_capabilities": list(
+                CAPABILITY_PROFILES[capability_profile]
             ),
-            "required_capabilities": [],
             "mandatory": True,
         }
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from test_worker import make_config, selected_registry
 
 from factory.artifacts import ArtifactStore
+from factory.autonomy import CAPABILITY_PROFILES
 from factory.common import sha256_text
 from factory.intake import IntakeService
 from factory.pipeline import PipelineCoordinator
@@ -150,12 +151,21 @@ class PipelineTests(unittest.TestCase):
                     "reviewer_readonly",
                 ),
                 (
-                    "release",
+                    "release-production",
                     "T-PIPEREL001",
                     "release-operator",
                     "release_production",
                 ),
             )
+            for capability in CAPABILITY_PROFILES["release_production"]:
+                state.grant_capability(
+                    product_id=product_id,
+                    task_id=None,
+                    capability=capability,
+                    provider="fake-controller",
+                    scope={"repository": "brullik/deterministic-pipeline"},
+                    status="AVAILABLE",
+                )
 
             def contract(
                 node_id: str,
@@ -193,7 +203,9 @@ class PipelineTests(unittest.TestCase):
                             "mandatory": True,
                         }
                     ],
-                    "required_capabilities": [],
+                    "required_capabilities": list(
+                        CAPABILITY_PROFILES[profile]
+                    ),
                     "capability_profile": profile,
                     "allowed_paths": ["artifacts/**"],
                     "forbidden_paths": ["secrets/**"],
@@ -258,7 +270,7 @@ class PipelineTests(unittest.TestCase):
                     for source, target in (
                         ("build", "test"),
                         ("test", "security"),
-                        ("security", "release"),
+                        ("security", "release-production"),
                     )
                 ],
                 "completion_criteria": [

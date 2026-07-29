@@ -34,3 +34,9 @@ restic backup "${BACKUP_PATHS[@]}" \
 
 restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
 restic check
+restic snapshots --latest 1 --tag hermes-factory --json \
+  > "$TMP_DIR/latest-snapshot.json"
+/opt/hermes-factory/venv/bin/python \
+  /opt/hermes-factory/current/scripts/backup/write-backup-proof.py \
+  --snapshots-json "$TMP_DIR/latest-snapshot.json" \
+  --proof "$STATE_DIR/evidence/backup-latest.json"

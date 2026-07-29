@@ -15,7 +15,6 @@ RuntimeDirectory=hermes-factory
 ExecStart=/opt/hermes-factory/venv/bin/python -m factory.controller
 Restart=on-failure
 RestartSec=10
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

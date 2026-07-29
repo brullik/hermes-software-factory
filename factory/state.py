@@ -382,12 +382,33 @@ class StateStore:
         graph_status: str | None = None,
         critical_path_rank: int = 0,
     ) -> None:
+        from .autonomy import (
+            CAPABILITY_PROFILES,
+            minimum_capability_profile,
+            validate_task_capability_contract,
+        )
+
         if priority < 0:
             raise ValueError("priority cannot be negative")
         if cycle < 0:
             raise ValueError("cycle cannot be negative")
         if task_revision < 1:
             raise ValueError("task_revision must be positive")
+        selected_profile = capability_profile or minimum_capability_profile(
+            role,
+            stage_key,
+        )
+        selected_required = (
+            list(CAPABILITY_PROFILES[selected_profile])
+            if required_capabilities is None
+            else [str(value) for value in required_capabilities]
+        )
+        validate_task_capability_contract(
+            role=role,
+            stage_key=stage_key,
+            capability_profile=selected_profile,
+            required_capabilities=selected_required,
+        )
         now = utc_now()
         dependency_values = dependencies or []
         inferred_graph_status = (
@@ -484,19 +505,6 @@ class StateStore:
                 source_task_id
                 or (str(dependency_values[0]) if dependency_values else task_id)
             )
-            selected_profile = capability_profile or (
-                "planning_readonly"
-                if role
-                in {
-                    "product-director",
-                    "product-analyst",
-                    "solution-architect",
-                    "task-specifier",
-                }
-                else "reviewer_readonly"
-                if role in {"independent-reviewer", "security-reviewer"}
-                else "builder_workspace"
-            )
             self._connection.execute(
                 """INSERT INTO tasks
                 (task_id, product_id, title, role, output_schema, contract_ref, stage_key, cycle,
@@ -541,7 +549,7 @@ class StateStore:
                     idempotency_key or sha256_text(f"task:{task_id}:{task_revision}"),
                     supersedes_task_id,
                     canonical_status,
-                    json.dumps(required_capabilities or []),
+                    json.dumps(selected_required),
                     int(mandatory),
                     critical_path_rank,
                 ),
@@ -2096,6 +2104,15 @@ class StateStore:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT * FROM outbox ORDER BY created_at, outbox_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def open_capability_blocks(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT * FROM capability_blocks
+                    WHERE status='OPEN'
+                    ORDER BY created_at, block_id"""
             ).fetchall()
             return [dict(row) for row in rows]
 

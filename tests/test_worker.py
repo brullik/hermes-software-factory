@@ -16,6 +16,7 @@ import yaml
 
 from factory.artifacts import ArtifactStore, artifact_metadata
 from factory.attempts import IdenticalAttemptError
+from factory.autonomy import CAPABILITY_PROFILES
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
 from factory.intake import IntakeService
@@ -421,6 +422,15 @@ def staging_release_task(
         "INTEGRATING",
     ):
         state.transition_product(product_id, status)
+    for capability in CAPABILITY_PROFILES["release_staging"]:
+        state.grant_capability(
+            product_id=product_id,
+            task_id=None,
+            capability=capability,
+            provider="fake-controller",
+            scope={"repository": "brullik/hermes-software-factory"},
+            status="AVAILABLE",
+        )
     return product_id, PipelineCoordinator(config, state, artifacts).create_task(
         product_id, "release-staging"
     )
@@ -1995,10 +2005,13 @@ class WorkerTests(unittest.TestCase):
                 state.list_failures(intake_result.product_id)[0]["failure_class"],
                 "controller",
             )
-            self.assertEqual(
-                list(config.evidence_dir.glob("owner-action-*.json")),
-                [],
+            owner_actions = list(config.evidence_dir.glob("owner-action-*.json"))
+            self.assertEqual(len(owner_actions), 1)
+            owner_action = json.loads(
+                owner_actions[0].read_text(encoding="utf-8")
             )
+            self.assertEqual(owner_action["reason"], "missing_credential")
+            self.assertNotIn("model_route_unapproved", json.dumps(owner_action))
             state.close()
 
     def test_workspace_scope_violation_is_failed_safe(self) -> None:

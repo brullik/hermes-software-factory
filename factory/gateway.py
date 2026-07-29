@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import ArtifactStore
+from .capabilities import CapabilityBroker
 from .config import FactoryConfig, load_config
 from .gateway_commands import GatewayCommandError, parse_command
 from .intake import IntakeService
@@ -60,6 +61,7 @@ class TelegramGateway:
         api: TelegramApi,
         *,
         offset_path: Path | None = None,
+        capability_broker: CapabilityBroker | None = None,
     ) -> None:
         self.config = config
         self.state = state
@@ -68,6 +70,7 @@ class TelegramGateway:
         self.offset_path = offset_path or (config.state_dir / "telegram-offset")
         self.offset_path.parent.mkdir(parents=True, exist_ok=True)
         self.outbox_worker_id = "telegram-gateway"
+        self.capability_broker = capability_broker
 
     def _read_offset(self) -> int | None:
         if not self.offset_path.is_file():
@@ -107,10 +110,19 @@ class TelegramGateway:
         return "\n".join(lines)
 
     def _owner_actions_text(self) -> str:
-        actions = sorted(self.config.evidence_dir.glob("owner-action-*.json"))
+        actions = self.state.open_capability_blocks()
         if not actions:
             return "Ожидающих OWNER_ACTION нет."
-        return "OWNER_ACTION:\n" + "\n".join(f"- {path.name}" for path in actions[:10])
+        names = list(
+            dict.fromkeys(
+                Path(str(item["owner_action_ref"])).name
+                for item in actions
+            )
+        )
+        return "OWNER_ACTION:\n" + "\n".join(
+            f"- {name}"
+            for name in names[:10]
+        )
 
     @staticmethod
     def _product_id(argument: str | None) -> str:
@@ -129,7 +141,12 @@ class TelegramGateway:
             return self._owner_actions_text()
         if command == "idea":
             assert argument is not None
-            result = IntakeService(self.config, self.state, self.artifacts).submit(
+            result = IntakeService(
+                self.config,
+                self.state,
+                self.artifacts,
+                capability_broker=self.capability_broker,
+            ).submit(
                 source="telegram",
                 owner_id=str(owner_id),
                 goal_text=argument,

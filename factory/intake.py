@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .artifacts import ArtifactStore
+from .capabilities import CapabilityBroker
 from .common import new_id, redact_text, sha256_text, slugify, utc_now
 from .config import FactoryConfig
 from .state import StateStore
@@ -67,10 +68,21 @@ class IntakeResult:
 
 
 class IntakeService:
-    def __init__(self, config: FactoryConfig, state: StateStore, artifacts: ArtifactStore) -> None:
+    def __init__(
+        self,
+        config: FactoryConfig,
+        state: StateStore,
+        artifacts: ArtifactStore,
+        *,
+        capability_broker: CapabilityBroker | None = None,
+    ) -> None:
         self.config = config
         self.state = state
         self.artifacts = artifacts
+        self.capability_broker = capability_broker or CapabilityBroker(
+            config,
+            state,
+        )
 
     def submit(
         self,
@@ -253,4 +265,5 @@ class IntakeService:
             schema_name, artifact, filename=f"intake-{product_id}.json"
         )
         ensure_initial_product_task(self.config, self.state, self.artifacts, product_id)
+        self.capability_broker.preflight_product(product_id)
         return IntakeResult(product_id, str(path), True, correlation_id)

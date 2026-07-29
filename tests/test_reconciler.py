@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from factory.artifacts import ArtifactStore
+from factory.autonomy import CAPABILITY_PROFILES
 from factory.common import sha256_text
 from factory.config import FactoryConfig
 from factory.pipeline import PipelineCoordinator
@@ -254,6 +255,15 @@ def test_repair_cycle_resumes_from_staging_without_restarting_planning() -> None
             idea="https://github.com/brullik/bybit-grid-research",
             idempotency_key="staging-resume-key",
         )
+        for capability in CAPABILITY_PROFILES["release_staging"]:
+            state.grant_capability(
+                product_id=product_id,
+                task_id=None,
+                capability=capability,
+                provider="fake-controller",
+                scope={"repository": "brullik/bybit-grid-research"},
+                status="AVAILABLE",
+            )
         product_at_staging(state, product_id)
         write_pm_task(config, product_id)
         pipeline = PipelineCoordinator(config, state, ArtifactStore(config))

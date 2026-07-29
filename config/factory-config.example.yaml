@@ -6,6 +6,8 @@ controller:
   max_active_products: 2
   max_active_workers: 2
   reconcile_interval_seconds: 2
+  capability_check_ttl_seconds: 300
+  capability_retry_seconds: 15
   max_repair_cycles: 3
   github_check_timeout_seconds: 300
   github_check_poll_seconds: 5
@@ -48,6 +50,8 @@ deployment:
   current_vps_high_risk_production: false
   staging_root: /var/lib/hermes-factory/staging
   production_helper: /usr/local/sbin/hermes-factory-release-submit
+  rollback_helper: /opt/hermes-factory/bin/factory-rollback
+  health_probe_url: http://127.0.0.1:8787/healthz
   production_target:
     mode: current_vps
     host: current-vps.example.invalid
@@ -56,6 +60,8 @@ deployment:
 backup:
   tool: restic
   offsite_configured: false
+  proof_path: /var/lib/hermes-factory/evidence/backup-latest.json
+  max_proof_age_seconds: 129600
 models:
   registry: /etc/hermes-factory/model-registry.yaml
   paid_api_fallback: false
