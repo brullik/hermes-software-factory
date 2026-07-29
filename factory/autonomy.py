@@ -7,6 +7,7 @@ import re
 import sqlite3
 import traceback
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from scripts.prompt_compiler import (
@@ -56,6 +57,7 @@ PLANNING_ONLY_ROLES = {
     "replanner",
     "incident-recovery",
 }
+IMMUTABLE_SCHEMA_ROOT = Path(__file__).resolve().parent.parent / "schemas"
 
 CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
     "planning_readonly": (
@@ -562,6 +564,18 @@ class AutonomyStore:
                 )
             task_ids.add(task_id)
             execution_roles.add(str(contract.get("role", "")))
+            output_schema = str(contract.get("output_schema", ""))
+            if (
+                not output_schema
+                or Path(output_schema).name != output_schema
+                or not output_schema.endswith(".schema.json")
+                or not (IMMUTABLE_SCHEMA_ROOT / output_schema).is_file()
+            ):
+                raise ValueError(
+                    "BacklogPlan "
+                    f"nodes[{node_index}].task_contract.output_schema "
+                    f"is not registered: {output_schema or '<missing>'}"
+                )
             idempotency_key = str(contract.get("idempotency_key", ""))
             if idempotency_key in idempotency_keys:
                 raise ValueError(

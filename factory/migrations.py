@@ -674,6 +674,88 @@ def _migration_007_causal_leaf_recovery(
         )
 
 
+def _migration_008_invalid_output_schema_replan(
+    connection: sqlite3.Connection,
+) -> None:
+    """Reopen plan-schema controller faults as semantic replanning work."""
+
+    rows = connection.execute(
+        """
+        SELECT failures.failure_id,
+               failures.product_id,
+               failures.task_id
+          FROM failures
+          JOIN tasks
+            ON tasks.task_id=failures.task_id
+           AND tasks.product_id=failures.product_id
+         WHERE failures.reason_code=
+                   'controller_exception_file_not_found_error'
+           AND failures.failure_class='controller'
+           AND tasks.output_schema IS NOT NULL
+           AND tasks.output_schema LIKE '%.schema.json'
+           AND REPLACE(failures.safe_message, '\', '/')
+               LIKE '%/schemas/' || tasks.output_schema
+           AND tasks.graph_status NOT IN
+               ('ACCEPTED','CANCELLED','SUPERSEDED')
+        ORDER BY failures.first_seen_at, failures.failure_id
+        """
+    ).fetchall()
+    if not rows:
+        return
+    now = utc_now()
+    failure_ids = sorted({str(row[0]) for row in rows})
+    product_ids = sorted({str(row[1]) for row in rows})
+    placeholders = ",".join("?" for _ in failure_ids)
+    connection.execute(
+        f"""
+        UPDATE failures
+           SET status='OPEN', retryable=0,
+               owner_action_eligible=0, last_seen_at=?
+         WHERE failure_id IN ({placeholders})
+        """,
+        (now, *failure_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE tasks
+           SET status='DONE', graph_status='SUPERSEDED',
+               lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+               heartbeat_at=NULL, available_at=NULL,
+               blocked_reason='invalid_output_schema_replan',
+               blocked_ref=failure_id, updated_at=?
+         WHERE failure_id IN ({placeholders})
+           AND role='incident-recovery'
+           AND graph_status NOT IN
+               ('ACCEPTED','CANCELLED','SUPERSEDED')
+        """,
+        (now, *failure_ids),
+    )
+    for product_id in product_ids:
+        product_failures = sorted(
+            str(row[0]) for row in rows if str(row[1]) == product_id
+        )
+        connection.execute(
+            """
+            INSERT INTO events
+                (product_id, task_id, event_type, payload_json, created_at)
+            VALUES (?, ?, 'invalid_output_schema_replan_required', ?, ?)
+            """,
+            (
+                product_id,
+                str(next(row[2] for row in rows if str(row[1]) == product_id)),
+                json.dumps(
+                    {
+                        "failure_ids": product_failures,
+                        "reason_code": "invalid_output_schema",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -822,6 +904,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         7,
         "causal-leaf-recovery-deduplication",
         _migration_007_causal_leaf_recovery,
+    ),
+    (
+        8,
+        "invalid-output-schema-replan",
+        _migration_008_invalid_output_schema_replan,
     ),
 )
 

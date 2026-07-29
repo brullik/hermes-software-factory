@@ -731,6 +731,46 @@ def test_AUT_P0_006_only_causal_leaf_failure_creates_recovery_work(
         state.close()
 
 
+def test_AUT_P0_006_missing_plan_output_schema_routes_replanner(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    missing_schema = "recovery-test-validation-v2.schema.json"
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET output_schema=? WHERE task_id='T-FAILNODEA'",
+                (missing_schema,),
+            )
+            state._connection.execute(
+                """
+                UPDATE failures
+                   SET failure_class='controller',
+                       reason_code='controller_exception_file_not_found_error',
+                       safe_message=?
+                 WHERE failure_id=?
+                """,
+                (
+                    f"/opt/hermes-factory/current/schemas/{missing_schema}",
+                    failure_id,
+                ),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
+        assert routed["output_schema"] == "backlog-plan-v2.schema.json"
+        assert routed["graph_status"] == "READY"
+        assert state._connection.execute(
+            "SELECT COUNT(*) FROM controller_incidents WHERE product_id=?",
+            ("product-autonomy",),
+        ).fetchone()[0] == 0
+    finally:
+        state.close()
+
+
 def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
     tmp_path: Path,
 ) -> None:
@@ -1372,7 +1412,7 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
         assert database.with_suffix(
             database.suffix + ".pre-autonomy-v2.bak"
         ).is_file()
@@ -1611,7 +1651,7 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
     finally:
         restarted.close()
 
@@ -1812,7 +1852,79 @@ def test_AUT_P0_019_causal_leaf_migration_supersedes_duplicate_recovery(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    finally:
+        restarted.close()
+
+
+def test_AUT_P0_019_invalid_output_schema_migration_reopens_replan(
+    tmp_path: Path,
+) -> None:
+    config, state, _, failure_id, root_id = failed_two_node_graph(tmp_path)
+    missing_schema = "recovery-test-validation-v2.schema.json"
+    recovery_id = "T-HISTORICAL-SCHEMA-INCIDENT"
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET output_schema=? WHERE task_id='T-FAILNODEA'",
+                (missing_schema,),
+            )
+            state._connection.execute(
+                """
+                UPDATE failures
+                   SET failure_class='controller',
+                       reason_code='controller_exception_file_not_found_error',
+                       safe_message=?, status='ROUTED'
+                 WHERE failure_id=?
+                """,
+                (
+                    f"/opt/hermes-factory/current/schemas/{missing_schema}",
+                    failure_id,
+                ),
+            )
+        state.add_task(
+            task_id=recovery_id,
+            product_id="product-autonomy",
+            title="Historical incident recovery for an invalid plan schema",
+            role="incident-recovery",
+            output_schema="incident-result.schema.json",
+            root_task_id=root_id,
+            parent_task_id="T-FAILNODEA",
+            source_task_id="T-FAILNODEA",
+            failure_id=failure_id,
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "DELETE FROM schema_migrations WHERE version=8"
+            )
+    finally:
+        state.close()
+
+    restarted = StateStore(config.database_path)
+    try:
+        failure = next(
+            item
+            for item in restarted.list_failures("product-autonomy")
+            if item["failure_id"] == failure_id
+        )
+        recovery = restarted.get_task(recovery_id)
+        assert failure["status"] == "OPEN"
+        assert failure["owner_action_eligible"] == 0
+        assert recovery is not None
+        assert recovery["graph_status"] == "SUPERSEDED"
+        assert recovery["blocked_reason"] == "invalid_output_schema_replan"
+        assert any(
+            event["event_type"] == "invalid_output_schema_replan_required"
+            for event in restarted.events("product-autonomy")
+        )
+        routed_id = FailureRouter(
+            config,
+            restarted,
+            ArtifactStore(config),
+        ).route(failure_id)
+        routed = restarted.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
     finally:
         restarted.close()
 
@@ -1889,7 +2001,7 @@ def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
         ]
     finally:
         verified.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 7]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(
@@ -2022,6 +2134,39 @@ def test_AUT_P0_019_plan_candidate_rejects_planning_only_graph(
             match="BacklogPlan nodes must include a non-planning execution task",
         ):
             state.validate_plan_candidate(plan)
+    finally:
+        state.close()
+
+
+def test_AUT_P0_018_unregistered_output_schema_is_rejected(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-UNREGISTERED-SCHEMA",
+            root_task_id="T-UNREGISTERED-SCHEMA-ROOT",
+            node_specs=[("A", "T-UNREGISTERED-SCHEMA", "accept-schema")],
+            edges=[],
+        )
+        plan["nodes"][0]["task_contract"]["output_schema"] = (
+            "recovery-test-validation-v2.schema.json"
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"nodes\[0\]\.task_contract\.output_schema "
+                r"is not registered: recovery-test-validation-v2\.schema\.json"
+            ),
+        ):
+            state.validate_plan_candidate(plan)
+
+        assert state.get_task("T-UNREGISTERED-SCHEMA") is None
     finally:
         state.close()
 

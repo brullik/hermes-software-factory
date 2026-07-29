@@ -222,6 +222,29 @@ class FailureRouter:
         ).fetchone()
         return str(row[0]) if row is not None and row[0] else None
 
+    def _invalid_plan_output_schema(
+        self,
+        *,
+        failure: dict[str, Any],
+        failed: dict[str, Any],
+    ) -> bool:
+        if str(failure.get("reason_code") or "") != (
+            "controller_exception_file_not_found_error"
+        ):
+            return False
+        output_schema = str(failed.get("output_schema") or "")
+        if (
+            not output_schema
+            or Path(output_schema).name != output_schema
+            or not output_schema.endswith(".schema.json")
+        ):
+            return False
+        safe_path = str(failure.get("safe_message") or "").replace("\\", "/")
+        return (
+            safe_path.endswith(f"/schemas/{output_schema}")
+            and not (self.config.schema_root() / output_schema).is_file()
+        )
+
     def _reanchor_routed_task(
         self,
         *,
@@ -367,7 +390,11 @@ class FailureRouter:
             active_plan_id = self._active_plan_id(str(failed["product_id"]))
             if active_plan_id:
                 failed["plan_id"] = active_plan_id
-            controller_fault = (
+            invalid_plan_output_schema = self._invalid_plan_output_schema(
+                failure=failure,
+                failed=failed,
+            )
+            controller_fault = not invalid_plan_output_schema and (
                 str(failure["failure_class"]) in {"controller", "transient"}
                 or reason.startswith(_CONTROLLER_PREFIXES)
             )
@@ -421,7 +448,11 @@ class FailureRouter:
                 else:
                     hypothesis_id = str(hypothesis["hypothesis_id"])
                     attempts_used = int(hypothesis["attempts_used"] or 0)
-            needs_replan = reason in _REPLAN_REASONS or attempts_used >= 3
+            needs_replan = (
+                invalid_plan_output_schema
+                or reason in _REPLAN_REASONS
+                or attempts_used >= 3
+            )
             if controller_fault:
                 incident_id = f"incident-{sha256_text(failure_id)[:20]}"
                 self.state._connection.execute(
