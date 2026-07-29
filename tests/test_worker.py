@@ -788,6 +788,26 @@ class WorkerTests(unittest.TestCase):
                 health_probe=lambda _: True,
                 repository_root=ROOT,
             )
+            durable_task = state.get_task(task_id)
+            self.assertIsNotNone(durable_task)
+            assert durable_task is not None
+            spec = worker.default_spec(durable_task)
+            identity_decision = next(
+                item
+                for item in spec.decisions
+                if "controller-owned identities" in item
+            )
+            self.assertIn(
+                "builder: output_schema=attempt-result.schema.json; "
+                "capability_profile=builder_workspace",
+                identity_decision,
+            )
+            self.assertIn(
+                "release-operator@release-production: "
+                "output_schema=release-operation-result.schema.json; "
+                "capability_profile=release_production",
+                identity_decision,
+            )
 
             result = worker.run_once()
 

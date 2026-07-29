@@ -33,6 +33,7 @@ from .autonomy import (
     FailureData,
     HypothesisData,
     TaskOutcome,
+    canonical_plan_identity_catalog,
     safe_exception_diagnostic,
 )
 from .capabilities import CapabilityBroker
@@ -678,6 +679,14 @@ class AgentWorker:
             decisions.append(
                 "Planning execution is enforced read-only: terminal and file tools are unavailable. "
                 "Use only the supplied Context Pack and return the required schema JSON."
+            )
+        if prompt_role in {"task-specifier", "replanner"}:
+            decisions.append(
+                "Every executable node must use one of the following controller-owned identities "
+                "exactly. Do not invent role, output_schema, capability_profile, or capability "
+                "names. A release-operator node must use plan_node_id release-staging or "
+                "release-production respectively.\n"
+                + canonical_plan_identity_catalog()
             )
         if task.get("dependencies_json") not in (None, "", "[]"):
             decisions.append(
