@@ -296,9 +296,13 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertEqual(recovered[0]["lease_owner"], "worker-b")
             state.close()
 
-    def test_active_product_capacity_is_enforced_and_released(self) -> None:
+    def test_product_intake_queues_while_active_execution_is_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state = StateStore(Path(directory) / "controller.db", max_active_products=1)
+            state = StateStore(
+                Path(directory) / "controller.db",
+                max_active_workers=2,
+                max_active_products=1,
+            )
             state.create_product(
                 product_id="first-product",
                 owner_id="owner",
@@ -306,15 +310,6 @@ class FactoryRuntimeTests(unittest.TestCase):
                 idea="first",
                 idempotency_key="first-product-key",
             )
-            with self.assertRaises(ValueError):
-                state.create_product(
-                    product_id="second-product",
-                    owner_id="owner",
-                    source="cli",
-                    idea="second",
-                    idempotency_key="second-product-key",
-                )
-            state.transition_product("first-product", "CANCELLED")
             created, was_created = state.create_product(
                 product_id="second-product",
                 owner_id="owner",
@@ -324,6 +319,26 @@ class FactoryRuntimeTests(unittest.TestCase):
             )
             self.assertTrue(was_created)
             self.assertEqual(created["product_id"], "second-product")
+            state.add_task(
+                task_id="first-task",
+                product_id="first-product",
+                title="First",
+            )
+            state.add_task(
+                task_id="second-task",
+                product_id="second-product",
+                title="Second",
+            )
+
+            first = state.claim_task(worker_id="worker-a")
+            self.assertIsNotNone(first)
+            self.assertEqual(first["task_id"], "first-task")
+            self.assertIsNone(state.claim_task(worker_id="worker-b"))
+            state.complete_task("first-task", "worker-a")
+
+            second = state.claim_task(worker_id="worker-b")
+            self.assertIsNotNone(second)
+            self.assertEqual(second["task_id"], "second-task")
             state.close()
 
     def test_cancel_stops_queued_and_leased_product_tasks(self) -> None:

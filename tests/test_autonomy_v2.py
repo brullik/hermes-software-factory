@@ -262,6 +262,43 @@ def test_AUT_P0_001_intake_separates_goal_and_repository(tmp_path: Path) -> None
         state.close()
 
 
+def test_AUT_P0_001_v2_intake_persists_products_beyond_execution_capacity(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=2,
+        max_active_products=1,
+    )
+    try:
+        service = IntakeService(config, state, ArtifactStore(config))
+        first = service.submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Build the first queued private service",
+            delivery_mode="new_repository",
+            repository_name="first-queued-service",
+            idempotency_key="queued-v2-first",
+        )
+        second = service.submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Build the second queued private service",
+            delivery_mode="new_repository",
+            repository_name="second-queued-service",
+            idempotency_key="queued-v2-second",
+        )
+
+        assert first.created is True
+        assert second.created is True
+        assert len(state.list_products()) == 2
+        assert state.active_tasks(first.product_id)
+        assert state.active_tasks(second.product_id)
+    finally:
+        state.close()
+
+
 class FakeRepositoryAdapter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []

@@ -451,16 +451,6 @@ class AutonomyStore:
                 if existing is not None:
                     self.connection.commit()
                     return dict(existing), False
-                active_count = int(
-                    self.connection.execute(
-                        "SELECT COUNT(*) FROM products WHERE status NOT IN "
-                        "('CANCELLED', 'COMPLETED', 'FAILED_SAFE')"
-                    ).fetchone()[0]
-                )
-                if active_count >= self.state.max_active_products:
-                    from .state import ProductCapacityError
-
-                    raise ProductCapacityError("active product capacity is exhausted")
                 if rate_limit is not None:
                     limit, window_seconds = rate_limit
                     import time

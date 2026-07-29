@@ -233,13 +233,6 @@ class StateStore:
                 if existing:
                     self._connection.commit()
                     return dict(existing), False
-                active_count = int(
-                    self._connection.execute(
-                        "SELECT COUNT(*) FROM products WHERE status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED_SAFE')"
-                    ).fetchone()[0]
-                )
-                if active_count >= self.max_active_products:
-                    raise ProductCapacityError("active product capacity is exhausted")
                 if rate_limit is not None:
                     limit, window_seconds = rate_limit
                     if limit < 1 or window_seconds < 1:
@@ -802,6 +795,8 @@ class StateStore:
                     # product. Different products can run in parallel, but two
                     # tasks from one product would contend for the same lease.
                     if str(row["product_id"]) in active_products:
+                        continue
+                    if len(active_products) >= self.max_active_products:
                         continue
                     dependencies = self._connection.execute(
                         """SELECT upstream.graph_status
