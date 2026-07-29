@@ -13,12 +13,20 @@ schedule:
   stateful_product_database: daily
   pre_deployment: mandatory
   pre_migration: mandatory
+local_recovery:
+  required: true
+  proof_path: /var/lib/hermes-factory/evidence/backup-local-latest.json
+  provider_failure_must_not_block_project_work: true
 offsite:
   required_for_stateful_production: true
   provider: owner_selected_when_needed
+  proof_path: /var/lib/hermes-factory/evidence/backup-latest.json
+  retry_interval: 2h
+  successful_proof_ttl: 26h
   missing_behavior:
     staging: allow
     production: block_with_owner_action
+    independent_project_work: continue
 verification:
   repository_check: weekly
   restore_drill: quarterly

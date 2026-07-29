@@ -6,6 +6,7 @@ After=network-online.target
 Type=oneshot
 User=root
 EnvironmentFile=-/etc/hermes-factory/backup.env
+Environment=BACKUP_PROOF_PATH=/var/lib/hermes-factory/evidence/backup-local-latest.json
 ExecStart=/usr/bin/env bash /opt/hermes-factory/current/scripts/backup/run-backup.sh
 Nice=10
 IOSchedulingClass=idle

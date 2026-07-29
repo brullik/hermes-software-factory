@@ -177,6 +177,12 @@ install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-backup.timer" \
   /etc/systemd/system/hermes-factory-backup.timer
 install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-backup-offsite.service" \
+  /etc/systemd/system/hermes-factory-backup-offsite.service
+install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-backup-offsite.timer" \
+  /etc/systemd/system/hermes-factory-backup-offsite.timer
+install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-osv-db.service" \
   /etc/systemd/system/hermes-factory-osv-db.service
 install -o root -g root -m 0644 \
@@ -196,6 +202,7 @@ systemctl enable \
   hermes-factory-worker.service \
   hermes-factory-worker-2.service \
   hermes-factory-backup.timer \
+  hermes-factory-backup-offsite.timer \
   hermes-factory-osv-db.timer
 systemctl start fail2ban.service
 printf 'Bootstrap files installed. Credentials, Hermes compatibility, firewall, SSH hardening, and service start require separate evidence-backed steps.\n'

@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes Software Factory best-effort encrypted offsite backup
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/hermes-factory/credentials.d/backup-offsite.env
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/hermes-factory/credentials.d/backup-offsite.env
+Environment=BACKUP_PROOF_PATH=/var/lib/hermes-factory/evidence/backup-latest.json
+Environment=OFFSITE_BACKUP_MAX_AGE_SECONDS=93600
+ExecStart=/usr/bin/env bash /opt/hermes-factory/current/scripts/backup/run-offsite-backup.sh
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
