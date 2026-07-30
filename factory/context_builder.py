@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,62 @@ from scripts.prompt_compiler import (
 from .artifacts import ArtifactStore
 from .common import redact_text
 from .config import FactoryConfig
+
+_TRUNCATION_MARKER = "\n...[TRUNCATED_BY_CONTROLLER_TOTAL_BUDGET]...\n"
+
+
+def _truncate_preserving_coordinates(value: str, limit: int) -> str:
+    """Keep a deterministic head and tail while respecting an exact limit."""
+
+    if len(value) <= limit:
+        return value
+    if limit <= 0:
+        return ""
+    if limit <= len(_TRUNCATION_MARKER):
+        return value[:limit]
+    available = limit - len(_TRUNCATION_MARKER)
+    head = (available * 3) // 4
+    tail = available - head
+    return value[:head] + _TRUNCATION_MARKER + (value[-tail:] if tail else "")
+
+
+def _string_count(value: Any) -> int:
+    if isinstance(value, str):
+        return 1
+    if isinstance(value, Mapping):
+        return sum(_string_count(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_string_count(item) for item in value)
+    return 0
+
+
+def _bound_string_content(value: Any, max_chars: int) -> Any:
+    """Fairly cap aggregate string content without dropping structural entries."""
+
+    if max_chars < 0:
+        raise ValueError("max_chars must not be negative")
+    remaining_chars = max_chars
+    remaining_strings = _string_count(value)
+
+    def visit(item: Any) -> Any:
+        nonlocal remaining_chars, remaining_strings
+        if isinstance(item, str):
+            limit = (
+                remaining_chars // remaining_strings
+                if remaining_strings > 0
+                else 0
+            )
+            bounded = _truncate_preserving_coordinates(item, limit)
+            remaining_chars -= len(bounded)
+            remaining_strings -= 1
+            return bounded
+        if isinstance(item, Mapping):
+            return {str(key): visit(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [visit(child) for child in item]
+        return item
+
+    return visit(value)
 
 
 @dataclass(frozen=True)
@@ -52,12 +108,16 @@ class ContextBuilder:
         decisions: list[str] | None = None,
         max_files: int = 20,
         max_chars: int = 100_000,
+        max_evidence_chars: int = 48_000,
+        max_plan_summary_chars: int = 48_000,
         filename: str | None = None,
     ) -> ContextPackResult:
         if len(subject_sha) != 64 or any(char not in "0123456789abcdef" for char in subject_sha):
             raise ValueError("subject_sha must be a lowercase SHA-256 digest")
         if not objective.strip() or not acceptance:
             raise ValueError("objective and acceptance are required")
+        if max_evidence_chars < 1 or max_plan_summary_chars < 1:
+            raise ValueError("context string budgets must be positive")
         selected = select_files(
             self.repository_root,
             candidates,
@@ -86,7 +146,7 @@ class ContextBuilder:
                     "redactions": diagnostics,
                 }
             )
-        safe_evidence: list[dict[str, str]] = []
+        prepared_evidence: list[dict[str, str]] = []
         for evidence_item in evidence:
             raw_summary = str(evidence_item.get("summary", ""))
             diagnostics = find_secret_candidate_diagnostics(raw_summary)
@@ -104,7 +164,7 @@ class ContextBuilder:
                     "\nSAFE_REDACTION_COORDINATES: "
                     f"{coordinates}. Secret values are not retained."
                 )
-            safe_evidence.append(
+            prepared_evidence.append(
                 {
                     "type": str(evidence_item.get("type", "evidence")),
                     "summary": summary or "redacted evidence",
@@ -113,6 +173,18 @@ class ContextBuilder:
                     ),
                 }
             )
+        bounded_summaries = _bound_string_content(
+            [item["summary"] for item in prepared_evidence],
+            max_evidence_chars,
+        )
+        safe_evidence = [
+            {**item, "summary": str(summary)}
+            for item, summary in zip(
+                prepared_evidence,
+                bounded_summaries,
+                strict=True,
+            )
+        ]
         artifact = {
             "schema_version": "2.0",
             "product_id": product_id,
@@ -122,7 +194,10 @@ class ContextBuilder:
             "root_goal": root_goal or objective,
             "objective": objective,
             "acceptance": acceptance,
-            "plan_summary": plan_summary or {},
+            "plan_summary": _bound_string_content(
+                plan_summary or {},
+                max_plan_summary_chars,
+            ),
             "lineage": lineage
             or {
                 "root_task_id": root_task_id or task_id,

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.22 - 2026-07-30
+
+- Bound dependency and typed-review evidence by aggregate Context Pack budgets
+  while preserving every predecessor identity, artifact reference, mandatory gate
+  result, and safe diagnostic coordinate.
+- Fairly compact verbose plan and evidence strings without dropping structural
+  entries, so repaired plans cannot grow provider prompts without bound.
+- Preflight compiled prompts against a conservative controller ceiling and
+  deterministically rebuild a smaller immutable Context Pack before provider
+  transport when additional compaction is required.
+
 ## 2.2.21 - 2026-07-30
 
 - Reject replan deltas that merely reuse accepted implementation nodes without
