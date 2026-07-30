@@ -33,6 +33,8 @@ from factory.worker import (
     TaskExecutionSpec,
     WorkerResult,
     _normalized_output_status,
+    _replanner_failure_inventory,
+    _replanner_hypothesis_inventory,
     _workspace_snapshot,
     public_github_repository_url,
 )
@@ -437,6 +439,165 @@ def staging_release_task(
 
 
 class WorkerTests(unittest.TestCase):
+    def test_replanner_inventory_preserves_safe_failure_coordinates_and_hypotheses(
+        self,
+    ) -> None:
+        failures = _replanner_failure_inventory(
+            [
+                {
+                    "failure_id": "failure-context",
+                    "parent_failure_id": "failure-parent",
+                    "task_id": "T-CONTEXT",
+                    "failure_class": "semantic",
+                    "reason_code": "scope_violation",
+                    "status": "ROUTED",
+                    "safe_message": "Change escaped the bounded source scope.",
+                    "failed_gate_ids_json": '["scope_violation"]',
+                    "expected_json": '{"allowed_paths":["src/**"]}',
+                    "actual_json": (
+                        '{"violating_paths":["Dockerfile"],'
+                        '"required_fixes":["Add the required path to a new plan."]}'
+                    ),
+                    "evidence_ref": "evidence/failure-context.json",
+                }
+            ]
+        )
+        hypotheses = _replanner_hypothesis_inventory(
+            [
+                {
+                    "hypothesis_id": "hypothesis-context",
+                    "parent_hypothesis_id": None,
+                    "failure_id": "failure-context",
+                    "status": "EXHAUSTED",
+                    "statement": "The original path scope was incomplete.",
+                    "required_evidence_json": '["evidence/failure-context.json"]',
+                    "semantic_budget": 3,
+                    "attempts_used": 3,
+                }
+            ]
+        )
+
+        self.assertEqual(
+            failures[0]["actual"]["violating_paths"],
+            ["Dockerfile"],
+        )
+        self.assertEqual(
+            failures[0]["expected"]["allowed_paths"],
+            ["src/**"],
+        )
+        self.assertEqual(hypotheses[0]["status"], "EXHAUSTED")
+        self.assertEqual(hypotheses[0]["attempts_used"], 3)
+
+    def test_replanner_implementation_inventory_includes_accepted_result(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            product_id = "P-REPLAN-CONTEXT"
+            task_id = "T-INVENTORY-BUILDER"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Build a context-complete service",
+                idempotency_key="replanner-context-product",
+            )
+            product = state.get_product(product_id)
+            assert product is not None
+            plan_id = str(product["active_plan_id"])
+            contract = {
+                **replanner_task_contract(config, product_id, task_id),
+                "plan_id": plan_id,
+                "plan_node_id": "implementation-001-runtime",
+                "title": "Implement runtime foundation",
+                "objective": "Implement and verify the reusable runtime foundation",
+                "role": "builder",
+                "output_schema": "attempt-result.schema.json",
+                "conflict_keys": [f"{product_id}:src"],
+                "required_capabilities": list(
+                    CAPABILITY_PROFILES["builder_workspace"]
+                ),
+                "capability_profile": "builder_workspace",
+                "allowed_paths": ["src/**", "tests/**"],
+                "semantic_node_key": "runtime-foundation",
+                "goal_ids": ["root-goal"],
+                "lifecycle_stage": "implementation-slice",
+            }
+            contract_path = artifacts.write(
+                "task-contract-v2.schema.json",
+                contract,
+                filename=f"task-{task_id}.json",
+            )
+            state.add_task(
+                task_id=task_id,
+                product_id=product_id,
+                title=str(contract["title"]),
+                role="builder",
+                output_schema="attempt-result.schema.json",
+                contract_ref=f"evidence/{contract_path.name}",
+                stage_key="implementation-001-runtime",
+                plan_id=plan_id,
+                plan_node_id="implementation-001-runtime",
+                conflict_keys=[f"{product_id}:src"],
+                capability_profile="builder_workspace",
+                required_capabilities=list(
+                    CAPABILITY_PROFILES["builder_workspace"]
+                ),
+            )
+            result_path = config.evidence_dir / "accepted-runtime-result.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "summary": "Runtime foundation passed its local gates.",
+                        "output_ref": "evidence/runtime-output.json",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with state._lock, state._connection:
+                state._connection.execute(
+                    """UPDATE tasks
+                          SET graph_status='ACCEPTED', status='SUCCEEDED',
+                              result_ref=?, result_digest=?
+                        WHERE task_id=?""",
+                    (
+                        f"evidence/{result_path.name}",
+                        sha256_text("accepted-runtime-result"),
+                        task_id,
+                    ),
+                )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            inventory = worker._replanner_implementation_inventory(
+                product_id,
+                plan_id,
+            )
+
+            self.assertEqual(len(inventory), 1)
+            self.assertEqual(inventory[0]["node_key"], "runtime-foundation")
+            self.assertEqual(inventory[0]["scope"], ["src/**", "tests/**"])
+            self.assertEqual(inventory[0]["goal_ids"], ["root-goal"])
+            self.assertEqual(
+                inventory[0]["accepted_result"]["summary"],
+                "Runtime foundation passed its local gates.",
+            )
+            state.close()
+
     def test_incident_recovery_status_is_a_terminal_success(self) -> None:
         self.assertEqual(
             _normalized_output_status(

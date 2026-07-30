@@ -25,6 +25,10 @@
 5. Верни `proposal_kind=replan_delta`, точный активный `parent_plan_id` и
    `source_failure_id`.
 6. Свяжи каждый обязательный goal с исполнимым implementation slice.
+7. Используй controller-owned `plan_summary.policy_digest`,
+   `implementation_nodes`, `accepted_unaffected_node_keys`,
+   `unresolved_failure_inventory` и `hypothesis_inventory`; не объявляй их
+   отсутствующими и не подменяй placeholder-значениями.
 
 ## Запрещено
 

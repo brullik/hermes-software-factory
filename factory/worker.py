@@ -42,6 +42,7 @@ from .config import FactoryConfig, load_config
 from .context_builder import ContextBuilder, ContextPackResult
 from .pipeline import PipelineCoordinator, PreparedPipelineOutcome
 from .plan_semantics import PlanContractViolation
+from .policy import policy_digest
 from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine, QualityGateRun, UnknownQualityGatesError
@@ -143,6 +144,107 @@ def _provider_redaction_summary(
         f"{locations}. Matched values were replaced with [REDACTED] and were "
         "not copied into durable evidence."
     )[:3500]
+
+
+def _bounded_context_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound already-sanitized controller evidence before prompt compilation."""
+
+    if depth >= 5:
+        return "[TRUNCATED]"
+    if isinstance(value, Mapping):
+        return {
+            str(key)[:160]: _bounded_context_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:40]
+        }
+    if isinstance(value, list):
+        return [
+            _bounded_context_value(item, depth=depth + 1)
+            for item in value[:60]
+        ]
+    if isinstance(value, str):
+        safe, _ = redact_secret_candidates(value)
+        safe, _ = redact_text(safe)
+        return safe[:2000]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)[:500]
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _replanner_failure_inventory(
+    failures: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    unresolved = [
+        failure
+        for failure in failures
+        if str(failure.get("status") or "") != "RESOLVED"
+    ][-24:]
+    return [
+        {
+            "failure_id": str(failure.get("failure_id") or ""),
+            "parent_failure_id": failure.get("parent_failure_id"),
+            "task_id": str(failure.get("task_id") or ""),
+            "failure_class": str(failure.get("failure_class") or ""),
+            "reason_code": str(failure.get("reason_code") or ""),
+            "status": str(failure.get("status") or ""),
+            "safe_message": _bounded_context_value(
+                str(failure.get("safe_message") or "")
+            ),
+            "failed_gate_ids": _bounded_context_value(
+                _json_list(failure.get("failed_gate_ids_json"))
+            ),
+            "expected": _bounded_context_value(
+                _json_object(failure.get("expected_json"))
+            ),
+            "actual": _bounded_context_value(
+                _json_object(failure.get("actual_json"))
+            ),
+            "evidence_ref": str(failure.get("evidence_ref") or ""),
+        }
+        for failure in unresolved
+    ]
+
+
+def _replanner_hypothesis_inventory(
+    hypotheses: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    relevant = [
+        hypothesis
+        for hypothesis in hypotheses
+        if str(hypothesis.get("status") or "") in {"ACTIVE", "EXHAUSTED"}
+    ][-24:]
+    return [
+        {
+            "hypothesis_id": str(hypothesis.get("hypothesis_id") or ""),
+            "parent_hypothesis_id": hypothesis.get("parent_hypothesis_id"),
+            "failure_id": str(hypothesis.get("failure_id") or ""),
+            "status": str(hypothesis.get("status") or ""),
+            "statement": _bounded_context_value(
+                str(hypothesis.get("statement") or "")
+            ),
+            "required_evidence": _bounded_context_value(
+                _json_list(hypothesis.get("required_evidence_json"))
+            ),
+            "semantic_budget": int(hypothesis.get("semantic_budget") or 0),
+            "attempts_used": int(hypothesis.get("attempts_used") or 0),
+        }
+        for hypothesis in relevant
+    ]
 
 
 @dataclass(frozen=True)
@@ -1575,6 +1677,102 @@ class AgentWorker:
             self.registry.set_health(provider, False)
         return self.registry.select(alias, tier=tier.value)
 
+    def _safe_evidence_object(self, reference: str) -> dict[str, Any]:
+        name = Path(reference).name
+        if reference not in {f"evidence/{name}", str(self.config.evidence_dir / name)}:
+            return {}
+        path = (self.config.evidence_dir / name).resolve()
+        if (
+            path.parent != self.config.evidence_dir.resolve()
+            or not path.is_file()
+            or path.is_symlink()
+        ):
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _replanner_implementation_inventory(
+        self,
+        product_id: str,
+        active_plan_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = [
+            row
+            for row in self.state.list_tasks(product_id)
+            if str(row.get("plan_id") or "") == active_plan_id
+            and str(row.get("stage_key") or "").startswith("implementation-")
+        ]
+        contracts = {
+            str(row["task_id"]): self._safe_evidence_object(
+                str(row.get("contract_ref") or "")
+            )
+            for row in rows
+        }
+        semantic_keys = {
+            task_id: str(
+                contract.get("semantic_node_key")
+                or contract.get("plan_node_id")
+                or task_id
+            )
+            for task_id, contract in contracts.items()
+        }
+        inventory: list[dict[str, Any]] = []
+        for row in sorted(
+            rows,
+            key=lambda item: (
+                int(item.get("critical_path_rank") or 0),
+                str(item.get("plan_node_id") or ""),
+            ),
+        ):
+            task_id = str(row["task_id"])
+            contract = contracts[task_id]
+            if not contract:
+                continue
+            result = self._safe_evidence_object(str(row.get("result_ref") or ""))
+            dependencies = [
+                semantic_keys[str(value)]
+                for value in contract.get("dependencies", [])
+                if str(value) in semantic_keys
+            ]
+            inventory.append(
+                {
+                    "node_key": semantic_keys[task_id],
+                    "task_id": task_id,
+                    "title": str(contract.get("title") or row.get("title") or ""),
+                    "objective": str(contract.get("objective") or ""),
+                    "depends_on": dependencies,
+                    "scope": [
+                        str(value)
+                        for value in contract.get("allowed_paths", [])
+                    ],
+                    "acceptance_intents": [
+                        str(item.get("verification") or "")
+                        for item in contract.get("acceptance", [])
+                        if isinstance(item, Mapping)
+                    ],
+                    "goal_ids": [
+                        str(value) for value in contract.get("goal_ids", [])
+                    ],
+                    "graph_status": str(row.get("graph_status") or ""),
+                    "accepted_result": (
+                        {
+                            "result_ref": str(row.get("result_ref") or ""),
+                            "result_digest": str(row.get("result_digest") or ""),
+                            "summary": _bounded_context_value(
+                                str(result.get("summary") or "")
+                            ),
+                            "output_ref": str(result.get("output_ref") or ""),
+                        }
+                        if str(row.get("graph_status") or "") == "ACCEPTED"
+                        else None
+                    ),
+                }
+            )
+        return inventory
+
     def _context_and_prompt(
         self,
         spec: TaskExecutionSpec,
@@ -1614,6 +1812,38 @@ class AgentWorker:
             ),
             None,
         )
+        plan_summary: dict[str, Any] = (
+            {
+                "plan_id": active_plan.get("plan_id"),
+                "revision": active_plan.get("revision"),
+                "status": active_plan.get("status"),
+                "goals": json.loads(str(active_plan.get("goals_json") or "[]")),
+            }
+            if active_plan is not None
+            else {}
+        )
+        if spec.role == "replanner" and active_plan is not None:
+            implementation_nodes = self._replanner_implementation_inventory(
+                str(task["product_id"]),
+                str(active_plan["plan_id"]),
+            )
+            plan_summary.update(
+                {
+                    "policy_digest": policy_digest(self.config),
+                    "implementation_nodes": implementation_nodes,
+                    "accepted_unaffected_node_keys": [
+                        str(node["node_key"])
+                        for node in implementation_nodes
+                        if node["graph_status"] == "ACCEPTED"
+                    ],
+                    "unresolved_failure_inventory": _replanner_failure_inventory(
+                        failures
+                    ),
+                    "hypothesis_inventory": _replanner_hypothesis_inventory(
+                        self.state.list_hypotheses(str(task["product_id"]))
+                    ),
+                }
+            )
         try:
             required_capabilities = json.loads(
                 str(task_row.get("required_capabilities_json") or "[]")
@@ -1645,16 +1875,7 @@ class AgentWorker:
                 output_schema=spec.output_schema,
                 root_goal=str(product.get("goal_text") or product.get("idea") or task["objective"]),
                 root_task_id=str(task_row.get("root_task_id") or task["task_id"]),
-                plan_summary=(
-                    {
-                        "plan_id": active_plan.get("plan_id"),
-                        "revision": active_plan.get("revision"),
-                        "status": active_plan.get("status"),
-                        "goals": json.loads(str(active_plan.get("goals_json") or "[]")),
-                    }
-                    if active_plan is not None
-                    else {}
-                ),
+                plan_summary=plan_summary,
                 lineage={
                     "root_task_id": str(task_row.get("root_task_id") or task["task_id"]),
                     "parent_task_id": task_row.get("parent_task_id"),
