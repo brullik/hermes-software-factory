@@ -82,6 +82,10 @@ class WorkspaceManager:
             if temporary.exists():
                 shutil.rmtree(temporary)
 
+    def _marker_path(self, path: Path) -> Path:
+        marker = path.parent / f".{path.name}.lease.json"
+        return assert_under_root(self.root, marker)
+
     def acquire(self, *, product_id: str, task_id: str, worker_id: str) -> WorkspaceLease:
         path = self.root / product_id / ("repository" if self.persistent else task_id)
         assert_under_root(self.root, path)
@@ -90,15 +94,17 @@ class WorkspaceManager:
             self._initialize(product_id, path)
         if not path.is_dir() or path.is_symlink():
             raise RuntimeError("workspace path is missing or unsafe")
-        marker = path / ".lease.json"
+        # Keep controller lease authority outside the model-managed repository.
+        # A provider may legitimately run a clean command inside ``path``; it
+        # must never be able to remove the marker required for safe release.
+        marker = self._marker_path(path)
         if marker.exists():
             data = json.loads(marker.read_text(encoding="utf-8"))
             if data.get("worker_id") != worker_id or data.get("task_id") != task_id:
                 marker_task_id = str(data.get("task_id") or "")
                 marker_worker_id = str(data.get("worker_id") or "")
                 stale = (
-                    self.persistent
-                    and self.lease_is_active is not None
+                    self.lease_is_active is not None
                     and marker_task_id
                     and marker_worker_id
                     and not self.lease_is_active(
@@ -128,7 +134,7 @@ class WorkspaceManager:
 
     def release(self, lease: WorkspaceLease) -> None:
         path = assert_under_root(self.root, lease.path)
-        marker = path / ".lease.json"
+        marker = self._marker_path(path)
         if not marker.is_file():
             raise RuntimeError("workspace lease marker is missing")
         data = json.loads(marker.read_text(encoding="utf-8"))
@@ -141,4 +147,5 @@ class WorkspaceManager:
         if self.persistent:
             marker.unlink()
         else:
+            marker.unlink()
             shutil.rmtree(path)

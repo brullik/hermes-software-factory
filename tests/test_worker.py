@@ -2241,6 +2241,15 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(product["status"], "IDEA_RECEIVED")
             task = next(iter(state.list_tasks(intake_result.product_id)))
             self.assertEqual(task["status"], "FAILED_SAFE")
+            failure = state.list_failures(intake_result.product_id)[0]
+            self.assertIn("forbidden.txt", failure["safe_message"])
+            self.assertEqual(
+                json.loads(failure["actual_json"])["violating_paths"],
+                ["forbidden.txt"],
+            )
+            self.assertTrue(
+                json.loads(failure["actual_json"])["required_fixes"]
+            )
             state.close()
 
     def test_malformed_provider_output_is_requeued_and_recorded(self) -> None:

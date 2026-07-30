@@ -42,6 +42,36 @@ def _controller_id(prefix: str, seed: str, length: int = 20) -> str:
     return f"{prefix}-{sha256_text(seed)[:length].upper()}"
 
 
+_PATH_GLOB = re.compile(
+    r"^[A-Za-z0-9._*?\[\]{}!+@-]+"
+    r"(?:/[A-Za-z0-9._*?\[\]{}!+@-]+)*$"
+)
+_ROOT_PATH_NAMES = {
+    "Dockerfile",
+    "Makefile",
+    "README",
+    "LICENSE",
+    "SECURITY",
+}
+
+
+def _valid_path_scope(value: object) -> bool:
+    path = str(value)
+    if not path or path != path.strip() or not _PATH_GLOB.fullmatch(path):
+        return False
+    if path.startswith("/") or any(
+        segment in {"", ".", ".."} for segment in path.split("/")
+    ):
+        return False
+    name = path.rsplit("/", 1)[-1]
+    return (
+        "/" in path
+        or "." in name
+        or any(marker in path for marker in ("*", "?", "[", "{"))
+        or name in _ROOT_PATH_NAMES
+    )
+
+
 class PlanCompiler:
     """The sole authority that assigns executable identities and release order."""
 
@@ -71,6 +101,15 @@ class PlanCompiler:
             if any(str(value).strip() in {"*", "**", "**/*"} for value in scope):
                 raise ValueError(
                     f"PlanProposal node {key} uses an unbounded repository scope"
+                )
+            invalid_scope = [
+                str(value) for value in scope if not _valid_path_scope(value)
+            ]
+            if invalid_scope:
+                raise ValueError(
+                    "PlanProposal node "
+                    f"{key}.scope must contain relative POSIX path globs, not prose: "
+                    f"{invalid_scope[0][:120]}"
                 )
             raw_dependencies = node.get("depends_on", [])
             if not isinstance(raw_dependencies, list):

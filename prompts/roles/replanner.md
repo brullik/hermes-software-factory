@@ -19,6 +19,8 @@
 2. Сохрани совместимые implementation slices без изменения их `node_key`.
 3. Измени только доказанно ошибочные objective, scope, зависимости или
    acceptance intents.
+   `scope` — только массив относительных POSIX path-glob координат репозитория
+   (`src/**`, `tests/**`, `README.md`); prose в `scope` недопустим.
 4. Не повторяй идентичную гипотезу с теми же evidence.
 5. Верни `proposal_kind=replan_delta`, точный активный `parent_plan_id` и
    `source_failure_id`.

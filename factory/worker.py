@@ -3025,18 +3025,20 @@ class AgentWorker:
                 [str(path) for path in spec.task_contract["forbidden_paths"]],
             )
             if scope_violations:
+                violating_paths = sorted(scope_violations)[:20]
                 route_action = self._route(
                     spec, tier, success=False, reason_code="scope_violation", attempt=attempt
+                )
+                summary = (
+                    "Workspace scope violation detected for "
+                    f"{', '.join(violating_paths)}; routing={route_action}."
                 )
                 result_path = self._attempt_artifact(
                     spec,
                     attempt,
                     selection,
                     status="failed_safe",
-                    summary=(
-                        "Workspace scope violation detected for "
-                        f"{', '.join(sorted(scope_violations)[:20])}; routing={route_action}."
-                    ),
+                    summary=summary,
                     prompt_digest=prompt_digest,
                     subject_sha=spec.subject_sha,
                     command_result="fail",
@@ -3053,6 +3055,34 @@ class AgentWorker:
                     "scope_violation",
                     str(result_path),
                     attempt.attempt_id,
+                    detail=summary,
+                    failure_data=FailureData(
+                        failure_class="policy",
+                        reason_code="scope_violation",
+                        safe_message=summary,
+                        evidence_ref=str(result_path),
+                        attempt_id=attempt.attempt_id,
+                        expected={
+                            "allowed_paths": [
+                                str(path)
+                                for path in spec.task_contract["allowed_paths"]
+                            ],
+                            "forbidden_paths": [
+                                str(path)
+                                for path in spec.task_contract["forbidden_paths"]
+                            ],
+                        },
+                        actual={
+                            "violating_paths": violating_paths,
+                            "required_fixes": [
+                                (
+                                    f"Revert {path} or return needs_replan with "
+                                    "a bounded POSIX path-glob scope that includes it."
+                                )
+                                for path in violating_paths
+                            ],
+                        },
+                    ),
                 )
             changed_files = (
                 reported_changed_files if isinstance(reported_changed_files, list) else None
@@ -3597,10 +3627,10 @@ class AgentWorker:
             reason_code = result.reason_code or "worker_internal_error"
             classified = classify_failure(reason_code).value
             owner_action = reason_code in OWNER_ACTION_REASONS
-            failure_class = (
-                "controller"
-                if result.failure_data is not None
-                or reason_code
+            if result.failure_data is not None:
+                failure_class = result.failure_data.failure_class
+            elif (
+                reason_code
                 in {
                     "release_adapter_missing",
                     "model_route_unapproved",
@@ -3617,8 +3647,10 @@ class AgentWorker:
                 )
                 or result.status == "blocked_external"
                 and not owner_action
-                else classified
-            )
+            ):
+                failure_class = "controller"
+            else:
+                failure_class = classified
             external = classified == "external" and owner_action
             durable_status = (
                 "WAITING_EXTERNAL"
