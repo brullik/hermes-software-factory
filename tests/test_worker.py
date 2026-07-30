@@ -29,6 +29,7 @@ from factory.state import StateStore
 from factory.worker import (
     AgentWorker,
     HermesRunResult,
+    PromptInputLimitError,
     SubprocessHermesRunner,
     TaskExecutionSpec,
     WorkerResult,
@@ -2614,6 +2615,55 @@ class WorkerTests(unittest.TestCase):
             )
             state.close()
 
+    def test_local_audit_directories_do_not_cross_workspace_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / "README.md").write_text(
+                "tracked product source\n",
+                encoding="utf-8",
+            )
+            for local_name in ("audit_output", "audit_tools"):
+                local_path = repository / local_name
+                local_path.mkdir()
+                (local_path / "local-only.txt").write_text(
+                    "must not enter provider workspace\n",
+                    encoding="utf-8",
+                )
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-luna",
+            )
+            config = make_config(root / "state", registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            product_id = "P-LOCAL-AUDIT-BOUNDARY"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Build from the trusted source snapshot",
+                idempotency_key="local-audit-boundary",
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=repository,
+            )
+            destination = root / "destination"
+
+            worker._initialize_product_workspace(product_id, destination)
+
+            self.assertTrue((destination / "README.md").is_file())
+            self.assertFalse((destination / "audit_output").exists())
+            self.assertFalse((destination / "audit_tools").exists())
+            state.close()
+
     def test_malformed_provider_output_is_requeued_and_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2747,6 +2797,105 @@ class WorkerTests(unittest.TestCase):
                 prompt="token " + "ghp_" + "abcdefghijklmnopqrstuvwxyz123456",
                 cwd=Path.cwd(),
             )
+
+    def test_subprocess_runner_separates_prompt_and_output_limits(self) -> None:
+        runner = SubprocessHermesRunner(
+            binary="hermes",
+            max_prompt_chars=1_000,
+            max_output_chars=10,
+        )
+        completed = subprocess.CompletedProcess(
+            ["hermes"],
+            0,
+            stdout="0123456789extra",
+            stderr="",
+        )
+
+        with patch("factory.worker.subprocess.run", return_value=completed) as run:
+            result = runner.run(
+                selection=ModelSelection(
+                    "openai-codex",
+                    "economy",
+                    "gpt-5.6-luna",
+                    "luna",
+                ),
+                prompt="p" * 200,
+                cwd=Path.cwd(),
+            )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.output, "0123456789")
+        run.assert_called_once()
+
+    def test_prompt_input_limit_is_controller_failure_not_transport_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-luna",
+            )
+            config = make_config(root, registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            intake_result = IntakeService(
+                config,
+                state,
+                ArtifactStore(config),
+            ).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Build a product with a bounded provider prompt",
+            )
+            runner = SubprocessHermesRunner(
+                binary="must-not-run",
+                max_prompt_chars=1,
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(
+                result.reason_code,
+                "controller_exception_prompt_input_limit_error",
+            )
+            self.assertNotEqual(result.reason_code, "malformed_transport")
+            task = state.list_tasks(intake_result.product_id)[0]
+            self.assertNotEqual(task["graph_status"], "WAITING_TIME")
+            failure = state.list_failures(intake_result.product_id)[0]
+            self.assertEqual(failure["failure_class"], "controller")
+            self.assertIn("prompt input size", failure["safe_message"])
+            state.close()
+
+    def test_subprocess_runner_rejects_prompt_over_input_limit_before_exec(self) -> None:
+        runner = SubprocessHermesRunner(
+            binary="must-not-run",
+            max_prompt_chars=10,
+        )
+        with (
+            patch("factory.worker.subprocess.run") as run,
+            self.assertRaises(PromptInputLimitError),
+        ):
+            runner.run(
+                selection=ModelSelection(
+                    "openai-codex",
+                    "economy",
+                    "gpt-5.6-luna",
+                    "luna",
+                ),
+                prompt="p" * 11,
+                cwd=Path.cwd(),
+            )
+        run.assert_not_called()
 
     def test_subprocess_runner_pins_tools_and_ignores_repository_rules(self) -> None:
         selection = ModelSelection("openai-codex", "economy", "gpt-5.6-luna", "luna")
