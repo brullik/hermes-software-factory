@@ -714,6 +714,20 @@ class StateStore:
 
         return AutonomyStore(self).grant_capability(**values)
 
+    def available_capabilities(
+        self,
+        product_id: str,
+        task_id: str,
+        required: list[str],
+    ) -> list[dict[str, Any]]:
+        from .autonomy import AutonomyStore
+
+        return AutonomyStore(self).available_capabilities(
+            product_id,
+            task_id,
+            required,
+        )
+
     def commit_task_outcome(
         self,
         outcome: Any,

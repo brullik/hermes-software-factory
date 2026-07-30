@@ -229,6 +229,10 @@ class SubprocessHermesRunner:
             "XDG_CONFIG_HOME",
             "XDG_STATE_HOME",
             "XDG_CACHE_HOME",
+            # Rootless container engines bind their per-user socket and state
+            # to this directory. The production worker receives the trusted
+            # path from systemd, so its child Hermes process must retain it.
+            "XDG_RUNTIME_DIR",
             "LANG",
             "LC_ALL",
             "NO_COLOR",
@@ -1622,6 +1626,11 @@ class AgentWorker:
                 missing_capabilities = json.loads(str(task_row.get("blocked_ref") or "[]"))
             except json.JSONDecodeError:
                 missing_capabilities = []
+        available_capabilities = self.state.available_capabilities(
+            str(task["product_id"]),
+            str(task["task_id"]),
+            [str(value) for value in required_capabilities],
+        )
 
         def build_context(filename: str) -> ContextPackResult:
             return context_builder.build(
@@ -1659,6 +1668,7 @@ class AgentWorker:
                     "profile": str(task_row.get("capability_profile") or "legacy"),
                     "required": [str(value) for value in required_capabilities],
                     "missing": [str(value) for value in missing_capabilities],
+                    "available": available_capabilities,
                 },
                 evidence=spec.evidence,
                 decisions=list(spec.decisions),

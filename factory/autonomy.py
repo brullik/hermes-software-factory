@@ -693,6 +693,46 @@ class AutonomyStore:
                 self._recompute_frontier(self.connection, product_id)
         return identifier
 
+    def available_capabilities(
+        self,
+        product_id: str,
+        task_id: str,
+        required: list[str],
+    ) -> list[dict[str, Any]]:
+        """Return the most specific trusted grant for every required capability."""
+
+        available: list[dict[str, Any]] = []
+        now = utc_now()
+        with self.lock:
+            for capability in sorted(set(required)):
+                row = self.connection.execute(
+                    """SELECT capability, provider, scope_json
+                       FROM capability_grants
+                       WHERE capability=? AND status='AVAILABLE'
+                         AND (product_id IS NULL OR product_id=?)
+                         AND (task_id IS NULL OR task_id=?)
+                         AND (expires_at IS NULL OR expires_at>?)
+                       ORDER BY (task_id IS NOT NULL) DESC,
+                                (product_id IS NOT NULL) DESC,
+                                created_at DESC
+                       LIMIT 1""",
+                    (capability, product_id, task_id, now),
+                ).fetchone()
+                if row is None:
+                    continue
+                try:
+                    scope = json.loads(str(row["scope_json"]))
+                except (json.JSONDecodeError, TypeError):
+                    scope = {}
+                available.append(
+                    {
+                        "capability": str(row["capability"]),
+                        "provider": str(row["provider"]),
+                        "scope": scope if isinstance(scope, dict) else {},
+                    }
+                )
+        return available
+
     def _missing_capabilities(
         self,
         connection: sqlite3.Connection,
