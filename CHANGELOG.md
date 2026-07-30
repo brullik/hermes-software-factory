@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.15 - 2026-07-30
+
+- Carry compiled Hermes prompts through a bounded UTF-8 stdin channel instead
+  of the `--oneshot` argv value, avoiding Linux's per-argument size ceiling
+  and keeping product context out of process listings.
+- Preserve the pinned Hermes one-shot startup, model, provider, toolset,
+  ignore-rules, usage-accounting, cleanup, and exit semantics through a small
+  fail-closed launcher.
+- Validate the stdin byte bound, encoding, and empty-input contract before
+  importing the provider runtime.
+
 ## 2.2.14 - 2026-07-30
 
 - Separate the provider prompt-input budget from the output-capture budget so

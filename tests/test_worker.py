@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import subprocess
@@ -10,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -19,6 +20,7 @@ from factory.attempts import IdenticalAttemptError
 from factory.autonomy import CAPABILITY_PROFILES
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
+from factory.hermes_stdin import _invoke_hermes, read_stdin_prompt
 from factory.intake import IntakeService
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
@@ -2826,6 +2828,75 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.output, "0123456789")
         run.assert_called_once()
+        call = run.call_args
+        assert call is not None
+        argv = call.args[0]
+        self.assertNotIn("p" * 200, argv)
+        self.assertTrue(str(argv[1]).endswith("hermes_stdin.py"))
+        self.assertEqual(call.kwargs["input"], "p" * 200)
+
+    def test_hermes_stdin_prompt_reader_is_bounded_and_utf8_strict(self) -> None:
+        prompt = "контекст"
+
+        self.assertEqual(
+            read_stdin_prompt(
+                io.BytesIO(prompt.encode("utf-8")),
+                max_input_bytes=64,
+            ),
+            prompt,
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            read_stdin_prompt(
+                io.BytesIO(b"x" * 11),
+                max_input_bytes=10,
+            )
+        with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+            read_stdin_prompt(
+                io.BytesIO(b"\xff"),
+                max_input_bytes=10,
+            )
+        with self.assertRaisesRegex(ValueError, "empty"):
+            read_stdin_prompt(
+                io.BytesIO(b""),
+                max_input_bytes=10,
+            )
+
+    def test_hermes_stdin_launcher_preserves_oneshot_contract(self) -> None:
+        module = Mock()
+        module._run_and_exit_oneshot.side_effect = SystemExit(0)
+
+        with (
+            patch(
+                "factory.hermes_stdin.importlib.import_module",
+                return_value=module,
+            ),
+            patch.dict(
+                "factory.hermes_stdin.os.environ",
+                {},
+                clear=True,
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            _invoke_hermes(
+                "bounded prompt",
+                model="gpt-5.6-luna",
+                provider="openai-codex",
+                toolsets="file,terminal",
+                usage_file="/tmp/usage.json",
+                ignore_rules=True,
+            )
+
+        startup = module._prepare_agent_startup.call_args.args[0]
+        self.assertIsNone(startup.command)
+        self.assertFalse(startup.yolo)
+        self.assertTrue(startup.ignore_rules)
+        module._run_and_exit_oneshot.assert_called_once_with(
+            "bounded prompt",
+            model="gpt-5.6-luna",
+            provider="openai-codex",
+            toolsets="file,terminal",
+            usage_file="/tmp/usage.json",
+        )
 
     def test_prompt_input_limit_is_controller_failure_not_transport_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
