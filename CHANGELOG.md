@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.2.23 - 2026-07-31
+
+- Route actionable semantic findings from read-only reviewers, and failed
+  mandatory gates from any non-Builder lifecycle role, to a Director replan
+  where a fresh Builder slice must resolve the exact safe coordinate instead of
+  accepting a prose-only same-role replacement.
+- Require fresh replan slices to name reviewer blocker IDs as well as mandatory
+  gate IDs from the bounded causal chain, so actionable coordinates cannot be
+  dropped between Director and Builder.
+- Preserve controller-owned quality gate IDs on exact executable repairs so an
+  accepted replacement must rerun the inherited deterministic checks.
+- Reject legacy read-only reviewer repairs and malformed mandatory-gate repair
+  contracts before provider execution, forcing a Director replan or exact gate
+  inheritance instead of repeating an incapable role.
+
 ## 2.2.22 - 2026-07-30
 
 - Bound dependency and typed-review evidence by aggregate Context Pack budgets

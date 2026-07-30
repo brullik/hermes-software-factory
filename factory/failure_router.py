@@ -215,6 +215,37 @@ class FailureRouter:
         ]
 
     @staticmethod
+    def _quality_gates(contract: dict[str, Any]) -> list[str]:
+        values = contract.get("quality_gates", [])
+        if not isinstance(values, list):
+            raise TypeError("failed task quality_gates are invalid")
+        return list(
+            dict.fromkeys(
+                str(value)
+                for value in values
+                if isinstance(value, str) and value
+            )
+        )
+
+    @staticmethod
+    def _failure_gate_ids(failure: dict[str, Any]) -> list[str]:
+        try:
+            values = json.loads(
+                str(failure.get("failed_gate_ids_json") or "[]")
+            )
+        except json.JSONDecodeError:
+            values = []
+        if not isinstance(values, list):
+            return []
+        return list(
+            dict.fromkeys(
+                str(value)
+                for value in values
+                if isinstance(value, str) and value
+            )
+        )
+
+    @staticmethod
     def _controller_incident_acceptance() -> list[dict[str, Any]]:
         """Keep controller recovery separate from product-semantic acceptance."""
 
@@ -376,6 +407,7 @@ class FailureRouter:
         node_suffix: str,
         required_capabilities: list[str] | None = None,
         acceptance: list[dict[str, Any]] | None = None,
+        quality_gates: list[str] | None = None,
     ) -> tuple[dict[str, Any], Path]:
         task_id = (
             "T-"
@@ -435,6 +467,7 @@ class FailureRouter:
             "status": "READY",
             "priority": int(failed.get("priority") or 0) + 10,
             "critical_path_rank": 0,
+            "quality_gates": list(quality_gates or []),
         }
         self.schemas.validate("task-contract-v2.schema.json", contract)
         path = self.artifacts.write(
@@ -641,6 +674,11 @@ class FailureRouter:
                     routed,
                     capability_profile,
                 )
+                if role != "replanner"
+                else None
+            ),
+            quality_gates=(
+                self._quality_gates(original)
                 if role != "replanner"
                 else None
             ),
@@ -852,6 +890,17 @@ class FailureRouter:
                 invalid_plan_output_schema
                 or controller_handoff
                 or reason in _REPLAN_REASONS
+                or (
+                    str(failed.get("capability_profile") or "")
+                    == "reviewer_readonly"
+                    and str(failure.get("failure_class") or "")
+                    in {"semantic", "policy"}
+                )
+                or (
+                    reason == "mandatory_gate_failed"
+                    and str(failed.get("capability_profile") or "")
+                    != "builder_workspace"
+                )
                 or attempts_used >= 3
                 or same_role_problem_count >= 2
                 or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
@@ -974,6 +1023,18 @@ class FailureRouter:
                 )
             else:
                 contract_acceptance = None
+            repair_quality_gates: list[str] | None = None
+            if suffix == "repair":
+                repair_quality_gates = self._quality_gates(original)
+                if reason == "mandatory_gate_failed":
+                    repair_quality_gates = list(
+                        dict.fromkeys(
+                            [
+                                *repair_quality_gates,
+                                *self._failure_gate_ids(failure),
+                            ]
+                        )
+                    )
             contract, path = self._write_contract(
                 failed=failed,
                 failure=failure,
@@ -994,6 +1055,7 @@ class FailureRouter:
                     if suffix == "repair"
                     else None
                 ),
+                quality_gates=repair_quality_gates,
             )
             repair_ref: str | None = None
             if suffix == "repair":

@@ -57,7 +57,11 @@ class PipelineTests(unittest.TestCase):
                 failures,
                 source_failure_id="failure-replan",
             ),
-            ("target-dependency-audit", "target-license-check"),
+            (
+                "MODEL_REPAIR_REQUIRED",
+                "target-dependency-audit",
+                "target-license-check",
+            ),
         )
 
     def test_different_products_have_disjoint_workspace_locks(self) -> None:
