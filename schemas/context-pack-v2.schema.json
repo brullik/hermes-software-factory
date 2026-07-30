@@ -53,7 +53,20 @@
       "properties": {
         "profile": {"type": "string"},
         "required": {"type": "array", "items": {"type": "string"}},
-        "missing": {"type": "array", "items": {"type": "string"}}
+        "missing": {"type": "array", "items": {"type": "string"}},
+        "available": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["capability", "provider", "scope"],
+            "properties": {
+              "capability": {"type": "string", "minLength": 1},
+              "provider": {"type": "string", "minLength": 1},
+              "scope": {"type": "object"}
+            }
+          }
+        }
       }
     },
     "constraints": {"type": "object"},

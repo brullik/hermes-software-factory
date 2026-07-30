@@ -2399,6 +2399,24 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("--ignore-rules", coding_argv)
         self.assertIn("--ignore-rules", planning_argv)
 
+    def test_subprocess_runner_preserves_rootless_container_runtime_directory(self) -> None:
+        runner = SubprocessHermesRunner()
+
+        with patch.dict(
+            "factory.worker.os.environ",
+            {
+                "HOME": "/var/lib/hermes-factory",
+                "PATH": "/usr/local/bin:/usr/bin",
+                "XDG_RUNTIME_DIR": "/run/hermes-factory",
+                "UNTRUSTED_SECRET": "must-not-cross-the-provider-boundary",
+            },
+            clear=True,
+        ):
+            environment = runner._environment()
+
+        self.assertEqual(environment["XDG_RUNTIME_DIR"], "/run/hermes-factory")
+        self.assertNotIn("UNTRUSTED_SECRET", environment)
+
     def test_AUT_P0_035_success_stdout_json_excludes_stderr_diagnostics(self) -> None:
         selection = ModelSelection(
             "openai-codex",

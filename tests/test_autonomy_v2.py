@@ -1333,6 +1333,18 @@ def test_AUT_P0_013_context_pack_has_bounded_safe_file_excerpts(
         root_goal="Create a verified service without exposing credentials",
         root_task_id="T-CONTEXT001",
         plan_summary={"plan_id": "PLAN-CONTEXT", "revision": 1},
+        capability_contract={
+            "profile": "builder_workspace",
+            "required": ["toolchain.container_builder"],
+            "missing": [],
+            "available": [
+                {
+                    "capability": "toolchain.container_builder",
+                    "provider": "controller-toolchain",
+                    "scope": {"runtime": "podman"},
+                }
+            ],
+        },
         max_chars=800,
     )
     excerpts = {item["path"]: item for item in result.artifact["file_excerpts"]}
@@ -1341,10 +1353,49 @@ def test_AUT_P0_013_context_pack_has_bounded_safe_file_excerpts(
     assert excerpts["large.py"]["redactions"][0]["location"].startswith("line ")
     assert excerpts["binary.bin"]["binary"] is True
     assert excerpts["binary.bin"]["content"] == ""
+    assert result.artifact["capability_contract"]["available"][0]["scope"] == {
+        "runtime": "podman"
+    }
     assert ArtifactStore(config).validate(
         "context-pack-v2.schema.json",
         result.artifact,
     ) == []
+
+
+def test_available_capability_inventory_selects_specific_runtime_scope(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.grant_capability(
+            capability="toolchain.container_builder",
+            provider="controller-toolchain",
+            scope={"runtime": "docker"},
+        )
+        state.grant_capability(
+            product_id="product-autonomy",
+            capability="toolchain.container_builder",
+            provider="controller-toolchain",
+            scope={"runtime": "podman"},
+        )
+
+        available = state.available_capabilities(
+            "product-autonomy",
+            "T-CONTEXT001",
+            ["toolchain.container_builder", "toolchain.python"],
+        )
+
+        assert available == [
+            {
+                "capability": "toolchain.container_builder",
+                "provider": "controller-toolchain",
+                "scope": {"runtime": "podman"},
+            }
+        ]
+    finally:
+        state.close()
 
 
 def test_AUT_P0_014_capability_preflight_controls_ready_frontier(

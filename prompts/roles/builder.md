@@ -39,6 +39,10 @@
     отдельное требование к корневому manifest, Makefile или canonical-command detector,
     если этих файлов нет в `allowed_paths`. Когда штатная task-local acceptance command
     репозитория проходит, зафиксируй evidence и заверши реализацию.
+15. `Context Pack.capability_contract.available` является trusted inventory.
+    Для `toolchain.container_builder` используй executable из `scope.runtime`
+    (например, `podman`), не угадывай `docker` и не запрашивай owner action,
+    если Controller уже выдал AVAILABLE grant.
 
 ## Tier behavior
 

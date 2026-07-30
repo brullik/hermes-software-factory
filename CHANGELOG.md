@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.5 - 2026-07-30
+
+- Preserve the systemd-provisioned `XDG_RUNTIME_DIR` across the sanitized
+  worker-to-Hermes subprocess boundary so builder terminal sessions can use
+  the same rootless container engine already proven by Controller preflight.
+- Include trusted resolved capability scopes in each Context Pack and direct
+  builders to use the controller-selected container runtime instead of
+  guessing a Docker socket.
+
 ## 2.2.4 - 2026-07-30
 
 - Reject PlanProposal scopes that contain product requirements instead of
