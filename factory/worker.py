@@ -110,6 +110,8 @@ _WORKSPACE_COPY_IGNORES = (
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
+    "audit_output",
+    "audit_tools",
     "build",
     "dist",
     "state",
@@ -268,6 +270,14 @@ class HermesRunner(Protocol):
     ) -> HermesRunResult: ...
 
 
+class PromptInputLimitError(ValueError):
+    """Raised before provider execution when a compiled prompt is too large."""
+
+
+class PromptSafetyError(ValueError):
+    """Raised before provider execution when a prompt still contains a secret candidate."""
+
+
 class SubprocessHermesRunner:
     """Run Hermes with a fixed argv and a deliberately small environment."""
 
@@ -276,6 +286,7 @@ class SubprocessHermesRunner:
         *,
         binary: str = "hermes",
         timeout_seconds: int = 900,
+        max_prompt_chars: int = 250_000,
         max_output_chars: int = 100_000,
         environment: Mapping[str, str] | None = None,
         toolsets: tuple[str, ...] = ("file", "terminal"),
@@ -283,12 +294,15 @@ class SubprocessHermesRunner:
     ) -> None:
         if timeout_seconds < 1:
             raise ValueError("timeout_seconds must be positive")
+        if max_prompt_chars < 1:
+            raise ValueError("max_prompt_chars must be positive")
         if max_output_chars < 1:
             raise ValueError("max_output_chars must be positive")
         if not toolsets or any(not _SAFE_NAME.fullmatch(toolset) for toolset in toolsets):
             raise ValueError("toolsets must contain safe explicit names")
         self.binary = binary
         self.timeout_seconds = timeout_seconds
+        self.max_prompt_chars = max_prompt_chars
         self.max_output_chars = max_output_chars
         self.environment = dict(environment) if environment is not None else None
         self.toolsets = toolsets
@@ -364,10 +378,21 @@ class SubprocessHermesRunner:
         cwd: Path,
         usage_path: Path | None = None,
     ) -> HermesRunResult:
-        if find_secret_candidates(prompt):
-            raise ValueError("Prompt compilation rejected secret-like content")
-        if len(prompt) > self.max_output_chars:
-            raise ValueError("prompt exceeds the worker input limit")
+        secret_diagnostics = find_secret_candidate_diagnostics(prompt)
+        if secret_diagnostics:
+            coordinates = ", ".join(
+                f"{diagnostic['detector']}@{diagnostic['location']}"
+                for diagnostic in secret_diagnostics
+            )
+            raise PromptSafetyError(
+                "Prompt safety preflight rejected secret-like content at "
+                f"safe coordinates: {coordinates}"
+            )
+        if len(prompt) > self.max_prompt_chars:
+            raise PromptInputLimitError(
+                f"prompt input size {len(prompt)} exceeds configured "
+                f"limit {self.max_prompt_chars}"
+            )
         if not cwd.is_dir():
             return HermesRunResult("FAIL", "", sha256_text("missing_cwd"), "workspace_missing")
         if usage_path is not None:
@@ -3719,19 +3744,21 @@ class AgentWorker:
                 output_ref=f"evidence/{output_path.name}",
             )
         except (json.JSONDecodeError, TypeError, ValueError) as error:
-            reason = (
-                str(error)
-                if str(error)
-                in {
-                    "secret_exposure",
-                    "malformed_transport",
-                    "schema_validation",
-                    *_PLAN_CONTRACT_REASONS,
-                    "release_policy_violation",
-                    "scope_violation",
-                }
-                else "malformed_transport"
-            )
+            known_reasons = {
+                "secret_exposure",
+                "malformed_transport",
+                "schema_validation",
+                *_PLAN_CONTRACT_REASONS,
+                "release_policy_violation",
+                "scope_violation",
+            }
+            if str(error) not in known_reasons:
+                # An unrecognized controller or runner exception is not
+                # evidence of a provider transport failure. Re-raise it so
+                # run_once records a safe controller FailureEnvelope and the
+                # incident-recovery path can change the hypothesis.
+                raise
+            reason = str(error)
             route_action = self._route(
                 spec,
                 tier,

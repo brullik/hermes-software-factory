@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.14 - 2026-07-30
+
+- Separate the provider prompt-input budget from the output-capture budget so
+  bounded 100,000-character Context Packs plus their contracts and schemas can
+  reach Hermes without a false pre-execution failure.
+- Classify an actual prompt-input overflow as a controller fault with safe size
+  coordinates instead of retrying it as malformed provider transport.
+- Re-raise every unrecognized worker `ValueError` into the controller incident
+  path rather than discarding its diagnostic under `malformed_transport`.
+- Keep local `audit_output` and `audit_tools` working directories outside
+  provider workspaces so locked archives and audit-only data cannot affect or
+  leak into product execution.
+
 ## 2.2.13 - 2026-07-30
 
 - Give every replanner a planning-specific acceptance contract instead of
