@@ -792,42 +792,17 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(durable_task)
             assert durable_task is not None
             spec = worker.default_spec(durable_task)
-            identity_decision = next(
+            proposal_decision = next(
                 item
                 for item in spec.decisions
-                if "controller-owned identities" in item
+                if "Return semantic implementation slices only" in item
             )
             self.assertIn(
-                "builder: output_schema=attempt-result.schema.json; "
-                "capability_profile=builder_workspace",
-                identity_decision,
+                "deterministic PlanCompiler",
+                proposal_decision,
             )
-            self.assertIn(
-                "release-operator@release-production: "
-                "output_schema=release-operation-result.schema.json; "
-                "capability_profile=release_production",
-                identity_decision,
-            )
-            self.assertIn(
-                "Use a new plan_id for every proposed immutable revision",
-                identity_decision,
-            )
-            self.assertIn(
-                "Every idempotency_key must be exactly 64 lowercase hexadecimal",
-                identity_decision,
-            )
-            self.assertIn(
-                "Every mandatory goal acceptance_ids list must be non-empty",
-                identity_decision,
-            )
-            self.assertIn(
-                "CANONICAL_QUALITY_GATE_IDS=[",
-                identity_decision,
-            )
-            self.assertIn(
-                "package-integrity",
-                identity_decision,
-            )
+            self.assertNotIn("output_schema=", proposal_decision)
+            self.assertNotIn("idempotency_key", proposal_decision)
 
             result = worker.run_once()
 
@@ -835,9 +810,10 @@ class WorkerTests(unittest.TestCase):
             assert result is not None
             self.assertEqual(result.status, "repair_scheduled")
             self.assertEqual(result.reason_code, "schema_validation")
+            expected = "replanner must return proposal_kind=replan_delta"
             self.assertEqual(
                 result.detail,
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             durable = state.get_task(task_id)
             self.assertIsNotNone(durable)
@@ -856,7 +832,7 @@ class WorkerTests(unittest.TestCase):
                 ["BACKLOG_PLAN_SEMANTIC_VALIDATION"],
             )
             self.assertIn(
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
                 repair["expected_vs_actual"]["actual"],
             )
             diagnostic = json.loads(
@@ -866,7 +842,7 @@ class WorkerTests(unittest.TestCase):
             )
             self.assertEqual(
                 diagnostic["parser_error_safe_message"],
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             self.assertIn(
                 f"evidence/transport-diagnostic-{result.attempt_id}.json",
@@ -879,11 +855,11 @@ class WorkerTests(unittest.TestCase):
             )
             self.assertEqual(
                 envelope["safe_message"],
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             self.assertEqual(
                 envelope["actual"]["validator_diagnostic"],
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             self.assertEqual(
                 envelope["failed_gate_ids"],
@@ -1045,7 +1021,7 @@ class WorkerTests(unittest.TestCase):
                 self.assertNotIn(secret, path.read_text(encoding="utf-8"))
             state.close()
 
-    def test_interrupted_attempt_replays_immutable_repair_without_provider_call(
+    def test_AUT_P0_036_interrupted_attempt_replays_without_provider_call(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2414,7 +2390,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("--ignore-rules", coding_argv)
         self.assertIn("--ignore-rules", planning_argv)
 
-    def test_subprocess_runner_keeps_success_stderr_out_of_json_contract(self) -> None:
+    def test_AUT_P0_035_success_stdout_json_excludes_stderr_diagnostics(self) -> None:
         selection = ModelSelection(
             "openai-codex",
             "economy",

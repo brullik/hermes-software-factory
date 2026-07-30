@@ -100,6 +100,8 @@ class IntakeService:
         idempotency_key: str | None = None,
         attachments: Iterable[dict[str, Any]] = (),
     ) -> IntakeResult:
+        if self.state.maintenance_active():
+            raise IntakeRejected("factory maintenance is active; intake is temporarily closed")
         legacy_boundary = (
             goal_text is None
             and idea is not None
@@ -147,7 +149,11 @@ class IntakeService:
         clean_constraints = dict(constraints or {})
         if any(not isinstance(key, str) for key in clean_constraints):
             raise IntakeRejected("constraint keys must be strings")
-        if not isinstance(owner_id, str) or not owner_id.strip() or any(char in owner_id for char in "\r\n\x00"):
+        if (
+            not isinstance(owner_id, str)
+            or not owner_id.strip()
+            or any(char in owner_id for char in "\r\n\x00")
+        ):
             raise IntakeRejected("Owner id is invalid")
         if len(owner_id) > 256:
             raise IntakeRejected("Owner id is too long")
@@ -180,9 +186,7 @@ class IntakeService:
         product_id = f"{slugify(redacted_goal)}-{sha256_text(key)[:8]}"
         intake_ref = f"evidence/intake-{product_id}.json"
         constraints_ref = (
-            f"inline-sha256:{sha256_text(constraints_text)}"
-            if clean_constraints
-            else None
+            f"inline-sha256:{sha256_text(constraints_text)}" if clean_constraints else None
         )
         if legacy_boundary:
             row, created = self.state.create_product(
@@ -261,9 +265,7 @@ class IntakeService:
                 "language": "ru",
             }
             schema_name = "idea-intake.schema.json"
-        path = self.artifacts.write(
-            schema_name, artifact, filename=f"intake-{product_id}.json"
-        )
+        path = self.artifacts.write(schema_name, artifact, filename=f"intake-{product_id}.json")
         ensure_initial_product_task(self.config, self.state, self.artifacts, product_id)
         self.capability_broker.preflight_product(product_id)
         return IntakeResult(product_id, str(path), True, correlation_id)

@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from .config import FactoryConfig, load_config
 from .gateway_commands import GatewayCommandError, parse_command
 from .intake import IntakeService
 from .kanban import build_kanban_snapshot, format_telegram_summary
-from .state import StateStore
+from .state import StateStore, is_sqlite_busy
 from .telegram import TelegramApi, TelegramApiError
 from .workflow import WorkflowEngine
 
@@ -113,16 +114,8 @@ class TelegramGateway:
         actions = self.state.open_capability_blocks()
         if not actions:
             return "Ожидающих OWNER_ACTION нет."
-        names = list(
-            dict.fromkeys(
-                Path(str(item["owner_action_ref"])).name
-                for item in actions
-            )
-        )
-        return "OWNER_ACTION:\n" + "\n".join(
-            f"- {name}"
-            for name in names[:10]
-        )
+        names = list(dict.fromkeys(Path(str(item["owner_action_ref"])).name for item in actions))
+        return "OWNER_ACTION:\n" + "\n".join(f"- {name}" for name in names[:10])
 
     @staticmethod
     def _product_id(argument: str | None) -> str:
@@ -221,7 +214,13 @@ class TelegramGateway:
                     str(payload.get("kind", "notification"))[:80],
                 )
                 delivered += 1
-            except (TelegramApiError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            except (
+                TelegramApiError,
+                OSError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as error:
                 self.state.mark_outbox_failed(
                     outbox_id,
                     self.outbox_worker_id,
@@ -237,6 +236,8 @@ class TelegramGateway:
 
     def poll_once(self) -> int:
         self.deliver_outbox()
+        if self.state.maintenance_active():
+            return 0
         offset = self._read_offset()
         processed = 0
         for update in self.api.get_updates(offset):
@@ -253,7 +254,11 @@ class TelegramGateway:
             try:
                 self.poll_once()
                 delay = 1.0
-            except (TelegramApiError, OSError, ValueError) as error:
+            except (TelegramApiError, OSError, ValueError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.OperationalError):
+                    if not is_sqlite_busy(error):
+                        raise
+                    self.state.record_sqlite_busy_event()
                 print(f"gateway transport recovery: {type(error).__name__}", flush=True)
                 time.sleep(delay)
                 delay = min(delay * 2, 60.0)
@@ -266,7 +271,9 @@ def main() -> int:
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
     config = load_config(args.config)
-    credential_name = str(config.raw.get("telegram", {}).get("token_credential_name", "telegram-token"))
+    credential_name = str(
+        config.raw.get("telegram", {}).get("token_credential_name", "telegram-token")
+    )
     try:
         token = read_credential(credential_name)
     except (FileNotFoundError, ValueError):

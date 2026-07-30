@@ -83,6 +83,10 @@
       "minItems": 1,
       "items": {"type": "string", "minLength": 1}
     },
-    "summary": {"type": "string", "minLength": 1}
+    "summary": {"type": "string", "minLength": 1},
+    "compiler_version": {"type": "string", "minLength": 1},
+    "lifecycle_version": {"type": "string", "minLength": 1},
+    "proposal_artifact_ref": {"type": "string", "minLength": 1},
+    "proposal_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
   }
 }

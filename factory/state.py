@@ -42,6 +42,15 @@ _RECOVERABLE_PRODUCT_STATUSES = {
 }
 
 
+def is_sqlite_busy(error: BaseException) -> bool:
+    message = str(error).lower()
+    return isinstance(error, sqlite3.OperationalError) and (
+        "database is locked" in message
+        or "database is busy" in message
+        or "database table is locked" in message
+    )
+
+
 class StateStore:
     def __init__(
         self,
@@ -62,10 +71,15 @@ class StateStore:
             self.database_path.is_file() and self.database_path.stat().st_size > 0
         )
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(self.database_path, check_same_thread=False)
+        self._connection = sqlite3.connect(
+            self.database_path,
+            timeout=30.0,
+            check_same_thread=False,
+        )
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
+        self._connection.execute("PRAGMA busy_timeout=30000")
         self._backup_before_autonomy_migration()
         self._initialize()
 
@@ -147,7 +161,9 @@ class StateStore:
                 """
             )
             try:
-                self._connection.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+                self._connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"
+                )
             except sqlite3.OperationalError:
                 pass
             for column, definition in (
@@ -194,9 +210,7 @@ class StateStore:
             ).fetchone()
             if applied is not None:
                 return
-        target = self.database_path.with_suffix(
-            self.database_path.suffix + ".pre-autonomy-v2.bak"
-        )
+        target = self.database_path.with_suffix(self.database_path.suffix + ".pre-autonomy-v2.bak")
         if target.exists():
             return
         destination = sqlite3.connect(target)
@@ -212,6 +226,66 @@ class StateStore:
     def health(self) -> bool:
         with self._lock:
             return bool(self._connection.execute("SELECT 1").fetchone()[0] == 1)
+
+    def maintenance_status(self) -> dict[str, Any]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM factory_runtime_state WHERE singleton_id=1"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("factory runtime state is missing")
+            return dict(row)
+
+    def maintenance_active(self) -> bool:
+        return bool(self.maintenance_status()["maintenance_active"])
+
+    def enter_maintenance(self, reason: str) -> dict[str, Any]:
+        normalized = reason.strip()
+        if not normalized:
+            raise ValueError("maintenance reason is required")
+        now = utc_now()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """UPDATE factory_runtime_state
+                   SET maintenance_active=1, maintenance_reason=?,
+                       maintenance_entered_at=COALESCE(
+                           maintenance_entered_at, ?
+                       ),
+                       maintenance_left_at=NULL, updated_at=?
+                   WHERE singleton_id=1""",
+                (normalized, now, now),
+            )
+            self._record_event(
+                None,
+                None,
+                "maintenance_entered",
+                {"reason": normalized},
+            )
+        return self.maintenance_status()
+
+    def leave_maintenance(self) -> dict[str, Any]:
+        now = utc_now()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """UPDATE factory_runtime_state
+                   SET maintenance_active=0, maintenance_left_at=?,
+                       updated_at=? WHERE singleton_id=1""",
+                (now, now),
+            )
+            self._record_event(None, None, "maintenance_left", {})
+        return self.maintenance_status()
+
+    def record_sqlite_busy_event(self) -> None:
+        try:
+            with self._lock, self._connection:
+                self._connection.execute(
+                    """UPDATE factory_runtime_state
+                       SET sqlite_busy_events=sqlite_busy_events+1,
+                           updated_at=? WHERE singleton_id=1""",
+                    (utc_now(),),
+                )
+        except sqlite3.OperationalError:
+            return
 
     def create_product(
         self,
@@ -312,7 +386,22 @@ class StateStore:
             "BLOCKED_OWNER": {"IMPLEMENTING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
             "ROLLING_BACK": {"ROLLED_BACK", "FAILED_SAFE"},
             "ROLLED_BACK": {"IMPLEMENTING", "STAGING_DEPLOYED", "FAILED_SAFE"},
-            "PAUSED": {"IDEA_RECEIVED", "CONTRACT_DRAFTED", "CONTRACT_VALIDATED", "RISK_CLASSIFIED", "ARCHITECTED", "BACKLOG_READY", "IMPLEMENTING", "INTEGRATING", "STAGING_DEPLOYED", "PRODUCT_ACCEPTANCE", "RELEASE_READY", "PRODUCTION_DEPLOYED", "OBSERVATION", "CANCELLED"},
+            "PAUSED": {
+                "IDEA_RECEIVED",
+                "CONTRACT_DRAFTED",
+                "CONTRACT_VALIDATED",
+                "RISK_CLASSIFIED",
+                "ARCHITECTED",
+                "BACKLOG_READY",
+                "IMPLEMENTING",
+                "INTEGRATING",
+                "STAGING_DEPLOYED",
+                "PRODUCT_ACCEPTANCE",
+                "RELEASE_READY",
+                "PRODUCTION_DEPLOYED",
+                "OBSERVATION",
+                "CANCELLED",
+            },
             "CANCELLED": set(),
             "COMPLETED": set(),
             "FAILED_SAFE": set(),
@@ -335,7 +424,9 @@ class StateStore:
                 "UPDATE products SET status = ?, updated_at = ? WHERE product_id = ?",
                 (status, now, product_id),
             )
-            self._record_event(product_id, None, "product_transition", {"from": current, "to": status})
+            self._record_event(
+                product_id, None, "product_transition", {"from": current, "to": status}
+            )
             updated = self._connection.execute(
                 "SELECT * FROM products WHERE product_id = ?", (product_id,)
             ).fetchone()
@@ -454,9 +545,7 @@ class StateStore:
                 raise KeyError(product_id)
             selected_plan_id = plan_id or str(product["active_plan_id"] or "")
             if not selected_plan_id:
-                selected_plan_id = (
-                    f"PLAN-SYSTEM-{sha256_text(product_id)[:16].upper()}"
-                )
+                selected_plan_id = f"PLAN-SYSTEM-{sha256_text(product_id)[:16].upper()}"
                 self._connection.execute(
                     """INSERT OR IGNORE INTO plans
                        (plan_id, product_id, revision, status, plan_artifact_ref,
@@ -494,9 +583,8 @@ class StateStore:
                 if dependency_values
                 else None
             )
-            selected_source = (
-                source_task_id
-                or (str(dependency_values[0]) if dependency_values else task_id)
+            selected_source = source_task_id or (
+                str(dependency_values[0]) if dependency_values else task_id
             )
             self._connection.execute(
                 """INSERT INTO tasks
@@ -667,6 +755,32 @@ class StateStore:
 
         return AutonomyStore(self).list_edges(plan_id)
 
+    def dependency_ancestors(self, task_id: str) -> list[dict[str, Any]]:
+        """Return only required upstream tasks, nearest first, across revisions."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                WITH RECURSIVE upstream(task_id, depth) AS (
+                    SELECT from_task_id, 1
+                      FROM task_edges
+                     WHERE to_task_id=? AND required=1
+                    UNION ALL
+                    SELECT edge.from_task_id, upstream.depth + 1
+                      FROM task_edges AS edge
+                      JOIN upstream ON edge.to_task_id=upstream.task_id
+                     WHERE edge.required=1 AND upstream.depth < 100
+                )
+                SELECT tasks.*, MIN(upstream.depth) AS dependency_depth
+                  FROM upstream
+                  JOIN tasks ON tasks.task_id=upstream.task_id
+                 GROUP BY tasks.task_id
+                 ORDER BY dependency_depth, tasks.created_at, tasks.task_id
+                """,
+                (task_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def list_failures(self, product_id: str) -> list[dict[str, Any]]:
         from .autonomy import AutonomyStore
 
@@ -742,6 +856,12 @@ class StateStore:
 
     def claim_task(self, *, worker_id: str, lease_seconds: int = 300) -> dict[str, Any] | None:
         with self._lock:
+            maintenance = self._connection.execute(
+                """SELECT maintenance_active FROM factory_runtime_state
+                   WHERE singleton_id=1"""
+            ).fetchone()
+            if maintenance is not None and bool(maintenance[0]):
+                return None
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 self._connection.execute(
@@ -785,18 +905,15 @@ class StateStore:
                     for active_row in claimed_rows
                     if active_row["lease_owner"]
                 }
-                active_products = {
-                    str(active_row["product_id"])
-                    for active_row in claimed_rows
-                }
+                active_products = {str(active_row["product_id"]) for active_row in claimed_rows}
                 if worker_id in active_workers or len(active_workers) >= self.max_active_workers:
                     self._connection.commit()
                     return None
                 claimed_conflicts: dict[str, set[str]] = {}
                 for active_row in claimed_rows:
-                    claimed_conflicts.setdefault(
-                        str(active_row["product_id"]), set()
-                    ).update(json.loads(active_row["conflict_keys_json"]))
+                    claimed_conflicts.setdefault(str(active_row["product_id"]), set()).update(
+                        json.loads(active_row["conflict_keys_json"])
+                    )
                 chosen = None
                 for row in rows:
                     # The production workspace is persistent and exclusive per
@@ -815,14 +932,11 @@ class StateStore:
                         (row["plan_id"], row["task_id"]),
                     ).fetchall()
                     if not all(
-                        str(status[0]) in {"ACCEPTED", "SUPERSEDED"}
-                        for status in dependencies
+                        str(status[0]) in {"ACCEPTED", "SUPERSEDED"} for status in dependencies
                     ):
                         continue
                     conflict_keys = set(json.loads(row["conflict_keys_json"]))
-                    if conflict_keys & claimed_conflicts.get(
-                        str(row["product_id"]), set()
-                    ):
+                    if conflict_keys & claimed_conflicts.get(str(row["product_id"]), set()):
                         continue
                     chosen = row
                     break
@@ -847,7 +961,9 @@ class StateStore:
                         chosen["task_id"],
                     ),
                 )
-                self._record_event(chosen["product_id"], chosen["task_id"], "task_claimed", {"worker": worker_id})
+                self._record_event(
+                    chosen["product_id"], chosen["task_id"], "task_claimed", {"worker": worker_id}
+                )
                 self._connection.commit()
                 result = dict(chosen)
                 result.update(
@@ -958,9 +1074,7 @@ class StateStore:
             )
             from .autonomy import AutonomyStore
 
-            AutonomyStore(self)._recompute_frontier(
-                self._connection, str(row["product_id"])
-            )
+            AutonomyStore(self)._recompute_frontier(self._connection, str(row["product_id"]))
 
     def requeue_task(
         self,
@@ -1684,17 +1798,13 @@ class StateStore:
             current_detail = str(row["terminal_detail"] or "")
             for recovery_row in recovery_rows:
                 try:
-                    recovery_payload = json.loads(
-                        str(recovery_row["payload_json"] or "{}")
-                    )
+                    recovery_payload = json.loads(str(recovery_row["payload_json"] or "{}"))
                 except json.JSONDecodeError:
                     continue
                 recorded_detail = recovery_payload.get("terminal_detail")
                 if recorded_detail == current_detail or (
                     recorded_detail is None
-                    and current_detail.startswith(
-                        "accepted task result is missing for "
-                    )
+                    and current_detail.startswith("accepted task result is missing for ")
                 ):
                     return False
             now = utc_now()
@@ -1874,15 +1984,12 @@ class StateStore:
             ).fetchall()
             for reopened_row in reopened_rows:
                 try:
-                    reopened_payload = json.loads(
-                        str(reopened_row["payload_json"] or "{}")
-                    )
+                    reopened_payload = json.loads(str(reopened_row["payload_json"] or "{}"))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
                 if (
                     isinstance(reopened_payload, dict)
-                    and int(reopened_payload.get("max_repair_cycles") or 0)
-                    >= max_repair_cycles
+                    and int(reopened_payload.get("max_repair_cycles") or 0) >= max_repair_cycles
                 ):
                     return False
             now = utc_now()
@@ -1960,9 +2067,7 @@ class StateStore:
                     continue
                 if isinstance(payload, dict) and payload.get("blocker_signature"):
                     signature = str(payload["blocker_signature"])
-                    signature_attempts[signature] = (
-                        signature_attempts.get(signature, 0) + 1
-                    )
+                    signature_attempts[signature] = signature_attempts.get(signature, 0) + 1
             hypothesis_attempt = signature_attempts.get(blocker_signature, 0) + 1
             if (
                 row is None
@@ -2002,7 +2107,9 @@ class StateStore:
             )
             return True
 
-    def update_attempt(self, attempt_id: str, *, status: str, reason_code: str | None = None) -> None:
+    def update_attempt(
+        self, attempt_id: str, *, status: str, reason_code: str | None = None
+    ) -> None:
         with self._lock, self._connection:
             updated = self._connection.execute(
                 "UPDATE attempts SET status=?, reason_code=? WHERE attempt_id=?",
@@ -2023,7 +2130,9 @@ class StateStore:
             assert row is not None
             return int(row["semantic"]), int(row["transient"])
 
-    def _record_event(self, product_id: str | None, task_id: str | None, event_type: str, payload: dict[str, Any]) -> None:
+    def _record_event(
+        self, product_id: str | None, task_id: str | None, event_type: str, payload: dict[str, Any]
+    ) -> None:
         self._connection.execute(
             "INSERT INTO events(product_id, task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
             (product_id, task_id, event_type, json.dumps(payload, ensure_ascii=False), utc_now()),
@@ -2054,7 +2163,9 @@ class StateStore:
                 self._record_event(row["product_id"], row["task_id"], "lease_recovered", {})
             return len(rows)
 
-    def enqueue_outbox(self, *, outbox_id: str, idempotency_key: str, event_type: str, payload: dict[str, Any]) -> bool:
+    def enqueue_outbox(
+        self, *, outbox_id: str, idempotency_key: str, event_type: str, payload: dict[str, Any]
+    ) -> bool:
         with self._lock, self._connection:
             existing = self._connection.execute(
                 "SELECT outbox_id FROM outbox WHERE idempotency_key=?", (idempotency_key,)
@@ -2065,7 +2176,13 @@ class StateStore:
                 """INSERT INTO outbox
                 (outbox_id, idempotency_key, event_type, payload_json, status, created_at)
                 VALUES (?, ?, ?, ?, 'PENDING', ?)""",
-                (outbox_id, idempotency_key, event_type, json.dumps(payload, ensure_ascii=False), utc_now()),
+                (
+                    outbox_id,
+                    idempotency_key,
+                    event_type,
+                    json.dumps(payload, ensure_ascii=False),
+                    utc_now(),
+                ),
             )
             return True
 
@@ -2108,8 +2225,7 @@ class StateStore:
                     ).fetchall()
                 else:
                     rows = self._connection.execute(
-                        "SELECT * FROM outbox WHERE status='PENDING' "
-                        "ORDER BY created_at LIMIT ?",
+                        "SELECT * FROM outbox WHERE status='PENDING' ORDER BY created_at LIMIT ?",
                         (limit,),
                     ).fetchall()
                 lease_until = utc_now_from_seconds(lease_seconds)
@@ -2120,7 +2236,9 @@ class StateStore:
                         (worker_id, lease_until, row["outbox_id"]),
                     )
                     item = dict(row)
-                    item.update({"status": "CLAIMED", "lease_owner": worker_id, "lease_until": lease_until})
+                    item.update(
+                        {"status": "CLAIMED", "lease_owner": worker_id, "lease_until": lease_until}
+                    )
                     result.append(item)
                 self._connection.commit()
                 return result
@@ -2171,6 +2289,9 @@ class StateStore:
 def utc_now_from_seconds(seconds: int) -> str:
     import datetime
 
-    return (datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=seconds)).replace(
-        microsecond=0
-    ).isoformat().replace("+00:00", "Z")
+    return (
+        (datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=seconds))
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )

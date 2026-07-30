@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,7 +29,7 @@ from .repair_brief import (
     repair_finding_detail,
     repair_requirements,
 )
-from .state import StateStore
+from .state import StateStore, is_sqlite_busy
 from .workflow import WorkflowEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +50,11 @@ _REASON_RU = {
     "mandatory_gate_failed": "не пройдена обязательная проверка качества",
     "model_requested_repair": "исполнитель подтвердил необходимость исправления",
     "schema_validation": "ответ исполнителя не прошёл проверку схемы",
+    "plan_contract_violation": "план нарушил обязательный контракт конвейера",
+    "missing_declared_predecessor": "в плане отсутствует обязательный предшественник",
+    "evidence_profile_mismatch": "тип доказательства не соответствует этапу",
+    "completion_unreachable": "план не позволяет доказуемо завершить продукт",
+    "toolchain_capability_missing": "на сервере отсутствует обязательный инструмент",
     "scope_violation": "изменения вышли за разрешённые пути задачи",
     "release_adapter_error": "адаптер релиза завершился внутренней ошибкой",
     "release_adapter_blocked": "адаптер релиза не смог продолжить автоматически",
@@ -100,14 +106,10 @@ class PipelineReconciler:
             "sol": int(configured_limits.get("sol", 1)),
         }
         transient = (
-            global_policy.get("transient_retries", {})
-            if isinstance(global_policy, dict)
-            else {}
+            global_policy.get("transient_retries", {}) if isinstance(global_policy, dict) else {}
         )
         self.transient_limit = int(transient.get("max", 3))
-        packaged_catalog = (
-            Path(__file__).resolve().parents[1] / "config" / "quality-gates.yaml"
-        )
+        packaged_catalog = Path(__file__).resolve().parents[1] / "config" / "quality-gates.yaml"
         configured_catalog = config.raw.get("paths", {}).get("quality_gates")
         gate_catalog = load_catalog(
             Path(str(configured_catalog)) if configured_catalog else packaged_catalog
@@ -116,11 +118,7 @@ class PipelineReconciler:
         self.optional_gate_ids = {
             str(item["id"])
             for item in entries
-            if (
-                isinstance(item, dict)
-                and item.get("id")
-                and item.get("mandatory") is False
-            )
+            if (isinstance(item, dict) and item.get("id") and item.get("mandatory") is False)
         }
 
     @staticmethod
@@ -138,9 +136,7 @@ class PipelineReconciler:
         task_id: str | None = None,
         discriminator: str = "",
     ) -> bool:
-        digest = sha256_text(
-            f"telegram:{product_id}:{kind}:{task_id or ''}:{discriminator}"
-        )
+        digest = sha256_text(f"telegram:{product_id}:{kind}:{task_id or ''}:{discriminator}")
         return self.state.enqueue_outbox(
             outbox_id=f"outbox-{digest[:24]}",
             idempotency_key=digest,
@@ -191,11 +187,7 @@ class PipelineReconciler:
         except OSError:
             return None
         evidence_root = self.config.evidence_dir.resolve()
-        if (
-            resolved.parent != evidence_root
-            or not resolved.is_file()
-            or resolved.is_symlink()
-        ):
+        if resolved.parent != evidence_root or not resolved.is_file() or resolved.is_symlink():
             return None
         try:
             payload = json.loads(resolved.read_text(encoding="utf-8"))
@@ -216,20 +208,14 @@ class PipelineReconciler:
                 and item.get("gate_id") == "schema-validation"
                 and item.get("status") == "PASS"
             ):
-                payload = self._read_evidence_payload(
-                    str(item.get("evidence_ref") or "")
-                )
+                payload = self._read_evidence_payload(str(item.get("evidence_ref") or ""))
                 if payload is not None:
                     return payload
         return None
 
     @staticmethod
     def _blocking_finding_detail(output: dict[str, Any]) -> str | None:
-        return (
-            repair_finding_detail(output)
-            if normalized_repair_findings(output)
-            else None
-        )
+        return repair_finding_detail(output) if normalized_repair_findings(output) else None
 
     def _task_reason(self, task: dict[str, Any]) -> tuple[str, str]:
         reason = str(task.get("terminal_reason") or "").strip()
@@ -262,37 +248,25 @@ class PipelineReconciler:
             )
             if isinstance(test_results, list):
                 for item in test_results:
-                    if (
-                        not isinstance(item, dict)
-                        or item.get("status") in {"PASS", "NOT_RUN"}
-                    ):
+                    if not isinstance(item, dict) or item.get("status") in {"PASS", "NOT_RUN"}:
                         continue
                     gate_id = str(item.get("gate_id") or "unknown-gate")
-                    gate_payload = self._read_evidence_payload(
-                        str(item.get("evidence_ref") or "")
-                    )
+                    gate_payload = self._read_evidence_payload(str(item.get("evidence_ref") or ""))
                     gate_summary = (
                         str(gate_payload.get("summary") or "").strip()
                         if gate_payload is not None
                         else ""
                     )
                     if gate_summary:
-                        failed_observations.append(
-                            f"{gate_id}: {gate_summary}"
-                        )
+                        failed_observations.append(f"{gate_id}: {gate_summary}")
             if failed_gates:
                 detail = f"{detail}; failed gates: {', '.join(failed_gates)}"
             if failed_observations:
                 detail = (
-                    f"{detail}; controller gate evidence: "
-                    + " | ".join(failed_observations)
+                    f"{detail}; controller gate evidence: " + " | ".join(failed_observations)
                 )[:4000]
             output = self._validated_output_payload(payload)
-            finding_detail = (
-                self._blocking_finding_detail(output)
-                if output is not None
-                else None
-            )
+            finding_detail = self._blocking_finding_detail(output) if output is not None else None
             if finding_detail:
                 detail = finding_detail
         return reason, detail
@@ -306,9 +280,7 @@ class PipelineReconciler:
             if transient_count >= self.transient_limit:
                 return None
             current = str(
-                (attempts[-1].get("tier") if attempts else None)
-                or task.get("next_tier")
-                or "luna"
+                (attempts[-1].get("tier") if attempts else None) or task.get("next_tier") or "luna"
             )
             return current if current in self.semantic_limits else "luna"
 
@@ -358,9 +330,7 @@ class PipelineReconciler:
         contract_path = self.config.evidence_dir / f"task-{task_id}.json"
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         attempts = self.state.attempts_for_task(task_id)
-        attempt_id = (
-            str(attempts[-1]["attempt_id"]) if attempts else new_id("reconcile-attempt")
-        )
+        attempt_id = str(attempts[-1]["attempt_id"]) if attempts else new_id("reconcile-attempt")
         evidence_refs = [
             value
             for value in (
@@ -369,13 +339,9 @@ class PipelineReconciler:
             )
             if value
         ]
-        attempt_payload = self._read_evidence_payload(
-            str(task.get("result_ref") or "")
-        )
+        attempt_payload = self._read_evidence_payload(str(task.get("result_ref") or ""))
         output = (
-            self._validated_output_payload(attempt_payload)
-            if attempt_payload is not None
-            else None
+            self._validated_output_payload(attempt_payload) if attempt_payload is not None else None
         )
         failed_gate_ids: list[str] = []
         gate_required_fixes: list[str] = []
@@ -383,16 +349,11 @@ class PipelineReconciler:
             test_results = attempt_payload.get("test_results", [])
             if isinstance(test_results, list):
                 for item in test_results:
-                    if (
-                        not isinstance(item, dict)
-                        or item.get("status") in {"PASS", "NOT_RUN"}
-                    ):
+                    if not isinstance(item, dict) or item.get("status") in {"PASS", "NOT_RUN"}:
                         continue
                     gate_id = str(item.get("gate_id") or "unknown-gate")
                     failed_gate_ids.append(gate_id)
-                    gate_payload = self._read_evidence_payload(
-                        str(item.get("evidence_ref") or "")
-                    )
+                    gate_payload = self._read_evidence_payload(str(item.get("evidence_ref") or ""))
                     gate_summary = (
                         str(gate_payload.get("summary") or "").strip()
                         if gate_payload is not None
@@ -400,8 +361,7 @@ class PipelineReconciler:
                     )
                     if gate_summary:
                         gate_required_fixes.append(
-                            f"Make controller gate {gate_id} pass. "
-                            f"Observed failure: {gate_summary}"
+                            f"Make controller gate {gate_id} pass. Observed failure: {gate_summary}"
                         )
         failed_gate_ids, required_fixes = repair_requirements(
             output=output,
@@ -412,9 +372,7 @@ class PipelineReconciler:
                 *failed_gate_ids,
             ],
         )
-        required_fixes = list(
-            dict.fromkeys([*gate_required_fixes, *required_fixes])
-        )
+        required_fixes = list(dict.fromkeys([*gate_required_fixes, *required_fixes]))
         brief = {
             **artifact_metadata(
                 self.config,
@@ -442,9 +400,7 @@ class PipelineReconciler:
             "changed_files": [],
             "forbidden_actions": [str(item) for item in contract["forbidden_paths"]],
             "previous_attempt_summary": detail[:2000],
-            "definition_of_done": [
-                str(item["verification"]) for item in contract["acceptance"]
-            ],
+            "definition_of_done": [str(item["verification"]) for item in contract["acceptance"]],
             "evidence_refs": list(dict.fromkeys(evidence_refs)),
         }
         path = self.artifacts.write(
@@ -580,16 +536,17 @@ class PipelineReconciler:
             }.get(role)
             if role == "release-operator":
                 successor = (
-                    "product-tester"
-                    if "Staging" in str(task.get("title"))
-                    else "observation"
+                    "product-tester" if "Staging" in str(task.get("title")) else "observation"
                 )
         if stage == "release-production" or (
             role == "release-operator" and str(product["status"]) == "OBSERVATION"
         ):
             available = (
-                datetime.now(UTC) + timedelta(seconds=self.config.observation_seconds)
-            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                (datetime.now(UTC) + timedelta(seconds=self.config.observation_seconds))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
             self.pipeline.create_task(
                 product_id,
                 "observation",
@@ -637,22 +594,17 @@ class PipelineReconciler:
             or str(task.get("stage_key")) != "builder-core"
         ):
             return False
-        attempt_payload = self._read_evidence_payload(
-            str(task.get("result_ref") or "")
-        )
+        attempt_payload = self._read_evidence_payload(str(task.get("result_ref") or ""))
         if attempt_payload is None:
             return False
         controller_results = attempt_payload.get("test_results", [])
-        if (
-            not isinstance(controller_results, list)
-            or any(
-                not isinstance(item, dict)
-                or (
-                    item.get("status") == "FAIL"
-                    and str(item.get("gate_id") or "") not in self.optional_gate_ids
-                )
-                for item in controller_results
+        if not isinstance(controller_results, list) or any(
+            not isinstance(item, dict)
+            or (
+                item.get("status") == "FAIL"
+                and str(item.get("gate_id") or "") not in self.optional_gate_ids
             )
+            for item in controller_results
         ):
             return False
         output = self._validated_output_payload(attempt_payload)
@@ -726,9 +678,7 @@ class PipelineReconciler:
                 or int(candidate.get("cycle") or 0) > int(latest.get("cycle") or 0)
             ):
                 continue
-            attempt_payload = self._read_evidence_payload(
-                str(candidate.get("result_ref") or "")
-            )
+            attempt_payload = self._read_evidence_payload(str(candidate.get("result_ref") or ""))
             if attempt_payload is None:
                 continue
             controller_results = attempt_payload.get("test_results", [])
@@ -747,10 +697,7 @@ class PipelineReconciler:
                 elif status == "FAIL" and gate_id not in self.optional_gate_ids:
                     controller_failed = True
                     break
-            if (
-                controller_failed
-                or not required_controller_gates.issubset(passed_controller_gates)
-            ):
+            if controller_failed or not required_controller_gates.issubset(passed_controller_gates):
                 continue
             output = self._validated_output_payload(attempt_payload)
             if output is None or not builder_result_is_controller_complete(output):
@@ -944,11 +891,10 @@ class PipelineReconciler:
         ):
             return False
         reason, detail = self._task_reason(task)
-        if (
-            owner_action_allowed(self.config, reason)
-            or classify_failure(reason)
-            in {FailureClass.EXTERNAL, FailureClass.TRANSIENT}
-        ):
+        if owner_action_allowed(self.config, reason) or classify_failure(reason) in {
+            FailureClass.EXTERNAL,
+            FailureClass.TRANSIENT,
+        }:
             return False
         resume_status = self._previous_status_before_failed_safe(product_id)
         if resume_status is None:
@@ -982,10 +928,7 @@ class PipelineReconciler:
         product_id = str(product["product_id"])
         task = self.state.legacy_latest_task_v1(product_id)
         maximum_product_cycle = max(
-            (
-                int(item.get("cycle") or 0)
-                for item in self.state.list_tasks(product_id)
-            ),
+            (int(item.get("cycle") or 0) for item in self.state.list_tasks(product_id)),
             default=0,
         )
         if task is None or maximum_product_cycle >= self.config.max_repair_cycles:
@@ -1010,9 +953,7 @@ class PipelineReconciler:
             product_id=product_id,
             task_id=str(task["task_id"]),
             kind="automatic_recovery",
-            discriminator=(
-                f"repair-budget:{task['task_id']}:{self.config.max_repair_cycles}"
-            ),
+            discriminator=(f"repair-budget:{task['task_id']}:{self.config.max_repair_cycles}"),
             text=(
                 "🔁 Hermes автоматически возобновил проект в рамках расширенного, "
                 "но ограниченного бюджета исправлений.\n"
@@ -1030,10 +971,7 @@ class PipelineReconciler:
         product_id = str(product["product_id"])
         task = self.state.legacy_latest_task_v1(product_id)
         maximum_product_cycle = max(
-            (
-                int(item.get("cycle") or 0)
-                for item in self.state.list_tasks(product_id)
-            ),
+            (int(item.get("cycle") or 0) for item in self.state.list_tasks(product_id)),
             default=0,
         )
         if task is None or maximum_product_cycle < 3:
@@ -1052,9 +990,7 @@ class PipelineReconciler:
         ):
             return False
         blocker_ids: list[str] = []
-        attempt_payload = self._read_evidence_payload(
-            str(task.get("result_ref") or "")
-        )
+        attempt_payload = self._read_evidence_payload(str(task.get("result_ref") or ""))
         if attempt_payload is not None:
             test_results = attempt_payload.get("test_results", [])
             if isinstance(test_results, list):
@@ -1070,12 +1006,9 @@ class PipelineReconciler:
             output = self._validated_output_payload(attempt_payload)
             if output is not None:
                 blocker_ids.extend(
-                    finding.finding_id
-                    for finding in normalized_repair_findings(output)
+                    finding.finding_id for finding in normalized_repair_findings(output)
                 )
-        blocker_ids = list(
-            dict.fromkeys(value.strip() for value in blocker_ids if value.strip())
-        )
+        blocker_ids = list(dict.fromkeys(value.strip() for value in blocker_ids if value.strip()))
         if not blocker_ids:
             blocker_ids = [reason]
         blocker_signature = sha256_text(
@@ -1100,20 +1033,17 @@ class PipelineReconciler:
                 continue
             if (
                 isinstance(payload, dict)
-                and str(payload.get("blocker_signature") or "")
-                == blocker_signature
+                and str(payload.get("blocker_signature") or "") == blocker_signature
             ):
                 prior_hypothesis_attempts += 1
-        diagnosis_reassessment = prior_hypothesis_attempts >= 3
+        diagnosis_reassessment = prior_hypothesis_attempts >= 2
         effective_signature = (
             sha256_text(f"diagnosis-reassessment-v1:{blocker_signature}")
             if diagnosis_reassessment
             else blocker_signature
         )
         effective_blocker_ids = (
-            ["DIAGNOSIS-REASSESSMENT", *blocker_ids]
-            if diagnosis_reassessment
-            else blocker_ids
+            ["DIAGNOSIS-REASSESSMENT", *blocker_ids] if diagnosis_reassessment else blocker_ids
         )
         if not self.state.reopen_for_director_root_cause(
             product_id=product_id,
@@ -1124,7 +1054,7 @@ class PipelineReconciler:
             return False
         attempts = self.state.attempts_for_task(task_id)
         reassessment_instruction = (
-            "Three repair cycles returned the same blocker. Do not repeat the "
+            "Two repair cycles returned the same blocker. Do not repeat the "
             "previous fix. First prove whether the task statement, allowed scope, "
             "controller gate/environment, or implementation diagnosis is wrong; "
             "then apply the smallest correction supported by that evidence and "
@@ -1134,7 +1064,7 @@ class PipelineReconciler:
         )
         diagnosed_summary = (
             (
-                "Director diagnosis reassessment: three bounded repair cycles for "
+                "Director diagnosis reassessment: two bounded repair cycles for "
                 "the same hypothesis failed. The next task must challenge the "
                 "problem statement before changing code. "
             )
@@ -1143,9 +1073,7 @@ class PipelineReconciler:
                 "Director root-cause diagnosis: the previous bounded budget is "
                 "closed, but this evidence identifies a distinct problem hypothesis. "
             )
-        ) + (
-            f"Blockers: {', '.join(blocker_ids)}. Exact evidence: {detail}"
-        )
+        ) + (f"Blockers: {', '.join(blocker_ids)}. Exact evidence: {detail}")
         path = self.pipeline.begin_repair_cycle(
             task,
             reason_code=reason,
@@ -1154,9 +1082,7 @@ class PipelineReconciler:
                 str(task.get("result_ref") or ""),
                 f"evidence/task-{task_id}.json",
             ],
-            attempt_id=(
-                str(attempts[-1]["attempt_id"]) if attempts else None
-            ),
+            attempt_id=(str(attempts[-1]["attempt_id"]) if attempts else None),
             director_replan=True,
             director_instruction=reassessment_instruction,
         )
@@ -1174,10 +1100,7 @@ class PipelineReconciler:
                 (
                     "🧭 Director меняет диагноз после трёх неудачных repair-cycles.\n"
                     if diagnosis_reassessment
-                    else (
-                        "🧭 Director пересмотрел постановку после исчерпания "
-                        "прежних попыток.\n"
-                    )
+                    else ("🧭 Director пересмотрел постановку после исчерпания прежних попыток.\n")
                 )
                 + f"Проект: {product_id}\n"
                 f"Problem hypothesis: {', '.join(effective_blocker_ids)}.\n"
@@ -1197,11 +1120,7 @@ class PipelineReconciler:
     ) -> str:
         product_id = str(product["product_id"])
         active_plan = next(
-            (
-                plan
-                for plan in plans
-                if str(plan.get("status")) == "ACTIVE"
-            ),
+            (plan for plan in plans if str(plan.get("status")) == "ACTIVE"),
             None,
         )
         if active_plan is None:
@@ -1251,8 +1170,7 @@ class PipelineReconciler:
                     stable_json(
                         {
                             "progress_path": (
-                                "READY, CLAIMED, bounded wait, or active "
-                                "controller recovery task"
+                                "READY, CLAIMED, bounded wait, or active controller recovery task"
                             )
                         }
                     ),
@@ -1298,8 +1216,7 @@ class PipelineReconciler:
             return "ignored"
         plans = self.state.list_plans(product_id)
         active_v2 = any(
-            str(plan.get("status")) == "ACTIVE"
-            and int(plan.get("revision") or 0) >= 1
+            str(plan.get("status")) == "ACTIVE" and int(plan.get("revision") or 0) >= 1
             for plan in plans
         )
         if active_v2 or self.state.list_failures(product_id):
@@ -1347,9 +1264,7 @@ class PipelineReconciler:
                 path = self.pipeline.begin_repair_cycle(
                     task,
                     reason_code="product_acceptance_blocked",
-                    summary=(
-                        "Product Tester завершил проверку без разрешения production release."
-                    ),
+                    summary=("Product Tester завершил проверку без разрешения production release."),
                     evidence_refs=[
                         str(task.get("result_ref") or ""),
                         f"evidence/task-{task['task_id']}.json",
@@ -1364,11 +1279,7 @@ class PipelineReconciler:
                     "Product Tester не разрешил production release.",
                 )
                 return "exhausted"
-            return (
-                "successor"
-                if self._recover_successor_legacy_v1(product, task)
-                else "unresolved"
-            )
+            return "successor" if self._recover_successor_legacy_v1(product, task) else "unresolved"
         if task_status not in {"FAILED_SAFE", "BLOCKED_EXTERNAL"}:
             return "unresolved"
 
@@ -1422,9 +1333,7 @@ class PipelineReconciler:
                         str(task.get("result_ref") or ""),
                         f"evidence/task-{task['task_id']}.json",
                     ],
-                    attempt_id=(
-                        str(attempts[-1]["attempt_id"]) if attempts else None
-                    ),
+                    attempt_id=(str(attempts[-1]["attempt_id"]) if attempts else None),
                 )
                 if path is not None:
                     return "repaired"
@@ -1439,9 +1348,7 @@ class PipelineReconciler:
             action = self.reconcile_product(product)
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             exception_type = type(error).__name__
-            fingerprint = sha256_text(
-                stable_json([product_id, exception_type, str(error)])
-            )
+            fingerprint = sha256_text(stable_json([product_id, exception_type, str(error)]))
             incident_id = f"incident-{fingerprint[:20]}"
             with self.state._lock, self.state._connection:
                 inserted = self.state._connection.execute(
@@ -1472,8 +1379,7 @@ class PipelineReconciler:
                     )
             if inserted:
                 LOGGER.error(
-                    "product reconcile isolated product_id=%s incident_id=%s "
-                    "exception_type=%s",
+                    "product reconcile isolated product_id=%s incident_id=%s exception_type=%s",
                     product_id,
                     incident_id,
                     exception_type,
@@ -1512,9 +1418,7 @@ class PipelineReconciler:
         }
         for product in self.state.list_products():
             status = str(product["status"])
-            if status == "FAILED_SAFE" and self._recover_controller_valid_builder(
-                product
-            ):
+            if status == "FAILED_SAFE" and self._recover_controller_valid_builder(product):
                 counts["inspected"] += 1
                 counts["recovered_successors"] += 1
                 continue
@@ -1533,16 +1437,11 @@ class PipelineReconciler:
                 counts["inspected"] += 1
                 counts["repaired"] += 1
                 continue
-            if (
-                status == "FAILED_SAFE"
-                and self._recover_undiagnosed_secret_exposure(product)
-            ):
+            if status == "FAILED_SAFE" and self._recover_undiagnosed_secret_exposure(product):
                 counts["inspected"] += 1
                 counts["repaired"] += 1
                 continue
-            if status == "FAILED_SAFE" and self._recover_deferred_dependency_consumer(
-                product
-            ):
+            if status == "FAILED_SAFE" and self._recover_deferred_dependency_consumer(product):
                 counts["inspected"] += 1
                 counts["repaired"] += 1
                 continue
@@ -1572,9 +1471,7 @@ class PipelineReconciler:
                 elif action == "successor":
                     counts["recovered_successors"] += 1
                 continue
-            if status == "FAILED_SAFE" and self._recover_director_root_cause_budget(
-                product
-            ):
+            if status == "FAILED_SAFE" and self._recover_director_root_cause_budget(product):
                 counts["inspected"] += 1
                 counts["repaired"] += 1
                 continue
@@ -1629,8 +1526,12 @@ class ReconcilerLoop:
             self._thread.join(timeout=max(5.0, self.interval_seconds * 2))
 
     def _run(self) -> None:
+        busy_delay = 0.25
         while not self._stop.is_set():
             try:
+                if self.reconciler.state.maintenance_active():
+                    self._stop.wait(self.interval_seconds)
+                    continue
                 capability_result = (
                     self.capability_reconciler.reconcile_once()
                     if self.capability_reconciler is not None
@@ -1656,6 +1557,14 @@ class ReconcilerLoop:
                     )
                 ):
                     LOGGER.info("pipeline reconcile result=%s", result)
+                busy_delay = 0.25
+            except sqlite3.OperationalError as error:
+                if not is_sqlite_busy(error):
+                    raise
+                self.reconciler.state.record_sqlite_busy_event()
+                self._stop.wait(busy_delay)
+                busy_delay = min(busy_delay * 2, 5.0)
+                continue
             except (OSError, RuntimeError, TypeError, ValueError):
                 LOGGER.exception("pipeline reconcile failed")
             self._stop.wait(self.interval_seconds)

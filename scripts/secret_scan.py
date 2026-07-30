@@ -13,7 +13,20 @@ if str(ROOT) not in sys.path:
 
 from factory.common import SECRET_PATTERNS
 
-IGNORED_DIRS = {".deployment", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "build", "dist", ".venv", "state", "__pycache__"}
+IGNORED_DIRS = {
+    ".deployment",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "audit_output",
+    "audit_tools",
+    "build",
+    "dist",
+    "state",
+    "__pycache__",
+}
 SUFFIXES = {".json", ".md", ".py", ".sh", ".toml", ".yaml", ".yml", ".txt"}
 EXTRA_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),

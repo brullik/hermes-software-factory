@@ -17,6 +17,8 @@ IGNORED_DIRS = {
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
+    "audit_output",
+    "audit_tools",
     "state",
     "__pycache__",
 }

@@ -8,7 +8,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "SHA256SUMS"
-IGNORED_DIRS = {".git", ".deployment", ".mypy_cache", ".pytest_cache", ".ruff_cache", "build", "dist", ".venv", "state", "__pycache__"}
+IGNORED_DIRS = {
+    ".git",
+    ".deployment",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "audit_output",
+    "audit_tools",
+    "build",
+    "dist",
+    "state",
+    "__pycache__",
+}
 IGNORED_RELATIVE_PREFIXES = {("evidence", "archive")}
 IGNORED_RELATIVE_FILES = {"evidence/final-acceptance.json"}
 

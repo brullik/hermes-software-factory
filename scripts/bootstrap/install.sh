@@ -40,16 +40,21 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates \
   caddy \
+  build-essential \
   curl \
   docker.io \
   docker-compose-v2 \
   fail2ban \
+  fuse-overlayfs \
   gh \
   git \
   logrotate \
+  podman \
   restic \
+  slirp4netns \
   sqlite3 \
   ufw \
+  uidmap \
   unattended-upgrades \
   python3.12 \
   python3.12-venv \
@@ -83,10 +88,16 @@ fi
 if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${STATE_DIR}" --create-home --shell /usr/sbin/nologin "${SERVICE_USER}"
 fi
+if ! grep -q "^${SERVICE_USER}:" /etc/subuid; then
+  usermod --add-subuids 1000000-1065535 "${SERVICE_USER}"
+fi
+if ! grep -q "^${SERVICE_USER}:" /etc/subgid; then
+  usermod --add-subgids 1000000-1065535 "${SERVICE_USER}"
+fi
 
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 \
   "${INSTALL_ROOT}/current" "${STATE_DIR}/evidence" "${STATE_DIR}/worktrees" "${STATE_DIR}/profiles" "${STATE_DIR}/kanban" \
-  /var/log/hermes-factory
+  /var/log/hermes-factory /run/hermes-factory
 install -d -o root -g root -m 0750 "${INSTALL_ROOT}/bin"
 install -d -o root -g "${SERVICE_USER}" -m 0750 "${CONFIG_DIR}" "${CONFIG_DIR}/credentials.d"
 install -d -o root -g "${SERVICE_USER}" -m 0750 \
@@ -205,4 +216,8 @@ systemctl enable \
   hermes-factory-backup-offsite.timer \
   hermes-factory-osv-db.timer
 systemctl start fail2ban.service
+runuser -u "${SERVICE_USER}" -- env \
+  HOME="${STATE_DIR}" \
+  XDG_RUNTIME_DIR=/run/hermes-factory \
+  podman info --format json >/dev/null
 printf 'Bootstrap files installed. Credentials, Hermes compatibility, firewall, SSH hardening, and service start require separate evidence-backed steps.\n'

@@ -112,5 +112,46 @@
     "priority": {"type": "integer", "minimum": 0},
     "critical_path_rank": {"type": "integer", "minimum": 0},
     "quality_gates": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+    ,
+    "lifecycle_stage": {
+      "enum": [
+        "architecture-review",
+        "implementation-slice",
+        "test",
+        "security-review",
+        "release-readiness-review",
+        "staging",
+        "product-acceptance",
+        "production",
+        "observation"
+      ]
+    },
+    "review_kind": {
+      "type": ["string", "null"],
+      "enum": ["architecture", "security", "release_readiness", null]
+    },
+    "evidence_profile": {"type": "string", "minLength": 1},
+    "consumes_evidence_types": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "produces_evidence_types": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "completion_obligation_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "goal_ids": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "semantic_node_key": {"type": ["string", "null"]},
+    "production_side_effects": {"type": "boolean"}
   }
 }
