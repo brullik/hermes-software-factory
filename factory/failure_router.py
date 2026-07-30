@@ -281,6 +281,48 @@ class FailureRouter:
         ]
 
     @staticmethod
+    def _product_replan_acceptance() -> list[dict[str, Any]]:
+        """Evaluate a product replan as a bounded planning handoff."""
+
+        return [
+            {
+                "criterion_id": "AC-REPLAN-FAILURE-CHAIN",
+                "verification": (
+                    "The replan_delta is bound to the active parent plan, affected "
+                    "node, and complete supplied failure chain, including failed "
+                    "acceptance criteria and mandatory gate IDs."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-REPLAN-EXECUTABLE-HANDOFF",
+                "verification": (
+                    "Unproven product criteria are carried into bounded executable "
+                    "replacement slices that require fresh product evidence; the "
+                    "PlanProposal does not claim that future product gates already pass."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-REPLAN-PRESERVE-ACCEPTED",
+                "verification": (
+                    "Accepted unaffected implementation and lifecycle evidence is "
+                    "preserved while only the affected causal path is replaced."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-REPLAN-SEMANTIC-ONLY",
+                "verification": (
+                    "The proposal contains semantic implementation slices only; the "
+                    "deterministic PlanCompiler retains ownership of task IDs, roles, "
+                    "schemas, capabilities, lifecycle tasks, and release mechanics."
+                ),
+                "mandatory": True,
+            },
+        ]
+
+    @staticmethod
     def _row_required_capabilities(task: dict[str, Any]) -> list[str]:
         try:
             values = json.loads(str(task.get("required_capabilities_json") or "[]"))
@@ -922,13 +964,16 @@ class FailureRouter:
                     else original.get("allowed_paths", ["artifacts/**"])
                 )
             ]
-            contract_acceptance = (
-                self._controller_incident_acceptance()
-                if role == "incident-recovery"
-                else self._controller_replan_acceptance()
-                if role == "replanner" and controller_recovery_depth > 0
-                else None
-            )
+            if role == "incident-recovery":
+                contract_acceptance = self._controller_incident_acceptance()
+            elif role == "replanner":
+                contract_acceptance = (
+                    self._controller_replan_acceptance()
+                    if controller_recovery_depth > 0
+                    else self._product_replan_acceptance()
+                )
+            else:
+                contract_acceptance = None
             contract, path = self._write_contract(
                 failed=failed,
                 failure=failure,

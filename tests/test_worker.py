@@ -1159,6 +1159,12 @@ class WorkerTests(unittest.TestCase):
             )
             self.assertNotIn("output_schema=", proposal_decision)
             self.assertNotIn("idempotency_key", proposal_decision)
+            handoff_decision = next(
+                item
+                for item in spec.decisions
+                if "Replanner acceptance evaluates the PlanProposal handoff" in item
+            )
+            self.assertIn("future product gates have not run yet", handoff_decision)
 
             result = worker.run_once()
 

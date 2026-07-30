@@ -837,11 +837,20 @@ class AgentWorker:
             decisions.append(
                 "This role produces a planning artifact. Do not run repository commands such as "
                 "pytest or make; deterministic schema and quality gates run after output. Mark the "
-                "result completed when the supplied evidence satisfies the schema and acceptance."
+                "result completed when the supplied evidence satisfies the planning artifact's "
+                "own schema and acceptance."
             )
             decisions.append(
                 "Planning execution is enforced read-only: terminal and file tools are unavailable. "
                 "Use only the supplied Context Pack and return the required schema JSON."
+            )
+        if prompt_role == "replanner":
+            decisions.append(
+                "Replanner acceptance evaluates the PlanProposal handoff, not the final product "
+                "outcome. A valid bounded replan_delta carries every still-unproven criterion and "
+                "failed mandatory gate into future executable slices that require fresh evidence. "
+                "Mark the planning result completed when that handoff is valid; do not return "
+                "needs_replan merely because those future product gates have not run yet."
             )
         if prompt_role in {"task-specifier", "replanner"}:
             decisions.append(
