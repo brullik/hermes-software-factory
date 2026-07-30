@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.2 - 2026-07-30
+
+- Give the rootless service user exclusive ownership of the temporary Podman
+  build context before the controller-owned container build probe.
+
 ## 2.2.1 - 2026-07-30
 
 - Enter the trusted release root before rootless Podman probes so the service

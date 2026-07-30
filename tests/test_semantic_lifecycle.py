@@ -789,3 +789,12 @@ def test_rootless_bootstrap_enters_trusted_release_root_before_runuser() -> None
     assert script.index('cd "${ROOT_DIR}"') < script.index(
         'runuser -u "${SERVICE_USER}"'
     )
+    probe_created = script.index(
+        'PROBE_DIR="$(mktemp -d "${STATE_DIR}/podman-preflight.XXXXXX")"'
+    )
+    probe_owned = script.index(
+        'chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}"'
+    )
+    assert probe_created < probe_owned < script.index(
+        'runuser -u "${SERVICE_USER}"'
+    )
