@@ -76,6 +76,14 @@ class FactoryConfig:
         return int(self.controller.get("max_repair_cycles", 3))
 
     @property
+    def agent_execution_timeout_seconds(self) -> int:
+        return int(self.controller.get("agent_execution_timeout_seconds", 1800))
+
+    @property
+    def planning_execution_timeout_seconds(self) -> int:
+        return int(self.controller.get("planning_execution_timeout_seconds", 900))
+
+    @property
     def github_check_timeout_seconds(self) -> int:
         return int(self.controller.get("github_check_timeout_seconds", 300))
 
@@ -173,6 +181,19 @@ def validate_config(config: FactoryConfig) -> list[str]:
         errors.append("max_repair_cycles must be positive")
     if int(controller.get("max_repair_cycles", 3)) > 3:
         errors.append("max_repair_cycles must not exceed 3")
+    agent_timeout = int(controller.get("agent_execution_timeout_seconds", 1800))
+    planning_timeout = int(controller.get("planning_execution_timeout_seconds", 900))
+    if agent_timeout < 900:
+        errors.append("agent_execution_timeout_seconds must be at least 900")
+    if agent_timeout > 3600:
+        errors.append("agent_execution_timeout_seconds must not exceed 3600")
+    if planning_timeout < 60:
+        errors.append("planning_execution_timeout_seconds must be at least 60")
+    if planning_timeout > agent_timeout:
+        errors.append(
+            "planning_execution_timeout_seconds must not exceed "
+            "agent_execution_timeout_seconds"
+        )
     if int(controller.get("github_check_timeout_seconds", 300)) < 30:
         errors.append("github_check_timeout_seconds must be at least 30")
     if float(controller.get("github_check_poll_seconds", 5.0)) < 1.0:

@@ -2924,6 +2924,59 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(str(argv[1]).endswith("hermes_stdin.py"))
         self.assertEqual(call.kwargs["input"], "p" * 200)
 
+    def test_subprocess_runner_reports_bounded_agent_execution_timeout(self) -> None:
+        runner = SubprocessHermesRunner(
+            binary="hermes",
+            timeout_seconds=1800,
+        )
+
+        with patch(
+            "factory.worker.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["hermes"], 1800),
+        ):
+            result = runner.run(
+                selection=ModelSelection(
+                    "openai-codex",
+                    "economy",
+                    "gpt-5.6-luna",
+                    "luna",
+                ),
+                prompt="bounded prompt",
+                cwd=Path.cwd(),
+            )
+
+        self.assertEqual(result.status, "TIMEOUT")
+        self.assertEqual(result.reason_code, "agent_execution_timeout")
+        self.assertIn("1800 seconds", result.output)
+        self.assertIn("not retained", result.output)
+        self.assertNotIn("hermes_stdin", result.output)
+
+    def test_worker_uses_distinct_bounded_execution_timeouts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(root)
+            config.raw["controller"]["agent_execution_timeout_seconds"] = 2400
+            config.raw["controller"]["planning_execution_timeout_seconds"] = 600
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+
+            worker = AgentWorker(
+                config,
+                state,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            self.assertIsInstance(worker.runner, SubprocessHermesRunner)
+            self.assertIsInstance(worker.planning_runner, SubprocessHermesRunner)
+            assert isinstance(worker.runner, SubprocessHermesRunner)
+            assert isinstance(worker.planning_runner, SubprocessHermesRunner)
+            self.assertEqual(worker.runner.timeout_seconds, 2400)
+            self.assertEqual(worker.planning_runner.timeout_seconds, 600)
+            state.close()
+
     def test_hermes_stdin_prompt_reader_is_bounded_and_utf8_strict(self) -> None:
         prompt = "контекст"
 

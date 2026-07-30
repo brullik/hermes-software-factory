@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.24 - 2026-07-31
+
+- Give tool-enabled coding agents a configurable 30-minute bounded execution
+  window while retaining a separate 15-minute planning limit, so image builds
+  and black-box Compose tests are not misclassified before they can finish.
+- Validate both runtime limits fail-closed and cap coding execution at one hour,
+  preserving bounded autonomous recovery even on a slow production VPS.
+- Classify the subprocess boundary precisely as `agent_execution_timeout`
+  without retaining provider output, while preserving same-tier transient retry
+  accounting and the three-attempt diagnosis-change rule.
+
 ## 2.2.23 - 2026-07-31
 
 - Route actionable semantic findings from read-only reviewers, and failed

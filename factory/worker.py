@@ -548,10 +548,16 @@ class SubprocessHermesRunner:
                 shell=False,
             )
         except subprocess.TimeoutExpired as error:
-            raw = str(error)
-            safe, _ = redact_text(raw)
+            del error
+            safe = (
+                "Agent execution exceeded the configured bounded timeout "
+                f"({self.timeout_seconds} seconds); provider output was not retained."
+            )
             return HermesRunResult(
-                "TIMEOUT", safe[: self.max_output_chars], sha256_text(safe), "network_timeout"
+                "TIMEOUT",
+                safe[: self.max_output_chars],
+                sha256_text(safe),
+                "agent_execution_timeout",
             )
         except OSError as error:
             raw = str(error)
@@ -816,12 +822,18 @@ class AgentWorker:
         self.runner: HermesRunner
         self.planning_runner: HermesRunner
         if runner is None:
-            self.runner = SubprocessHermesRunner(toolsets=("file", "terminal"))
+            self.runner = SubprocessHermesRunner(
+                timeout_seconds=config.agent_execution_timeout_seconds,
+                toolsets=("file", "terminal"),
+            )
             # Hermes oneshot auto-loads coding tools in a code workspace. Planning
             # roles must be enforced read-only at the CLI boundary, not merely
             # asked to avoid commands in their prompt. ``vision`` is a valid
             # built-in toolset with no filesystem or terminal capability.
-            self.planning_runner = SubprocessHermesRunner(toolsets=("vision",))
+            self.planning_runner = SubprocessHermesRunner(
+                timeout_seconds=config.planning_execution_timeout_seconds,
+                toolsets=("vision",),
+            )
         else:
             self.runner = runner
             self.planning_runner = runner
