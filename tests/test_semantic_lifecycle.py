@@ -779,3 +779,13 @@ def test_AUT_P0_037_large_failure_history_compacts_to_one_recovery_root(
         "status"
     ] == "REPLAYED"
     state.close()
+
+
+def test_rootless_bootstrap_enters_trusted_release_root_before_runuser() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = (
+        root / "scripts" / "bootstrap" / "upgrade-autonomy-runtime.sh"
+    ).read_text(encoding="utf-8")
+    assert script.index('cd "${ROOT_DIR}"') < script.index(
+        'runuser -u "${SERVICE_USER}"'
+    )
