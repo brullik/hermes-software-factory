@@ -60,6 +60,7 @@ from .repair_brief import (
     repair_finding_detail,
     repair_requirements,
 )
+from .replan_lineage import implementation_lineage
 from .repository import RepositoryBootstrapper, build_repository_bootstrapper
 from .state import StateStore, is_sqlite_busy
 from .workflow import WorkflowEngine
@@ -1699,74 +1700,31 @@ class AgentWorker:
         product_id: str,
         active_plan_id: str,
     ) -> list[dict[str, Any]]:
-        rows = [
-            row
-            for row in self.state.list_tasks(product_id)
-            if str(row.get("plan_id") or "") == active_plan_id
-            and str(row.get("stage_key") or "").startswith("implementation-")
-        ]
-        contracts = {
-            str(row["task_id"]): self._safe_evidence_object(
-                str(row.get("contract_ref") or "")
-            )
-            for row in rows
-        }
-        semantic_keys = {
-            task_id: str(
-                contract.get("semantic_node_key")
-                or contract.get("plan_node_id")
-                or task_id
-            )
-            for task_id, contract in contracts.items()
-        }
+        nodes = implementation_lineage(
+            self.state,
+            self.config.evidence_dir,
+            product_id,
+            active_plan_id,
+        )
         inventory: list[dict[str, Any]] = []
-        for row in sorted(
-            rows,
-            key=lambda item: (
-                int(item.get("critical_path_rank") or 0),
-                str(item.get("plan_node_id") or ""),
-            ),
-        ):
-            task_id = str(row["task_id"])
-            contract = contracts[task_id]
-            if not contract:
-                continue
-            result = self._safe_evidence_object(str(row.get("result_ref") or ""))
-            dependencies = [
-                semantic_keys[str(value)]
-                for value in contract.get("dependencies", [])
-                if str(value) in semantic_keys
-            ]
+        for node in nodes:
+            proposal_node = node.proposal_node
+            result = self._safe_evidence_object(node.result_ref)
             inventory.append(
                 {
-                    "node_key": semantic_keys[task_id],
-                    "task_id": task_id,
-                    "title": str(contract.get("title") or row.get("title") or ""),
-                    "objective": str(contract.get("objective") or ""),
-                    "depends_on": dependencies,
-                    "scope": [
-                        str(value)
-                        for value in contract.get("allowed_paths", [])
-                    ],
-                    "acceptance_intents": [
-                        str(item.get("verification") or "")
-                        for item in contract.get("acceptance", [])
-                        if isinstance(item, Mapping)
-                    ],
-                    "goal_ids": [
-                        str(value) for value in contract.get("goal_ids", [])
-                    ],
-                    "graph_status": str(row.get("graph_status") or ""),
+                    **proposal_node,
+                    "task_id": node.task_id,
+                    "graph_status": node.graph_status,
                     "accepted_result": (
                         {
-                            "result_ref": str(row.get("result_ref") or ""),
-                            "result_digest": str(row.get("result_digest") or ""),
+                            "result_ref": node.result_ref,
+                            "result_digest": node.result_digest,
                             "summary": _bounded_context_value(
                                 str(result.get("summary") or "")
                             ),
                             "output_ref": str(result.get("output_ref") or ""),
                         }
-                        if str(row.get("graph_status") or "") == "ACCEPTED"
+                        if node.graph_status == "ACCEPTED"
                         else None
                     ),
                 }

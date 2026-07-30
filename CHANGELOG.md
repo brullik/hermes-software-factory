@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.8 - 2026-07-30
+
+- Carry accepted, unchanged implementation slices and architecture-review
+  evidence across immutable replan revisions instead of rebuilding or losing
+  their durable results.
+- Reconstruct semantic dependencies from controller-owned plan edges, preserve
+  accepted parent-lineage nodes in replanner Context Packs, and bind a fresh
+  architecture review to an accepted architecture-package producer.
+- Refuse result reuse when a replan changes any semantic node contract field,
+  while keeping the provider PlanProposal digest bound to the original
+  immutable proposal.
+
 ## 2.2.7 - 2026-07-30
 
 - Supply replanners with the active implementation inventory, accepted
