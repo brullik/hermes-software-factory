@@ -1883,6 +1883,73 @@ class AutonomyStore:
                         )
                     supersedes_task_id = str(task["supersedes_task_id"] or "")
                     if supersedes_task_id:
+                        sibling_failure_ids = [
+                            str(row[0])
+                            for row in self.connection.execute(
+                                """SELECT failure_id FROM failures
+                                   WHERE product_id=? AND task_id=?
+                                     AND status!='RESOLVED'
+                                   ORDER BY first_seen_at, failure_id""",
+                                (
+                                    str(task["product_id"]),
+                                    supersedes_task_id,
+                                ),
+                            ).fetchall()
+                        ]
+                        resolved_sibling_ids: set[str] = set()
+                        for sibling_failure_id in sibling_failure_ids:
+                            resolved_sibling_ids.update(
+                                self._resolve_failure_chain(
+                                    self.connection,
+                                    sibling_failure_id,
+                                    resolved_at=now,
+                                )
+                            )
+                        redundant_repair_ids = [
+                            str(row[0])
+                            for row in self.connection.execute(
+                                """SELECT task_id FROM tasks
+                                   WHERE product_id=? AND supersedes_task_id=?
+                                     AND task_id!=? AND stage_key='repair'
+                                     AND graph_status IN (
+                                         'BLOCKED_DEPENDENCY',
+                                         'BLOCKED_CAPABILITY',
+                                         'READY',
+                                         'WAITING_TIME',
+                                         'WAITING_EXTERNAL',
+                                         'FAILED_TRANSIENT',
+                                         'FAILED_SEMANTIC'
+                                     )
+                                   ORDER BY created_at, task_id""",
+                                (
+                                    str(task["product_id"]),
+                                    supersedes_task_id,
+                                    outcome.task_id,
+                                ),
+                            ).fetchall()
+                        ]
+                        if redundant_repair_ids:
+                            placeholders = ",".join(
+                                "?" for _ in redundant_repair_ids
+                            )
+                            self.connection.execute(
+                                f"""UPDATE tasks
+                                    SET graph_status='SUPERSEDED', status='DONE',
+                                        terminal_reason='redundant_repair_suppressed',
+                                        terminal_detail=?,
+                                        lease_owner=NULL, lease_until=NULL,
+                                        heartbeat_at=NULL, lease_token=NULL,
+                                        updated_at=?
+                                    WHERE task_id IN ({placeholders})""",
+                                (
+                                    (
+                                        "An accepted replacement already satisfies "
+                                        "the superseded task contract."
+                                    ),
+                                    now,
+                                    *redundant_repair_ids,
+                                ),
+                            )
                         self.connection.execute(
                             """UPDATE tasks
                                SET graph_status='SUPERSEDED', status='DONE',
@@ -1907,6 +1974,20 @@ class AutonomyStore:
                                 now,
                             ),
                         )
+                        if resolved_sibling_ids or redundant_repair_ids:
+                            self.state._record_event(
+                                str(task["product_id"]),
+                                outcome.task_id,
+                                "redundant_repair_work_suppressed",
+                                {
+                                    "superseded_task_id": supersedes_task_id,
+                                    "accepted_replacement_task_id": outcome.task_id,
+                                    "resolved_failure_ids": sorted(
+                                        resolved_sibling_ids
+                                    ),
+                                    "suppressed_task_ids": redundant_repair_ids,
+                                },
+                            )
                 self._recompute_frontier(
                     self.connection, str(task["product_id"])
                 )

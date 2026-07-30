@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.19 - 2026-07-30
+
+- Resolve every sibling FailureEnvelope for a superseded task when one repair
+  replacement is accepted, and suppress redundant pending repair work atomically.
+- Add migration 16 to reconcile only proven historical duplicate accepted repair
+  branches while preserving immutable result evidence and recording an audit event.
+- Keep genuinely ambiguous or identity-conflicting replacement branches fail-closed;
+  no resolver chooses between unproven competing results.
+
 ## 2.2.18 - 2026-07-30
 
 - Preserve the active Replanner source failure and its bounded causal ancestors,

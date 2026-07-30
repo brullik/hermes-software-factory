@@ -1260,6 +1260,122 @@ def test_migration_015_closes_hypothesis_for_resolved_failure(
     restarted.close()
 
 
+def test_migration_016_reconciles_proven_duplicate_accepted_repairs(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-redundant-repair"
+    original_task_id = "T-REDUNDANT-ORIGINAL"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Keep one accepted repair lineage per failed task",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="redundant-repair",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    state.add_task(
+        task_id=original_task_id,
+        product_id=product_id,
+        title="Original failed implementation",
+        role="builder",
+        output_schema="attempt-result.schema.json",
+        contract_ref=f"evidence/task-{original_task_id}.json",
+        stage_key="implementation-001",
+        root_task_id=original_task_id,
+        root_context_ref=f"evidence/intake-{product_id}.json",
+        graph_status="SUPERSEDED",
+    )
+    for index, repair_task_id in enumerate(
+        ("T-ACCEPTED-REPAIR-A", "T-ACCEPTED-REPAIR-B"),
+        start=1,
+    ):
+        failure_id = f"failure-redundant-{index}"
+        timestamp = f"2026-07-30T00:00:0{index}Z"
+        with state._lock, state._connection:
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id, product_id, task_id, failure_class,
+                    reason_code, fingerprint, safe_message, evidence_ref,
+                    status, retryable, owner_action_eligible, expected_json,
+                    actual_json, failed_gate_ids_json, first_seen_at,
+                    last_seen_at)
+                   VALUES (?, ?, ?, 'semantic', 'schema_validation', ?,
+                           'safe duplicate repair coordinate', ?,
+                           'RESOLVED', 0, 0, '{}', '{}', '[]', ?, ?)""",
+                (
+                    failure_id,
+                    product_id,
+                    original_task_id,
+                    sha256_text(failure_id),
+                    f"internal://{failure_id}",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        state.add_task(
+            task_id=repair_task_id,
+            product_id=product_id,
+            title="Accepted repair for one sibling failure",
+            role="builder",
+            output_schema="attempt-result.schema.json",
+            contract_ref=f"evidence/task-{repair_task_id}.json",
+            stage_key="repair",
+            root_task_id=original_task_id,
+            parent_task_id=original_task_id,
+            source_task_id=original_task_id,
+            root_context_ref=f"evidence/intake-{product_id}.json",
+            failure_id=failure_id,
+            supersedes_task_id=original_task_id,
+            graph_status="ACCEPTED",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                   SET result_ref=?, result_digest=?, created_at=?, updated_at=?
+                   WHERE task_id=?""",
+                (
+                    f"internal://{repair_task_id}",
+                    sha256_text(repair_task_id),
+                    timestamp,
+                    timestamp,
+                    repair_task_id,
+                ),
+            )
+    with state._lock, state._connection:
+        state._connection.execute(
+            "DELETE FROM schema_migrations WHERE version=16"
+        )
+    state.close()
+
+    restarted = StateStore(config.database_path)
+    canonical = restarted.get_task("T-ACCEPTED-REPAIR-A")
+    redundant = restarted.get_task("T-ACCEPTED-REPAIR-B")
+    assert canonical is not None
+    assert canonical["graph_status"] == "ACCEPTED"
+    assert redundant is not None
+    assert redundant["graph_status"] == "REJECTED"
+    assert (
+        redundant["terminal_reason"]
+        == "redundant_accepted_repair_branch"
+    )
+    assert redundant["result_ref"] == "internal://T-ACCEPTED-REPAIR-B"
+    assert any(
+        event["event_type"]
+        == "redundant_accepted_repair_reconciled"
+        for event in restarted.events(product_id)
+    )
+    restarted.close()
+
+
 def test_AUT_P0_033_release_version_must_match_all_evidence(
     tmp_path: Path,
 ) -> None:

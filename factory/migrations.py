@@ -1035,6 +1035,149 @@ def _migration_015_resolved_hypothesis_cleanup(
     )
 
 
+def _migration_016_redundant_accepted_repair_reconciliation(
+    connection: sqlite3.Connection,
+) -> None:
+    """Reject only proven duplicate accepted repair branches without deleting evidence."""
+
+    groups = connection.execute(
+        """SELECT product_id, supersedes_task_id
+           FROM tasks
+           WHERE supersedes_task_id IS NOT NULL
+             AND stage_key='repair'
+             AND status='DONE'
+             AND graph_status IN ('ACCEPTED','SUPERSEDED')
+           GROUP BY product_id, supersedes_task_id
+           HAVING COUNT(*) > 1"""
+    ).fetchall()
+    for product_id_value, superseded_task_id_value in groups:
+        product_id = str(product_id_value)
+        superseded_task_id = str(superseded_task_id_value)
+        original = connection.execute(
+            """SELECT product_id, role, output_schema, root_task_id,
+                      root_context_ref, graph_status
+               FROM tasks WHERE task_id=?""",
+            (superseded_task_id,),
+        ).fetchone()
+        replacements = connection.execute(
+            """SELECT task_id, product_id, role, output_schema, root_task_id,
+                      root_context_ref, failure_id, created_at
+               FROM tasks
+               WHERE product_id=? AND supersedes_task_id=?
+                 AND stage_key='repair' AND status='DONE'
+                 AND graph_status IN ('ACCEPTED','SUPERSEDED')
+               ORDER BY created_at, task_id""",
+            (product_id, superseded_task_id),
+        ).fetchall()
+        if (
+            original is None
+            or str(original["product_id"]) != product_id
+            or str(original["graph_status"]) != "SUPERSEDED"
+            or len(replacements) < 2
+        ):
+            continue
+        identity = (
+            str(original["role"] or ""),
+            str(original["output_schema"] or ""),
+            str(original["root_task_id"] or ""),
+            str(original["root_context_ref"] or ""),
+        )
+        safely_redundant = True
+        for replacement in replacements:
+            replacement_identity = (
+                str(replacement["role"] or ""),
+                str(replacement["output_schema"] or ""),
+                str(replacement["root_task_id"] or ""),
+                str(replacement["root_context_ref"] or ""),
+            )
+            failure_id = str(replacement["failure_id"] or "")
+            failure = (
+                connection.execute(
+                    """SELECT product_id, task_id FROM failures
+                       WHERE failure_id=?""",
+                    (failure_id,),
+                ).fetchone()
+                if failure_id
+                else None
+            )
+            if (
+                replacement_identity != identity
+                or failure is None
+                or str(failure["product_id"]) != product_id
+                or str(failure["task_id"]) != superseded_task_id
+            ):
+                safely_redundant = False
+                break
+        redundant = replacements[1:]
+        if safely_redundant:
+            safely_redundant = not any(
+                connection.execute(
+                    """SELECT 1 FROM task_edges
+                       WHERE from_task_id=? AND required=1 LIMIT 1""",
+                    (str(replacement["task_id"]),),
+                ).fetchone()
+                is not None
+                for replacement in redundant
+            )
+        if not safely_redundant:
+            continue
+
+        now = utc_now()
+        canonical_task_id = str(replacements[0]["task_id"])
+        for replacement in redundant:
+            redundant_task_id = str(replacement["task_id"])
+            connection.execute(
+                """UPDATE tasks
+                   SET graph_status='REJECTED',
+                       terminal_reason='redundant_accepted_repair_branch',
+                       terminal_detail=?,
+                       updated_at=?
+                   WHERE task_id=?""",
+                (
+                    (
+                        "A prior accepted repair already provides the unique "
+                        "replacement lineage; immutable result evidence is retained."
+                    ),
+                    now,
+                    redundant_task_id,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO events
+                   (product_id, task_id, event_type, payload_json, created_at)
+                   VALUES (?, ?, 'redundant_accepted_repair_reconciled', ?, ?)""",
+                (
+                    product_id,
+                    redundant_task_id,
+                    json.dumps(
+                        {
+                            "canonical_replacement_task_id": canonical_task_id,
+                            "redundant_replacement_task_id": redundant_task_id,
+                            "superseded_task_id": superseded_task_id,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    now,
+                ),
+            )
+        connection.execute(
+            """UPDATE failures SET status='RESOLVED', last_seen_at=?
+               WHERE product_id=? AND task_id=? AND status!='RESOLVED'""",
+            (now, product_id, superseded_task_id),
+        )
+        connection.execute(
+            """UPDATE hypotheses
+               SET status='RESOLVED', closed_at=COALESCE(closed_at, ?)
+               WHERE status='ACTIVE' AND failure_id IN (
+                   SELECT failure_id FROM failures
+                   WHERE product_id=? AND task_id=?
+               )""",
+            (now, product_id, superseded_task_id),
+        )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -1223,6 +1366,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         15,
         "resolved-hypothesis-cleanup",
         _migration_015_resolved_hypothesis_cleanup,
+    ),
+    (
+        16,
+        "redundant-accepted-repair-reconciliation",
+        _migration_016_redundant_accepted_repair_reconciliation,
     ),
 )
 

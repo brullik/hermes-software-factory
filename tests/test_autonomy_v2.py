@@ -723,6 +723,47 @@ def test_AUT_P0_006_failed_dependency_routes_and_unblocks_after_repair(
             for task in state.list_tasks("product-autonomy")
             if task["supersedes_task_id"] == "T-FAILNODEA"
         )
+        sibling_failure_id = "failure-sibling-output"
+        now = "2026-07-30T00:00:00Z"
+        with state._lock, state._connection:
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id, product_id, task_id, failure_class,
+                    reason_code, fingerprint, safe_message, evidence_ref,
+                    status, retryable, owner_action_eligible, expected_json,
+                    actual_json, failed_gate_ids_json, first_seen_at,
+                    last_seen_at)
+                   VALUES (?, 'product-autonomy', 'T-FAILNODEA', 'semantic',
+                           'schema_validation', ?, 'safe sibling failure',
+                           'internal://sibling-failure', 'OPEN', 0, 0,
+                           '{}', '{}', '[]', ?, ?)""",
+                (
+                    sibling_failure_id,
+                    sha256_text(sibling_failure_id),
+                    now,
+                    now,
+                ),
+            )
+        redundant_repair_id = "T-REDUNDANT-SIBLING-REPAIR"
+        state.add_task(
+            task_id=redundant_repair_id,
+            product_id="product-autonomy",
+            title="Repair a sibling failure for the same task",
+            role=str(repair["role"]),
+            output_schema=str(repair["output_schema"]),
+            contract_ref=f"evidence/task-{redundant_repair_id}.json",
+            stage_key="repair",
+            root_task_id=str(repair["root_task_id"]),
+            parent_task_id="T-FAILNODEA",
+            source_task_id="T-FAILNODEA",
+            plan_id=str(repair["plan_id"]),
+            plan_node_id=f"{repair['plan_node_id']}-sibling",
+            root_context_ref=str(repair["root_context_ref"]),
+            active_context_ref=str(repair["active_context_ref"]),
+            failure_id=sibling_failure_id,
+            supersedes_task_id="T-FAILNODEA",
+            graph_status="READY",
+        )
         claimed = state.claim_task(worker_id="repair-worker")
         assert claimed is not None
         assert claimed["task_id"] == repair["task_id"]
@@ -741,6 +782,23 @@ def test_AUT_P0_006_failed_dependency_routes_and_unblocks_after_repair(
         )
         assert state.get_task("T-FAILNODEA")["graph_status"] == "SUPERSEDED"
         assert state.get_task("T-FAILNODEB")["graph_status"] == "READY"
+        sibling_failure = state._connection.execute(
+            "SELECT status FROM failures WHERE failure_id=?",
+            (sibling_failure_id,),
+        ).fetchone()
+        assert sibling_failure is not None
+        assert sibling_failure["status"] == "RESOLVED"
+        redundant_repair = state.get_task(redundant_repair_id)
+        assert redundant_repair is not None
+        assert redundant_repair["graph_status"] == "SUPERSEDED"
+        assert (
+            redundant_repair["terminal_reason"]
+            == "redundant_repair_suppressed"
+        )
+        assert any(
+            event["event_type"] == "redundant_repair_work_suppressed"
+            for event in state.events("product-autonomy")
+        )
     finally:
         state.close()
 
