@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -499,12 +500,79 @@ class ConfiguredCapabilityProbe:
         self._production_cache = (now, context)
         return context
 
+    def _toolchain_check(self, capability: str) -> CapabilityCheck:
+        available = False
+        scope: dict[str, Any] = {"allowed_operations": [capability]}
+        reason = "controller_toolchain_unavailable"
+        if capability == "toolchain.python":
+            interpreter = Path(sys.executable)
+            available = (
+                interpreter.is_file()
+                and self.command_runner(
+                    [
+                        str(interpreter),
+                        "-c",
+                        "import pip, pytest; print('python-test-runtime-ready')",
+                    ]
+                ).returncode
+                == 0
+            )
+            scope["runtime"] = str(interpreter)
+            scope["includes"] = ["pip", "pytest"]
+            reason = "controller_toolchain_python_missing"
+        elif capability == "toolchain.make":
+            available = shutil.which("make") is not None
+            reason = "controller_toolchain_make_missing"
+        elif capability == "toolchain.container_builder":
+            probes = (
+                ("podman", ["podman", "info", "--format", "json"]),
+                ("buildctl", ["buildctl", "debug", "workers"]),
+                (
+                    "docker",
+                    ["docker", "info", "--format", "{{json .ServerVersion}}"],
+                ),
+            )
+            selected = ""
+            for executable, argv in probes:
+                if shutil.which(executable) is None:
+                    continue
+                if self.command_runner(list(argv)).returncode == 0:
+                    selected = executable
+                    break
+            available = bool(selected)
+            if selected:
+                scope["runtime"] = selected
+            reason = "controller_toolchain_container_builder_unavailable"
+        elif capability == "toolchain.scanners":
+            root = Path(__file__).resolve().parents[1]
+            scanner = Path("/usr/local/bin/osv-scanner")
+            available = (
+                (root / "config" / "quality-gates.yaml").is_file()
+                and (root / "scripts" / "quality_gate.py").is_file()
+                and self._trusted_executable(scanner)
+                and self.command_runner(
+                    [str(scanner), "--version"]
+                ).returncode
+                == 0
+            )
+            scope["scanner"] = str(scanner)
+            reason = "controller_toolchain_scanner_missing"
+        return CapabilityCheck(
+            capability,
+            "AVAILABLE" if available else "DENIED_POLICY",
+            "controller-toolchain",
+            None if available else reason,
+            scope,
+        )
+
     def check(
         self,
         capability: str,
         *,
         product: dict[str, Any],
     ) -> CapabilityCheck:
+        if capability.startswith("toolchain."):
+            return self._toolchain_check(capability)
         if capability.startswith(("github.", "git.")) or capability in {
             "repository.read",
             "repository.read_bounded",
@@ -571,12 +639,25 @@ class CapabilityBroker:
     @staticmethod
     def required_for_product(product: dict[str, Any]) -> tuple[str, ...]:
         profiles = ["repository_bootstrap", "release_staging", "release_production"]
-        return tuple(
-            dict.fromkeys(
-                capability
-                for profile in profiles
-                for capability in CAPABILITY_PROFILES[profile]
+        capabilities = [
+            capability
+            for profile in profiles
+            for capability in CAPABILITY_PROFILES[profile]
+        ]
+        capabilities.extend(
+            (
+                "toolchain.python",
+                "toolchain.container_builder",
+                "toolchain.scanners",
             )
+        )
+        if str(product.get("delivery_mode") or "") in {
+            "new_repository",
+            "existing_repository",
+        }:
+            capabilities.append("toolchain.make")
+        return tuple(
+            dict.fromkeys(capabilities)
         )
 
     def _controller_incident(

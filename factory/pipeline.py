@@ -14,6 +14,8 @@ from .artifacts import ArtifactStore, artifact_metadata
 from .autonomy import CAPABILITY_PROFILES
 from .common import new_id, sha256_text
 from .config import FactoryConfig
+from .plan_compiler import CompileContext, PlanCompiler
+from .policy import policy_digest
 from .registry import SchemaRegistry
 from .repair_brief import normalized_repair_findings, repair_requirements
 from .state import StateStore
@@ -41,6 +43,7 @@ class PreparedPipelineOutcome:
     product_status: str | None = None
     successors: tuple[dict[str, Any], ...] = ()
     edges: tuple[dict[str, Any], ...] = ()
+    downstream_bindings: tuple[dict[str, Any], ...] = ()
     plan: dict[str, Any] | None = None
     run_completion_reducer: bool = False
 
@@ -60,13 +63,14 @@ def _external_github_repository(value: str) -> bool:
 
 
 def _product_repository_url(product: dict[str, Any]) -> str | None:
-    """Return the canonical existing-repository URL, with legacy read compatibility."""
+    """Return a canonical product-repository URL after bootstrap."""
 
-    if product.get("delivery_mode") == "existing_repository":
+    if product.get("delivery_mode") in {
+        "new_repository",
+        "existing_repository",
+    }:
         value = str(product.get("repository_url") or "")
         return value if _external_github_repository(value) else None
-    if product.get("delivery_mode") in {"new_repository", "existing_repository"}:
-        return None
     legacy = str(product.get("idea", ""))
     return legacy if _external_github_repository(legacy) else None
 
@@ -275,13 +279,13 @@ class PipelineCoordinator:
             ),
             "task-specifier": StageDefinition(
                 "task-specifier",
-                "Create Backlog DAG",
+                "Propose Semantic Product Work",
                 "task-specifier",
-                "backlog-plan-v2.schema.json",
+                "plan-proposal-v1.schema.json",
                 "luna",
                 "low",
-                "Turn the accepted architecture into a small dependency-aware backlog DAG.",
-                "Validate executable nodes, edges, goal traceability, and completion criteria in backlog-plan-v2.schema.json.",
+                "Describe product implementation slices without choosing executable identities.",
+                "Validate semantic goals, scope, dependencies, and acceptance intents in plan-proposal-v1.schema.json.",
                 ("artifacts/**",),
                 workspace_conflict,
                 70,
@@ -848,6 +852,80 @@ class PipelineCoordinator:
         self.artifacts.write("risk-assessment.schema.json", artifact, filename=path.name)
         return path
 
+    def _compile_proposal(
+        self,
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+        proposal_path: Path,
+    ) -> dict[str, Any]:
+        """Compile semantic provider output into an immutable executable plan."""
+
+        role = str(task.get("role") or "")
+        expected_kind = "replan_delta" if role == "replanner" else "initial"
+        if str(proposal.get("proposal_kind") or "") != expected_kind:
+            raise ValueError(
+                f"{role} must return proposal_kind={expected_kind}"
+            )
+        product_id = str(task["product_id"])
+        product = self.state.get_product(product_id)
+        if product is None:
+            raise KeyError(product_id)
+        current_revision = int(product.get("active_plan_revision") or 0)
+        parent_plan_id = str(product.get("active_plan_id") or "") or None
+        proposed_parent = str(proposal.get("parent_plan_id") or "") or None
+        if expected_kind == "replan_delta" and proposed_parent != parent_plan_id:
+            raise ValueError(
+                "replan proposal must name the active parent plan"
+            )
+        if expected_kind == "initial" and proposed_parent is not None:
+            raise ValueError("initial proposal cannot name a parent plan")
+        source_failure_id = (
+            str(proposal.get("source_failure_id") or "")
+            or str(task.get("failure_id") or "")
+            or None
+        )
+        compiler = PlanCompiler(policy_digest=policy_digest(self.config))
+        compiled = compiler.compile(
+            proposal,
+            CompileContext(
+                product_id=product_id,
+                revision=current_revision + 1,
+                parent_plan_id=parent_plan_id,
+                source_failure_id=source_failure_id,
+                created_by_task_id=str(task["task_id"]),
+                root_task_id=str(task.get("root_task_id") or task["task_id"]),
+                root_context_ref=str(
+                    product.get("root_goal_ref")
+                    or task.get("root_context_ref")
+                    or f"evidence/intake-{product_id}.json"
+                ),
+                external_repository=_product_repository_url(product) is not None,
+                proposal_artifact_ref=f"evidence/{proposal_path.name}",
+            ),
+        )
+        for node in compiled["nodes"]:
+            contract = dict(node["task_contract"])
+            node["task_contract_digest"] = self.artifacts.digest(contract)
+            self.schemas.validate("task-contract-v2.schema.json", contract)
+        self.schemas.validate("backlog-plan-v2.schema.json", compiled)
+        self.state.validate_plan_candidate(compiled)
+        for node in compiled["nodes"]:
+            contract = dict(node["task_contract"])
+            self.artifacts.write(
+                "task-contract-v2.schema.json",
+                contract,
+                filename=f"task-{contract['task_id']}.json",
+            )
+        plan_path = self.artifacts.write(
+            "backlog-plan-v2.schema.json",
+            compiled,
+            filename=f"plan-{compiled['plan_id']}.json",
+        )
+        runtime_plan = dict(compiled)
+        runtime_plan["plan_artifact_ref"] = f"evidence/{plan_path.name}"
+        runtime_plan["plan_digest"] = self.artifacts.digest(compiled)
+        return runtime_plan
+
     def prepare_after(
         self,
         task: dict[str, Any],
@@ -867,23 +945,7 @@ class PipelineCoordinator:
         if output.get("status") not in successful_statuses:
             return PreparedPipelineOutcome()
         if role == "replanner":
-            if str(output.get("schema_version")) != "2.0":
-                raise ValueError("replanner must return BacklogPlan v2")
-            for node in output.get("nodes", []):
-                if not isinstance(node, dict) or not isinstance(
-                    node.get("task_contract"), dict
-                ):
-                    raise TypeError("replanned BacklogPlan contains an invalid node")
-                contract = dict(node["task_contract"])
-                self.schemas.validate("task-contract-v2.schema.json", contract)
-                self.artifacts.write(
-                    "task-contract-v2.schema.json",
-                    contract,
-                    filename=f"task-{contract['task_id']}.json",
-                )
-            plan = dict(output)
-            plan["plan_artifact_ref"] = f"evidence/{output_path.name}"
-            plan["plan_digest"] = self.artifacts.digest(output)
+            plan = self._compile_proposal(task, output, output_path)
             return PreparedPipelineOutcome("IMPLEMENTING", plan=plan)
         if role == "product-director":
             self._write_risk_assessment(
@@ -904,32 +966,18 @@ class PipelineCoordinator:
             )
             return PreparedPipelineOutcome("ARCHITECTED", (successor,))
         if role == "task-specifier":
-            if str(output.get("schema_version")) != "2.0":
-                raise ValueError("task-specifier must return BacklogPlan v2")
-            for node in output.get("nodes", []):
-                if not isinstance(node, dict) or not isinstance(
-                    node.get("task_contract"), dict
-                ):
-                    raise TypeError("BacklogPlan v2 contains an invalid node")
-                contract = dict(node["task_contract"])
-                self.schemas.validate("task-contract-v2.schema.json", contract)
-                self.artifacts.write(
-                    "task-contract-v2.schema.json",
-                    contract,
-                    filename=f"task-{contract['task_id']}.json",
-                )
-            plan = dict(output)
-            plan["plan_artifact_ref"] = f"evidence/{output_path.name}"
-            plan["plan_digest"] = self.artifacts.digest(output)
+            plan = self._compile_proposal(task, output, output_path)
             return PreparedPipelineOutcome("IMPLEMENTING", plan=plan)
         task_plan_id = str(task.get("plan_id") or "")
+        lifecycle_stage = str(task.get("lifecycle_stage") or "")
+        effective_stage = lifecycle_stage or stage_key
         active_plans = self.state.list_plans(product_id)
         if any(
             str(plan.get("plan_id")) == task_plan_id
             and int(plan.get("revision") or 0) >= 1
             for plan in active_plans
         ):
-            if stage_key == "release-production":
+            if effective_stage in {"production", "release-production"}:
                 release = output.get("release")
                 release_digest = (
                     str(release.get("image_digest") or "")
@@ -939,6 +987,21 @@ class PipelineCoordinator:
                 if not re.fullmatch(r"sha256:[a-f0-9]{64}", release_digest):
                     raise ValueError(
                         "production release must bind observation to an immutable digest"
+                    )
+                if lifecycle_stage:
+                    available_at = (
+                        datetime.now(UTC)
+                        + timedelta(seconds=self.config.observation_seconds)
+                    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    return PreparedPipelineOutcome(
+                        product_status="OBSERVATION",
+                        downstream_bindings=(
+                            {
+                                "lifecycle_stage": "observation",
+                                "required_predecessor_digest": release_digest,
+                                "available_at": available_at,
+                            },
+                        ),
                     )
                 available_at = (
                     datetime.now(UTC)
@@ -958,12 +1021,15 @@ class PipelineCoordinator:
                 )
             product_status = {
                 "release-staging": "STAGING_DEPLOYED",
+                "staging": "STAGING_DEPLOYED",
                 "product-tester": "RELEASE_READY",
+                "product-acceptance": "RELEASE_READY",
                 "observation": "OBSERVATION",
-            }.get(stage_key)
+                "release-readiness-review": "INTEGRATING",
+            }.get(effective_stage)
             return PreparedPipelineOutcome(
                 product_status=product_status,
-                run_completion_reducer=stage_key == "observation",
+                run_completion_reducer=effective_stage == "observation",
             )
         if role == "builder":
             successor = self.prepare_task(

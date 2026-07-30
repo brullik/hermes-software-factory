@@ -51,11 +51,20 @@ def run_checked(argv: list[str], *, cwd: Path | None = None) -> None:
 def validate_source(source: Path) -> None:
     if not source.is_dir() or source.is_symlink():
         raise DeploymentError("release source directory is missing or unsafe")
-    for name in ("verify_manifest.py", "validate_package.py"):
+    checks = (
+        ("verify_version_consistency.py", "--factory-source"),
+        ("verify_manifest.py",),
+        ("validate_package.py",),
+    )
+    for command in checks:
+        name = command[0]
         script = source / "scripts" / name
         if not script.is_file() or script.is_symlink():
             raise DeploymentError(f"release validation script is missing: {name}")
-        run_checked([sys.executable, str(script)], cwd=source)
+        run_checked(
+            [sys.executable, str(script), *command[1:]],
+            cwd=source,
+        )
 
 
 def restart_services() -> None:

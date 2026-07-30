@@ -878,6 +878,95 @@ def _migration_011_recurring_workspace_claim_recovery(
     _migration_005_persistent_workspace_claim_recovery(connection)
 
 
+def _migration_012_typed_semantic_lifecycle(
+    connection: sqlite3.Connection,
+) -> None:
+    """Persist controller-owned lifecycle and evidence contracts."""
+
+    _add_columns(
+        connection,
+        "tasks",
+        (
+            ("lifecycle_stage", "TEXT"),
+            ("review_kind", "TEXT"),
+            ("evidence_profile", "TEXT"),
+            ("consumes_evidence_types_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("produces_evidence_types_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("completion_obligation_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("goal_ids_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("semantic_node_key", "TEXT"),
+            ("production_side_effects", "INTEGER NOT NULL DEFAULT 0"),
+        ),
+    )
+    _add_columns(
+        connection,
+        "plans",
+        (
+            ("compiler_version", "TEXT"),
+            ("lifecycle_version", "TEXT"),
+            ("proposal_artifact_ref", "TEXT"),
+            ("proposal_digest", "TEXT"),
+        ),
+    )
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tasks_lifecycle_stage
+            ON tasks(product_id, plan_id, lifecycle_stage, graph_status);
+        CREATE INDEX IF NOT EXISTS idx_tasks_semantic_node
+            ON tasks(product_id, semantic_node_key, graph_status);
+        """
+    )
+
+
+def _migration_013_maintenance_and_recovery_control(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add durable maintenance and idempotent recovery coordination."""
+
+    products_table = connection.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type='table' AND name='products'"""
+    ).fetchone()
+    active_products = (
+        int(
+            connection.execute(
+                """SELECT COUNT(*) FROM products
+                   WHERE status NOT IN
+                       ('CANCELLED', 'COMPLETED', 'FAILED_SAFE')"""
+            ).fetchone()[0]
+        )
+        if products_table is not None
+        else 0
+    )
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS factory_runtime_state (
+            singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+            maintenance_active INTEGER NOT NULL DEFAULT 0,
+            maintenance_reason TEXT,
+            maintenance_entered_at TEXT,
+            maintenance_left_at TEXT,
+            sqlite_busy_events INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS recovery_applications (
+            recovery_plan_digest TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            recovery_task_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            PRIMARY KEY(recovery_plan_digest, product_id)
+        );
+        """
+    )
+    connection.execute(
+        """INSERT OR IGNORE INTO factory_runtime_state
+           (singleton_id, maintenance_active, updated_at)
+           VALUES (1, ?, ?)""",
+        (int(active_products > 0), utc_now()),
+    )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -1046,6 +1135,16 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         11,
         "recurring-workspace-claim-recovery",
         _migration_011_recurring_workspace_claim_recovery,
+    ),
+    (
+        12,
+        "typed-semantic-lifecycle",
+        _migration_012_typed_semantic_lifecycle,
+    ),
+    (
+        13,
+        "maintenance-and-recovery-control",
+        _migration_013_maintenance_and_recovery_control,
     ),
 )
 

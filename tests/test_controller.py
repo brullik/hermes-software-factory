@@ -157,6 +157,43 @@ class ControllerHttpTests(unittest.TestCase):
                 thread.join(timeout=3)
                 state.close()
 
+    def test_maintenance_is_visible_and_readiness_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config, state = self._config_and_state(Path(directory))
+            state.enter_maintenance("semantic recovery")
+            state.record_sqlite_busy_event()
+            server = ControllerHttpServer(("127.0.0.1", 0), state, config)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                client = HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=3
+                )
+                client.request("GET", "/healthz")
+                health = client.getresponse()
+                health_payload = json.loads(health.read())
+                self.assertEqual(health.status, 200)
+                self.assertTrue(health_payload["maintenance"]["active"])
+
+                client.request("GET", "/readyz")
+                ready = client.getresponse()
+                ready_payload = json.loads(ready.read())
+                self.assertEqual(ready.status, 503)
+                self.assertEqual(ready_payload["status"], "MAINTENANCE")
+
+                client.request("GET", "/metrics")
+                metrics = client.getresponse().read().decode("utf-8")
+                self.assertIn("hermes_factory_maintenance_active 1", metrics)
+                self.assertIn(
+                    "hermes_factory_sqlite_busy_events_total 1", metrics
+                )
+                client.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+                state.close()
+
 
 if __name__ == "__main__":
     unittest.main()

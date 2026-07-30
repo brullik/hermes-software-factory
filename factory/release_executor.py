@@ -20,11 +20,15 @@ import sys
 import tarfile
 import tempfile
 import time
-import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+
+from scripts.verify_version_consistency import (
+    VersionConsistencyError,
+    verify_version_consistency,
+)
 
 from .config import FactoryConfig
 from .deployment import DeploymentGuard, TransactionalDeployer, TransactionResult
@@ -304,24 +308,11 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
 
     @staticmethod
     def _version(source: Path, candidate_sha: str) -> str:
-        version_path = source / "VERSION"
-        version = version_path.read_text(encoding="utf-8").strip() if version_path.is_file() else ""
-        pyproject = source / "pyproject.toml"
-        if not version and pyproject.is_file():
-            try:
-                payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-            except (OSError, tomllib.TOMLDecodeError) as error:
-                raise ReleaseAdapterError("release pyproject metadata is invalid") from error
-            project = payload.get("project", {})
-            if isinstance(project, Mapping):
-                configured = project.get("version")
-                if isinstance(configured, str):
-                    version = configured.strip()
-        if not version:
-            version = candidate_sha[:12]
-        if not version or len(version) > 120 or any(char in version for char in "\r\n"):
-            raise ReleaseAdapterError("release VERSION is invalid")
-        return version
+        del candidate_sha
+        try:
+            return verify_version_consistency(source)
+        except VersionConsistencyError as error:
+            raise ReleaseAdapterError(str(error)) from error
 
     def _command(
         self,
@@ -951,6 +942,16 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             raise ExternalBlocker("accepted staging digest is missing")
         if record["image_digest"] != expected_staging_digest:
             raise ExternalBlocker("accepted staging digest differs from the trusted staging record")
+        try:
+            verify_version_consistency(
+                self._staging_record_path(product_id).parent / "current",
+                release_record=self._staging_record_path(product_id),
+                expected=record["version"],
+            )
+        except VersionConsistencyError as error:
+            raise ExternalBlocker(
+                f"accepted release version evidence is inconsistent: {error}"
+            ) from error
         self._production_policy(
             risk=str(task_contract.get("risk_tier", "medium")),
             image_digest=expected_staging_digest,

@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import yaml
 from test_autonomy_v2 import (
     FakePrivateRepositoryAdapter,
     FakeRepositoryAdapter,
@@ -145,6 +146,7 @@ def record_completion_evidence(
         "independent_review",
         "required_checks",
         "staging",
+        "product_acceptance",
         "production",
         "rollback",
         "observation",
@@ -1087,7 +1089,7 @@ def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
         state.close()
 
 
-def test_AUT_P1_008_three_failed_controller_recoveries_force_diagnosis_reassessment(
+def test_AUT_P1_008_two_identical_recoveries_force_diagnosis_reassessment(
     tmp_path: Path,
 ) -> None:
     config = configured(tmp_path)
@@ -1146,7 +1148,9 @@ def test_AUT_P1_008_three_failed_controller_recoveries_force_diagnosis_reassessm
         )
         assert len(routed) == 1
 
-        for recovery_number in range(1, 4):
+        # Two identical same-role recovery failures exhaust the hypothesis.
+        # A third incident-recovery provider call is forbidden.
+        for recovery_number in range(1, 3):
             recovery = state.claim_task(
                 worker_id=f"incident-depth-{recovery_number}"
             )
@@ -1191,7 +1195,7 @@ def test_AUT_P1_008_three_failed_controller_recoveries_force_diagnosis_reassessm
             assert len(routed) == 1
             routed_task = state.get_task(routed[0])
             assert routed_task is not None
-            if recovery_number < 3:
+            if recovery_number < 2:
                 assert routed_task["role"] == "incident-recovery"
             else:
                 assert routed_task["role"] == "replanner"
@@ -1766,8 +1770,26 @@ class RuntimeRepositoryAdapter(FakeRepositoryAdapter):
             "# Runtime acceptance\n",
             encoding="utf-8",
         )
+        (workspace / "src" / "runtime_service").mkdir(parents=True)
+        (workspace / "src" / "runtime_service" / "__init__.py").write_text(
+            '"""Runtime service fixture."""\n',
+            encoding="utf-8",
+        )
+        (workspace / "tests").mkdir()
+        (workspace / "tests" / "test_runtime_service.py").write_text(
+            "def test_runtime_service() -> None:\n"
+            "    assert True\n",
+            encoding="utf-8",
+        )
+        (workspace / "pyproject.toml").write_text(
+            "[project]\n"
+            'name = "runtime-service-fixture"\n'
+            'version = "1.0.0"\n'
+            "dependencies = []\n",
+            encoding="utf-8",
+        )
         subprocess.run(
-            ["git", "-C", str(workspace), "add", "README.md"],
+            ["git", "-C", str(workspace), "add", "."],
             check=True,
         )
         subprocess.run(
@@ -1851,85 +1873,63 @@ def _runtime_plan(
     product_id: str,
     root_task_id: str,
 ) -> dict[str, Any]:
-    product = state.get_product(product_id)
-    assert product is not None
-    specs = [
-        ("builder-core", "T-AUT-P0-027-BUILDER", "accept-builder"),
-        ("test-engineer", "T-AUT-P0-027-TEST", "accept-test"),
-        ("security-reviewer", "T-AUT-P0-027-SECURITY", "accept-security"),
-        (
-            "independent-reviewer",
-            "T-AUT-P0-027-REVIEW",
-            "accept-review",
+    del state, root_task_id
+    return {
+        **artifact_metadata(
+            config,
+            "task-specifier",
+            "plan-proposal-aut-p0-027",
+            product_id,
         ),
-        ("release-staging", "T-AUT-P0-027-STAGING", "accept-staging"),
-        ("product-tester", "T-AUT-P0-027-PRODUCT", "accept-product"),
-        (
-            "release-production",
-            "T-AUT-P0-027-PRODUCTION",
-            "accept-production",
-        ),
-    ]
-    plan = executable_plan(
-        config,
-        product_id=product_id,
-        plan_id="PLAN-AUT-P0-027-RUNTIME",
-        root_task_id=root_task_id,
-        parent_plan_id=str(product["active_plan_id"]),
-        node_specs=specs,
-        edges=[
-            (specs[index][0], specs[index + 1][0])
-            for index in range(len(specs) - 1)
+        "schema_version": "1.0",
+        "producer": {
+            "role": "task-specifier",
+            "tier": "luna",
+            "provider": "strict-fake",
+            "model": "strict-fake",
+        },
+        "status": "completed",
+        "proposal_kind": "initial",
+        "parent_plan_id": None,
+        "source_failure_id": None,
+        "goals": [
+            {
+                "goal_id": "runtime-service",
+                "statement": (
+                    "Build, release, and observe the complete private runtime "
+                    "acceptance service."
+                ),
+                "mandatory": True,
+            }
         ],
-    )
-    identities = {
-        "builder-core": (
-            "builder",
-            "attempt-result.schema.json",
-            "builder_workspace",
+        "nodes": [
+            {
+                "node_key": "runtime-service",
+                "stage_kind": "implementation_slice",
+                "title": "Implement the private runtime service",
+                "objective": (
+                    "Implement the complete private service and its observable "
+                    "critical journey."
+                ),
+                "depends_on": [],
+                "scope": [
+                    "src/**",
+                    "tests/**",
+                    "README.md",
+                    "pyproject.toml",
+                ],
+                "acceptance_intents": [
+                    "The critical private-service journey and its negative path pass."
+                ],
+                "goal_ids": ["runtime-service"],
+            }
+        ],
+        "summary": (
+            "Semantic implementation proposal for the complete private runtime "
+            "acceptance service."
         ),
-        "test-engineer": (
-            "test-engineer",
-            "test-package-result.schema.json",
-            "test_workspace",
-        ),
-        "security-reviewer": (
-            "security-reviewer",
-            "security-review-result.schema.json",
-            "reviewer_readonly",
-        ),
-        "independent-reviewer": (
-            "independent-reviewer",
-            "review-result.schema.json",
-            "reviewer_readonly",
-        ),
-        "release-staging": (
-            "release-operator",
-            "release-operation-result.schema.json",
-            "release_staging",
-        ),
-        "product-tester": (
-            "product-tester",
-            "product-test-result.schema.json",
-            "test_workspace",
-        ),
-        "release-production": (
-            "release-operator",
-            "release-operation-result.schema.json",
-            "release_production",
-        ),
+        "evidence_refs": ["strict://architecture/accepted"],
     }
-    for node in plan["nodes"]:
-        node_id = str(node["node_id"])
-        role, output_schema, profile = identities[node_id]
-        contract = node["task_contract"]
-        contract["role"] = role
-        contract["output_schema"] = output_schema
-        contract["capability_profile"] = profile
-        contract["required_capabilities"] = list(
-            CAPABILITY_PROFILES[profile]
-        )
-    return plan
 
 
 def _attempt_output(
@@ -2102,6 +2102,34 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
     tmp_path: Path,
 ) -> None:
     config = configured(tmp_path)
+    quality_catalog = yaml.safe_load(
+        (
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "quality-gates.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    dependency_gate = next(
+        gate
+        for gate in quality_catalog["gates"]
+        if gate["id"] == "target-dependency-audit"
+    )
+    dependency_gate.clear()
+    dependency_gate.update(
+        {
+            "id": "target-dependency-audit",
+            "command": 'python3 -c "pass"',
+            "allowlist_prefixes": ["python3 -c"],
+            "timeout_seconds": 30,
+            "mandatory": True,
+        }
+    )
+    quality_path = tmp_path / "quality-gates-runtime-e2e.yaml"
+    quality_path.write_text(
+        yaml.safe_dump(quality_catalog, sort_keys=False),
+        encoding="utf-8",
+    )
+    config.raw["paths"]["quality_gates"] = str(quality_path)
     config.raw["telegram"]["allowed_user_ids"] = ["42"]
     config.raw["controller"]["observation_seconds"] = 0
     state = StateStore(config.database_path)
@@ -2183,28 +2211,56 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
             product_id=product_id,
             root_task_id=str(task_specifier["task_id"]),
         )
+        runner.outputs.append(json.dumps(plan))
+        capability_reconciler.reconcile_once()
+        compiled = worker.run_once()
+        assert compiled is not None
+        assert compiled.status == "completed", (
+            compiled.reason_code,
+            compiled.detail,
+        )
+        lifecycle_tasks = {
+            str(task["lifecycle_stage"]): task
+            for task in state.list_tasks(product_id)
+            if task.get("lifecycle_stage")
+        }
+        assert set(lifecycle_tasks) == {
+            "architecture-review",
+            "implementation-slice",
+            "test",
+            "security-review",
+            "release-readiness-review",
+            "staging",
+            "product-acceptance",
+            "production",
+            "observation",
+        }
         runner.outputs.extend(
             [
-                json.dumps(plan),
+                _review_output(
+                    config,
+                    product_id,
+                    str(lifecycle_tasks["architecture-review"]["task_id"]),
+                ),
                 _attempt_output(
                     config,
                     product_id,
-                    "T-AUT-P0-027-BUILDER",
+                    str(lifecycle_tasks["implementation-slice"]["task_id"]),
                 ),
                 _test_output(
                     config,
                     product_id,
-                    "T-AUT-P0-027-TEST",
+                    str(lifecycle_tasks["test"]["task_id"]),
                 ),
                 _security_output(
                     config,
                     product_id,
-                    "T-AUT-P0-027-SECURITY",
+                    str(lifecycle_tasks["security-review"]["task_id"]),
                 ),
                 _review_output(
                     config,
                     product_id,
-                    "T-AUT-P0-027-REVIEW",
+                    str(lifecycle_tasks["release-readiness-review"]["task_id"]),
                 ),
                 _release_proposal(config, product_id, "staging"),
                 _product_test_output(
@@ -2221,11 +2277,19 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
             ]
         )
         capability_reconciler.reconcile_once()
-        for _ in range(12):
+        for _ in range(14):
             if str(state.get_product(product_id)["status"]) == "COMPLETED":
                 break
             result = worker.run_once()
-            assert result is not None
+            assert result is not None, {
+                str(task.get("lifecycle_stage")): (
+                    task.get("graph_status"),
+                    task.get("blocked_reason"),
+                    task.get("blocked_ref"),
+                )
+                for task in state.list_tasks(product_id)
+                if task.get("lifecycle_stage")
+            }
             assert result.status == "completed", (
                 result.reason_code,
                 result.detail,

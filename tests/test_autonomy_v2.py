@@ -875,7 +875,7 @@ def test_AUT_P0_006_missing_plan_output_schema_routes_replanner(
         routed = state.get_task(routed_id)
         assert routed is not None
         assert routed["role"] == "replanner"
-        assert routed["output_schema"] == "backlog-plan-v2.schema.json"
+        assert routed["output_schema"] == "plan-proposal-v1.schema.json"
         assert routed["graph_status"] == "READY"
         incident = state._connection.execute(
             "SELECT status, resolved_at FROM controller_incidents WHERE product_id=?",
@@ -1243,6 +1243,68 @@ def test_AUT_P0_012_hypothesis_budget_exhaustion_changes_hypothesis(
         state.close()
 
 
+def test_AUT_P0_031_second_identical_same_role_failure_opens_replan_circuit(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        router = FailureRouter(config, state, artifacts)
+        repair_id = router.route(failure_id)
+        repair = state.claim_task(worker_id="repair-worker")
+        assert repair is not None
+        assert repair["task_id"] == repair_id
+        original = next(
+            item
+            for item in state.list_failures("product-autonomy")
+            if item["failure_id"] == failure_id
+        )
+        failed_gates = tuple(json.loads(original["failed_gate_ids_json"]))
+        committed = state.commit_task_outcome(
+            TaskOutcome(
+                task_id=repair_id,
+                worker_id="repair-worker",
+                lease_token=str(repair["lease_token"]),
+                expected_task_revision=int(repair["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("second-identical-problem"),
+                result_ref="internal://second-identical-problem",
+                result_digest=sha256_text("second-identical-problem"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class=str(original["failure_class"]),
+                    reason_code=str(original["reason_code"]),
+                    safe_message=str(original["safe_message"]),
+                    evidence_ref="internal://second-identical-problem",
+                    parent_failure_id=failure_id,
+                    expected=json.loads(original["expected_json"]),
+                    actual=json.loads(original["actual_json"]),
+                    failed_gate_ids=failed_gates,
+                ),
+            )
+        )
+        assert committed.failure_id is not None
+        routed_id = router.route(committed.failure_id)
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
+        assert routed["output_schema"] == "plan-proposal-v1.schema.json"
+        assert not any(
+            task["role"] == "builder"
+            and task["graph_status"] == "READY"
+            and task["task_id"] != repair_id
+            for task in state.list_tasks("product-autonomy")
+        )
+        events = [
+            json.loads(event["payload_json"])
+            for event in state.events("product-autonomy")
+            if event["event_type"] == "failure_routed"
+            and event["task_id"] == routed_id
+        ]
+        assert events[-1]["same_role_problem_count"] == 2
+    finally:
+        state.close()
+
+
 def test_AUT_P0_013_context_pack_has_bounded_safe_file_excerpts(
     tmp_path: Path,
 ) -> None:
@@ -1579,9 +1641,10 @@ def test_AUT_P0_017_completion_reducer_requires_all_evidence_and_is_idempotent(
         )
         for evidence_type in (
             "independent_review",
-            "required_checks",
-            "staging",
-            "production",
+                "required_checks",
+                "staging",
+                "product_acceptance",
+                "production",
             "rollback",
             "observation",
         ):
@@ -1935,10 +1998,10 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
                         f"evidence/{failure_id}.json",
                     ),
                 )
-            state._connection.execute(
-                "DELETE FROM schema_migrations WHERE version=?",
-                (MIGRATIONS[-1][0],),
-            )
+                state._connection.execute(
+                    "DELETE FROM schema_migrations WHERE version=?",
+                    (11,),
+                )
     finally:
         state.close()
 
@@ -2482,7 +2545,7 @@ def test_AUT_P0_019_plan_candidate_rejects_planning_only_graph(
         )
         contract = plan["nodes"][0]["task_contract"]
         contract["role"] = "replanner"
-        contract["output_schema"] = "backlog-plan-v2.schema.json"
+        contract["output_schema"] = "plan-proposal-v1.schema.json"
         contract["capability_profile"] = "planning_readonly"
         contract["required_capabilities"] = [
             "artifact.read",
@@ -2564,6 +2627,41 @@ def test_AUT_P0_018_registered_but_noncanonical_output_schema_is_rejected(
             state.validate_plan_candidate(plan)
 
         assert state.get_task("T-WRONG-REGISTERED-SCHEMA") is None
+    finally:
+        state.close()
+
+
+def test_AUT_P0_018_unregistered_quality_gate_is_rejected_before_plan_ingest(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-UNREGISTERED-QUALITY-GATE",
+            root_task_id="T-UNREGISTERED-QUALITY-GATE-ROOT",
+            node_specs=[
+                ("A", "T-UNREGISTERED-QUALITY-GATE", "accept-quality-gate")
+            ],
+            edges=[],
+        )
+        plan["nodes"][0]["task_contract"]["quality_gates"] = [
+            "package_integrity"
+        ]
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"nodes\[0\]\.task_contract\.quality_gates\[0\] "
+                r"is not registered: package_integrity"
+            ),
+        ):
+            state.validate_plan_candidate(plan)
+
+        assert state.get_task("T-UNREGISTERED-QUALITY-GATE") is None
     finally:
         state.close()
 

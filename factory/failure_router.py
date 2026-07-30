@@ -20,6 +20,12 @@ _REPLAN_REASONS = {
     "scope_contradiction",
     "architecture_impossible",
     "invalid_capability_contract",
+    "invalid_quality_gate_contract",
+    "plan_contract_violation",
+    "missing_declared_predecessor",
+    "evidence_profile_mismatch",
+    "completion_unreachable",
+    "toolchain_capability_missing",
     "liveness_invariant_violation",
     "repeated_hypothesis",
 }
@@ -44,6 +50,60 @@ class FailureRouter:
         self.state = state
         self.artifacts = artifacts or ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)
+
+    def _same_role_problem_count(
+        self,
+        failure: dict[str, Any],
+        failed: dict[str, Any],
+    ) -> int:
+        """Count an identical causal problem without using task-specific IDs."""
+
+        failures = {
+            str(item["failure_id"]): item
+            for item in self.state.list_failures(str(failed["product_id"]))
+        }
+
+        def signature(item: dict[str, Any]) -> str:
+            try:
+                failed_gates = sorted(
+                    str(value)
+                    for value in json.loads(
+                        str(item.get("failed_gate_ids_json") or "[]")
+                    )
+                )
+            except (TypeError, json.JSONDecodeError):
+                failed_gates = []
+            return sha256_text(
+                stable_json(
+                    [
+                        item.get("failure_class"),
+                        item.get("reason_code"),
+                        item.get("safe_message"),
+                        item.get("exception_type"),
+                        failed_gates,
+                    ]
+                )
+            )
+
+        expected_signature = signature(failure)
+        expected_role = str(failed.get("role") or "")
+        count = 0
+        failure_id = str(failure["failure_id"])
+        seen: set[str] = set()
+        while failure_id and failure_id not in seen:
+            seen.add(failure_id)
+            item = failures.get(failure_id)
+            if item is None:
+                break
+            task = self.state.get_task(str(item.get("task_id") or ""))
+            if (
+                task is not None
+                and str(task.get("role") or "") == expected_role
+                and signature(item) == expected_signature
+            ):
+                count += 1
+            failure_id = str(item.get("parent_failure_id") or "")
+        return count
 
     def _contract(self, task: dict[str, Any]) -> dict[str, Any]:
         reference = str(task.get("contract_ref") or "")
@@ -393,7 +453,7 @@ class FailureRouter:
         ]
         role = str(routed.get("role") or "replanner")
         output_schema = str(
-            routed.get("output_schema") or "backlog-plan-v2.schema.json"
+            routed.get("output_schema") or "plan-proposal-v1.schema.json"
         )
         capability_profile = str(
             routed.get("capability_profile") or "planning_readonly"
@@ -563,7 +623,12 @@ class FailureRouter:
             hypothesis = None
             hypothesis_id: str | None = None
             attempts_used = 0
+            same_role_problem_count = 0
             if not controller_fault:
+                same_role_problem_count = self._same_role_problem_count(
+                    dict(failure),
+                    dict(failed),
+                )
                 inherited_hypothesis_id = str(
                     failed.get("hypothesis_id") or ""
                 )
@@ -614,6 +679,7 @@ class FailureRouter:
                 invalid_plan_output_schema
                 or reason in _REPLAN_REASONS
                 or attempts_used >= 3
+                or same_role_problem_count >= 2
                 or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
             )
             if controller_fault:
@@ -643,6 +709,7 @@ class FailureRouter:
             elif needs_replan:
                 if (
                     attempts_used >= 3
+                    or same_role_problem_count >= 2
                     or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
                 ):
                     assert hypothesis_id is not None
@@ -658,6 +725,7 @@ class FailureRouter:
                                 parent_hypothesis_id,
                                 failure_id,
                                 "director-diagnosis-reassessment",
+                                same_role_problem_count,
                             ]
                         )
                     )
@@ -686,7 +754,7 @@ class FailureRouter:
                 else:
                     suffix = "replan"
                 role = "replanner"
-                output_schema = "backlog-plan-v2.schema.json"
+                output_schema = "plan-proposal-v1.schema.json"
                 capability_profile = "planning_readonly"
                 objective = (
                     "Create plan revision N+1 from the inherited root goal, active "
@@ -806,6 +874,7 @@ class FailureRouter:
                         "hypothesis_id": hypothesis_id,
                         "route": suffix,
                         "source_task_id": str(failed["task_id"]),
+                        "same_role_problem_count": same_role_problem_count,
                     },
                 )
             return str(contract["task_id"])

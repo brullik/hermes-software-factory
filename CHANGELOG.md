@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.2.0 - 2026-07-30
+
+- Compile model-proposed semantic implementation slices into a deterministic,
+  controller-owned lifecycle with typed evidence dependencies and mandatory
+  architecture, security, acceptance, production, and observation stages.
+- Add fail-closed semantic plan validation, hypothesis-changing circuit
+  breaking, toolchain preflight, maintenance mode, durable state audit, and
+  idempotent digest-bound recovery planning and application.
+- Reject release candidates whose source, wheel, SBOM, changelog, or release
+  record version evidence disagrees.
+
+## 2.1.26 - 2026-07-29
+
+- Publish the controller-owned quality gate ID catalog to planning agents and
+  reject unregistered gate IDs before a proposed DAG can mutate durable state.
+- Route unknown gate IDs in older persisted plans as
+  `invalid_quality_gate_contract` with exact safe coordinates instead of
+  misclassifying the post-parse controller error as `malformed_transport`.
+
 ## 2.1.25 - 2026-07-29
 
 - Normalize every routed v2 repair brief to a non-empty blocker coordinate,

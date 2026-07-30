@@ -39,6 +39,9 @@ class ControllerHandler(BaseHTTPRequestHandler):
             database_ready = int(self.server.state.health())
             product_count = len(self.server.state.list_products())
             orphaned_count = self.server.state.orphaned_product_count()
+            runtime = self.server.state.maintenance_status()
+            maintenance_active = int(bool(runtime["maintenance_active"]))
+            sqlite_busy_events = int(runtime["sqlite_busy_events"])
             body = (
                 "# HELP hermes_factory_database_ready Whether the controller database is ready.\n"
                 "# TYPE hermes_factory_database_ready gauge\n"
@@ -49,6 +52,12 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 "# HELP hermes_factory_orphaned_products Products without durable next work.\n"
                 "# TYPE hermes_factory_orphaned_products gauge\n"
                 f"hermes_factory_orphaned_products {orphaned_count}\n"
+                "# HELP hermes_factory_maintenance_active Whether intake and new claims are paused.\n"
+                "# TYPE hermes_factory_maintenance_active gauge\n"
+                f"hermes_factory_maintenance_active {maintenance_active}\n"
+                "# HELP hermes_factory_sqlite_busy_events_total Observed bounded SQLite busy events.\n"
+                "# TYPE hermes_factory_sqlite_busy_events_total counter\n"
+                f"hermes_factory_sqlite_busy_events_total {sqlite_busy_events}\n"
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -59,14 +68,28 @@ class ControllerHandler(BaseHTTPRequestHandler):
         if path not in {"/healthz", "/readyz", "/status"}:
             self.send_error(404)
             return
+        runtime = self.server.state.maintenance_status()
+        maintenance_active = bool(runtime["maintenance_active"])
         payload: dict[str, Any] = {
-            "status": "PASS",
+            "status": (
+                "MAINTENANCE"
+                if path == "/readyz" and maintenance_active
+                else "PASS"
+            ),
             "service": "hermes-factory-controller",
             "database": self.server.state.health(),
+            "maintenance": {
+                "active": maintenance_active,
+                "reason": runtime["maintenance_reason"],
+                "entered_at": runtime["maintenance_entered_at"],
+            },
         }
         if path == "/status":
             payload["products"] = self.server.state.list_products()
-        self._send_json(200, payload)
+        self._send_json(
+            503 if path == "/readyz" and maintenance_active else 200,
+            payload,
+        )
 
     def do_POST(self) -> None:
         try:
@@ -91,9 +114,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
                     ),
                     repository_url=payload.get("repository_url"),
                     repository_name=payload.get("repository_name"),
-                    repository_visibility=str(
-                        payload.get("repository_visibility", "private")
-                    ),
+                    repository_visibility=str(payload.get("repository_visibility", "private")),
                     constraints=payload.get("constraints", {}),
                     idempotency_key=payload.get("idempotency_key"),
                     attachments=payload.get("attachments", []),
@@ -110,7 +131,11 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 )
                 return
             parts = path.strip("/").split("/")
-            if len(parts) == 3 and parts[0] == "products" and parts[2] in {"pause", "resume", "cancel"}:
+            if (
+                len(parts) == 3
+                and parts[0] == "products"
+                and parts[2] in {"pause", "resume", "cancel"}
+            ):
                 workflow = WorkflowEngine(self.server.state)
                 if parts[2] == "pause":
                     product = workflow.pause(parts[1])
@@ -123,7 +148,9 @@ class ControllerHandler(BaseHTTPRequestHandler):
             self.send_error(404)
         except (IntakeRateLimitError, ProductCapacityError) as error:
             self._send_json(429, {"status": "FAIL", "error": str(error)})
-        except (KeyError, TypeError, ValueError, IntakeRejected) as error:
+        except IntakeRejected as error:
+            self._send_json(503, {"status": "FAIL", "error": str(error)})
+        except (KeyError, TypeError, ValueError) as error:
             self._send_json(400, {"status": "FAIL", "error": str(error)})
 
     def _read_json(self) -> dict[str, Any]:
@@ -151,7 +178,10 @@ class ControllerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(encoded)

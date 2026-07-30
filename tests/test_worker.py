@@ -792,34 +792,17 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(durable_task)
             assert durable_task is not None
             spec = worker.default_spec(durable_task)
-            identity_decision = next(
+            proposal_decision = next(
                 item
                 for item in spec.decisions
-                if "controller-owned identities" in item
+                if "Return semantic implementation slices only" in item
             )
             self.assertIn(
-                "builder: output_schema=attempt-result.schema.json; "
-                "capability_profile=builder_workspace",
-                identity_decision,
+                "deterministic PlanCompiler",
+                proposal_decision,
             )
-            self.assertIn(
-                "release-operator@release-production: "
-                "output_schema=release-operation-result.schema.json; "
-                "capability_profile=release_production",
-                identity_decision,
-            )
-            self.assertIn(
-                "Use a new plan_id for every proposed immutable revision",
-                identity_decision,
-            )
-            self.assertIn(
-                "Every idempotency_key must be exactly 64 lowercase hexadecimal",
-                identity_decision,
-            )
-            self.assertIn(
-                "Every mandatory goal acceptance_ids list must be non-empty",
-                identity_decision,
-            )
+            self.assertNotIn("output_schema=", proposal_decision)
+            self.assertNotIn("idempotency_key", proposal_decision)
 
             result = worker.run_once()
 
@@ -827,9 +810,10 @@ class WorkerTests(unittest.TestCase):
             assert result is not None
             self.assertEqual(result.status, "repair_scheduled")
             self.assertEqual(result.reason_code, "schema_validation")
+            expected = "replanner must return proposal_kind=replan_delta"
             self.assertEqual(
                 result.detail,
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             durable = state.get_task(task_id)
             self.assertIsNotNone(durable)
@@ -848,7 +832,7 @@ class WorkerTests(unittest.TestCase):
                 ["BACKLOG_PLAN_SEMANTIC_VALIDATION"],
             )
             self.assertIn(
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
                 repair["expected_vs_actual"]["actual"],
             )
             diagnostic = json.loads(
@@ -858,7 +842,7 @@ class WorkerTests(unittest.TestCase):
             )
             self.assertEqual(
                 diagnostic["parser_error_safe_message"],
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             self.assertIn(
                 f"evidence/transport-diagnostic-{result.attempt_id}.json",
@@ -871,11 +855,11 @@ class WorkerTests(unittest.TestCase):
             )
             self.assertEqual(
                 envelope["safe_message"],
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             self.assertEqual(
                 envelope["actual"]["validator_diagnostic"],
-                "BacklogPlan edges[0].to endpoint is missing",
+                expected,
             )
             self.assertEqual(
                 envelope["failed_gate_ids"],
@@ -1037,7 +1021,7 @@ class WorkerTests(unittest.TestCase):
                 self.assertNotIn(secret, path.read_text(encoding="utf-8"))
             state.close()
 
-    def test_interrupted_attempt_replays_immutable_repair_without_provider_call(
+    def test_AUT_P0_036_interrupted_attempt_replays_without_provider_call(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2292,6 +2276,98 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(product["status"], "IDEA_RECEIVED")
             state.close()
 
+    def test_unknown_persisted_quality_gate_routes_replan_not_transport_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / "README.md").write_text(
+                "minimal workspace\n",
+                encoding="utf-8",
+            )
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-luna",
+            )
+            config = make_config(root / "state", registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            artifacts = ArtifactStore(config)
+            product_id = "P-UNKNOWN-QUALITY-GATE"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Build a product from an older persisted plan",
+                idempotency_key="unknown-quality-gate-product",
+            )
+            pipeline = PipelineCoordinator(config, state, artifacts)
+            task_path = pipeline.create_task(product_id, "builder-core")
+            contract = json.loads(task_path.read_text(encoding="utf-8"))
+            contract["quality_gates"] = ["package_integrity"]
+            output = {
+                **artifact_metadata(
+                    config,
+                    "builder",
+                    "unknown-quality-gate-output",
+                    product_id,
+                ),
+                "producer": {
+                    "role": "builder",
+                    "tier": "luna",
+                    "provider": "openai_codex_subscription",
+                    "model": "gpt-5.6-luna",
+                },
+                "task_id": contract["task_id"],
+                "attempt_id": "attempt-unknown-quality-gate",
+                "tier": "luna",
+                "attempt_kind": "initial",
+                "prompt_digest": "a" * 64,
+                "subject_sha_before": "b" * 64,
+                "status": "completed",
+                "summary": "The implementation is ready for controller gates.",
+                "changed_files": [],
+                "commands": [],
+                "test_results": [],
+                "assumptions": [],
+                "findings": [],
+                "evidence_refs": [],
+            }
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(output)),
+                health_probe=lambda _: True,
+                repository_root=repository,
+            )
+            spec = TaskExecutionSpec(
+                task_contract=contract,
+                role="builder",
+                output_schema="attempt-result.schema.json",
+                subject_sha="c" * 64,
+            )
+
+            result = worker.execute(spec)
+
+            self.assertEqual(result.status, "failed_safe")
+            self.assertEqual(
+                result.reason_code,
+                "invalid_quality_gate_contract",
+            )
+            self.assertIn("package_integrity", result.detail or "")
+            self.assertIsNotNone(result.failure_data)
+            assert result.failure_data is not None
+            self.assertEqual(
+                result.failure_data.failed_gate_ids,
+                ("package_integrity",),
+            )
+            self.assertNotEqual(result.reason_code, "malformed_transport")
+            state.close()
+
     def test_subprocess_runner_rejects_secret_like_prompt_before_exec(self) -> None:
         runner = SubprocessHermesRunner(binary="does-not-exist")
         with self.assertRaises(ValueError):
@@ -2314,7 +2390,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("--ignore-rules", coding_argv)
         self.assertIn("--ignore-rules", planning_argv)
 
-    def test_subprocess_runner_keeps_success_stderr_out_of_json_contract(self) -> None:
+    def test_AUT_P0_035_success_stdout_json_excludes_stderr_diagnostics(self) -> None:
         selection = ModelSelection(
             "openai-codex",
             "economy",

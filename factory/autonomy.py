@@ -63,8 +63,8 @@ CANONICAL_ROLE_OUTPUT_SCHEMAS: dict[str, str] = {
     "product-director": "product-contract.schema.json",
     "product-analyst": "requirements-package.schema.json",
     "solution-architect": "architecture-package.schema.json",
-    "task-specifier": "backlog-plan-v2.schema.json",
-    "replanner": "backlog-plan-v2.schema.json",
+    "task-specifier": "plan-proposal-v1.schema.json",
+    "replanner": "plan-proposal-v1.schema.json",
     "incident-recovery": "incident-result.schema.json",
     "builder": "attempt-result.schema.json",
     "test-engineer": "test-package-result.schema.json",
@@ -73,6 +73,28 @@ CANONICAL_ROLE_OUTPUT_SCHEMAS: dict[str, str] = {
     "release-operator": "release-operation-result.schema.json",
     "product-tester": "product-test-result.schema.json",
 }
+
+CANONICAL_QUALITY_GATE_IDS = frozenset(
+    {
+        "package-integrity",
+        "unit-tests",
+        "python-compile",
+        "pilot-tests",
+        "lint",
+        "typecheck",
+        "secret-scan",
+        "manifest",
+        "sbom",
+        "target-environment",
+        "target-tests",
+        "target-compile",
+        "target-lint",
+        "target-sast",
+        "target-dependency-audit",
+        "target-license-check",
+        "target-secret-scan",
+    }
+)
 
 CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
     "planning_readonly": (
@@ -137,6 +159,13 @@ ALL_CAPABILITIES = frozenset(
     capability
     for capabilities in CAPABILITY_PROFILES.values()
     for capability in capabilities
+) | frozenset(
+    {
+        "toolchain.python",
+        "toolchain.make",
+        "toolchain.container_builder",
+        "toolchain.scanners",
+    }
 )
 
 BUILTIN_CAPABILITIES = {
@@ -209,9 +238,13 @@ def canonical_plan_identity_catalog() -> str:
         "copy one template key between nodes.\n"
         "- Every acceptance criterion_id must be unique across the proposed DAG. "
         "Every mandatory goal acceptance_ids list must be non-empty and contain only "
-        "criterion IDs that exist in proposed node task_contract.acceptance arrays."
+        "criterion IDs that exist in proposed node task_contract.acceptance arrays.\n"
+        "- Every task_contract.quality_gates entry must be copied exactly from "
+        "CANONICAL_QUALITY_GATE_IDS below; do not translate hyphens to underscores "
+        "or invent repository-local gate names."
     )
-    return f"{catalog}\n{invariants}"
+    quality_gates = ", ".join(sorted(CANONICAL_QUALITY_GATE_IDS))
+    return f"{catalog}\nCANONICAL_QUALITY_GATE_IDS=[{quality_gates}]\n{invariants}"
 
 
 def minimum_capability_profile(
@@ -379,6 +412,7 @@ class TaskOutcome:
     product_status: str | None = None
     successors: tuple[dict[str, Any], ...] = ()
     edges: tuple[dict[str, Any], ...] = ()
+    downstream_bindings: tuple[dict[str, Any], ...] = ()
     failure: FailureData | None = None
     hypothesis: HypothesisData | None = None
     plan: dict[str, Any] | None = None
@@ -751,6 +785,22 @@ class AutonomyStore:
                     f"must be {canonical_output_schema} for role "
                     f"{normalized_role}; got {output_schema}"
                 )
+            quality_gates = contract.get("quality_gates", [])
+            if not isinstance(quality_gates, list):
+                raise TypeError(
+                    "BacklogPlan "
+                    f"nodes[{node_index}].task_contract.quality_gates "
+                    "must be an array"
+                )
+            for gate_index, gate_id_value in enumerate(quality_gates):
+                gate_id = str(gate_id_value)
+                if gate_id not in CANONICAL_QUALITY_GATE_IDS:
+                    raise ValueError(
+                        "BacklogPlan "
+                        f"nodes[{node_index}].task_contract."
+                        f"quality_gates[{gate_index}] is not registered: "
+                        f"{gate_id or '<missing>'}"
+                    )
             idempotency_key = str(contract.get("idempotency_key", ""))
             if idempotency_key in idempotency_keys:
                 raise ValueError(
@@ -831,6 +881,9 @@ class AutonomyStore:
                     frontier.append(target)
         if visited != len(node_ids):
             raise ValueError("BacklogPlan must be acyclic")
+        from .plan_semantics import validate_compiled_plan
+
+        validate_compiled_plan(plan)
 
     def validate_plan_candidate(self, plan: dict[str, Any]) -> None:
         """Validate semantic identities without mutating durable graph state."""
@@ -971,8 +1024,10 @@ class AutonomyStore:
             """INSERT INTO plans
                (plan_id, product_id, revision, parent_plan_id, source_failure_id,
                 status, plan_artifact_ref, plan_digest, goals_json,
-                completion_criteria_json, created_by_task_id, created_at, activated_at)
-               VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)""",
+                completion_criteria_json, created_by_task_id, created_at, activated_at,
+                compiler_version, lifecycle_version, proposal_artifact_ref,
+                proposal_digest)
+               VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 plan_id,
                 product_id,
@@ -986,6 +1041,10 @@ class AutonomyStore:
                 created_by_task_id,
                 now,
                 now,
+                plan.get("compiler_version"),
+                plan.get("lifecycle_version"),
+                plan.get("proposal_artifact_ref"),
+                plan.get("proposal_digest"),
             ),
         )
         product = connection.execute(
@@ -1002,9 +1061,11 @@ class AutonomyStore:
             else created_by_task_id
         )
         node_to_task: dict[str, str] = {}
+        contracts_by_node: dict[str, dict[str, Any]] = {}
         for rank, node in enumerate(plan["nodes"]):
             node_id = str(node["node_id"])
             contract = dict(node["task_contract"])
+            contracts_by_node[node_id] = contract
             task_id = str(
                 contract.get("task_id")
                 or f"T-{sha256_text(f'{product_id}:{plan_id}:{node_id}:{revision}')[:16].upper()}"
@@ -1055,9 +1116,14 @@ class AutonomyStore:
                      failure_id, hypothesis_id, capability_profile,
                      idempotency_key, supersedes_task_id,
                      graph_status, required_capabilities_json, mandatory,
-                     critical_path_rank, result_ref, result_digest)
+                     critical_path_rank, result_ref, result_digest,
+                     lifecycle_stage, review_kind, evidence_profile,
+                     consumes_evidence_types_json, produces_evidence_types_json,
+                     completion_obligation_ids_json, goal_ids_json,
+                     semantic_node_key, production_side_effects)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
@@ -1095,6 +1161,15 @@ class AutonomyStore:
                     int(contract.get("critical_path_rank", rank)),
                     reused_result_ref,
                     reused_result_digest,
+                    contract.get("lifecycle_stage"),
+                    contract.get("review_kind"),
+                    contract.get("evidence_profile"),
+                    stable_json(contract.get("consumes_evidence_types", [])),
+                    stable_json(contract.get("produces_evidence_types", [])),
+                    stable_json(contract.get("completion_obligation_ids", [])),
+                    stable_json(contract.get("goal_ids", [])),
+                    contract.get("semantic_node_key"),
+                    int(bool(contract.get("production_side_effects", False))),
                 ),
             )
             if supersedes_task_id:
@@ -1106,6 +1181,35 @@ class AutonomyStore:
                     (plan_id, str(supersedes_task_id), task_id, now),
                 )
         incoming: dict[str, list[str]] = {node: [] for node in node_to_task}
+        new_task_ids = set(node_to_task.values())
+        for node_id, contract in contracts_by_node.items():
+            for dependency_value in contract.get("dependencies", []):
+                dependency_id = str(dependency_value)
+                if dependency_id in new_task_ids:
+                    raise ValueError(
+                        "compiled task dependencies must use plan edges for internal nodes"
+                    )
+                dependency = connection.execute(
+                    "SELECT product_id FROM tasks WHERE task_id=?",
+                    (dependency_id,),
+                ).fetchone()
+                if dependency is None or str(dependency[0]) != product_id:
+                    raise ValueError(
+                        "compiled task external dependency is outside this product"
+                    )
+                incoming[node_id].append(dependency_id)
+                connection.execute(
+                    """INSERT OR IGNORE INTO task_edges
+                       (plan_id, from_task_id, to_task_id, edge_type,
+                        required, created_at)
+                       VALUES (?, ?, ?, 'evidence_from', 1, ?)""",
+                    (
+                        plan_id,
+                        dependency_id,
+                        node_to_task[node_id],
+                        now,
+                    ),
+                )
         for edge in plan["edges"]:
             source_node = str(edge["from"])
             target_node = str(edge["to"])
@@ -1687,6 +1791,47 @@ class AutonomyStore:
                             created_by_task_id=outcome.task_id,
                         )
                     )
+                for binding in outcome.downstream_bindings:
+                    lifecycle_stage = str(binding.get("lifecycle_stage") or "")
+                    digest = str(
+                        binding.get("required_predecessor_digest") or ""
+                    )
+                    available_at = str(binding.get("available_at") or "")
+                    if lifecycle_stage != "observation":
+                        raise ValueError(
+                            "only observation may receive a downstream release binding"
+                        )
+                    if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+                        raise ValueError(
+                            "downstream release binding requires an immutable digest"
+                        )
+                    if not available_at:
+                        raise ValueError(
+                            "downstream observation binding requires available_at"
+                        )
+                    target = self.connection.execute(
+                        """SELECT task_id FROM tasks
+                           WHERE product_id=? AND plan_id=?
+                             AND lifecycle_stage='observation'
+                             AND graph_status NOT IN
+                                 ('ACCEPTED','SUPERSEDED','REJECTED','CANCELLED')""",
+                        (
+                            str(task["product_id"]),
+                            str(task["plan_id"]),
+                        ),
+                    ).fetchall()
+                    if len(target) != 1:
+                        raise ValueError(
+                            "compiled plan must have one active observation target"
+                        )
+                    self.connection.execute(
+                        """UPDATE tasks
+                           SET required_predecessor_digest=?, available_at=?,
+                               graph_status='WAITING_TIME', status='WAITING',
+                               updated_at=?
+                           WHERE task_id=?""",
+                        (digest, available_at, now, str(target[0][0])),
+                    )
                 inject("after_successor_write")
                 if outcome.status in TERMINAL_SUCCESS and failure_id is None:
                     prior_failure_id = str(task["failure_id"] or "")
@@ -1979,7 +2124,8 @@ class AutonomyStore:
                            FROM product_evidence WHERE product_id=?
                              AND evidence_type IN
                                ('independent_review','required_checks','staging',
-                                'production','rollback','observation')""",
+                                'product_acceptance','production','rollback',
+                                'observation')""",
                         (product_id,),
                     ).fetchall()
                     if str(row[2]) == "PASS"
@@ -1988,6 +2134,7 @@ class AutonomyStore:
                     "independent_review",
                     "required_checks",
                     "staging",
+                    "product_acceptance",
                     "production",
                     "rollback",
                     "observation",

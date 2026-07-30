@@ -21,6 +21,14 @@ from .common import new_id, sha256_text, utc_now
 from .config import ConfigError, FactoryConfig, load_config
 from .intake import IntakeService
 from .policy import policy_digest
+from .recovery import (
+    apply_recovery_plan,
+    build_recovery_plan,
+    state_audit,
+    verify_active_graphs,
+    verify_recovery_preconditions,
+    write_json_atomic,
+)
 from .state import StateStore
 from .workflow import WorkflowEngine
 
@@ -31,12 +39,16 @@ def _config(path: Path | None) -> FactoryConfig:
     if path is not None:
         return load_config(path)
     configured = os.environ.get("FACTORY_CONFIG")
-    return load_config(Path(configured) if configured else ROOT / "config" / "factory-config.example.yaml")
+    return load_config(
+        Path(configured) if configured else ROOT / "config" / "factory-config.example.yaml"
+    )
 
 
 def _write_repo_evidence(filename: str, artifact: dict[str, Any], schema_name: str) -> Path:
     schema = json.loads((ROOT / "schemas" / schema_name).read_text(encoding="utf-8"))
-    errors = list(Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(artifact))
+    errors = list(
+        Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(artifact)
+    )
     if errors:
         raise ValueError(f"Invalid {schema_name}: {'; '.join(error.message for error in errors)}")
     path = ROOT / "evidence" / filename
@@ -50,7 +62,9 @@ def _write_repo_evidence(filename: str, artifact: dict[str, Any], schema_name: s
 def _write_latest_acceptance(artifact: dict[str, Any]) -> Path:
     schema_name = "final-acceptance.schema.json"
     schema = json.loads((ROOT / "schemas" / schema_name).read_text(encoding="utf-8"))
-    errors = list(Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(artifact))
+    errors = list(
+        Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(artifact)
+    )
     if errors:
         raise ValueError(f"Invalid {schema_name}: {'; '.join(error.message for error in errors)}")
     path = ROOT / "evidence" / "final-acceptance.json"
@@ -68,7 +82,9 @@ def _write_latest_acceptance(artifact: dict[str, Any]) -> Path:
 
 def _run_local(command: list[str], timeout: int = 300) -> dict[str, Any]:
     started = utc_now()
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=timeout, check=False)
+    result = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, timeout=timeout, check=False
+    )
     output = (result.stdout + "\n" + result.stderr).strip()
     return {
         "command": command,
@@ -93,9 +109,7 @@ def _strict_compatibility_open_scenarios(path: Path) -> list[dict[str, str]]:
     if not isinstance(checks, list):
         checks = []
     checks_by_id = {
-        str(item.get("id")): item
-        for item in checks
-        if isinstance(item, dict) and item.get("id")
+        str(item.get("id")): item for item in checks if isinstance(item, dict) and item.get("id")
     }
     open_items = compatibility_data.get("open_items", [])
     if not isinstance(open_items, list):
@@ -108,7 +122,11 @@ def _strict_compatibility_open_scenarios(path: Path) -> list[dict[str, str]]:
         if any(scenario["id"] == item_id for scenario in scenarios):
             continue
         record = checks_by_id.get(item_id, {})
-        status = str(record.get("status", "BLOCKED_EXTERNAL")) if isinstance(record, dict) else "BLOCKED_EXTERNAL"
+        status = (
+            str(record.get("status", "BLOCKED_EXTERNAL"))
+            if isinstance(record, dict)
+            else "BLOCKED_EXTERNAL"
+        )
         if status not in {"PASS", "FAIL", "BLOCKED_EXTERNAL"}:
             status = "BLOCKED_EXTERNAL"
         scenarios.append(
@@ -123,7 +141,11 @@ def _strict_compatibility_open_scenarios(path: Path) -> list[dict[str, str]]:
 
 def validate_config_command(args: argparse.Namespace) -> int:
     config = _config(args.config)
-    print(json.dumps({"status": "PASS", "config": str(config.source), "policy_digest": policy_digest(config)}))
+    print(
+        json.dumps(
+            {"status": "PASS", "config": str(config.source), "policy_digest": policy_digest(config)}
+        )
+    )
     return 0
 
 
@@ -151,13 +173,18 @@ def intake_command(args: argparse.Namespace) -> int:
             repository_visibility=str(args.repository_visibility),
             idempotency_key=args.idempotency_key,
         )
-        print(json.dumps({
-            "status": "PASS",
-            "product_id": result.product_id,
-            "artifact_path": result.artifact_path,
-            "created": result.created,
-            "correlation_id": result.correlation_id,
-        }, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "product_id": result.product_id,
+                    "artifact_path": result.artifact_path,
+                    "created": result.created,
+                    "correlation_id": result.correlation_id,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
     finally:
         state.close()
@@ -196,6 +223,108 @@ def transition_command(args: argparse.Namespace) -> int:
         else:
             product = workflow.cancel(args.product_id)
         print(json.dumps({"status": "PASS", "product": product}, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def maintenance_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = (
+            state.enter_maintenance(str(args.reason))
+            if args.maintenance_action == "enter"
+            else state.leave_maintenance()
+        )
+        print(json.dumps({"status": "PASS", "maintenance": result}))
+        return 0
+    finally:
+        state.close()
+
+
+def state_audit_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = state_audit(state)
+        if args.output:
+            write_json_atomic(args.output, result)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def recovery_plan_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        if args.plan:
+            loaded = json.loads(args.plan.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise TypeError("recovery plan must be a JSON object")
+            plan = loaded
+        else:
+            plan = build_recovery_plan(state)
+        verification = verify_recovery_preconditions(state, plan) if args.dry_run else None
+        if args.output:
+            write_json_atomic(args.output, plan)
+        print(
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "plan": plan,
+                    "dry_run": verification,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    finally:
+        state.close()
+
+
+def recovery_apply_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    loaded = json.loads(args.plan.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise TypeError("recovery plan must be a JSON object")
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = apply_recovery_plan(config, state, loaded)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def graph_verify_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = verify_active_graphs(config, state)
+        print(json.dumps(result, ensure_ascii=False))
         return 0
     finally:
         state.close()
@@ -256,7 +385,9 @@ def disaster_recovery_command(args: argparse.Namespace) -> int:
         pilot_restored = root / "pilot-restored.db"
         pilot_connection = sqlite3.connect(pilot_source)
         try:
-            pilot_connection.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, kind TEXT NOT NULL)")
+            pilot_connection.execute(
+                "CREATE TABLE events (id INTEGER PRIMARY KEY, kind TEXT NOT NULL)"
+            )
             pilot_connection.execute("INSERT INTO events(id, kind) VALUES (1, 'startup')")
             pilot_connection.commit()
         finally:
@@ -277,17 +408,23 @@ def disaster_recovery_command(args: argparse.Namespace) -> int:
             pilot_restored_connection.close()
         pilot_check = sqlite3.connect(pilot_restored)
         try:
-            pilot_event_count = int(pilot_check.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+            pilot_event_count = int(
+                pilot_check.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            )
         finally:
             pilot_check.close()
 
         passed = restored_product_present and pending_task_resumed and pilot_event_count == 1
-    print(json.dumps({
-        "status": "PASS" if passed else "FAIL",
-        "restored_product": "dr-fixture",
-        "pending_task_resumed": pending_task_resumed,
-        "pilot_db_restored": pilot_event_count == 1,
-    }))
+    print(
+        json.dumps(
+            {
+                "status": "PASS" if passed else "FAIL",
+                "restored_product": "dr-fixture",
+                "pending_task_resumed": pending_task_resumed,
+                "pilot_db_restored": pilot_event_count == 1,
+            }
+        )
+    )
     return 0 if passed else 1
 
 
@@ -295,13 +432,26 @@ def pilot_report_command(args: argparse.Namespace) -> int:
     config = _config(args.config)
     existing_path = ROOT / "evidence" / "pilot-selection.json"
     if existing_path.is_file():
-        schema = json.loads((ROOT / "schemas" / "pilot-selection.schema.json").read_text(encoding="utf-8"))
+        schema = json.loads(
+            (ROOT / "schemas" / "pilot-selection.schema.json").read_text(encoding="utf-8")
+        )
         existing = json.loads(existing_path.read_text(encoding="utf-8"))
-        errors = list(Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(existing))
+        errors = list(
+            Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(existing)
+        )
         if errors:
-            raise ValueError(f"Invalid existing pilot selection: {'; '.join(error.message for error in errors)}")
+            raise ValueError(
+                f"Invalid existing pilot selection: {'; '.join(error.message for error in errors)}"
+            )
         completed = existing.get("status") == "completed"
-        print(json.dumps({"status": "PASS" if completed else "BLOCKED_EXTERNAL", "evidence": str(existing_path)}))
+        print(
+            json.dumps(
+                {
+                    "status": "PASS" if completed else "BLOCKED_EXTERNAL",
+                    "evidence": str(existing_path),
+                }
+            )
+        )
         return 0 if completed else 2
     artifact_id = new_id("pilot")
     neutral_pilot_ready = (ROOT / "pilot" / "compose.yaml").is_file()
@@ -311,12 +461,21 @@ def pilot_report_command(args: argparse.Namespace) -> int:
         "candidates": [],
         "selected_repository": None,
         "create_neutral_pilot": neutral_pilot_ready,
-        "reason": "No existing safe repository was available; neutral credential-free pilot was created." if neutral_pilot_ready else "GitHub credentials are not connected and neutral pilot files are absent.",
-        "evidence_refs": ["evidence/pilot/product-contract.json", "evidence/pilot/staging-smoke.json"] if neutral_pilot_ready else ["evidence/external-acceptance.json"],
+        "reason": "No existing safe repository was available; neutral credential-free pilot was created."
+        if neutral_pilot_ready
+        else "GitHub credentials are not connected and neutral pilot files are absent.",
+        "evidence_refs": [
+            "evidence/pilot/product-contract.json",
+            "evidence/pilot/staging-smoke.json",
+        ]
+        if neutral_pilot_ready
+        else ["evidence/external-acceptance.json"],
     }
     path = _write_repo_evidence("pilot-selection.json", artifact, "pilot-selection.schema.json")
     completed = artifact["status"] == "completed"
-    print(json.dumps({"status": "PASS" if completed else "BLOCKED_EXTERNAL", "evidence": str(path)}))
+    print(
+        json.dumps({"status": "PASS" if completed else "BLOCKED_EXTERNAL", "evidence": str(path)})
+    )
     return 0 if completed else 2
 
 
@@ -332,7 +491,9 @@ def acceptance_command(args: argparse.Namespace) -> int:
         _run_local([sys.executable, "-m", "pytest", "-q"]),
         _run_local([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]),
         _run_local([sys.executable, "-m", "unittest", "pilot.tests.test_pilot", "-v"]),
-        _run_local([sys.executable, "-m", "compileall", "-q", "scripts", "tests", "factory", "pilot"]),
+        _run_local(
+            [sys.executable, "-m", "compileall", "-q", "scripts", "tests", "factory", "pilot"]
+        ),
         _run_local([sys.executable, "-m", "ruff", "check", "factory", "scripts", "tests", "pilot"]),
         _run_local([sys.executable, "-m", "mypy", "factory", "scripts", "pilot"]),
         _run_local([sys.executable, "-m", "factory.cli", "disaster-recovery-test"]),
@@ -357,7 +518,11 @@ def acceptance_command(args: argparse.Namespace) -> int:
     if not isinstance(external_checks, dict):
         external_checks = {}
     scenarios = [
-        {"id": f"local-{index + 1}", "status": check["status"], "evidence_ref": "evidence/package-validation-report.json"}
+        {
+            "id": f"local-{index + 1}",
+            "status": check["status"],
+            "evidence_ref": "evidence/package-validation-report.json",
+        }
         for index, check in enumerate(checks)
     ]
     external_scenarios: list[dict[str, str]] = []
@@ -392,16 +557,32 @@ def acceptance_command(args: argparse.Namespace) -> int:
     if not isinstance(external_host, dict):
         external_host = {}
     versions = [
-        {"component": "python", "version": platform.python_version(), "digest": sha256_text(platform.python_version())},
-        {"component": "package", "version": (ROOT / "VERSION").read_text(encoding="utf-8").strip(), "digest": sha256_text((ROOT / "VERSION").read_text(encoding="utf-8"))},
+        {
+            "component": "python",
+            "version": platform.python_version(),
+            "digest": sha256_text(platform.python_version()),
+        },
+        {
+            "component": "package",
+            "version": (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+            "digest": sha256_text((ROOT / "VERSION").read_text(encoding="utf-8")),
+        },
     ]
     external_versions = external_data.get("versions", [])
     if isinstance(external_versions, list):
         versions.extend(item for item in external_versions if isinstance(item, dict))
-    external_backup = external_data.get("backup_restore", "PASS" if not open_items else "BLOCKED_EXTERNAL")
+    external_backup = external_data.get(
+        "backup_restore", "PASS" if not open_items else "BLOCKED_EXTERNAL"
+    )
     if external_backup not in {"PASS", "FAIL", "BLOCKED_EXTERNAL"}:
         external_backup = "BLOCKED_EXTERNAL"
-    status = "FAIL" if local_failed or external_failed else "PASS" if not open_items else "BLOCKED_EXTERNAL"
+    status = (
+        "FAIL"
+        if local_failed or external_failed
+        else "PASS"
+        if not open_items
+        else "BLOCKED_EXTERNAL"
+    )
     pilot_artifact = ROOT / "evidence" / "pilot" / "staging-smoke.json"
     pilot_status = "FAIL"
     pilot_release = "not-deployed"
@@ -448,16 +629,30 @@ def acceptance_command(args: argparse.Namespace) -> int:
         },
         "versions": versions,
         "mandatory_scenarios": scenarios,
-        "pilot": {"repository": "brullik/hermes-factory-pilot", "url": pilot_url, "release": pilot_release, "acceptance": pilot_status},
+        "pilot": {
+            "repository": "brullik/hermes-factory-pilot",
+            "url": pilot_url,
+            "release": pilot_release,
+            "acceptance": pilot_status,
+        },
         "security": "PASS" if not local_failed else "FAIL",
         "backup_restore": "FAIL" if checks[-1]["status"] != "PASS" else external_backup,
         "resource_usage": {"max_workers": 2, "oom_events": 0, "disk_cleanup": "PASS"},
         "open_items": open_items,
-        "summary": "All local and external checks passed." if status == "PASS" else "Local checks passed; remaining external acceptance items are explicitly recorded." if not local_failed else "One or more local checks failed.",
+        "summary": "All local and external checks passed."
+        if status == "PASS"
+        else "Local checks passed; remaining external acceptance items are explicitly recorded."
+        if not local_failed
+        else "One or more local checks failed.",
         "evidence_refs": list(dict.fromkeys(evidence_refs)),
     }
     path = _write_latest_acceptance(artifact)
-    print(json.dumps({"status": artifact["status"], "evidence": str(path), "checks": checks}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {"status": artifact["status"], "evidence": str(path), "checks": checks},
+            ensure_ascii=False,
+        )
+    )
     return 0 if artifact["status"] == "PASS" else 2
 
 
@@ -506,6 +701,36 @@ def build_parser() -> argparse.ArgumentParser:
         if transition == "resume":
             command.add_argument("--resume-status", default="IMPLEMENTING")
         command.set_defaults(function=transition_command, transition=transition)
+    maintenance = subparsers.add_parser("maintenance")
+    maintenance.add_argument("--config", type=Path)
+    maintenance_actions = maintenance.add_subparsers(
+        dest="maintenance_action",
+        required=True,
+    )
+    maintenance_enter = maintenance_actions.add_parser("enter")
+    maintenance_enter.add_argument("--reason", required=True)
+    maintenance_enter.set_defaults(function=maintenance_command)
+    maintenance_leave = maintenance_actions.add_parser("leave")
+    maintenance_leave.set_defaults(function=maintenance_command, reason="")
+    audit = subparsers.add_parser("state-audit")
+    audit.add_argument("--config", type=Path)
+    audit.add_argument("--output", type=Path)
+    audit.set_defaults(function=state_audit_command)
+    recovery_plan = subparsers.add_parser("recovery-plan")
+    recovery_plan.add_argument("--config", type=Path)
+    recovery_plan.add_argument("--all-active", action="store_true")
+    recovery_plan.add_argument("--output", type=Path)
+    recovery_plan.add_argument("--plan", type=Path)
+    recovery_plan.add_argument("--dry-run", action="store_true")
+    recovery_plan.set_defaults(function=recovery_plan_command)
+    recovery_apply = subparsers.add_parser("recovery-apply")
+    recovery_apply.add_argument("--config", type=Path)
+    recovery_apply.add_argument("--plan", type=Path, required=True)
+    recovery_apply.set_defaults(function=recovery_apply_command)
+    graph_verify = subparsers.add_parser("graph-verify")
+    graph_verify.add_argument("--config", type=Path)
+    graph_verify.add_argument("--all-active", action="store_true")
+    graph_verify.set_defaults(function=graph_verify_command)
     return parser
 
 
