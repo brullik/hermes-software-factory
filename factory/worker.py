@@ -9,6 +9,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -311,11 +312,13 @@ class SubprocessHermesRunner:
     def build_argv(
         self, selection: ModelSelection, prompt: str, usage_path: Path | None
     ) -> list[str]:
+        del prompt
         provider = selection.cli_provider or selection.provider
         if not _SAFE_NAME.fullmatch(provider) or not _SAFE_NAME.fullmatch(selection.model):
             raise ValueError("provider and model identifiers contain unsafe characters")
         argv = [
-            self.binary,
+            sys.executable,
+            str(Path(__file__).with_name("hermes_stdin.py").resolve()),
             "--model",
             selection.model,
             "--provider",
@@ -325,13 +328,7 @@ class SubprocessHermesRunner:
         ]
         if self.ignore_rules:
             argv.append("--ignore-rules")
-        argv.extend(
-            [
-                "--oneshot",
-                prompt,
-                "--no-restore-cwd",
-            ]
-        )
+        argv.extend(["--max-input-bytes", str(self.max_prompt_chars * 4)])
         if usage_path is not None:
             argv.extend(["--usage-file", str(usage_path)])
         return argv
@@ -403,6 +400,7 @@ class SubprocessHermesRunner:
                 argv,
                 cwd=cwd,
                 env=self._environment(cwd),
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
