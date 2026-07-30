@@ -214,6 +214,45 @@ class FailureRouter:
             if isinstance(item, dict)
         ]
 
+    @staticmethod
+    def _row_required_capabilities(task: dict[str, Any]) -> list[str]:
+        try:
+            values = json.loads(str(task.get("required_capabilities_json") or "[]"))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(values, list):
+            return []
+        return [str(value) for value in values if isinstance(value, str) and value]
+
+    def _lineage_required_capabilities(
+        self,
+        failed: dict[str, Any],
+        capability_profile: str,
+    ) -> list[str]:
+        """Preserve controller-granted tools when routing an exact-node repair."""
+
+        required = set(CAPABILITY_PROFILES[capability_profile])
+        current: dict[str, Any] | None = failed
+        seen: set[str] = set()
+        while current is not None and len(seen) < 64:
+            task_id = str(current.get("task_id") or "")
+            if not task_id or task_id in seen:
+                break
+            seen.add(task_id)
+            required.update(self._row_required_capabilities(current))
+            parent_id = str(current.get("parent_task_id") or "")
+            if not parent_id:
+                break
+            parent = self.state.get_task(parent_id)
+            if (
+                parent is None
+                or str(parent.get("product_id") or "")
+                != str(failed.get("product_id") or "")
+            ):
+                break
+            current = parent
+        return sorted(required)
+
     def _write_contract(
         self,
         *,
@@ -227,6 +266,7 @@ class FailureRouter:
         allowed_paths: list[str],
         task_revision: int,
         node_suffix: str,
+        required_capabilities: list[str] | None = None,
     ) -> tuple[dict[str, Any], Path]:
         task_id = (
             "T-"
@@ -267,7 +307,9 @@ class FailureRouter:
             ),
             "acceptance": self._acceptance(self._contract(failed)),
             "required_capabilities": list(
-                CAPABILITY_PROFILES[capability_profile]
+                required_capabilities
+                if required_capabilities is not None
+                else CAPABILITY_PROFILES[capability_profile]
             ),
             "capability_profile": capability_profile,
             "allowed_paths": allowed_paths or ["artifacts/**"],
@@ -476,6 +518,14 @@ class FailureRouter:
             allowed_paths=allowed_paths,
             task_revision=int(routed.get("task_revision") or 1) + 1,
             node_suffix="active-plan-reanchor",
+            required_capabilities=(
+                self._lineage_required_capabilities(
+                    routed,
+                    capability_profile,
+                )
+                if role != "replanner"
+                else None
+            ),
         )
         task_id = str(contract["task_id"])
         if self.state.get_task(task_id) is None:
@@ -801,6 +851,14 @@ class FailureRouter:
                 allowed_paths=allowed_paths,
                 task_revision=int(failed.get("task_revision") or 1) + 1,
                 node_suffix=suffix,
+                required_capabilities=(
+                    self._lineage_required_capabilities(
+                        failed,
+                        capability_profile,
+                    )
+                    if suffix == "repair"
+                    else None
+                ),
             )
             repair_ref: str | None = None
             if suffix == "repair":

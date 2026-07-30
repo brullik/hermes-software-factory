@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.6 - 2026-07-30
+
+- Preserve required toolchain capabilities across the causal task lineage when
+  FailureRouter creates an exact-node repair, so repair Context Packs retain
+  the controller-selected container runtime and scanner grants.
+
 ## 2.2.5 - 2026-07-30
 
 - Preserve the systemd-provisioned `XDG_RUNTIME_DIR` across the sanitized

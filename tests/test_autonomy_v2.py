@@ -612,6 +612,62 @@ def test_AUT_P0_005_lineage_is_preserved_through_repair(tmp_path: Path) -> None:
         state.close()
 
 
+def test_repair_inherits_toolchain_capabilities_from_failed_node_lineage(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        inherited = [
+            *json.loads(str(failed["required_capabilities_json"])),
+            "toolchain.container_builder",
+            "toolchain.scanners",
+        ]
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET required_capabilities_json=? WHERE task_id=?",
+                (stable_json(inherited), "T-FAILNODEA"),
+            )
+
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        required = json.loads(str(repair["required_capabilities_json"]))
+        assert "toolchain.container_builder" in required
+        assert "toolchain.scanners" in required
+        contract = json.loads(
+            (
+                config.evidence_dir / Path(str(repair["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert contract["required_capabilities"] == required
+
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET required_capabilities_json=? WHERE task_id=?",
+                (
+                    stable_json(list(CAPABILITY_PROFILES["builder_workspace"])),
+                    repair_id,
+                ),
+            )
+        stripped_repair = state.get_task(repair_id)
+        assert stripped_repair is not None
+        recovered = FailureRouter(
+            config,
+            state,
+            artifacts,
+        )._lineage_required_capabilities(
+            stripped_repair,
+            "builder_workspace",
+        )
+        assert "toolchain.container_builder" in recovered
+        assert "toolchain.scanners" in recovered
+    finally:
+        state.close()
+
+
 def test_AUT_P0_005_failure_router_replays_partial_artifacts_idempotently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
