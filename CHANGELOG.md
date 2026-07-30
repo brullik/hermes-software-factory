@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.11 - 2026-07-30
+
+- Give controller incident-recovery tasks dedicated containment, evidence, and
+  bounded-next-step acceptance instead of inheriting an unrelated failed
+  product role's semantic criteria.
+- Preserve those controller criteria through incident repair chains and accept
+  an evidence-backed `contained` result as a fail-safe terminal recovery
+  outcome without requiring a production mutation or invented product finding.
+
 ## 2.2.10 - 2026-07-30
 
 - Resolve a durable dependency on a superseded failed task through its unique
