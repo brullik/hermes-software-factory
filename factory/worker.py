@@ -857,36 +857,93 @@ class AgentWorker:
         self,
         task_id: str,
     ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
-        task = self.state.get_task(task_id)
-        if task is None or str(task.get("status")) != "DONE":
+        requested_task = self.state.get_task(task_id)
+        if requested_task is None or str(requested_task.get("status")) != "DONE":
             raise ExternalBlocker(f"accepted task is missing for {task_id}")
-        attempts = [
-            item
-            for item in self.state.attempts_for_task(task_id)
-            if str(item.get("status")) == "completed"
-        ]
-        deferred_builder = False
-        controller_adopted_builder = False
-        if not attempts and (
-            str(task.get("role")) == "builder" and str(task.get("stage_key")) == "builder-core"
-        ):
-            recovery_events = {
-                str(event.get("event_type") or "")
-                for event in self.state.events(str(task["product_id"]))
-                if str(event.get("task_id") or "") == task_id
-            }
-            deferred_builder = "builder_downstream_gate_deferred" in recovery_events
-            controller_adopted_builder = "builder_controller_gates_adopted" in recovery_events
-            if deferred_builder or controller_adopted_builder:
-                attempts = [
-                    item
-                    for item in self.state.attempts_for_task(task_id)
-                    if str(item.get("status")) == "repair_required"
-                ]
-                deferred_builder = deferred_builder and bool(attempts)
-                controller_adopted_builder = controller_adopted_builder and bool(attempts)
-        if not attempts:
-            raise ExternalBlocker(f"accepted task result is missing for {task_id}")
+        task = requested_task
+        visited: set[str] = set()
+        while True:
+            source_task_id = str(task["task_id"])
+            if source_task_id in visited or len(visited) >= 100:
+                raise ExternalBlocker(
+                    f"accepted task reuse lineage is cyclic for {task_id}"
+                )
+            visited.add(source_task_id)
+            attempts = [
+                item
+                for item in self.state.attempts_for_task(source_task_id)
+                if str(item.get("status")) == "completed"
+            ]
+            deferred_builder = False
+            controller_adopted_builder = False
+            if not attempts and (
+                str(task.get("role")) == "builder"
+                and str(task.get("stage_key")) == "builder-core"
+            ):
+                recovery_events = {
+                    str(event.get("event_type") or "")
+                    for event in self.state.events(str(task["product_id"]))
+                    if str(event.get("task_id") or "") == source_task_id
+                }
+                deferred_builder = (
+                    "builder_downstream_gate_deferred" in recovery_events
+                )
+                controller_adopted_builder = (
+                    "builder_controller_gates_adopted" in recovery_events
+                )
+                if deferred_builder or controller_adopted_builder:
+                    attempts = [
+                        item
+                        for item in self.state.attempts_for_task(source_task_id)
+                        if str(item.get("status")) == "repair_required"
+                    ]
+                    deferred_builder = deferred_builder and bool(attempts)
+                    controller_adopted_builder = controller_adopted_builder and bool(
+                        attempts
+                    )
+            if attempts:
+                break
+            predecessor_id = str(task.get("supersedes_task_id") or "")
+            predecessor = (
+                self.state.get_task(predecessor_id) if predecessor_id else None
+            )
+            if predecessor is None:
+                raise ExternalBlocker(
+                    f"accepted task result is missing for {task_id}"
+                )
+            if (
+                str(task.get("graph_status") or "") != "ACCEPTED"
+                or str(predecessor.get("graph_status") or "") != "ACCEPTED"
+                or str(predecessor.get("status") or "") != "DONE"
+                or str(task.get("product_id") or "")
+                != str(predecessor.get("product_id") or "")
+                or not str(task.get("result_ref") or "")
+                or str(task.get("result_ref") or "")
+                != str(predecessor.get("result_ref") or "")
+                or not str(task.get("result_digest") or "")
+                or str(task.get("result_digest") or "")
+                != str(predecessor.get("result_digest") or "")
+            ):
+                raise ExternalBlocker(
+                    f"accepted task reuse lineage is invalid for {task_id}"
+                )
+            identity_fields = (
+                "role",
+                "output_schema",
+                "lifecycle_stage",
+                "review_kind",
+                "evidence_profile",
+                "semantic_node_key",
+            )
+            if any(
+                str(task.get(field) or "")
+                != str(predecessor.get(field) or "")
+                for field in identity_fields
+            ):
+                raise ExternalBlocker(
+                    f"accepted task reuse identity conflicts for {task_id}"
+                )
+            task = predecessor
         attempt_id = str(attempts[-1].get("attempt_id", ""))
         attempt_path = self.config.evidence_dir / f"attempt-{attempt_id}.json"
         try:
@@ -897,7 +954,7 @@ class AgentWorker:
             raise ExternalBlocker(f"task attempt evidence is invalid for {task_id}")
         self.schemas.validate("attempt-result.schema.json", attempt_artifact)
         if (
-            str(attempt_artifact.get("task_id") or "") != task_id
+            str(attempt_artifact.get("task_id") or "") != source_task_id
             or str(attempt_artifact.get("attempt_id") or "") != attempt_id
         ):
             raise ExternalBlocker(f"task attempt evidence identity conflicts for {task_id}")
@@ -918,7 +975,7 @@ class AgentWorker:
             )
         }
 
-        output_schema = str(task.get("output_schema") or "")
+        output_schema = str(requested_task.get("output_schema") or "")
         if not output_schema:
             raise ExternalBlocker(f"task output schema is missing for {task_id}")
         for ref_value in refs:
