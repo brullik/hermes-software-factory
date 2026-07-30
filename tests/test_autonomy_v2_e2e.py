@@ -1658,6 +1658,55 @@ def test_AUT_P0_026_contents_read_never_implies_github_write(
             assert probe.check(capability, product=product).status != "AVAILABLE"
 
 
+def test_admin_permission_proves_configure_and_merge_when_governance_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    product = {
+        "product_id": "fine-grained-admin-product",
+        "repository_url": "https://github.com/brullik/fine-grained-admin",
+        "repository_name": None,
+        "repository_visibility": "public",
+    }
+
+    def runner(argv: list[str]) -> ProbeCommandResult:
+        endpoint = argv[-1]
+        if endpoint == "user":
+            return ProbeCommandResult(
+                0,
+                'HTTP/2 200 OK\n\n{"login":"brullik"}',
+            )
+        if endpoint == "repos/brullik/fine-grained-admin":
+            return ProbeCommandResult(
+                0,
+                (
+                    "HTTP/2 200 OK\n\n"
+                    '{"default_branch":"main","permissions":'
+                    '{"pull":true,"push":true,"maintain":true,"admin":true},'
+                    '"allow_merge_commit":true}'
+                ),
+            )
+        if endpoint.endswith("/rulesets"):
+            return ProbeCommandResult(1, "HTTP/2 404 Not Found\n\n{}")
+        if endpoint.endswith("/protection"):
+            return ProbeCommandResult(1, "HTTP/2 404 Not Found\n\n{}")
+        raise AssertionError(argv)
+
+    with patch("factory.capabilities.shutil.which", return_value="/safe/tool"):
+        probe = ConfiguredCapabilityProbe(
+            config,
+            command_runner=runner,
+        )
+        assert (
+            probe.check("github.repository.configure", product=product).status
+            == "AVAILABLE"
+        )
+        assert (
+            probe.check("github.pull_request.merge", product=product).status
+            == "AVAILABLE"
+        )
+
+
 class QueuedRuntimeRunner:
     def __init__(self) -> None:
         self.outputs: list[str] = []

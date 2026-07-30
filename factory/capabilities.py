@@ -360,7 +360,6 @@ class ConfiguredCapabilityProbe:
             available = (
                 repository_exists
                 and self._can_admin(permission)
-                and bool(context.get("governance_readable"))
             ) or (not repository_exists and can_create)
         elif capability in {
             "github.checks.read",
@@ -371,7 +370,6 @@ class ConfiguredCapabilityProbe:
             available = (
                 repository_exists
                 and self._can_push(permission)
-                and bool(context.get("governance_readable"))
                 and bool(context.get("merge_enabled"))
             )
             reason = "controller_github_merge_permission_unverifiable"
