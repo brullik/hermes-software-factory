@@ -66,6 +66,8 @@ install -o root -g root -m 0755 \
 systemctl daemon-reload
 
 PROBE_DIR="$(mktemp -d "${STATE_DIR}/podman-preflight.XXXXXX")"
+chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}"
+chmod 0700 "${PROBE_DIR}"
 cleanup_probe() {
   if [[ "${PROBE_DIR}" == "${STATE_DIR}"/podman-preflight.* ]]; then
     rm -f -- "${PROBE_DIR}/Containerfile" "${PROBE_DIR}/payload"
