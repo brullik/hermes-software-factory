@@ -174,6 +174,12 @@ class ControllerHttpTests(unittest.TestCase):
                 health_payload = json.loads(health.read())
                 self.assertEqual(health.status, 200)
                 self.assertTrue(health_payload["maintenance"]["active"])
+                self.assertEqual(
+                    health_payload["maintenance"]["mode"], "manual"
+                )
+                self.assertFalse(
+                    health_payload["maintenance"]["auto_resume"]
+                )
 
                 client.request("GET", "/readyz")
                 ready = client.getresponse()
@@ -184,6 +190,12 @@ class ControllerHttpTests(unittest.TestCase):
                 client.request("GET", "/metrics")
                 metrics = client.getresponse().read().decode("utf-8")
                 self.assertIn("hermes_factory_maintenance_active 1", metrics)
+                self.assertIn(
+                    "hermes_factory_maintenance_expired 0", metrics
+                )
+                self.assertIn(
+                    "hermes_factory_maintenance_recoveries_total 0", metrics
+                )
                 self.assertIn(
                     "hermes_factory_sqlite_busy_events_total 1", metrics
                 )

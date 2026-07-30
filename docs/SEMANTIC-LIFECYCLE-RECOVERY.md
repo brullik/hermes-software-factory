@@ -68,3 +68,38 @@ counters.
 - The production canary is resumed only after rootless container builder,
   scanners, GitHub, staging, backup, production, and rollback capabilities
   pass controller-owned probes.
+
+## Bounded maintenance for releases and hotfixes
+
+Code releases must use a fenced deploy lease instead of an unbounded manual
+hold. The release helper retains the returned lease ID, renews it if the
+operation approaches its deadline, and releases it from an `EXIT` trap:
+
+```bash
+maintenance_json="$(
+  sudo -u hermesfactory factory maintenance \
+    --config /etc/hermes-factory/config.yaml enter \
+    --mode deploy --ttl-seconds 1800 --owner release-helper \
+    --reason transactional-release
+)"
+maintenance_lease="$(
+  python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["maintenance"]["maintenance_lease_id"])' \
+    <<<"$maintenance_json"
+)"
+cleanup() {
+  sudo -u hermesfactory factory maintenance \
+    --config /etc/hermes-factory/config.yaml leave \
+    --lease-id "$maintenance_lease" || true
+}
+trap cleanup EXIT INT TERM
+
+# Run the transactional promotion and post-deploy verification here.
+```
+
+Use `factory maintenance status` for inspection. A long release renews its
+lease with `factory maintenance heartbeat --lease-id ...`. An expired deploy
+lease resumes automatically only after live claimed tasks drain; abandoned
+expired task leases cannot strand it. A late or incorrect lease ID cannot
+renew or release the hold. Manual semantic migrations remain fail-closed and
+require an explicit `factory maintenance leave`.
