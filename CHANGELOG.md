@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.18 - 2026-07-30
+
+- Preserve the active Replanner source failure and its bounded causal ancestors,
+  including already resolved parents that retain authoritative gate diagnostics.
+- Mark each supplied chain seed and causal depth so the Replanner can distinguish
+  the terminal symptom from the safe root-cause coordinates and required fixes.
+- Keep unrelated resolved history out of the prompt while retaining other active
+  failure chains within the existing bounded context budget.
+
 ## 2.2.17 - 2026-07-30
 
 - Preserve controller-owned mandatory gate summaries, statuses, exit codes,

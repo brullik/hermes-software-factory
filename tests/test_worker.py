@@ -502,11 +502,33 @@ class WorkerTests(unittest.TestCase):
         failures = _replanner_failure_inventory(
             [
                 {
+                    "failure_id": "failure-root",
+                    "parent_failure_id": None,
+                    "task_id": "T-ROOT",
+                    "failure_class": "semantic",
+                    "reason_code": "mandatory_gate_failed",
+                    "status": "RESOLVED",
+                    "safe_message": (
+                        "target dependency audit failed closed: "
+                        "pyproject.toml has no [project] dependency contract"
+                    ),
+                    "failed_gate_ids_json": '["target-dependency-audit"]',
+                    "expected_json": (
+                        '{"quality_gates":['
+                        '{"gate_id":"target-dependency-audit","status":"PASS"}]}'
+                    ),
+                    "actual_json": (
+                        '{"required_fixes":['
+                        '"Add an explicit [project] dependency contract."]}'
+                    ),
+                    "evidence_ref": "evidence/failure-root.json",
+                },
+                {
                     "failure_id": "failure-context",
-                    "parent_failure_id": "failure-parent",
+                    "parent_failure_id": "failure-root",
                     "task_id": "T-CONTEXT",
                     "failure_class": "semantic",
-                    "reason_code": "scope_violation",
+                    "reason_code": "model_requested_repair",
                     "status": "ROUTED",
                     "safe_message": "Change escaped the bounded source scope.",
                     "failed_gate_ids_json": '["scope_violation"]',
@@ -517,7 +539,8 @@ class WorkerTests(unittest.TestCase):
                     ),
                     "evidence_ref": "evidence/failure-context.json",
                 }
-            ]
+            ],
+            source_failure_id="failure-context",
         )
         hypotheses = _replanner_hypothesis_inventory(
             [
@@ -541,6 +564,18 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             failures[0]["expected"]["allowed_paths"],
             ["src/**"],
+        )
+        self.assertTrue(failures[0]["chain_seed"])
+        self.assertEqual(failures[0]["causal_depth"], 0)
+        self.assertEqual(failures[1]["status"], "RESOLVED")
+        self.assertEqual(failures[1]["causal_depth"], 1)
+        self.assertIn(
+            "pyproject.toml has no [project] dependency contract",
+            failures[1]["safe_message"],
+        )
+        self.assertEqual(
+            failures[1]["actual"]["required_fixes"],
+            ["Add an explicit [project] dependency contract."],
         )
         self.assertEqual(hypotheses[0]["status"], "EXHAUSTED")
         self.assertEqual(hypotheses[0]["attempts_used"], 3)
