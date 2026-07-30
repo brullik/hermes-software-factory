@@ -1236,6 +1236,128 @@ def test_AUT_P1_008_two_identical_recoveries_force_diagnosis_reassessment(
         state.close()
 
 
+def test_AUT_P1_008_contained_incident_routes_directly_to_fresh_product_replan(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-CONTAINED-ROOT",
+            product_id="product-autonomy",
+            title="Contained controller incident planner",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-CONTAINED-CONTROLLER",
+            root_task_id="T-CONTAINED-ROOT",
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[
+                (
+                    "controller",
+                    "T-CONTAINED-CONTROLLER",
+                    "fresh-product-evidence",
+                )
+            ],
+            edges=[],
+        )
+        persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id="T-CONTAINED-ROOT",
+        )
+        claimed = state.claim_task(worker_id="controller-contained-fault")
+        assert claimed is not None
+        failed = state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-CONTAINED-CONTROLLER",
+                worker_id="controller-contained-fault",
+                lease_token=str(claimed["lease_token"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("controller-contained-fault"),
+                result_ref="internal://controller/contained-fault",
+                result_digest=sha256_text("controller-contained-fault"),
+                status="FAILED_TRANSIENT",
+                failure=FailureData(
+                    failure_class="transient",
+                    reason_code="malformed_transport",
+                    safe_message="Provider response transport was invalid.",
+                    evidence_ref="internal://controller/contained-fault",
+                    retryable=True,
+                ),
+            )
+        )
+        assert failed.failure_id is not None
+        routed = FailureRouter(config, state).route_open_failures(
+            "product-autonomy"
+        )
+        assert len(routed) == 1
+        recovery = state.claim_task(worker_id="incident-contained")
+        assert recovery is not None
+        assert recovery["task_id"] == routed[0]
+        assert recovery["role"] == "incident-recovery"
+
+        contained = state.commit_task_outcome(
+            TaskOutcome(
+                task_id=str(recovery["task_id"]),
+                worker_id="incident-contained",
+                lease_token=str(recovery["lease_token"]),
+                expected_task_revision=int(recovery["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("incident-contained-handoff"),
+                result_ref="internal://incident/contained-handoff",
+                result_digest=sha256_text("incident-contained-handoff"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="semantic",
+                    reason_code="needs_replan",
+                    safe_message=(
+                        "Controller incident is contained; fresh product "
+                        "semantic evidence is required."
+                    ),
+                    evidence_ref="internal://incident/contained-handoff",
+                    parent_failure_id=str(recovery["failure_id"]),
+                ),
+            )
+        )
+        assert contained.failure_id is not None
+        replans = FailureRouter(config, state).route_open_failures(
+            "product-autonomy"
+        )
+        assert len(replans) == 1
+        replan = state.get_task(replans[0])
+        assert replan is not None
+        assert replan["role"] == "replanner"
+        assert replan["stage_key"] == "replan"
+        assert replan["hypothesis_id"] is None
+        contract = json.loads(
+            (
+                config.evidence_dir / Path(str(replan["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert {
+            item["criterion_id"] for item in contract["acceptance"]
+        } == {
+            "AC-CONTROLLER-REPLAN-AFFECTED-NODE",
+            "AC-CONTROLLER-REPLAN-PRESERVE-ACCEPTED",
+            "AC-CONTROLLER-REPLAN-BOUNDED",
+        }
+        assert all(
+            "fresh" in item["verification"]
+            or "preserves accepted" in item["verification"]
+            or "bounded scope" in item["verification"]
+            for item in contract["acceptance"]
+        )
+        assert state.list_hypotheses("product-autonomy") == []
+    finally:
+        state.close()
+
+
 def test_AUT_P1_009_artifact_conflict_commits_controller_failure_only(
     tmp_path: Path,
 ) -> None:

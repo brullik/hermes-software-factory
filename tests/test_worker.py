@@ -770,22 +770,45 @@ class WorkerTests(unittest.TestCase):
                 worker._accepted_task_artifacts(failed_id)
             state.close()
 
-    def test_incident_recovery_status_is_a_terminal_success(self) -> None:
+    def test_incident_recovery_containment_requires_director_replan(self) -> None:
+        output = {
+            "containment": ["Provider retries were stopped."],
+            "recovery": [],
+            "root_cause": "Controller transport validation rejected the response.",
+            "repair_task": "Retry the affected node from a new plan revision.",
+            "data_integrity": "confirmed",
+            "evidence_refs": ["evidence/controller-failure.json"],
+        }
+        for reported_status in ("recovered", "contained", "failed_safe"):
+            self.assertEqual(
+                _normalized_output_status(
+                    "incident-recovery",
+                    reported_status,
+                    builder_gate_deferred=False,
+                    output={**output, "status": reported_status},
+                ),
+                "needs_replan",
+            )
+
+    def test_incident_recovery_without_bounded_handoff_remains_failed_safe(
+        self,
+    ) -> None:
         self.assertEqual(
             _normalized_output_status(
                 "incident-recovery",
-                "recovered",
+                "failed_safe",
                 builder_gate_deferred=False,
+                output={
+                    "status": "failed_safe",
+                    "containment": ["Retries stopped."],
+                    "recovery": [],
+                    "root_cause": None,
+                    "repair_task": None,
+                    "data_integrity": "at_risk",
+                    "evidence_refs": [],
+                },
             ),
-            "completed",
-        )
-        self.assertEqual(
-            _normalized_output_status(
-                "incident-recovery",
-                "contained",
-                builder_gate_deferred=False,
-            ),
-            "completed",
+            "failed_safe",
         )
 
     def test_provider_output_secret_is_redacted_and_task_continues(self) -> None:
