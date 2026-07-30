@@ -679,6 +679,97 @@ class WorkerTests(unittest.TestCase):
                 worker._accepted_task_artifacts(reused_id)
             state.close()
 
+    def test_superseded_dependency_resolves_accepted_repair_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            intake = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Build a forward repair-evidence lineage",
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(product_contract(config, intake.product_id)),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            result = worker.run_once()
+            self.assertIsNotNone(result)
+            accepted_repair = next(
+                task
+                for task in state.list_tasks(intake.product_id)
+                if task["role"] == "product-director"
+            )
+            self.assertEqual(accepted_repair["graph_status"], "ACCEPTED")
+
+            failed_id = "T-SUPERSEDED-FAILED-DEPENDENCY"
+            state.add_task(
+                task_id=failed_id,
+                product_id=intake.product_id,
+                title="Failed dependency replaced by an accepted repair",
+                role=str(accepted_repair["role"]),
+                output_schema=str(accepted_repair["output_schema"]),
+                contract_ref=f"evidence/task-{failed_id}.json",
+                stage_key="test",
+                root_task_id=str(accepted_repair["root_task_id"]),
+                root_context_ref=str(accepted_repair["root_context_ref"]),
+                graph_status="SUPERSEDED",
+            )
+            with state._lock, state._connection:
+                state._connection.execute(
+                    """UPDATE tasks
+                          SET supersedes_task_id=?, parent_task_id=?,
+                              source_task_id=?
+                        WHERE task_id=?""",
+                    (
+                        failed_id,
+                        failed_id,
+                        failed_id,
+                        accepted_repair["task_id"],
+                    ),
+                )
+
+            output_path, output, attempt = worker._accepted_task_artifacts(
+                failed_id
+            )
+
+            self.assertTrue(output_path.is_file())
+            self.assertEqual(output["status"], "completed")
+            self.assertEqual(attempt["task_id"], accepted_repair["task_id"])
+
+            ambiguous_id = "T-SECOND-ACCEPTED-REPAIR"
+            state.add_task(
+                task_id=ambiguous_id,
+                product_id=intake.product_id,
+                title="Ambiguous accepted repair",
+                role=str(accepted_repair["role"]),
+                output_schema=str(accepted_repair["output_schema"]),
+                contract_ref=f"evidence/task-{ambiguous_id}.json",
+                stage_key="repair",
+                root_task_id=str(accepted_repair["root_task_id"]),
+                parent_task_id=failed_id,
+                source_task_id=failed_id,
+                root_context_ref=str(accepted_repair["root_context_ref"]),
+                supersedes_task_id=failed_id,
+                graph_status="ACCEPTED",
+            )
+            with self.assertRaisesRegex(
+                ExternalBlocker,
+                "replacement lineage is ambiguous",
+            ):
+                worker._accepted_task_artifacts(failed_id)
+            state.close()
+
     def test_incident_recovery_status_is_a_terminal_success(self) -> None:
         self.assertEqual(
             _normalized_output_status(

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.10 - 2026-07-30
+
+- Resolve a durable dependency on a superseded failed task through its unique
+  accepted repair chain, so downstream reviewers receive the replacement's
+  immutable completed evidence instead of the failed attempt.
+- Reject ambiguous, cross-product, role-changing, schema-changing, or
+  root-context-changing forward repair lineages rather than guessing which
+  replacement output to admit.
+
 ## 2.2.9 - 2026-07-30
 
 - Resolve evidence for accepted reused tasks through their validated
