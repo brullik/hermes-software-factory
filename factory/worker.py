@@ -452,15 +452,44 @@ def _normalized_output_status(
     reported_status: str,
     *,
     builder_gate_deferred: bool,
+    output: Mapping[str, Any] | None = None,
 ) -> str:
     if builder_gate_deferred:
         return "completed"
-    if role == "incident-recovery" and reported_status in {
-        "contained",
-        "recovered",
-    }:
-        return "completed"
+    if (
+        role == "incident-recovery"
+        and reported_status in {"contained", "recovered", "failed_safe"}
+        and output is not None
+        and _incident_recovery_has_bounded_handoff(output)
+    ):
+        # Controller recovery evidence cannot substitute for the failed
+        # product node's semantic evidence.  A contained incident must hand
+        # control to the Director so a new plan revision retries or replaces
+        # the affected product work.
+        return "needs_replan"
     return reported_status
+
+
+def _incident_recovery_has_bounded_handoff(
+    output: Mapping[str, Any],
+) -> bool:
+    containment = output.get("containment")
+    evidence_refs = output.get("evidence_refs")
+    recovery = output.get("recovery")
+    data_integrity = str(output.get("data_integrity") or "")
+    has_next_step = bool(output.get("repair_task")) or bool(output.get("root_cause")) or (
+        isinstance(recovery, list)
+        and any(isinstance(item, str) and item.strip() for item in recovery)
+    )
+    return (
+        isinstance(containment, list)
+        and any(isinstance(item, str) and item.strip() for item in containment)
+        and data_integrity
+        in {"confirmed", "unknown_writes_stopped", "at_risk"}
+        and has_next_step
+        and isinstance(evidence_refs, list)
+        and any(isinstance(item, str) and item.strip() for item in evidence_refs)
+    )
 
 
 def _workspace_snapshot(root: Path) -> dict[str, str]:
@@ -826,8 +855,10 @@ class AgentWorker:
                 "This task proves controller-incident containment and a bounded recovery path, "
                 "not the failed product role's semantic acceptance. Do not invent a product "
                 "finding. If retries are stopped and no production mutation is required, status "
-                "contained is a valid fail-safe terminal result when the supplied evidence and "
-                "data-integrity status are recorded."
+                "contained or failed_safe is a valid containment handoff when the supplied "
+                "evidence, data-integrity status, and bounded repair task are recorded. The "
+                "controller will require a Director plan revision and fresh product evidence; "
+                "do not claim that this IncidentResult proves the failed product task."
             )
         if task.get("dependencies_json") not in (None, "", "[]"):
             decisions.append(
@@ -3490,6 +3521,7 @@ class AgentWorker:
                 spec.role,
                 reported_output_status,
                 builder_gate_deferred=builder_gate_deferred,
+                output=output,
             )
             if (
                 spec.role == "product-tester"
@@ -3498,20 +3530,43 @@ class AgentWorker:
             ):
                 output_status = "repair_required"
             if output_status not in {"completed", "accepted"}:
-                repair_detail = _repair_request_detail(output)
+                incident_handoff = (
+                    spec.role == "incident-recovery"
+                    and output_status == "needs_replan"
+                    and reported_output_status
+                    in {"contained", "recovered", "failed_safe"}
+                )
+                repair_detail = (
+                    "Controller incident containment is complete and bound to "
+                    "safe evidence. A Director plan revision must retry or "
+                    "replace the affected product node; incident recovery "
+                    "evidence cannot prove product-semantic acceptance."
+                    if incident_handoff
+                    else _repair_request_detail(output)
+                )
                 reason_code = (
                     "needs_replan" if output_status == "needs_replan" else "model_requested_repair"
                 )
-                blocker_ids, required_fixes = repair_requirements(
-                    output=output,
-                    reason_code=reason_code,
-                    detail=repair_detail,
-                    failed_gate_ids=(
-                        str(item.get("gate_id"))
-                        for item in quality_run.results
-                        if item.get("status") == "FAIL"
-                    ),
-                )
+                if incident_handoff:
+                    blocker_ids = ["controller-incident-contained"]
+                    required_fixes = [
+                        (
+                            "Create plan revision N+1 from the complete failure "
+                            "chain and rerun or replace the affected product node "
+                            "with fresh product-semantic evidence."
+                        )
+                    ]
+                else:
+                    blocker_ids, required_fixes = repair_requirements(
+                        output=output,
+                        reason_code=reason_code,
+                        detail=repair_detail,
+                        failed_gate_ids=(
+                            str(item.get("gate_id"))
+                            for item in quality_run.results
+                            if item.get("status") == "FAIL"
+                        ),
+                    )
                 reviewer_handoff = (
                     output_status == "repair_required" and spec.role == "security-reviewer"
                 )
@@ -3563,7 +3618,8 @@ class AgentWorker:
                         attempt_id=attempt.attempt_id,
                         expected={"acceptance": spec.task_contract["acceptance"]},
                         actual={
-                            "reported_status": output_status,
+                            "reported_status": reported_output_status,
+                            "normalized_status": output_status,
                             "required_fixes": required_fixes,
                         },
                         failed_gate_ids=tuple(blocker_ids),

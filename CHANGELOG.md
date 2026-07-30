@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.12 - 2026-07-30
+
+- Route evidence-backed `contained`, `recovered`, and `failed_safe`
+  controller-incident results directly to a Director replan instead of
+  repeating an already-contained recovery hypothesis.
+- Require revision N+1 to rerun or replace the affected product node with
+  fresh product-semantic evidence; never use an `IncidentResult` as proof that
+  a product test or review passed.
+- Preserve accepted unaffected work and keep the controller containment
+  handoff outside the product's semantic hypothesis budget.
+
 ## 2.2.11 - 2026-07-30
 
 - Give controller incident-recovery tasks dedicated containment, evidence, and

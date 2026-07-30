@@ -249,6 +249,38 @@ class FailureRouter:
         ]
 
     @staticmethod
+    def _controller_replan_acceptance() -> list[dict[str, Any]]:
+        """Require fresh product evidence after a contained controller incident."""
+
+        return [
+            {
+                "criterion_id": "AC-CONTROLLER-REPLAN-AFFECTED-NODE",
+                "verification": (
+                    "Plan revision N+1 retries or replaces the affected product "
+                    "node and requires fresh product-semantic evidence; an "
+                    "IncidentResult is not reused as proof that the product node passed."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-CONTROLLER-REPLAN-PRESERVE-ACCEPTED",
+                "verification": (
+                    "The plan preserves accepted unaffected implementation and "
+                    "lifecycle evidence while invalidating only the affected causal path."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-CONTROLLER-REPLAN-BOUNDED",
+                "verification": (
+                    "The plan is bound to the supplied controller failure chain, "
+                    "uses a bounded scope, and does not invent a product finding."
+                ),
+                "mandatory": True,
+            },
+        ]
+
+    @staticmethod
     def _row_required_capabilities(task: dict[str, Any]) -> list[str]:
         try:
             values = json.loads(str(task.get("required_capabilities_json") or "[]"))
@@ -706,8 +738,13 @@ class FailureRouter:
                         },
                     )
             controller_recovery_depth = self._controller_recovery_depth(failed)
+            controller_handoff = (
+                str(failed.get("role") or "") == "incident-recovery"
+                and reason == "needs_replan"
+            )
             controller_fault = (
                 not invalid_plan_output_schema
+                and not controller_handoff
                 and controller_recovery_depth < _MAX_CONTROLLER_RECOVERY_DEPTH
                 and (
                     str(failure["failure_class"]) in {"controller", "transient"}
@@ -718,7 +755,7 @@ class FailureRouter:
             hypothesis_id: str | None = None
             attempts_used = 0
             same_role_problem_count = 0
-            if not controller_fault:
+            if not controller_fault and not controller_handoff:
                 same_role_problem_count = self._same_role_problem_count(
                     dict(failure),
                     dict(failed),
@@ -771,6 +808,7 @@ class FailureRouter:
                     attempts_used = int(hypothesis["attempts_used"] or 0)
             needs_replan = (
                 invalid_plan_output_schema
+                or controller_handoff
                 or reason in _REPLAN_REASONS
                 or attempts_used >= 3
                 or same_role_problem_count >= 2
@@ -887,6 +925,8 @@ class FailureRouter:
             contract_acceptance = (
                 self._controller_incident_acceptance()
                 if role == "incident-recovery"
+                else self._controller_replan_acceptance()
+                if role == "replanner" and controller_recovery_depth > 0
                 else None
             )
             contract, path = self._write_contract(
