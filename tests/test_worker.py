@@ -785,7 +785,7 @@ class WorkerTests(unittest.TestCase):
                 "contained",
                 builder_gate_deferred=False,
             ),
-            "contained",
+            "completed",
         )
 
     def test_provider_output_secret_is_redacted_and_task_continues(self) -> None:

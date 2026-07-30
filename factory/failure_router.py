@@ -215,6 +215,40 @@ class FailureRouter:
         ]
 
     @staticmethod
+    def _controller_incident_acceptance() -> list[dict[str, Any]]:
+        """Keep controller recovery separate from product-semantic acceptance."""
+
+        return [
+            {
+                "criterion_id": "AC-CONTROLLER-INCIDENT-CONTAINMENT",
+                "verification": (
+                    "The supplied controller incident is explicitly contained or "
+                    "recovered using only allowlisted, non-destructive actions; "
+                    "the result states when no production mutation was required."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-CONTROLLER-INCIDENT-EVIDENCE",
+                "verification": (
+                    "The IncidentResult binds containment, data-integrity status, "
+                    "and root-cause or validation-plan claims to supplied safe "
+                    "controller evidence without inventing product findings."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-CONTROLLER-INCIDENT-NEXT-STEP",
+                "verification": (
+                    "The result identifies a bounded controller recovery, repair, "
+                    "or retry path and does not require the incident-recovery role "
+                    "to prove the failed product task's semantic acceptance."
+                ),
+                "mandatory": True,
+            },
+        ]
+
+    @staticmethod
     def _row_required_capabilities(task: dict[str, Any]) -> list[str]:
         try:
             values = json.loads(str(task.get("required_capabilities_json") or "[]"))
@@ -267,6 +301,7 @@ class FailureRouter:
         task_revision: int,
         node_suffix: str,
         required_capabilities: list[str] | None = None,
+        acceptance: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], Path]:
         task_id = (
             "T-"
@@ -305,7 +340,11 @@ class FailureRouter:
                 if capability_profile == "planning_readonly"
                 else json.loads(str(failed.get("conflict_keys_json") or "[]"))
             ),
-            "acceptance": self._acceptance(self._contract(failed)),
+            "acceptance": (
+                [dict(item) for item in acceptance]
+                if acceptance is not None
+                else self._acceptance(self._contract(failed))
+            ),
             "required_capabilities": list(
                 required_capabilities
                 if required_capabilities is not None
@@ -340,9 +379,14 @@ class FailureRouter:
         parent_hypothesis_id: str | None,
         repair_task_id: str,
         allowed_paths: list[str],
+        acceptance: list[dict[str, Any]] | None = None,
     ) -> Path:
         original = self._contract(failed)
-        acceptance = self._acceptance(original)
+        inherited_acceptance = (
+            [dict(item) for item in acceptance]
+            if acceptance is not None
+            else self._acceptance(original)
+        )
         try:
             actual = json.loads(str(failure.get("actual_json") or "{}"))
         except json.JSONDecodeError:
@@ -393,7 +437,7 @@ class FailureRouter:
             "plan_id": str(failed["plan_id"]),
             "plan_node_id": str(failed["plan_node_id"]),
             "inherited_goal_ref": str(failed["root_context_ref"]),
-            "inherited_acceptance": acceptance,
+            "inherited_acceptance": inherited_acceptance,
             "failed_gate_ids": failed_gate_ids,
             "required_fixes": [
                 *actionable_fixes,
@@ -405,7 +449,7 @@ class FailureRouter:
             "capability_gaps": [],
             "supersedes_task_id": str(failed["task_id"]),
             "definition_of_done": [
-                str(item["verification"]) for item in acceptance
+                str(item["verification"]) for item in inherited_acceptance
             ],
         }
         return self.artifacts.write(
@@ -840,6 +884,11 @@ class FailureRouter:
                     else original.get("allowed_paths", ["artifacts/**"])
                 )
             ]
+            contract_acceptance = (
+                self._controller_incident_acceptance()
+                if role == "incident-recovery"
+                else None
+            )
             contract, path = self._write_contract(
                 failed=failed,
                 failure=failure,
@@ -851,6 +900,7 @@ class FailureRouter:
                 allowed_paths=allowed_paths,
                 task_revision=int(failed.get("task_revision") or 1) + 1,
                 node_suffix=suffix,
+                acceptance=contract_acceptance,
                 required_capabilities=(
                     self._lineage_required_capabilities(
                         failed,
@@ -875,6 +925,7 @@ class FailureRouter:
                     ),
                     repair_task_id=str(contract["task_id"]),
                     allowed_paths=allowed_paths,
+                    acceptance=contract_acceptance,
                 )
                 repair_ref = f"evidence/{repair_path.name}"
             self.state.add_task(

@@ -1018,6 +1018,24 @@ def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
         assert incident_task is not None
         assert incident_task["role"] == "incident-recovery"
         assert incident_task["capability_profile"] == "controller_incident"
+        incident_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(incident_task["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert {
+            item["criterion_id"]
+            for item in incident_contract["acceptance"]
+        } == {
+            "AC-CONTROLLER-INCIDENT-CONTAINMENT",
+            "AC-CONTROLLER-INCIDENT-EVIDENCE",
+            "AC-CONTROLLER-INCIDENT-NEXT-STEP",
+        }
+        assert all(
+            "accept-controller" not in item["verification"]
+            for item in incident_contract["acceptance"]
+        )
         assert state.list_hypotheses("product-autonomy") == []
         with state._lock:
             incidents = state._connection.execute(
@@ -1059,6 +1077,19 @@ def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
         final_recovery = state.claim_task(worker_id="incident-recovery-2")
         assert final_recovery is not None
         assert final_recovery["task_id"] == rerouted[0]
+        final_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(final_recovery["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert {
+            item["criterion_id"] for item in final_contract["acceptance"]
+        } == {
+            "AC-CONTROLLER-INCIDENT-CONTAINMENT",
+            "AC-CONTROLLER-INCIDENT-EVIDENCE",
+            "AC-CONTROLLER-INCIDENT-NEXT-STEP",
+        }
         state.commit_task_outcome(
             TaskOutcome(
                 task_id=str(final_recovery["task_id"]),

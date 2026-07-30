@@ -455,7 +455,10 @@ def _normalized_output_status(
 ) -> str:
     if builder_gate_deferred:
         return "completed"
-    if role == "incident-recovery" and reported_status == "recovered":
+    if role == "incident-recovery" and reported_status in {
+        "contained",
+        "recovered",
+    }:
         return "completed"
     return reported_status
 
@@ -817,6 +820,14 @@ class AgentWorker:
                 "roles, output schemas, capability profiles, quality gate IDs, lifecycle review "
                 "tasks, release tasks, or completion mechanics. The deterministic PlanCompiler "
                 "owns those fields and adds the mandatory lifecycle."
+            )
+        if prompt_role == "incident-recovery":
+            decisions.append(
+                "This task proves controller-incident containment and a bounded recovery path, "
+                "not the failed product role's semantic acceptance. Do not invent a product "
+                "finding. If retries are stopped and no production mutation is required, status "
+                "contained is a valid fail-safe terminal result when the supplied evidence and "
+                "data-integrity status are recorded."
             )
         if task.get("dependencies_json") not in (None, "", "[]"):
             decisions.append(
