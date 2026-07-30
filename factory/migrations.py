@@ -1040,6 +1040,27 @@ def _migration_016_redundant_accepted_repair_reconciliation(
 ) -> None:
     """Reject only proven duplicate accepted repair branches without deleting evidence."""
 
+    def failure_reaches_task(
+        failure_id: str,
+        *,
+        product_id: str,
+        task_id: str,
+    ) -> bool:
+        visited: set[str] = set()
+        while failure_id and failure_id not in visited and len(visited) < 32:
+            visited.add(failure_id)
+            row = connection.execute(
+                """SELECT product_id, task_id, parent_failure_id
+                   FROM failures WHERE failure_id=?""",
+                (failure_id,),
+            ).fetchone()
+            if row is None or str(row["product_id"]) != product_id:
+                return False
+            if str(row["task_id"]) == task_id:
+                return True
+            failure_id = str(row["parent_failure_id"] or "")
+        return False
+
     groups = connection.execute(
         """SELECT product_id, supersedes_task_id
            FROM tasks
@@ -1091,20 +1112,13 @@ def _migration_016_redundant_accepted_repair_reconciliation(
                 str(replacement["root_context_ref"] or ""),
             )
             failure_id = str(replacement["failure_id"] or "")
-            failure = (
-                connection.execute(
-                    """SELECT product_id, task_id FROM failures
-                       WHERE failure_id=?""",
-                    (failure_id,),
-                ).fetchone()
-                if failure_id
-                else None
-            )
             if (
                 replacement_identity != identity
-                or failure is None
-                or str(failure["product_id"]) != product_id
-                or str(failure["task_id"]) != superseded_task_id
+                or not failure_reaches_task(
+                    failure_id,
+                    product_id=product_id,
+                    task_id=superseded_task_id,
+                )
             ):
                 safely_redundant = False
                 break

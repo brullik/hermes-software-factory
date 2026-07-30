@@ -1299,6 +1299,11 @@ def test_migration_016_reconciles_proven_duplicate_accepted_repairs(
         start=1,
     ):
         failure_id = f"failure-redundant-{index}"
+        root_failure_id = (
+            f"failure-redundant-root-{index}"
+            if index == 1
+            else failure_id
+        )
         timestamp = f"2026-07-30T00:00:0{index}Z"
         with state._lock, state._connection:
             state._connection.execute(
@@ -1312,15 +1317,37 @@ def test_migration_016_reconciles_proven_duplicate_accepted_repairs(
                            'safe duplicate repair coordinate', ?,
                            'RESOLVED', 0, 0, '{}', '{}', '[]', ?, ?)""",
                 (
-                    failure_id,
+                    root_failure_id,
                     product_id,
                     original_task_id,
-                    sha256_text(failure_id),
-                    f"internal://{failure_id}",
+                    sha256_text(root_failure_id),
+                    f"internal://{root_failure_id}",
                     timestamp,
                     timestamp,
                 ),
             )
+            if index == 1:
+                state._connection.execute(
+                    """INSERT INTO failures
+                       (failure_id, product_id, task_id, parent_failure_id,
+                        failure_class, reason_code, fingerprint, safe_message,
+                        evidence_ref, status, retryable, owner_action_eligible,
+                        expected_json, actual_json, failed_gate_ids_json,
+                        first_seen_at, last_seen_at)
+                       VALUES (?, ?, ?, ?, 'transient', 'malformed_transport',
+                               ?, 'safe child repair failure', ?,
+                               'RESOLVED', 1, 0, '{}', '{}', '[]', ?, ?)""",
+                    (
+                        failure_id,
+                        product_id,
+                        repair_task_id,
+                        root_failure_id,
+                        sha256_text(failure_id),
+                        f"internal://{failure_id}",
+                        timestamp,
+                        timestamp,
+                    ),
+                )
         state.add_task(
             task_id=repair_task_id,
             product_id=product_id,
