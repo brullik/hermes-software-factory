@@ -14,7 +14,7 @@ from .lifecycle import (
     PLAN_COMPILER_VERSION,
     stage_contract,
 )
-from .plan_semantics import validate_compiled_plan
+from .plan_semantics import PlanContractViolation, validate_compiled_plan
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,7 @@ class CompileContext:
     external_repository: bool
     proposal_artifact_ref: str
     architecture_source_task_id: str | None = None
+    mandatory_replan_gate_ids: tuple[str, ...] = ()
 
 
 def _node_key(value: str) -> str:
@@ -169,6 +170,56 @@ class PlanCompiler:
             raise ValueError("PlanProposal implementation dependencies must be acyclic")
 
     @staticmethod
+    def _validate_replan_handoff(
+        proposed_slices: Sequence[Mapping[str, Any]],
+        inherited_by_key: Mapping[str, Mapping[str, Any]],
+        mandatory_gate_ids: Sequence[str],
+    ) -> None:
+        """Require a replan to schedule fresh work for every failed mandatory gate."""
+
+        fresh_slices: list[Mapping[str, Any]] = []
+        for node in proposed_slices:
+            key = _node_key(str(node.get("node_key") or ""))
+            inherited = inherited_by_key.get(key)
+            if inherited is None or stable_json(inherited) != stable_json(node):
+                fresh_slices.append(node)
+        if not fresh_slices:
+            raise PlanContractViolation(
+                "replan_delta has no fresh implementation slice; accepted inherited "
+                "nodes cannot repair the causal failure"
+            )
+
+        fresh_text = "\n".join(
+            value
+            for node in fresh_slices
+            for value in (
+                str(node.get("title") or ""),
+                str(node.get("objective") or ""),
+                *[
+                    str(item)
+                    for item in node.get("acceptance_intents", [])
+                    if isinstance(item, str)
+                ],
+            )
+        )
+        missing = [
+            str(gate_id)
+            for gate_id in dict.fromkeys(mandatory_gate_ids)
+            if str(gate_id)
+            and re.search(
+                rf"(?<![A-Za-z0-9_-]){re.escape(str(gate_id))}(?![A-Za-z0-9_-])",
+                fresh_text,
+                flags=re.IGNORECASE,
+            )
+            is None
+        ]
+        if missing:
+            raise PlanContractViolation(
+                "fresh implementation slices do not cover failed mandatory gates: "
+                + ", ".join(missing)
+            )
+
+    @staticmethod
     def _quality_gates(stage_key: str, external_repository: bool) -> list[str]:
         if external_repository:
             implementation = [
@@ -260,6 +311,11 @@ class PlanCompiler:
                 if key in inherited_by_key:
                     raise ValueError("inherited semantic node_key values must be unique")
                 inherited_by_key[key] = dict(node)
+            self._validate_replan_handoff(
+                proposed_slices,
+                inherited_by_key,
+                context.mandatory_replan_gate_ids,
+            )
         merged_by_key = dict(inherited_by_key)
         for key, node in zip(proposed_keys, proposed_slices, strict=True):
             merged_by_key[key] = node

@@ -14,12 +14,52 @@ from factory.autonomy import (
 )
 from factory.common import sha256_text
 from factory.intake import IntakeService
-from factory.pipeline import PipelineCoordinator
+from factory.pipeline import PipelineCoordinator, _replan_mandatory_gate_ids
 from factory.policy import policy_digest
 from factory.state import StateStore
 
 
 class PipelineTests(unittest.TestCase):
+    def test_replan_gate_inventory_uses_only_bounded_causal_gate_failures(
+        self,
+    ) -> None:
+        failures = [
+            {
+                "failure_id": "failure-root",
+                "parent_failure_id": None,
+                "reason_code": "mandatory_gate_failed",
+                "failed_gate_ids_json": (
+                    '["target-dependency-audit", "target-license-check"]'
+                ),
+            },
+            {
+                "failure_id": "failure-repair",
+                "parent_failure_id": "failure-root",
+                "reason_code": "model_requested_repair",
+                "failed_gate_ids_json": '["MODEL_REPAIR_REQUIRED"]',
+            },
+            {
+                "failure_id": "failure-replan",
+                "parent_failure_id": "failure-repair",
+                "reason_code": "plan_contract_violation",
+                "failed_gate_ids_json": '["PLAN_CONTRACT_VIOLATION"]',
+            },
+            {
+                "failure_id": "failure-unrelated",
+                "parent_failure_id": None,
+                "reason_code": "mandatory_gate_failed",
+                "failed_gate_ids_json": '["target-tests"]',
+            },
+        ]
+
+        self.assertEqual(
+            _replan_mandatory_gate_ids(
+                failures,
+                source_failure_id="failure-replan",
+            ),
+            ("target-dependency-audit", "target-license-check"),
+        )
+
     def test_different_products_have_disjoint_workspace_locks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
