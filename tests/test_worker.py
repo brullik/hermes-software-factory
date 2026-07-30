@@ -22,7 +22,7 @@ from factory.config import FactoryConfig
 from factory.intake import IntakeService
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
-from factory.providers import ModelSelection
+from factory.providers import ExternalBlocker, ModelSelection
 from factory.quality import QualityGateRun
 from factory.reconciler import PipelineReconciler
 from factory.state import StateStore
@@ -596,6 +596,87 @@ class WorkerTests(unittest.TestCase):
                 inventory[0]["accepted_result"]["summary"],
                 "Runtime foundation passed its local gates.",
             )
+            state.close()
+
+    def test_reused_accepted_task_resolves_immutable_source_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(
+                    root / "registry.yaml",
+                    selected="gpt-5.6-luna",
+                ),
+            )
+            state = StateStore(config.database_path)
+            artifacts = ArtifactStore(config)
+            intake = IntakeService(config, state, artifacts).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Build a reusable accepted-evidence lineage",
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(product_contract(config, intake.product_id)),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            result = worker.run_once()
+            self.assertIsNotNone(result)
+            original = next(
+                task
+                for task in state.list_tasks(intake.product_id)
+                if task["role"] == "product-director"
+            )
+            self.assertEqual(original["graph_status"], "ACCEPTED")
+            self.assertTrue(original["result_ref"])
+            self.assertTrue(original["result_digest"])
+
+            reused_id = "T-REUSED-PRODUCT-DIRECTOR"
+            state.add_task(
+                task_id=reused_id,
+                product_id=intake.product_id,
+                title="Reuse the accepted product contract",
+                role="product-director",
+                output_schema="product-contract.schema.json",
+                contract_ref=f"evidence/task-{reused_id}.json",
+                stage_key="product-director-reused",
+                plan_id=str(original["plan_id"]),
+                supersedes_task_id=str(original["task_id"]),
+                graph_status="ACCEPTED",
+            )
+            with state._lock, state._connection:
+                state._connection.execute(
+                    """UPDATE tasks
+                          SET result_ref=?, result_digest=?
+                        WHERE task_id=?""",
+                    (
+                        original["result_ref"],
+                        original["result_digest"],
+                        reused_id,
+                    ),
+                )
+
+            output_path, output, attempt = worker._accepted_task_artifacts(
+                reused_id
+            )
+
+            self.assertTrue(output_path.is_file())
+            self.assertEqual(output["status"], "completed")
+            self.assertEqual(attempt["task_id"], original["task_id"])
+            self.assertEqual(state.attempts_for_task(reused_id), [])
+
+            with state._lock, state._connection:
+                state._connection.execute(
+                    "UPDATE tasks SET result_digest=? WHERE task_id=?",
+                    ("f" * 64, reused_id),
+                )
+            with self.assertRaisesRegex(
+                ExternalBlocker,
+                "reuse lineage is invalid",
+            ):
+                worker._accepted_task_artifacts(reused_id)
             state.close()
 
     def test_incident_recovery_status_is_a_terminal_success(self) -> None:

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.9 - 2026-07-30
+
+- Resolve evidence for accepted reused tasks through their validated
+  `supersedes_task_id` chain to the original immutable attempt, while keeping
+  each reused task free of duplicate attempt rows.
+- Reject cyclic, cross-product, identity-changing, result-reference-changing,
+  or result-digest-changing reuse lineages before admitting dependency
+  evidence to a downstream agent.
+
 ## 2.2.8 - 2026-07-30
 
 - Carry accepted, unchanged implementation slices and architecture-review
