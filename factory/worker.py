@@ -858,7 +858,12 @@ class AgentWorker:
         task_id: str,
     ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
         requested_task = self.state.get_task(task_id)
-        if requested_task is None or str(requested_task.get("status")) != "DONE":
+        if (
+            requested_task is None
+            or str(requested_task.get("status")) != "DONE"
+            or str(requested_task.get("graph_status") or "")
+            not in {"ACCEPTED", "SUPERSEDED"}
+        ):
             raise ExternalBlocker(f"accepted task is missing for {task_id}")
         task = requested_task
         visited: set[str] = set()
@@ -903,6 +908,46 @@ class AgentWorker:
                     )
             if attempts:
                 break
+            if str(task.get("graph_status") or "") == "SUPERSEDED":
+                replacements = self.state._connection.execute(
+                    """SELECT * FROM tasks
+                       WHERE product_id=? AND supersedes_task_id=?
+                         AND status='DONE'
+                         AND graph_status IN ('ACCEPTED','SUPERSEDED')
+                       ORDER BY created_at, task_id""",
+                    (str(task["product_id"]), source_task_id),
+                ).fetchall()
+                if len(replacements) > 1:
+                    raise ExternalBlocker(
+                        f"accepted task replacement lineage is ambiguous for {task_id}"
+                    )
+                if replacements:
+                    replacement = dict(replacements[0])
+                    if (
+                        str(replacement.get("product_id") or "")
+                        != str(task.get("product_id") or "")
+                        or str(replacement.get("role") or "")
+                        != str(task.get("role") or "")
+                        or str(replacement.get("output_schema") or "")
+                        != str(task.get("output_schema") or "")
+                        or str(replacement.get("root_task_id") or "")
+                        != str(task.get("root_task_id") or "")
+                        or str(replacement.get("root_context_ref") or "")
+                        != str(task.get("root_context_ref") or "")
+                        or source_task_id
+                        not in {
+                            str(replacement.get("parent_task_id") or ""),
+                            str(replacement.get("source_task_id") or ""),
+                        }
+                    ):
+                        raise ExternalBlocker(
+                            f"accepted task replacement identity conflicts for {task_id}"
+                        )
+                    task = replacement
+                    continue
+                raise ExternalBlocker(
+                    f"accepted task replacement is missing for {task_id}"
+                )
             predecessor_id = str(task.get("supersedes_task_id") or "")
             predecessor = (
                 self.state.get_task(predecessor_id) if predecessor_id else None
