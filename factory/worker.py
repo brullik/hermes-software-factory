@@ -133,6 +133,97 @@ def _failed_gate_detail(results: list[dict[str, Any]]) -> str:
     )
 
 
+def _mandatory_gate_failure_data(
+    run: QualityGateRun,
+    *,
+    detail: str,
+    evidence_ref: str,
+    attempt_id: str,
+) -> FailureData:
+    """Preserve safe controller gate diagnostics for the next autonomous role."""
+
+    diagnostics: list[dict[str, Any]] = []
+    failed_gate_ids: list[str] = []
+    for index, result in enumerate(run.results):
+        gate_id = str(result.get("gate_id") or "")
+        if not gate_id or result.get("status") in {"PASS", "NOT_RUN"}:
+            continue
+        failed_gate_ids.append(gate_id)
+        path = (
+            run.evidence_paths[index]
+            if index < len(run.evidence_paths)
+            else None
+        )
+        try:
+            payload = (
+                json.loads(path.read_text(encoding="utf-8"))
+                if path is not None
+                else {}
+            )
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        raw_summary = str(payload.get("summary") or "")
+        redaction_coordinates = find_secret_candidate_diagnostics(raw_summary)
+        safe_summary, _ = redact_text(raw_summary)
+        safe_summary, _ = redact_secret_candidates(safe_summary)
+        safe_summary = (
+            safe_summary.strip()
+            or "Controller gate evidence is unavailable; inspect the evidence reference."
+        )
+        if redaction_coordinates:
+            coordinates = ", ".join(
+                f"{item['detector']}@{item['location']}"
+                for item in redaction_coordinates[:20]
+            )
+            safe_summary += (
+                " SAFE_REDACTION_COORDINATES: "
+                f"{coordinates}. Secret values are not retained."
+            )
+        diagnostics.append(
+            {
+                "gate_id": gate_id,
+                "status": str(payload.get("status") or result.get("status") or ""),
+                "exit_code": payload.get("exit_code"),
+                "summary": safe_summary[:2000],
+                "evidence_ref": (
+                    f"evidence/{path.name}"
+                    if path is not None
+                    else "internal://gate-evidence-unavailable"
+                ),
+            }
+        )
+    unique_gate_ids = tuple(dict.fromkeys(failed_gate_ids))
+    diagnostic_message = "; ".join(
+        f"{item['gate_id']}: {item['summary']}" for item in diagnostics
+    )
+    safe_message = (
+        f"{detail}. Safe controller diagnostics: {diagnostic_message}"
+        if diagnostic_message
+        else detail
+    )[:4000]
+    return FailureData(
+        failure_class="semantic",
+        reason_code="mandatory_gate_failed",
+        safe_message=safe_message,
+        evidence_ref=evidence_ref,
+        attempt_id=attempt_id,
+        expected={
+            "quality_gates": [
+                {"gate_id": gate_id, "status": "PASS"}
+                for gate_id in unique_gate_ids
+            ]
+        },
+        actual={
+            "gate_diagnostics": diagnostics,
+            "required_fixes": [
+                f"Resolve {item['gate_id']}: {item['summary']}"
+                for item in diagnostics
+            ],
+        },
+        failed_gate_ids=unique_gate_ids,
+    )
+
+
 def _repair_request_detail(output: Mapping[str, Any]) -> str:
     return repair_finding_detail(output)[:3500]
 
@@ -3076,6 +3167,12 @@ class AgentWorker:
                     str(result_path),
                     attempt.attempt_id,
                     detail=gate_detail,
+                    failure_data=_mandatory_gate_failure_data(
+                        preflight,
+                        detail=gate_detail,
+                        evidence_ref=f"evidence/{result_path.name}",
+                        attempt_id=attempt.attempt_id,
+                    ),
                 )
             active_runner = self.planning_runner if spec.role in _PLANNING_ROLES else self.runner
             run = active_runner.run(
@@ -3544,6 +3641,12 @@ class AgentWorker:
                     str(result_path),
                     attempt.attempt_id,
                     detail=gate_detail,
+                    failure_data=_mandatory_gate_failure_data(
+                        quality_run,
+                        detail=gate_detail,
+                        evidence_ref=f"evidence/{result_path.name}",
+                        attempt_id=attempt.attempt_id,
+                    ),
                 )
             reported_output_status = str(output.get("status"))
             builder_gate_deferred = spec.role == "builder" and builder_result_is_locally_complete(

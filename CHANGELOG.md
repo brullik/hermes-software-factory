@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.17 - 2026-07-30
+
+- Preserve controller-owned mandatory gate summaries, statuses, exit codes,
+  and immutable evidence references in the causal FailureEnvelope.
+- Give Replanner and Builder the exact safe remediation coordinate instead of
+  reducing deterministic failures to gate IDs and forcing blind hypotheses.
+- Redact any secret-like values from gate summaries while retaining detector
+  and location coordinates that are sufficient for autonomous repair.
+
 ## 2.2.16 - 2026-07-30
 
 - Replace unbounded release maintenance with durable deploy leases, bounded
