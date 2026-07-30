@@ -283,16 +283,57 @@ def _json_list(value: Any) -> list[Any]:
 
 def _replanner_failure_inventory(
     failures: list[dict[str, Any]],
+    *,
+    source_failure_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    unresolved = [
-        failure
+    by_id = {
+        str(failure.get("failure_id") or ""): failure
         for failure in failures
-        if str(failure.get("status") or "") != "RESOLVED"
-    ][-24:]
+        if str(failure.get("failure_id") or "")
+    }
+    seed_ids: list[str] = []
+    if source_failure_id and source_failure_id in by_id:
+        seed_ids.append(source_failure_id)
+    for failure in reversed(failures):
+        failure_id = str(failure.get("failure_id") or "")
+        if (
+            failure_id
+            and failure_id not in seed_ids
+            and str(failure.get("status") or "") != "RESOLVED"
+        ):
+            seed_ids.append(failure_id)
+
+    relevant: list[tuple[dict[str, Any], int, bool]] = []
+    included: set[str] = set()
+    for seed_id in seed_ids:
+        failure_id = seed_id
+        depth = 0
+        visited: set[str] = set()
+        while (
+            failure_id
+            and failure_id not in visited
+            and len(relevant) < 24
+        ):
+            visited.add(failure_id)
+            causal_failure = by_id.get(failure_id)
+            if causal_failure is None:
+                break
+            if failure_id not in included:
+                relevant.append(
+                    (causal_failure, depth, failure_id == seed_id)
+                )
+                included.add(failure_id)
+            failure_id = str(causal_failure.get("parent_failure_id") or "")
+            depth += 1
+        if len(relevant) >= 24:
+            break
+
     return [
         {
             "failure_id": str(failure.get("failure_id") or ""),
             "parent_failure_id": failure.get("parent_failure_id"),
+            "causal_depth": causal_depth,
+            "chain_seed": chain_seed,
             "task_id": str(failure.get("task_id") or ""),
             "failure_class": str(failure.get("failure_class") or ""),
             "reason_code": str(failure.get("reason_code") or ""),
@@ -311,7 +352,7 @@ def _replanner_failure_inventory(
             ),
             "evidence_ref": str(failure.get("evidence_ref") or ""),
         }
-        for failure in unresolved
+        for failure, causal_depth, chain_seed in relevant
     ]
 
 
@@ -2062,7 +2103,8 @@ class AgentWorker:
                         if node["graph_status"] == "ACCEPTED"
                     ],
                     "unresolved_failure_inventory": _replanner_failure_inventory(
-                        failures
+                        failures,
+                        source_failure_id=str(task.get("failure_id") or "") or None,
                     ),
                     "hypothesis_inventory": _replanner_hypothesis_inventory(
                         self.state.list_hypotheses(str(task["product_id"]))
