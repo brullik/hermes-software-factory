@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.3 - 2026-07-30
+
+- Prove repository configuration and pull-request merge capabilities from the
+  authenticated repository permission and enabled merge methods even when a
+  free GitHub repository does not expose ruleset or branch-protection reads.
+
 ## 2.2.2 - 2026-07-30
 
 - Give the rootless service user exclusive ownership of the temporary Podman
