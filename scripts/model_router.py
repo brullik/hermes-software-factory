@@ -32,6 +32,7 @@ _TRANSIENT_CODES = {
     "http_429",
     "provider_5xx",
     "network_timeout",
+    "agent_execution_timeout",
     "process_crash_before_result",
     "malformed_transport",
     "github_checks_pending",

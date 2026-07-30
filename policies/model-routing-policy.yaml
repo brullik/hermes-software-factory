@@ -98,6 +98,7 @@ do_not_escalate_on:
   - http_429
   - provider_5xx
   - network_timeout
+  - agent_execution_timeout
   - process_crash_before_result
   - malformed_transport
 provider_selection:

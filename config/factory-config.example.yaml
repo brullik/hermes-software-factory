@@ -9,6 +9,8 @@ controller:
   capability_check_ttl_seconds: 300
   capability_retry_seconds: 15
   max_repair_cycles: 3
+  agent_execution_timeout_seconds: 1800
+  planning_execution_timeout_seconds: 900
   github_check_timeout_seconds: 300
   github_check_poll_seconds: 5
   observation_seconds: 1209600

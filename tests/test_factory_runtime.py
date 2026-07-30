@@ -13,7 +13,7 @@ import yaml
 from factory.artifacts import ArtifactStore
 from factory.attempts import AttemptManager, IdenticalAttemptError
 from factory.backup import BackupAdapter
-from factory.config import FactoryConfig, load_config
+from factory.config import FactoryConfig, load_config, validate_config
 from factory.context_builder import ContextBuilder
 from factory.deployment import DeploymentError, DeploymentGuard, TransactionalDeployer
 from factory.gateway_commands import GatewayCommandError, parse_command
@@ -129,6 +129,39 @@ class FactoryRuntimeTests(unittest.TestCase):
         self.assertEqual(len(config.policy_paths()), 12)
         self.assertEqual(config.schema_root(), (ROOT / "schemas").resolve())
         self.assertEqual(PromptCompiler(config).root, (ROOT / "prompts").resolve())
+        self.assertEqual(config.agent_execution_timeout_seconds, 1800)
+        self.assertEqual(config.planning_execution_timeout_seconds, 900)
+
+    def test_agent_execution_timeout_configuration_is_bounded(self) -> None:
+        cases = (
+            (
+                {"agent_execution_timeout_seconds": 899},
+                "agent_execution_timeout_seconds must be at least 900",
+            ),
+            (
+                {"agent_execution_timeout_seconds": 3601},
+                "agent_execution_timeout_seconds must not exceed 3600",
+            ),
+            (
+                {"planning_execution_timeout_seconds": 59},
+                "planning_execution_timeout_seconds must be at least 60",
+            ),
+            (
+                {
+                    "agent_execution_timeout_seconds": 900,
+                    "planning_execution_timeout_seconds": 901,
+                },
+                (
+                    "planning_execution_timeout_seconds must not exceed "
+                    "agent_execution_timeout_seconds"
+                ),
+            ),
+        )
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                config = _make_config(Path("state"))
+                config.raw["controller"].update(overrides)
+                self.assertIn(expected, validate_config(config))
 
     def test_task_dependencies_and_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

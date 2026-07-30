@@ -45,6 +45,13 @@ _HANDOFF_ROLES = {
 }
 
 _REASON_RU = {
+    "agent_execution_timeout": (
+        "\u0438\u0441\u0442\u0435\u043a\u043b\u043e "
+        "\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u043d\u043e\u0435 "
+        "\u0432\u0440\u0435\u043c\u044f "
+        "\u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f "
+        "\u0430\u0433\u0435\u043d\u0442\u0430"
+    ),
     "pm_acceptance_failed": "обязательная проверка GitHub pm-acceptance завершилась ошибкой",
     "product_acceptance_blocked": "пользовательская проверка продукта потребовала исправления",
     "mandatory_gate_failed": "не пройдена обязательная проверка качества",

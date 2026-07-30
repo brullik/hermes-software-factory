@@ -18,6 +18,13 @@ from factory.state import StateStore
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_agent_execution_timeout_notification_is_russian() -> None:
+    assert (
+        PipelineReconciler._reason_text("agent_execution_timeout")
+        == "истекло ограниченное время выполнения агента"
+    )
+
+
 def make_config(root: Path) -> FactoryConfig:
     raw = yaml.safe_load(
         (ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8")
