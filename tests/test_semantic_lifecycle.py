@@ -14,7 +14,7 @@ from test_worker import make_config, selected_registry
 from factory.artifacts import ArtifactStore
 from factory.autonomy import TaskOutcome
 from factory.capabilities import CapabilityBroker, CapabilityCheck
-from factory.common import sha256_text
+from factory.common import sha256_text, stable_json
 from factory.intake import IntakeRejected, IntakeService
 from factory.pipeline import PipelineCoordinator
 from factory.plan_compiler import CompileContext, PlanCompiler
@@ -28,6 +28,7 @@ from factory.recovery import (
     verify_active_graphs,
     verify_recovery_preconditions,
 )
+from factory.replan_lineage import implementation_lineage
 from factory.state import StateStore
 from scripts.verify_version_consistency import (
     VersionConsistencyError,
@@ -185,6 +186,143 @@ def test_AUT_P0_032_plan_compiler_is_deterministic_and_controller_owned(
         )
 
 
+def test_replan_compiler_merges_and_reuses_accepted_lineage_nodes(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    semantic = proposal(config)
+    semantic.update(
+        {
+            "artifact_id": "plan-proposal-semantic-replan",
+            "producer": {
+                "role": "replanner",
+                "tier": "terra",
+                "provider": "fake",
+                "model": "fake",
+            },
+            "proposal_kind": "replan_delta",
+            "parent_plan_id": "PLAN-PARENT-001",
+            "source_failure_id": "failure-container-runtime",
+            "nodes": [
+                {
+                    "node_key": "container-runtime",
+                    "stage_kind": "implementation_slice",
+                    "title": "Repair the container runtime",
+                    "objective": (
+                        "Build the container with the controller-provided rootless runtime"
+                    ),
+                    "depends_on": ["architecture-review"],
+                    "scope": ["Dockerfile", "compose.yaml", "tests/**"],
+                    "acceptance_intents": [
+                        "The image build and startup smoke test pass without a Docker socket."
+                    ],
+                    "goal_ids": ["root-goal"],
+                }
+            ],
+        }
+    )
+    inherited = [
+        {
+            "node_key": "architecture-review",
+            "stage_kind": "implementation_slice",
+            "title": "Implement the architecture review view",
+            "objective": "Implement the accepted architecture review product view",
+            "depends_on": [],
+            "scope": ["src/**", "tests/runtime/**"],
+            "acceptance_intents": [
+                "The runtime foundation passes its deterministic service checks."
+            ],
+            "goal_ids": ["root-goal"],
+        }
+    ]
+    compiled = PlanCompiler(policy_digest=policy_digest(config)).compile(
+        semantic,
+        CompileContext(
+            product_id="product-semantic",
+            revision=2,
+            parent_plan_id="PLAN-PARENT-001",
+            source_failure_id="failure-container-runtime",
+            created_by_task_id="T-REPLANNER-001",
+            root_task_id="T-ROOTSEMANTIC001",
+            root_context_ref="evidence/intake-product-semantic.json",
+            external_repository=False,
+            proposal_artifact_ref="evidence/plan-proposal-semantic-replan.json",
+            architecture_source_task_id="T-ARCHITECTURE-SOURCE",
+        ),
+        inherited_nodes=inherited,
+        accepted_nodes={
+            "semantic:architecture-review": "T-ACCEPTED-FOUNDATION",
+            "lifecycle:architecture-review": "T-ACCEPTED-ARCH-REVIEW",
+        },
+    )
+
+    implementations = {
+        str(node["task_contract"]["semantic_node_key"]): node["task_contract"]
+        for node in compiled["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+    }
+    architecture = next(
+        node["task_contract"]
+        for node in compiled["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "architecture-review"
+    )
+    assert set(implementations) == {"architecture-review", "container-runtime"}
+    assert (
+        implementations["architecture-review"]["supersedes_task_id"]
+        == "T-ACCEPTED-FOUNDATION"
+    )
+    assert implementations["container-runtime"]["supersedes_task_id"] is None
+    assert architecture["supersedes_task_id"] == "T-ACCEPTED-ARCH-REVIEW"
+    assert architecture["dependencies"] == ["T-ARCHITECTURE-SOURCE"]
+    assert compiled["proposal_digest"] == sha256_text(stable_json(semantic))
+
+
+def test_replan_compiler_does_not_reuse_changed_accepted_node(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    semantic = proposal(config)
+    semantic.update(
+        {
+            "producer": {
+                "role": "replanner",
+                "tier": "terra",
+                "provider": "fake",
+                "model": "fake",
+            },
+            "proposal_kind": "replan_delta",
+            "parent_plan_id": "PLAN-PARENT-001",
+            "source_failure_id": "failure-foundation",
+        }
+    )
+    inherited = [dict(semantic["nodes"][0])]
+    semantic["nodes"][0]["objective"] = (
+        "Replace the previously accepted foundation after new contrary evidence"
+    )
+    compiled = PlanCompiler(policy_digest=policy_digest(config)).compile(
+        semantic,
+        CompileContext(
+            product_id="product-semantic",
+            revision=2,
+            parent_plan_id="PLAN-PARENT-001",
+            source_failure_id="failure-foundation",
+            created_by_task_id="T-REPLANNER-002",
+            root_task_id="T-ROOTSEMANTIC001",
+            root_context_ref="evidence/intake-product-semantic.json",
+            external_repository=False,
+            proposal_artifact_ref="evidence/plan-proposal-semantic-replan-2.json",
+        ),
+        inherited_nodes=inherited,
+        accepted_nodes={"semantic:core-journey": "T-ACCEPTED-CORE"},
+    )
+    implementation = next(
+        node["task_contract"]
+        for node in compiled["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+    )
+    assert implementation["supersedes_task_id"] is None
+
+
 def test_plan_compiler_rejects_product_requirements_used_as_path_scope(
     tmp_path: Path,
 ) -> None:
@@ -320,6 +458,220 @@ def test_AUT_P0_039_compilation_is_read_only_until_atomic_plan_ingestion(
     )
     assert architecture["graph_status"] == "READY"
     assert architecture["dependencies_json"] == f'["{creator_id}"]'
+    state.close()
+
+
+def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    artifacts = ArtifactStore(config)
+    product_id = "product-replan-lineage"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Deliver the complete observable product behavior",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="replan-lineage",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    architecture_source_id = "T-LINEAGE-ARCHITECT"
+    state.add_task(
+        task_id=architecture_source_id,
+        product_id=product_id,
+        title="Create the architecture package",
+        role="solution-architect",
+        output_schema="architecture-package.schema.json",
+        contract_ref=f"evidence/task-{architecture_source_id}.json",
+        stage_key="solution-architect",
+        graph_status="ACCEPTED",
+    )
+    creator_id = "T-LINEAGE-SPECIFIER"
+    state.add_task(
+        task_id=creator_id,
+        product_id=product_id,
+        title="Propose the initial semantic plan",
+        role="task-specifier",
+        output_schema="plan-proposal-v1.schema.json",
+        contract_ref=f"evidence/task-{creator_id}.json",
+        stage_key="task-specifier",
+        graph_status="ACCEPTED",
+    )
+    initial = proposal(config, product_id=product_id)
+    initial["artifact_id"] = "plan-proposal-lineage-initial"
+    initial_path = artifacts.write(
+        "plan-proposal-v1.schema.json",
+        initial,
+        filename="plan-proposal-lineage-initial.json",
+    )
+    pipeline = PipelineCoordinator(config, state, artifacts)
+    creator = state.get_task(creator_id)
+    assert creator is not None
+    prepared = pipeline.prepare_after(creator, initial, initial_path)
+    assert prepared.plan is not None
+    state.ingest_plan(
+        prepared.plan,
+        plan_artifact_ref=str(prepared.plan["plan_artifact_ref"]),
+        plan_digest=str(prepared.plan["plan_digest"]),
+        created_by_task_id=creator_id,
+    )
+    first_plan_id = str(state.get_product(product_id)["active_plan_id"])
+    first_tasks = [
+        task for task in state.list_tasks(product_id) if task["plan_id"] == first_plan_id
+    ]
+    first_architecture = next(
+        task
+        for task in first_tasks
+        if task["lifecycle_stage"] == "architecture-review"
+    )
+    first_implementation = next(
+        task
+        for task in first_tasks
+        if task["lifecycle_stage"] == "implementation-slice"
+    )
+    with state._lock, state._connection:
+        for task, label in (
+            (first_architecture, "architecture"),
+            (first_implementation, "implementation"),
+        ):
+            result_path = config.evidence_dir / f"accepted-{label}.json"
+            result_path.write_text(
+                json.dumps({"summary": f"Accepted {label} result."}),
+                encoding="utf-8",
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET graph_status='ACCEPTED', status='DONE',
+                          result_ref=?, result_digest=?
+                    WHERE task_id=?""",
+                (
+                    f"evidence/{result_path.name}",
+                    sha256_text(f"accepted-{label}"),
+                    task["task_id"],
+                ),
+            )
+    refreshed_architecture = state.get_task(str(first_architecture["task_id"]))
+    refreshed_implementation = state.get_task(str(first_implementation["task_id"]))
+    assert refreshed_architecture is not None
+    assert refreshed_implementation is not None
+    first_architecture = refreshed_architecture
+    first_implementation = refreshed_implementation
+
+    replanner_id = "T-LINEAGE-REPLANNER"
+    state.add_task(
+        task_id=replanner_id,
+        product_id=product_id,
+        title="Repair the affected runtime slice",
+        role="replanner",
+        output_schema="plan-proposal-v1.schema.json",
+        contract_ref=f"evidence/task-{replanner_id}.json",
+        stage_key="replan",
+        plan_id=first_plan_id,
+        graph_status="ACCEPTED",
+    )
+    replan = proposal(config, product_id=product_id)
+    replan.update(
+        {
+            "artifact_id": "plan-proposal-lineage-replan",
+            "producer": {
+                "role": "replanner",
+                "tier": "terra",
+                "provider": "fake",
+                "model": "fake",
+            },
+            "proposal_kind": "replan_delta",
+            "parent_plan_id": first_plan_id,
+            "source_failure_id": "failure-runtime-extension",
+            "nodes": [
+                {
+                    "node_key": "runtime-extension",
+                    "stage_kind": "implementation_slice",
+                    "title": "Implement the runtime extension",
+                    "objective": "Implement and verify the newly isolated runtime extension",
+                    "depends_on": ["core-journey"],
+                    "scope": ["src/runtime/**", "tests/runtime/**"],
+                    "acceptance_intents": [
+                        "The isolated runtime extension passes its deterministic checks."
+                    ],
+                    "goal_ids": ["root-goal"],
+                }
+            ],
+        }
+    )
+    replan_path = artifacts.write(
+        "plan-proposal-v1.schema.json",
+        replan,
+        filename="plan-proposal-lineage-replan.json",
+    )
+    replanner = state.get_task(replanner_id)
+    assert replanner is not None
+    runtime_plan = pipeline._compile_proposal(replanner, replan, replan_path)
+    implementation_contracts = {
+        str(node["task_contract"]["semantic_node_key"]): node["task_contract"]
+        for node in runtime_plan["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+    }
+    architecture_contract = next(
+        node["task_contract"]
+        for node in runtime_plan["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "architecture-review"
+    )
+    assert set(implementation_contracts) == {"core-journey", "runtime-extension"}
+    assert (
+        implementation_contracts["core-journey"]["supersedes_task_id"]
+        == first_implementation["task_id"]
+    )
+    assert (
+        architecture_contract["supersedes_task_id"]
+        == first_architecture["task_id"]
+    )
+
+    state.ingest_plan(
+        runtime_plan,
+        plan_artifact_ref=str(runtime_plan["plan_artifact_ref"]),
+        plan_digest=str(runtime_plan["plan_digest"]),
+        created_by_task_id=replanner_id,
+    )
+    second_plan_id = str(state.get_product(product_id)["active_plan_id"])
+    second_tasks = [
+        task for task in state.list_tasks(product_id) if task["plan_id"] == second_plan_id
+    ]
+    reused = {
+        str(task["semantic_node_key"]): task
+        for task in second_tasks
+        if task.get("semantic_node_key")
+    }
+    second_architecture = next(
+        task
+        for task in second_tasks
+        if task["lifecycle_stage"] == "architecture-review"
+    )
+    assert reused["core-journey"]["graph_status"] == "ACCEPTED"
+    assert reused["core-journey"]["result_ref"] == first_implementation["result_ref"]
+    assert reused["runtime-extension"]["graph_status"] != "BLOCKED_DEPENDENCY"
+    assert second_architecture["graph_status"] == "ACCEPTED"
+    assert second_architecture["result_ref"] == first_architecture["result_ref"]
+    lineage = {
+        str(node.proposal_node["node_key"]): node
+        for node in implementation_lineage(
+            state,
+            config.evidence_dir,
+            product_id,
+            second_plan_id,
+        )
+    }
+    assert lineage["core-journey"].graph_status == "ACCEPTED"
+    assert lineage["runtime-extension"].proposal_node["depends_on"] == [
+        "core-journey"
+    ]
     state.close()
 
 

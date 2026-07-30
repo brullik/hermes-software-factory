@@ -28,6 +28,7 @@ class CompileContext:
     root_context_ref: str
     external_repository: bool
     proposal_artifact_ref: str
+    architecture_source_task_id: str | None = None
 
 
 def _node_key(value: str) -> str:
@@ -229,6 +230,7 @@ class PlanCompiler:
         context: CompileContext,
         *,
         accepted_nodes: Mapping[str, str] | None = None,
+        inherited_nodes: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         if str(proposal.get("schema_version")) != "1.0":
             raise ValueError("PlanProposal schema_version must be 1.0")
@@ -237,25 +239,66 @@ class PlanCompiler:
         proposal_nodes = proposal.get("nodes")
         if not isinstance(proposal_nodes, Sequence) or isinstance(proposal_nodes, (str, bytes)):
             raise TypeError("PlanProposal nodes must be an array")
-        slices = [
+        proposed_slices = [
             dict(node)
             for node in proposal_nodes
             if isinstance(node, Mapping) and str(node.get("stage_kind")) == "implementation_slice"
         ]
-        if not slices:
+        if not proposed_slices:
             raise ValueError("PlanProposal requires at least one implementation_slice")
-        raw_keys = [_node_key(str(node.get("node_key") or "")) for node in slices]
+        proposed_keys = [
+            _node_key(str(node.get("node_key") or "")) for node in proposed_slices
+        ]
+        if len(set(proposed_keys)) != len(proposed_keys):
+            raise ValueError("PlanProposal node_key values must be unique")
+        inherited_by_key: dict[str, dict[str, Any]] = {}
+        if str(proposal.get("proposal_kind") or "") == "replan_delta":
+            for node in inherited_nodes:
+                if str(node.get("stage_kind") or "") != "implementation_slice":
+                    continue
+                key = _node_key(str(node.get("node_key") or ""))
+                if key in inherited_by_key:
+                    raise ValueError("inherited semantic node_key values must be unique")
+                inherited_by_key[key] = dict(node)
+        merged_by_key = dict(inherited_by_key)
+        for key, node in zip(proposed_keys, proposed_slices, strict=True):
+            merged_by_key[key] = node
+        slices = list(merged_by_key.values())
+        raw_keys = list(merged_by_key)
         if len(set(raw_keys)) != len(raw_keys):
             raise ValueError("PlanProposal node_key values must be unique")
         self._validate_semantic_proposal(proposal, slices, raw_keys)
 
         proposal_digest = sha256_text(stable_json(proposal))
+        accepted = dict(accepted_nodes or {})
+        for reuse_key in tuple(accepted):
+            if reuse_key == "lifecycle:architecture-review":
+                continue
+            if not reuse_key.startswith("semantic:"):
+                accepted.pop(reuse_key)
+                continue
+            key = reuse_key.removeprefix("semantic:")
+            if key not in inherited_by_key or key not in merged_by_key:
+                accepted.pop(reuse_key)
+                continue
+            if stable_json(inherited_by_key[key]) != stable_json(merged_by_key[key]):
+                accepted.pop(reuse_key)
+        inheritance_digest = sha256_text(
+            stable_json(
+                {
+                    "inherited_nodes": list(inherited_by_key.values()),
+                    "accepted_nodes": accepted,
+                    "architecture_source_task_id": context.architecture_source_task_id,
+                }
+            )
+        )
         plan_seed = stable_json(
             [
                 context.product_id,
                 context.revision,
                 context.parent_plan_id,
                 proposal_digest,
+                inheritance_digest,
                 PLAN_COMPILER_VERSION,
             ]
         )
@@ -267,7 +310,6 @@ class PlanCompiler:
             "provider": None,
             "model": None,
         }
-        accepted = dict(accepted_nodes or {})
         nodes: list[dict[str, Any]] = []
 
         def add_node(
@@ -281,6 +323,7 @@ class PlanCompiler:
             goal_ids: Sequence[str] = (),
             external_dependencies: Sequence[str] = (),
             semantic_node_key: str | None = None,
+            reuse_key: str | None = None,
         ) -> str:
             definition = stage_contract(stage_key)
             task_seed = stable_json([plan_id, node_id, context.revision])
@@ -312,7 +355,7 @@ class PlanCompiler:
                 "active_context_ref": f"evidence/task-{task_id}.json",
                 "failure_id": context.source_failure_id,
                 "hypothesis_id": None,
-                "supersedes_task_id": accepted.get(node_id),
+                "supersedes_task_id": accepted.get(reuse_key or node_id),
                 "title": title,
                 "objective": objective,
                 "role": definition.role,
@@ -394,7 +437,10 @@ class PlanCompiler:
             "Review architecture independently",
             "Review the accepted architecture before any implementation begins.",
             ("Architecture review is accepted without depending on Builder or Test evidence.",),
-            external_dependencies=(context.created_by_task_id,),
+            external_dependencies=(
+                context.architecture_source_task_id or context.created_by_task_id,
+            ),
+            reuse_key="lifecycle:architecture-review",
         )
 
         implementation_by_key: dict[str, str] = {}
@@ -424,6 +470,7 @@ class PlanCompiler:
                 scope=scope,
                 goal_ids=goal_ids,
                 semantic_node_key=key,
+                reuse_key=f"semantic:{key}",
             )
             implementation_by_key[key] = compiled_node_id
 

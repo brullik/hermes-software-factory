@@ -15,9 +15,15 @@ from .autonomy import CAPABILITY_PROFILES
 from .common import new_id, sha256_text
 from .config import FactoryConfig
 from .plan_compiler import CompileContext, PlanCompiler
+from .plan_semantics import PlanContractViolation
 from .policy import policy_digest
 from .registry import SchemaRegistry
 from .repair_brief import normalized_repair_findings, repair_requirements
+from .replan_lineage import (
+    accepted_stage_task_id,
+    architecture_source_task_id,
+    implementation_lineage,
+)
 from .state import StateStore
 from .workflow import WorkflowEngine
 
@@ -884,6 +890,53 @@ class PipelineCoordinator:
             or str(task.get("failure_id") or "")
             or None
         )
+        inherited_nodes: list[dict[str, Any]] = []
+        accepted_nodes: dict[str, str] = {}
+        architecture_source: str | None = None
+        if expected_kind == "replan_delta" and parent_plan_id is not None:
+            lineage_nodes = implementation_lineage(
+                self.state,
+                self.config.evidence_dir,
+                product_id,
+                parent_plan_id,
+            )
+            accepted_implementation = [
+                node
+                for node in lineage_nodes
+                if node.graph_status == "ACCEPTED"
+                and node.result_ref
+                and node.result_digest
+            ]
+            inherited_nodes = [
+                dict(node.proposal_node) for node in accepted_implementation
+            ]
+            accepted_nodes.update(
+                {
+                    "semantic:" + str(node.proposal_node["node_key"]): node.task_id
+                    for node in accepted_implementation
+                }
+            )
+            accepted_architecture_review = accepted_stage_task_id(
+                self.state,
+                product_id,
+                parent_plan_id,
+                "architecture-review",
+            )
+            if accepted_architecture_review is not None:
+                accepted_nodes["lifecycle:architecture-review"] = (
+                    accepted_architecture_review
+                )
+            else:
+                architecture_source = architecture_source_task_id(
+                    self.state,
+                    product_id,
+                    parent_plan_id,
+                )
+                if architecture_source is None:
+                    raise PlanContractViolation(
+                        "replan has no accepted architecture_package producer",
+                        reason_code="missing_declared_predecessor",
+                    )
         compiler = PlanCompiler(policy_digest=policy_digest(self.config))
         compiled = compiler.compile(
             proposal,
@@ -901,7 +954,10 @@ class PipelineCoordinator:
                 ),
                 external_repository=_product_repository_url(product) is not None,
                 proposal_artifact_ref=f"evidence/{proposal_path.name}",
+                architecture_source_task_id=architecture_source,
             ),
+            accepted_nodes=accepted_nodes,
+            inherited_nodes=inherited_nodes,
         )
         for node in compiled["nodes"]:
             contract = dict(node["task_contract"])
