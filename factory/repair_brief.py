@@ -102,7 +102,11 @@ def repair_finding_detail(output: Mapping[str, Any]) -> str:
         return ("blocking findings: " + " | ".join(rendered))[:4000]
     if bool(output.get("release_blocked")):
         return "provider marked the release as blocked without a structured blocking finding"
-    return f"provider requested repair with status={output.get('status', 'unknown')}"
+    status = str(output.get("status", "unknown"))
+    summary = str(output.get("summary") or "").strip()
+    if summary:
+        return f"provider requested repair with status={status}: {summary}"[:4000]
+    return f"provider requested repair with status={status}"
 
 
 def builder_result_is_locally_complete(output: Mapping[str, Any]) -> bool:

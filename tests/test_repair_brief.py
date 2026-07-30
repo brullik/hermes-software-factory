@@ -10,6 +10,7 @@ from factory.repair_brief import (
     builder_result_is_locally_complete,
     normalized_repair_findings,
     product_goals_are_proven,
+    repair_finding_detail,
     repair_requirements,
 )
 
@@ -45,6 +46,22 @@ def test_attempt_result_findings_preserve_code_and_text_as_actionable_fix() -> N
     assert required_fixes == [
         "Validate the assigned row against its own role boundary."
     ]
+
+
+def test_plan_proposal_failed_safe_summary_remains_actionable() -> None:
+    detail = repair_finding_detail(
+        {
+            "status": "failed_safe",
+            "summary": (
+                "The active implementation inventory and exhausted hypothesis "
+                "chain are missing from the supplied context."
+            ),
+        }
+    )
+
+    assert "status=failed_safe" in detail
+    assert "implementation inventory" in detail
+    assert "hypothesis chain" in detail
 
 
 def test_repair_brief_schema_requires_every_actionable_field() -> None:

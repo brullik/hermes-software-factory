@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.7 - 2026-07-30
+
+- Supply replanners with the active implementation inventory, accepted
+  unaffected result coordinates, unresolved FailureEnvelopes, hypothesis
+  history, safe problem coordinates, and the current policy digest.
+- Preserve schema-bounded PlanProposal `summary` text in failure diagnostics
+  when planning output returns `failed_safe` without reviewer-style findings.
+
 ## 2.2.6 - 2026-07-30
 
 - Preserve required toolchain capabilities across the causal task lineage when
