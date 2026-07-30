@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.1 - 2026-07-30
+
+- Enter the trusted release root before rootless Podman probes so the service
+  user never inherits an unreadable operator home as its working directory.
+
 ## 2.2.0 - 2026-07-30
 
 - Compile model-proposed semantic implementation slices into a deterministic,

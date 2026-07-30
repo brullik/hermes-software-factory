@@ -32,6 +32,7 @@ if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
   printf 'Service user does not exist: %s\n' "${SERVICE_USER}" >&2
   exit 78
 fi
+cd "${ROOT_DIR}"
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
