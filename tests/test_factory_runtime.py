@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -574,6 +575,43 @@ class FactoryRuntimeTests(unittest.TestCase):
             manager.release(second)
             self.assertTrue(second.path.is_dir())
             self.assertFalse((second.path / ".lease.json").exists())
+            self.assertFalse(
+                (second.path.parent / ".repository.lease.json").exists()
+            )
+
+    def test_provider_cleanup_cannot_remove_controller_workspace_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def initialize(_product_id: str, destination: Path) -> None:
+                destination.mkdir(parents=True)
+                (destination / "README.md").write_text(
+                    "target repository\n",
+                    encoding="utf-8",
+                )
+
+            manager = WorkspaceManager(
+                root / "worktrees",
+                persistent=True,
+                initializer=initialize,
+            )
+            lease = manager.acquire(
+                product_id="product",
+                task_id="builder",
+                worker_id="worker",
+            )
+            marker = lease.path.parent / ".repository.lease.json"
+            self.assertTrue(marker.is_file())
+
+            for child in lease.path.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+
+            self.assertTrue(marker.is_file())
+            manager.release(lease)
+            self.assertFalse(marker.exists())
 
     def test_persistent_workspace_reclaims_only_durably_stale_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.4 - 2026-07-30
+
+- Reject PlanProposal scopes that contain product requirements instead of
+  relative repository path globs, and make the path-glob contract explicit in
+  the schema and planner prompts.
+- Preserve sanitized violating path coordinates and required fixes in
+  `scope_violation` FailureEnvelopes so repair and replan agents can act on the
+  exact controller diagnostic.
+- Store workspace lease authority beside the model-managed repository instead
+  of inside it, so provider cleanup cannot delete the marker required for a
+  safe release.
+
 ## 2.2.3 - 2026-07-30
 
 - Prove repository configuration and pull-request merge capabilities from the

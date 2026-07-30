@@ -185,6 +185,35 @@ def test_AUT_P0_032_plan_compiler_is_deterministic_and_controller_owned(
         )
 
 
+def test_plan_compiler_rejects_product_requirements_used_as_path_scope(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    semantic = proposal(config)
+    semantic["nodes"][0]["scope"] = [
+        "Runtime HTTP service with protected runtime workflow",
+        "Bearer authentication and authorization rejection paths",
+    ]
+    with pytest.raises(
+        ValueError,
+        match="relative POSIX path globs, not prose",
+    ):
+        PlanCompiler(policy_digest=policy_digest(config)).compile(
+            semantic,
+            CompileContext(
+                product_id="product-semantic",
+                revision=1,
+                parent_plan_id=None,
+                source_failure_id=None,
+                created_by_task_id="T-TASKSPECIFIER001",
+                root_task_id="T-ROOTSEMANTIC001",
+                root_context_ref="evidence/intake-product-semantic.json",
+                external_repository=False,
+                proposal_artifact_ref="evidence/plan-proposal-semantic-001.json",
+            ),
+        )
+
+
 def test_AUT_P0_038_product_acceptance_is_mandatory_between_staging_and_production(
     tmp_path: Path,
 ) -> None:

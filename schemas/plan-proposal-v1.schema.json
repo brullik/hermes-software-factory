@@ -86,10 +86,16 @@
             "uniqueItems": true
           },
           "scope": {
+            "description": "Bounded repository write scope expressed only as relative POSIX path globs, for example src/**, tests/**, or README.md. Prose is invalid.",
             "type": "array",
             "minItems": 1,
             "maxItems": 200,
-            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "^(?!/)(?!.*\\\\)(?!.*\\s)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+            },
             "uniqueItems": true
           },
           "acceptance_intents": {

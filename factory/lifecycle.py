@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Final
 
 LIFECYCLE_VERSION: Final = "3.0"
-PLAN_COMPILER_VERSION: Final = "1.0"
+PLAN_COMPILER_VERSION: Final = "1.1"
 
 
 @dataclass(frozen=True)
