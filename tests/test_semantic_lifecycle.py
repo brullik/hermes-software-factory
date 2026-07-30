@@ -277,6 +277,156 @@ def test_replan_compiler_merges_and_reuses_accepted_lineage_nodes(
     assert compiled["proposal_digest"] == sha256_text(stable_json(semantic))
 
 
+def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    semantic = proposal(config)
+    inherited_dependency = {
+        "node_key": "dependency-contract",
+        "stage_kind": "implementation_slice",
+        "title": "Implement dependency metadata",
+        "objective": (
+            "Provide metadata previously accepted by target-dependency-audit "
+            "and target-license-check"
+        ),
+        "depends_on": [],
+        "scope": ["pyproject.toml"],
+        "acceptance_intents": [
+            "The accepted dependency metadata remains available to repository checks."
+        ],
+        "goal_ids": ["root-goal"],
+    }
+    semantic.update(
+        {
+            "artifact_id": "plan-proposal-gate-obligation-replan",
+            "producer": {
+                "role": "replanner",
+                "tier": "terra",
+                "provider": "fake",
+                "model": "fake",
+            },
+            "proposal_kind": "replan_delta",
+            "parent_plan_id": "PLAN-PARENT-GATES",
+            "source_failure_id": "failure-gates",
+            "nodes": [
+                dict(inherited_dependency),
+                {
+                    "node_key": "image-security",
+                    "stage_kind": "implementation_slice",
+                    "title": "Record immutable image security evidence",
+                    "objective": "Bind the release candidate to an immutable image digest",
+                    "depends_on": ["dependency-contract"],
+                    "scope": ["Dockerfile", "tests/**"],
+                    "acceptance_intents": [
+                        "Container security evidence is bound to the candidate digest."
+                    ],
+                    "goal_ids": ["root-goal"],
+                },
+            ],
+        }
+    )
+    context = CompileContext(
+        product_id="product-semantic",
+        revision=2,
+        parent_plan_id="PLAN-PARENT-GATES",
+        source_failure_id="failure-gates",
+        created_by_task_id="T-REPLANNER-GATES",
+        root_task_id="T-ROOTSEMANTIC001",
+        root_context_ref="evidence/intake-product-semantic.json",
+        external_repository=True,
+        proposal_artifact_ref="evidence/plan-proposal-gate-obligation-replan.json",
+        architecture_source_task_id="T-ARCHITECTURE-SOURCE",
+        mandatory_replan_gate_ids=(
+            "target-dependency-audit",
+            "target-license-check",
+        ),
+    )
+
+    with pytest.raises(
+        PlanContractViolation,
+        match=(
+            "fresh implementation slices do not cover failed mandatory gates: "
+            "target-dependency-audit, target-license-check"
+        ),
+    ):
+        PlanCompiler(policy_digest=policy_digest(config)).compile(
+            semantic,
+            context,
+            inherited_nodes=[inherited_dependency],
+            accepted_nodes={
+                "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
+            },
+        )
+
+    semantic["nodes"][1]["objective"] = (
+        "Repair target-dependency-audit and target-license-check by adding the "
+        "missing executable dependency contract"
+    )
+    compiled = PlanCompiler(policy_digest=policy_digest(config)).compile(
+        semantic,
+        context,
+        inherited_nodes=[inherited_dependency],
+        accepted_nodes={
+            "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
+        },
+    )
+    implementations = [
+        node["task_contract"]
+        for node in compiled["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+    ]
+    assert any(
+        node["semantic_node_key"] == "image-security"
+        and node["supersedes_task_id"] is None
+        for node in implementations
+    )
+
+
+def test_replan_compiler_rejects_delta_without_fresh_implementation(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    semantic = proposal(config)
+    inherited = dict(semantic["nodes"][0])
+    semantic.update(
+        {
+            "producer": {
+                "role": "replanner",
+                "tier": "terra",
+                "provider": "fake",
+                "model": "fake",
+            },
+            "proposal_kind": "replan_delta",
+            "parent_plan_id": "PLAN-PARENT-NOOP",
+            "source_failure_id": "failure-noop",
+            "nodes": [dict(inherited)],
+        }
+    )
+
+    with pytest.raises(
+        PlanContractViolation,
+        match="replan_delta has no fresh implementation slice",
+    ):
+        PlanCompiler(policy_digest=policy_digest(config)).compile(
+            semantic,
+            CompileContext(
+                product_id="product-semantic",
+                revision=2,
+                parent_plan_id="PLAN-PARENT-NOOP",
+                source_failure_id="failure-noop",
+                created_by_task_id="T-REPLANNER-NOOP",
+                root_task_id="T-ROOTSEMANTIC001",
+                root_context_ref="evidence/intake-product-semantic.json",
+                external_repository=False,
+                proposal_artifact_ref="evidence/plan-proposal-noop.json",
+                architecture_source_task_id="T-ARCHITECTURE-SOURCE",
+            ),
+            inherited_nodes=[inherited],
+            accepted_nodes={"semantic:core-journey": "T-ACCEPTED-CORE"},
+        )
+
+
 def test_replan_compiler_does_not_reuse_changed_accepted_node(
     tmp_path: Path,
 ) -> None:

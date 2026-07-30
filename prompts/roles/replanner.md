@@ -24,8 +24,13 @@
 4. Не повторяй идентичную гипотезу с теми же evidence.
 5. Верни `proposal_kind=replan_delta`, точный активный `parent_plan_id` и
    `source_failure_id`.
-6. Свяжи каждый обязательный goal с исполнимым implementation slice.
-7. Используй controller-owned `plan_summary.policy_digest`,
+6. Для каждого `failed_gate_id` из причинной цепочки
+   `mandatory_gate_failed` создай новый или материально изменённый implementation
+   slice. Укажи точный gate ID в `objective` или `acceptance_intents`, а в `scope`
+   включи безопасную координату из `required_fixes`. Неизменённый `ACCEPTED`
+   slice не считается исправлением этого gate.
+7. Свяжи каждый обязательный goal с исполнимым implementation slice.
+8. Используй controller-owned `plan_summary.policy_digest`,
    `implementation_nodes`, `accepted_unaffected_node_keys`,
    `unresolved_failure_inventory` и `hypothesis_inventory`; не объявляй их
    отсутствующими и не подменяй placeholder-значениями.

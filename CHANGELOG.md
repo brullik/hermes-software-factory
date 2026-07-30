@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.21 - 2026-07-30
+
+- Reject replan deltas that merely reuse accepted implementation nodes without
+  scheduling a fresh or materially changed executable slice.
+- Require fresh replan slices to name every failed mandatory quality gate found
+  in the bounded causal FailureEnvelope chain.
+- Bind the proposal to its controller-issued source failure so a model cannot
+  substitute unrelated evidence or activate a plan that omits the proven blocker.
+- Teach Replanner to carry each safe required-fix coordinate into the bounded
+  scope and exact gate ID into fresh executable acceptance.
+
 ## 2.2.20 - 2026-07-30
 
 - Prove a historical repair branch belongs to the superseded task through its
