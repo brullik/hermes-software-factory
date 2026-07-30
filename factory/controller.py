@@ -42,6 +42,10 @@ class ControllerHandler(BaseHTTPRequestHandler):
             runtime = self.server.state.maintenance_status()
             maintenance_active = int(bool(runtime["maintenance_active"]))
             sqlite_busy_events = int(runtime["sqlite_busy_events"])
+            maintenance_expired = int(bool(runtime.get("maintenance_expired")))
+            maintenance_recoveries = int(
+                runtime.get("maintenance_recovery_count") or 0
+            )
             body = (
                 "# HELP hermes_factory_database_ready Whether the controller database is ready.\n"
                 "# TYPE hermes_factory_database_ready gauge\n"
@@ -55,6 +59,15 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 "# HELP hermes_factory_maintenance_active Whether intake and new claims are paused.\n"
                 "# TYPE hermes_factory_maintenance_active gauge\n"
                 f"hermes_factory_maintenance_active {maintenance_active}\n"
+                "# HELP hermes_factory_maintenance_expired "
+                "Whether the current maintenance lease is past its deadline.\n"
+                "# TYPE hermes_factory_maintenance_expired gauge\n"
+                f"hermes_factory_maintenance_expired {maintenance_expired}\n"
+                "# HELP hermes_factory_maintenance_recoveries_total "
+                "Expired deploy maintenance holds recovered automatically.\n"
+                "# TYPE hermes_factory_maintenance_recoveries_total counter\n"
+                f"hermes_factory_maintenance_recoveries_total "
+                f"{maintenance_recoveries}\n"
                 "# HELP hermes_factory_sqlite_busy_events_total Observed bounded SQLite busy events.\n"
                 "# TYPE hermes_factory_sqlite_busy_events_total counter\n"
                 f"hermes_factory_sqlite_busy_events_total {sqlite_busy_events}\n"
@@ -81,7 +94,12 @@ class ControllerHandler(BaseHTTPRequestHandler):
             "maintenance": {
                 "active": maintenance_active,
                 "reason": runtime["maintenance_reason"],
+                "mode": runtime.get("maintenance_mode"),
+                "owner": runtime.get("maintenance_owner"),
                 "entered_at": runtime["maintenance_entered_at"],
+                "expires_at": runtime.get("maintenance_expires_at"),
+                "expired": bool(runtime.get("maintenance_expired")),
+                "auto_resume": bool(runtime.get("maintenance_auto_resume")),
             },
         }
         if path == "/status":

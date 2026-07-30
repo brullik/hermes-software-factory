@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.16 - 2026-07-30
+
+- Replace unbounded release maintenance with durable deploy leases, bounded
+  TTLs, heartbeat renewal, fencing IDs, and drain-aware automatic recovery.
+- Reconcile the exact historical prompt-boundary hotfix hold at startup while
+  leaving every unrelated legacy or manual hold fail-closed.
+- Prevent expired task leases, late heartbeats, and stale operators from
+  stranding or taking over maintenance across controller and worker processes.
+- Close stale active hypotheses whose causal failures are already resolved and
+  expose maintenance mode, expiry, and recovery counters to operators.
+
 ## 2.2.15 - 2026-07-30
 
 - Carry compiled Hermes prompts through a bounded UTF-8 stdin channel instead

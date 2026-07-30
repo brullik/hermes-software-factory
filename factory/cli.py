@@ -236,11 +236,25 @@ def maintenance_command(args: argparse.Namespace) -> int:
         max_active_products=config.max_active_products,
     )
     try:
-        result = (
-            state.enter_maintenance(str(args.reason))
-            if args.maintenance_action == "enter"
-            else state.leave_maintenance()
-        )
+        if args.maintenance_action == "enter":
+            result = state.enter_maintenance(
+                str(args.reason),
+                mode=str(args.mode),
+                ttl_seconds=args.ttl_seconds,
+                owner=str(args.owner),
+            )
+        elif args.maintenance_action == "heartbeat":
+            result = state.heartbeat_maintenance(
+                str(args.lease_id),
+                ttl_seconds=int(args.ttl_seconds),
+            )
+        elif args.maintenance_action == "leave":
+            result = state.leave_maintenance(
+                lease_id=args.lease_id,
+                force=bool(args.force),
+            )
+        else:
+            result = state.maintenance_status()
         print(json.dumps({"status": "PASS", "maintenance": result}))
         return 0
     finally:
@@ -709,9 +723,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     maintenance_enter = maintenance_actions.add_parser("enter")
     maintenance_enter.add_argument("--reason", required=True)
+    maintenance_enter.add_argument(
+        "--mode", choices=("manual", "deploy"), default="manual"
+    )
+    maintenance_enter.add_argument("--ttl-seconds", type=int)
+    maintenance_enter.add_argument("--owner", default="operator")
     maintenance_enter.set_defaults(function=maintenance_command)
+    maintenance_heartbeat = maintenance_actions.add_parser("heartbeat")
+    maintenance_heartbeat.add_argument("--lease-id", required=True)
+    maintenance_heartbeat.add_argument("--ttl-seconds", type=int, default=1800)
+    maintenance_heartbeat.set_defaults(function=maintenance_command)
     maintenance_leave = maintenance_actions.add_parser("leave")
-    maintenance_leave.set_defaults(function=maintenance_command, reason="")
+    maintenance_leave.add_argument("--lease-id")
+    maintenance_leave.add_argument("--force", action="store_true")
+    maintenance_leave.set_defaults(function=maintenance_command)
+    maintenance_status = maintenance_actions.add_parser("status")
+    maintenance_status.set_defaults(function=maintenance_command)
     audit = subparsers.add_parser("state-audit")
     audit.add_argument("--config", type=Path)
     audit.add_argument("--output", type=Path)

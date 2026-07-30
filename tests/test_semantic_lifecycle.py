@@ -876,6 +876,206 @@ def test_maintenance_closes_intake_and_recovery_apply_is_restart_safe(
     state.close()
 
 
+def test_deploy_maintenance_auto_resumes_after_expiry_and_drain(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-maintenance-lease"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Prove a deploy maintenance lease cannot strand ready work",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="maintenance-lease",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    for task_id in ("T-MAINT-LEASE-A", "T-MAINT-LEASE-B"):
+        state.add_task(
+            task_id=task_id,
+            product_id=product_id,
+            title=f"Maintenance lease task {task_id}",
+            role="builder",
+        )
+    claimed = state.claim_task(worker_id="maintenance-drain-worker")
+    assert claimed is not None
+    maintenance = state.enter_maintenance(
+        "transactional-deploy",
+        mode="deploy",
+        ttl_seconds=60,
+        owner="release-helper",
+    )
+    lease_id = str(maintenance["maintenance_lease_id"])
+    with state._lock, state._connection:
+        state._connection.execute(
+            "UPDATE factory_runtime_state SET maintenance_expires_at=? "
+            "WHERE singleton_id=1",
+            ("2000-01-01T00:00:00Z",),
+        )
+    assert state.maintenance_active()
+    with pytest.raises(ValueError, match="lease changed"):
+        state.leave_maintenance(lease_id="maintenance-wrong")
+    with pytest.raises(ValueError, match="expired"):
+        state.heartbeat_maintenance(lease_id)
+    state.commit_task_outcome(
+        TaskOutcome(
+            task_id=str(claimed["task_id"]),
+            worker_id="maintenance-drain-worker",
+            lease_token=str(claimed["lease_token"]),
+            expected_plan_revision=0,
+            idempotency_key=sha256_text("maintenance-drained-outcome"),
+            result_ref="internal://maintenance-drained",
+            result_digest=sha256_text("maintenance-drained"),
+            status="ACCEPTED",
+        )
+    )
+    assert not state.maintenance_active()
+    next_claim = state.claim_task(worker_id="maintenance-resumed-worker")
+    assert next_claim is not None
+    assert next_claim["task_id"] != claimed["task_id"]
+    runtime = state.maintenance_status()
+    assert runtime["maintenance_recovery_count"] == 1
+    assert any(
+        event["event_type"] == "maintenance_auto_resumed"
+        for event in state.events()
+    )
+    state.close()
+
+
+def test_deploy_maintenance_is_fenced_across_state_store_instances(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    first = StateStore(config.database_path)
+    maintenance = first.enter_maintenance(
+        "transactional-deploy",
+        mode="deploy",
+        ttl_seconds=60,
+        owner="release-helper",
+    )
+    lease_id = str(maintenance["maintenance_lease_id"])
+    second = StateStore(config.database_path)
+    with pytest.raises(ValueError, match="already active"):
+        second.enter_maintenance("manual-schema-repair")
+    renewed = second.heartbeat_maintenance(lease_id, ttl_seconds=120)
+    assert renewed["maintenance_active"]
+    with pytest.raises(ValueError, match="lease changed"):
+        second.leave_maintenance(lease_id="maintenance-stale")
+    second.leave_maintenance(lease_id=lease_id)
+    assert not first.maintenance_active()
+    second.close()
+    first.close()
+
+
+def test_expired_task_lease_cannot_strand_expired_deploy_maintenance(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-expired-maintenance-claim"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Recover an abandoned claim before resuming after deploy",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="expired-maintenance-claim",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    state.add_task(
+        task_id="T-EXPIRED-MAINTENANCE-CLAIM",
+        product_id=product_id,
+        title="Recover an expired task lease",
+        role="builder",
+    )
+    claimed = state.claim_task(worker_id="abandoned-worker")
+    assert claimed is not None
+    state.enter_maintenance(
+        "transactional-deploy",
+        mode="deploy",
+        ttl_seconds=60,
+        owner="release-helper",
+    )
+    with state._lock, state._connection:
+        state._connection.execute(
+            """UPDATE tasks SET lease_until='2000-01-01T00:00:00Z'
+               WHERE task_id=?""",
+            (claimed["task_id"],),
+        )
+        state._connection.execute(
+            """UPDATE factory_runtime_state
+               SET maintenance_expires_at='2000-01-01T00:00:00Z'
+               WHERE singleton_id=1"""
+        )
+    assert not state.maintenance_active()
+    reclaimed = state.claim_task(worker_id="recovery-worker")
+    assert reclaimed is not None
+    assert reclaimed["task_id"] == claimed["task_id"]
+    assert reclaimed["lease_owner"] == "recovery-worker"
+    state.close()
+
+
+def test_manual_maintenance_requires_explicit_release(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    state.enter_maintenance("manual-schema-repair")
+    with state._lock, state._connection:
+        state._connection.execute(
+            "UPDATE factory_runtime_state SET updated_at=? WHERE singleton_id=1",
+            ("2000-01-01T00:00:00Z",),
+        )
+    assert state.maintenance_active()
+    assert not state.recover_expired_maintenance()
+    state.leave_maintenance()
+    assert not state.maintenance_active()
+    state.close()
+
+
+def test_migration_014_recovers_exact_stale_prompt_hotfix(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    state.enter_maintenance(
+        "prompt-input-limit-and-error-classification-hotfix"
+    )
+    with state._lock, state._connection:
+        state._connection.execute(
+            "DELETE FROM schema_migrations WHERE version=14"
+        )
+        state._connection.execute(
+            """UPDATE factory_runtime_state
+               SET maintenance_mode='manual', maintenance_owner=NULL,
+                   maintenance_lease_id=NULL, maintenance_expires_at=NULL,
+                   maintenance_heartbeat_at=NULL, maintenance_auto_resume=0,
+                   updated_at='2000-01-01T00:00:00Z'
+               WHERE singleton_id=1"""
+        )
+    state.close()
+
+    restarted = StateStore(config.database_path)
+    runtime = restarted.maintenance_status()
+    assert not runtime["maintenance_active"]
+    assert runtime["maintenance_mode"] == "deploy"
+    assert runtime["maintenance_recovery_count"] == 1
+    assert any(
+        event["event_type"] == "maintenance_auto_resumed"
+        for event in restarted.events()
+    )
+    restarted.close()
+
+
 def test_AUT_P1_011_maintenance_drains_claims_and_sqlite_busy_is_bounded(
     tmp_path: Path,
 ) -> None:
@@ -983,7 +1183,9 @@ def test_active_legacy_state_enters_maintenance_during_recovery_migration(
     state.close()
     connection = sqlite3.connect(config.database_path)
     try:
-        connection.execute("DELETE FROM schema_migrations WHERE version=13")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN (13,14,15)"
+        )
         connection.execute("DROP TABLE factory_runtime_state")
         connection.execute("DROP TABLE recovery_applications")
         connection.commit()
@@ -994,6 +1196,68 @@ def test_active_legacy_state_enters_maintenance_during_recovery_migration(
     assert migrated.maintenance_active()
     assert migrated.claim_task(worker_id="must-not-claim") is None
     migrated.close()
+
+
+def test_migration_015_closes_hypothesis_for_resolved_failure(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-resolved-hypothesis"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Close stale diagnosis state after its failure is resolved",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="resolved-hypothesis",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    now = "2026-07-30T00:00:00Z"
+    with state._lock, state._connection:
+        state._connection.execute(
+            """INSERT INTO failures
+               (failure_id, product_id, task_id, failure_class, reason_code,
+                fingerprint, safe_message, evidence_ref, status, retryable,
+                owner_action_eligible, expected_json, actual_json,
+                failed_gate_ids_json, first_seen_at, last_seen_at)
+               VALUES ('failure-resolved-hypothesis', ?,
+                       'T-RESOLVED-HYPOTHESIS', 'semantic',
+                       'scope_violation', ?, 'resolved diagnostic',
+                       'internal://resolved', 'RESOLVED', 0, 0, '{}', '{}',
+                       '[]', ?, ?)""",
+            (product_id, sha256_text("resolved-hypothesis"), now, now),
+        )
+        state._connection.execute(
+            """INSERT INTO hypotheses
+               (hypothesis_id, product_id, failure_id, signature, statement,
+                required_evidence_json, status, semantic_budget, attempts_used,
+                created_at)
+               VALUES ('hypothesis-stale-resolved', ?,
+                       'failure-resolved-hypothesis', ?, 'stale diagnosis',
+                       '[]', 'ACTIVE', 3, 1, ?)""",
+            (product_id, sha256_text("stale-diagnosis"), now),
+        )
+        state._connection.execute(
+            "DELETE FROM schema_migrations WHERE version=15"
+        )
+    state.close()
+
+    restarted = StateStore(config.database_path)
+    hypothesis = restarted._connection.execute(
+        "SELECT status, closed_at FROM hypotheses WHERE hypothesis_id=?",
+        ("hypothesis-stale-resolved",),
+    ).fetchone()
+    assert hypothesis is not None
+    assert hypothesis["status"] == "RESOLVED"
+    assert hypothesis["closed_at"]
+    restarted.close()
 
 
 def test_AUT_P0_033_release_version_must_match_all_evidence(

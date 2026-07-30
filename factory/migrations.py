@@ -967,6 +967,74 @@ def _migration_013_maintenance_and_recovery_control(
     )
 
 
+def _migration_014_maintenance_lease_fencing(
+    connection: sqlite3.Connection,
+) -> None:
+    """Fence deploy maintenance with a bounded durable lease.
+
+    The exact maintenance reason left by the 2.2.14 prompt-boundary hotfix is
+    converted into an expired deploy lease. Startup reconciliation can then
+    release it after live claimed work drains. Every other legacy reason stays
+    manual and therefore fails closed.
+    """
+
+    _add_columns(
+        connection,
+        "factory_runtime_state",
+        (
+            ("maintenance_mode", "TEXT NOT NULL DEFAULT 'manual'"),
+            ("maintenance_owner", "TEXT"),
+            ("maintenance_lease_id", "TEXT"),
+            ("maintenance_expires_at", "TEXT"),
+            ("maintenance_heartbeat_at", "TEXT"),
+            ("maintenance_auto_resume", "INTEGER NOT NULL DEFAULT 0"),
+            ("maintenance_recovery_count", "INTEGER NOT NULL DEFAULT 0"),
+        ),
+    )
+    row = connection.execute(
+        """SELECT maintenance_active, maintenance_reason, updated_at
+           FROM factory_runtime_state WHERE singleton_id=1"""
+    ).fetchone()
+    if (
+        row is not None
+        and bool(row[0])
+        and str(row[1] or "")
+        == "prompt-input-limit-and-error-classification-hotfix"
+    ):
+        updated_at = str(row[2] or utc_now())
+        lease_id = "maintenance-" + sha256_text(
+            f"legacy-hotfix:{updated_at}:{row[1]}"
+        )[:24]
+        connection.execute(
+            """UPDATE factory_runtime_state
+               SET maintenance_mode='deploy',
+                   maintenance_owner='legacy-hotfix-recovery',
+                   maintenance_lease_id=?,
+                   maintenance_expires_at=?,
+                   maintenance_heartbeat_at=?,
+                   maintenance_auto_resume=1
+               WHERE singleton_id=1""",
+            (lease_id, updated_at, updated_at),
+        )
+
+
+def _migration_015_resolved_hypothesis_cleanup(
+    connection: sqlite3.Connection,
+) -> None:
+    """Close hypotheses whose causal FailureEnvelope is already resolved."""
+
+    now = utc_now()
+    connection.execute(
+        """UPDATE hypotheses
+           SET status='RESOLVED', closed_at=COALESCE(closed_at, ?)
+           WHERE status='ACTIVE'
+             AND failure_id IN (
+                 SELECT failure_id FROM failures WHERE status='RESOLVED'
+             )""",
+        (now,),
+    )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -1145,6 +1213,16 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         13,
         "maintenance-and-recovery-control",
         _migration_013_maintenance_and_recovery_control,
+    ),
+    (
+        14,
+        "maintenance-lease-fencing",
+        _migration_014_maintenance_lease_fencing,
+    ),
+    (
+        15,
+        "resolved-hypothesis-cleanup",
+        _migration_015_resolved_hypothesis_cleanup,
     ),
 )
 

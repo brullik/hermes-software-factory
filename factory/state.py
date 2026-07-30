@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .common import sha256_text, utc_now
+from .common import new_id, sha256_text, utc_now
 from .migrations import apply_migrations
 
 
@@ -82,6 +82,7 @@ class StateStore:
         self._connection.execute("PRAGMA busy_timeout=30000")
         self._backup_before_autonomy_migration()
         self._initialize()
+        self.recover_expired_maintenance()
 
     def _initialize(self) -> None:
         with self._connection:
@@ -227,52 +228,291 @@ class StateStore:
         with self._lock:
             return bool(self._connection.execute("SELECT 1").fetchone()[0] == 1)
 
-    def maintenance_status(self) -> dict[str, Any]:
+    def _recover_expired_maintenance_locked(self, now: str) -> bool:
+        row = self._connection.execute(
+            "SELECT * FROM factory_runtime_state WHERE singleton_id=1"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("factory runtime state is missing")
+        if (
+            not bool(row["maintenance_active"])
+            or str(row["maintenance_mode"] or "manual") != "deploy"
+            or not bool(row["maintenance_auto_resume"])
+            or not row["maintenance_expires_at"]
+            or str(row["maintenance_expires_at"]) > now
+        ):
+            return False
+        live_claimed = int(
+            self._connection.execute(
+                """SELECT COUNT(*) FROM tasks
+                   WHERE status='CLAIMED'
+                     AND (lease_until IS NULL OR lease_until >= ?)""",
+                (now,),
+            ).fetchone()[0]
+        )
+        if live_claimed:
+            return False
+        reason = str(row["maintenance_reason"] or "expired deploy maintenance")
+        lease_id = str(row["maintenance_lease_id"] or "")
+        expired_at = str(row["maintenance_expires_at"])
+        updated = self._connection.execute(
+            """UPDATE factory_runtime_state
+               SET maintenance_active=0, maintenance_left_at=?, updated_at=?,
+                   maintenance_recovery_count=maintenance_recovery_count+1
+               WHERE singleton_id=1 AND maintenance_active=1
+                 AND maintenance_mode='deploy'
+                 AND maintenance_auto_resume=1
+                 AND maintenance_lease_id=?
+                 AND maintenance_expires_at <= ?""",
+            (now, now, lease_id, now),
+        ).rowcount
+        if updated != 1:
+            return False
+        self._record_event(
+            None,
+            None,
+            "maintenance_auto_resumed",
+            {
+                "reason": reason,
+                "lease_id": lease_id,
+                "expired_at": expired_at,
+            },
+        )
+        return True
+
+    def recover_expired_maintenance(self) -> bool:
+        now = utc_now()
         with self._lock:
-            row = self._connection.execute(
-                "SELECT * FROM factory_runtime_state WHERE singleton_id=1"
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("factory runtime state is missing")
-            return dict(row)
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                recovered = self._recover_expired_maintenance_locked(now)
+                self._connection.commit()
+                return recovered
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def maintenance_status(self) -> dict[str, Any]:
+        now = utc_now()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._recover_expired_maintenance_locked(now)
+                row = self._connection.execute(
+                    "SELECT * FROM factory_runtime_state WHERE singleton_id=1"
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("factory runtime state is missing")
+                result = dict(row)
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+            expires_at = str(result.get("maintenance_expires_at") or "")
+            result["maintenance_expired"] = bool(
+                result.get("maintenance_active")
+                and expires_at
+                and expires_at <= now
+            )
+            return result
 
     def maintenance_active(self) -> bool:
         return bool(self.maintenance_status()["maintenance_active"])
 
-    def enter_maintenance(self, reason: str) -> dict[str, Any]:
+    def enter_maintenance(
+        self,
+        reason: str,
+        *,
+        mode: str = "manual",
+        ttl_seconds: int | None = None,
+        owner: str = "operator",
+    ) -> dict[str, Any]:
         normalized = reason.strip()
+        normalized_owner = owner.strip()
         if not normalized:
             raise ValueError("maintenance reason is required")
+        if len(normalized) > 512:
+            raise ValueError("maintenance reason must not exceed 512 characters")
+        if mode not in {"manual", "deploy"}:
+            raise ValueError("maintenance mode must be manual or deploy")
+        if not normalized_owner:
+            raise ValueError("maintenance owner is required")
+        if len(normalized_owner) > 128:
+            raise ValueError("maintenance owner must not exceed 128 characters")
+        if mode == "manual" and ttl_seconds is not None:
+            raise ValueError("manual maintenance does not accept a TTL")
+        if mode == "deploy":
+            ttl_seconds = 1800 if ttl_seconds is None else int(ttl_seconds)
+            if ttl_seconds < 60 or ttl_seconds > 7200:
+                raise ValueError(
+                    "deploy maintenance TTL must be between 60 and 7200 seconds"
+                )
         now = utc_now()
-        with self._lock, self._connection:
-            self._connection.execute(
-                """UPDATE factory_runtime_state
-                   SET maintenance_active=1, maintenance_reason=?,
-                       maintenance_entered_at=COALESCE(
-                           maintenance_entered_at, ?
-                       ),
-                       maintenance_left_at=NULL, updated_at=?
-                   WHERE singleton_id=1""",
-                (normalized, now, now),
-            )
-            self._record_event(
-                None,
-                None,
-                "maintenance_entered",
-                {"reason": normalized},
-            )
+        expires_at = (
+            utc_now_from_seconds(int(ttl_seconds))
+            if mode == "deploy" and ttl_seconds is not None
+            else None
+        )
+        lease_id = new_id("maintenance")
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._recover_expired_maintenance_locked(now)
+                existing = self._connection.execute(
+                    "SELECT maintenance_active FROM factory_runtime_state "
+                    "WHERE singleton_id=1"
+                ).fetchone()
+                if existing is None:
+                    raise RuntimeError("factory runtime state is missing")
+                if bool(existing["maintenance_active"]):
+                    raise ValueError("maintenance is already active")
+                self._connection.execute(
+                    """UPDATE factory_runtime_state
+                       SET maintenance_active=1, maintenance_reason=?,
+                           maintenance_entered_at=?, maintenance_left_at=NULL,
+                           maintenance_mode=?, maintenance_owner=?,
+                           maintenance_lease_id=?, maintenance_expires_at=?,
+                           maintenance_heartbeat_at=?, maintenance_auto_resume=?,
+                           updated_at=?
+                       WHERE singleton_id=1""",
+                    (
+                        normalized,
+                        now,
+                        mode,
+                        normalized_owner,
+                        lease_id,
+                        expires_at,
+                        now,
+                        int(mode == "deploy"),
+                        now,
+                    ),
+                )
+                self._record_event(
+                    None,
+                    None,
+                    "maintenance_entered",
+                    {
+                        "reason": normalized,
+                        "mode": mode,
+                        "owner": normalized_owner,
+                        "lease_id": lease_id,
+                        "expires_at": expires_at,
+                    },
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
         return self.maintenance_status()
 
-    def leave_maintenance(self) -> dict[str, Any]:
+    def heartbeat_maintenance(
+        self,
+        lease_id: str,
+        *,
+        ttl_seconds: int = 1800,
+    ) -> dict[str, Any]:
+        normalized_lease_id = lease_id.strip()
+        if not normalized_lease_id:
+            raise ValueError("maintenance lease ID is required")
+        if ttl_seconds < 60 or ttl_seconds > 7200:
+            raise ValueError("maintenance TTL must be between 60 and 7200 seconds")
         now = utc_now()
-        with self._lock, self._connection:
-            self._connection.execute(
-                """UPDATE factory_runtime_state
-                   SET maintenance_active=0, maintenance_left_at=?,
-                       updated_at=? WHERE singleton_id=1""",
-                (now, now),
-            )
-            self._record_event(None, None, "maintenance_left", {})
+        expires_at = utc_now_from_seconds(ttl_seconds)
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT * FROM factory_runtime_state WHERE singleton_id=1"
+                ).fetchone()
+                if (
+                    row is None
+                    or not bool(row["maintenance_active"])
+                    or str(row["maintenance_mode"] or "") != "deploy"
+                    or str(row["maintenance_lease_id"] or "") != normalized_lease_id
+                ):
+                    raise ValueError(
+                        "maintenance deploy lease is missing or changed"
+                    )
+                if (
+                    not row["maintenance_expires_at"]
+                    or str(row["maintenance_expires_at"]) <= now
+                ):
+                    raise ValueError("maintenance deploy lease has expired")
+                updated = self._connection.execute(
+                    """UPDATE factory_runtime_state
+                       SET maintenance_heartbeat_at=?, maintenance_expires_at=?,
+                           updated_at=?
+                       WHERE singleton_id=1 AND maintenance_active=1
+                         AND maintenance_mode='deploy'
+                         AND maintenance_lease_id=?
+                         AND maintenance_expires_at > ?""",
+                    (now, expires_at, now, normalized_lease_id, now),
+                ).rowcount
+                if updated != 1:
+                    raise ValueError(
+                        "maintenance deploy lease is missing or changed"
+                    )
+                self._record_event(
+                    None,
+                    None,
+                    "maintenance_heartbeat",
+                    {
+                        "lease_id": normalized_lease_id,
+                        "expires_at": expires_at,
+                    },
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return self.maintenance_status()
+
+    def leave_maintenance(
+        self,
+        *,
+        lease_id: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT * FROM factory_runtime_state WHERE singleton_id=1"
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("factory runtime state is missing")
+                if not bool(row["maintenance_active"]):
+                    self._connection.commit()
+                    return self.maintenance_status()
+                stored_lease = str(row["maintenance_lease_id"] or "")
+                mode = str(row["maintenance_mode"] or "manual")
+                if mode == "deploy" and not force and lease_id != stored_lease:
+                    raise ValueError(
+                        "maintenance deploy lease changed; "
+                        "use the current lease or --force"
+                    )
+                self._connection.execute(
+                    """UPDATE factory_runtime_state
+                       SET maintenance_active=0, maintenance_left_at=?,
+                           updated_at=? WHERE singleton_id=1""",
+                    (now, now),
+                )
+                self._record_event(
+                    None,
+                    None,
+                    "maintenance_left",
+                    {
+                        "reason": str(row["maintenance_reason"] or ""),
+                        "mode": mode,
+                        "lease_id": stored_lease,
+                        "forced": bool(force),
+                    },
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
         return self.maintenance_status()
 
     def record_sqlite_busy_event(self) -> None:
@@ -870,26 +1110,29 @@ class StateStore:
 
     def claim_task(self, *, worker_id: str, lease_seconds: int = 300) -> dict[str, Any] | None:
         with self._lock:
-            maintenance = self._connection.execute(
-                """SELECT maintenance_active FROM factory_runtime_state
-                   WHERE singleton_id=1"""
-            ).fetchone()
-            if maintenance is not None and bool(maintenance[0]):
-                return None
             self._connection.execute("BEGIN IMMEDIATE")
             try:
+                now = utc_now()
+                self._recover_expired_maintenance_locked(now)
+                maintenance = self._connection.execute(
+                    """SELECT maintenance_active FROM factory_runtime_state
+                       WHERE singleton_id=1"""
+                ).fetchone()
+                if maintenance is not None and bool(maintenance[0]):
+                    self._connection.commit()
+                    return None
                 self._connection.execute(
                     """UPDATE tasks SET status='PENDING', graph_status='READY',
                            lease_owner=NULL, lease_until=NULL, lease_token=NULL
                        WHERE status='CLAIMED' AND lease_until < ?""",
-                    (utc_now(),),
+                    (now,),
                 )
                 self._connection.execute(
                     """UPDATE tasks SET status='PENDING', graph_status='READY',
                            updated_at=?
                        WHERE status='WAITING' AND graph_status='WAITING_TIME'
                          AND available_at IS NOT NULL AND available_at <= ?""",
-                    (utc_now(), utc_now()),
+                    (now, now),
                 )
                 rows = self._connection.execute(
                     """SELECT tasks.* FROM tasks
@@ -957,7 +1200,6 @@ class StateStore:
                 if chosen is None:
                     self._connection.commit()
                     return None
-                now = utc_now()
                 lease_until = utc_now_from_seconds(lease_seconds)
                 lease_token = sha256_text(
                     f"{chosen['task_id']}:{worker_id}:{now}:{chosen['attempts']}"
