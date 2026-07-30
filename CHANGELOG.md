@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.13 - 2026-07-30
+
+- Give every replanner a planning-specific acceptance contract instead of
+  inheriting an unprovable final product-review criterion.
+- Require bounded replan deltas to carry failed acceptance and mandatory gate
+  obligations into fresh executable evidence while preserving unaffected work.
+- Clarify that a replanner completes on a valid PlanProposal handoff even though
+  its future product gates have not run yet.
+
 ## 2.2.12 - 2026-07-30
 
 - Route evidence-backed `contained`, `recovered`, and `failed_safe`

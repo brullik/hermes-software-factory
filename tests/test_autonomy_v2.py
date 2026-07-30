@@ -1000,9 +1000,14 @@ def test_AUT_P0_006_missing_contract_reconstructs_safe_replan_coordinate(
             ).read_text(encoding="utf-8")
         )
         assert routed_contract["allowed_paths"] == ["artifacts/**"]
-        assert "mandatory active-plan completion criterion" in (
-            routed_contract["acceptance"][0]["verification"]
-        )
+        assert {
+            item["criterion_id"] for item in routed_contract["acceptance"]
+        } == {
+            "AC-REPLAN-FAILURE-CHAIN",
+            "AC-REPLAN-EXECUTABLE-HANDOFF",
+            "AC-REPLAN-PRESERVE-ACCEPTED",
+            "AC-REPLAN-SEMANTIC-ONLY",
+        }
         incident = state._connection.execute(
             """
             SELECT reason_code, status, evidence_ref
@@ -1016,6 +1021,101 @@ def test_AUT_P0_006_missing_contract_reconstructs_safe_replan_coordinate(
         assert incident["status"] == "RESOLVED"
         assert str(incident["evidence_ref"]).startswith(
             "state://task-contract/"
+        )
+    finally:
+        state.close()
+
+
+def test_replanner_uses_planning_acceptance_not_failed_security_acceptance(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, root_id = failed_two_node_graph(
+        tmp_path,
+        reason_code="needs_replan",
+    )
+    failed_contract_path = config.evidence_dir / "task-T-FAILNODEA.json"
+    failed_product_criterion = "No blocking security finding remains."
+    try:
+        failed_contract = json.loads(
+            failed_contract_path.read_text(encoding="utf-8")
+        )
+        failed_contract["role"] = "security-reviewer"
+        failed_contract["acceptance"] = [
+            {
+                "criterion_id": "AC-SECURITY-NO-BLOCKER",
+                "verification": failed_product_criterion,
+                "mandatory": True,
+            }
+        ]
+        failed_contract_path.write_text(
+            stable_json(failed_contract),
+            encoding="utf-8",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """
+                UPDATE tasks
+                   SET role='security-reviewer'
+                 WHERE task_id='T-FAILNODEA'
+                """
+            )
+            state._connection.execute(
+                """
+                UPDATE failures
+                   SET expected_json=?,
+                       failed_gate_ids_json=?
+                 WHERE failure_id=?
+                """,
+                (
+                    stable_json(
+                        {
+                            "acceptance": [
+                                "AC-SECURITY-NO-BLOCKER",
+                            ]
+                        }
+                    ),
+                    stable_json(
+                        [
+                            "target-dependency-audit",
+                            "target-license-check",
+                        ]
+                    ),
+                    failure_id,
+                ),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
+        assert routed["parent_task_id"] == "T-FAILNODEA"
+        assert routed["root_task_id"] == root_id
+        assert routed["failure_id"] == failure_id
+        assert routed["root_context_ref"] == (
+            "evidence/intake-product-autonomy.json"
+        )
+        routed_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(routed["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        criterion_ids = {
+            str(item["criterion_id"])
+            for item in routed_contract["acceptance"]
+        }
+        assert criterion_ids == {
+            "AC-REPLAN-FAILURE-CHAIN",
+            "AC-REPLAN-EXECUTABLE-HANDOFF",
+            "AC-REPLAN-PRESERVE-ACCEPTED",
+            "AC-REPLAN-SEMANTIC-ONLY",
+        }
+        assert failed_product_criterion not in stable_json(
+            routed_contract["acceptance"]
+        )
+        assert "failed acceptance criteria and mandatory gate IDs" in (
+            routed_contract["acceptance"][0]["verification"]
         )
     finally:
         state.close()
