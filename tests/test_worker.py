@@ -3036,6 +3036,72 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("prompt input size", failure["safe_message"])
             state.close()
 
+    def test_high_fan_in_evidence_is_totally_bounded_without_losing_coordinates(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(
+                root / "registry.yaml",
+                selected="gpt-5.6-luna",
+            )
+            config = make_config(root / "state", registry_path)
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            intake_result = IntakeService(
+                config,
+                state,
+                ArtifactStore(config),
+            ).submit(
+                source="cli",
+                owner_id="owner",
+                idea="Build a product from many independently accepted slices",
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            task = state.list_tasks(intake_result.product_id)[0]
+            spec = worker.default_spec(task)
+            evidence = tuple(
+                {
+                    "type": "dependency-result",
+                    "summary": (
+                        "TRUSTED_CONTROLLER_EVIDENCE "
+                        f"dependency_id=T-FANIN-{index:02d}; "
+                        f"mandatory_gate_id=target-gate-{index:02d};\n"
+                        + ("accepted-output " * 2_000)
+                        + f"\nsafe_coordinate=src/slice_{index:02d}.py"
+                    ),
+                    "artifact_ref": f"evidence/result-fanin-{index:02d}.json",
+                }
+                for index in range(32)
+            )
+
+            prompt, _, context_path = worker._context_and_prompt(
+                replace(spec, evidence=evidence)
+            )
+
+            self.assertLessEqual(len(prompt), 225_000)
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+            summaries = context["evidence"]
+            self.assertEqual(len(summaries), 32)
+            self.assertLessEqual(
+                sum(len(item["summary"]) for item in summaries),
+                48_000,
+            )
+            for index in range(32):
+                self.assertIn(f"T-FANIN-{index:02d}", prompt)
+                self.assertIn(f"target-gate-{index:02d}", prompt)
+                self.assertIn(f"result-fanin-{index:02d}.json", prompt)
+                self.assertIn(f"src/slice_{index:02d}.py", prompt)
+            state.close()
+
     def test_subprocess_runner_rejects_prompt_over_input_limit_before_exec(self) -> None:
         runner = SubprocessHermesRunner(
             binary="must-not-run",
