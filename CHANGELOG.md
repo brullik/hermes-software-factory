@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.20 - 2026-07-30
+
+- Prove a historical repair branch belongs to the superseded task through its
+  bounded parent FailureEnvelope ancestry, not only the terminal failure row.
+- Reconcile transient failures raised by a repair itself only when their same-product
+  ancestry reaches the original task and every replacement identity still matches.
+- Preserve fail-closed behavior for missing, cyclic, cross-product, overlong, or
+  otherwise unproven failure ancestry.
+
 ## 2.2.19 - 2026-07-30
 
 - Resolve every sibling FailureEnvelope for a superseded task when one repair
