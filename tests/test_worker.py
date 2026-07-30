@@ -35,6 +35,7 @@ from factory.worker import (
     SubprocessHermesRunner,
     TaskExecutionSpec,
     WorkerResult,
+    _mandatory_gate_failure_data,
     _normalized_output_status,
     _replanner_failure_inventory,
     _replanner_hypothesis_inventory,
@@ -442,6 +443,59 @@ def staging_release_task(
 
 
 class WorkerTests(unittest.TestCase):
+    def test_mandatory_gate_failure_preserves_safe_actionable_diagnostic(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "gate-target-license-check.json"
+            credential = "github_" + "pat_" + ("A" * 30)
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "status": "ERROR",
+                        "exit_code": None,
+                        "summary": (
+                            "pyproject.toml has no [project] dependency contract; "
+                            f"provider diagnostic contained {credential}"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            failure = _mandatory_gate_failure_data(
+                QualityGateRun(
+                    (
+                        {
+                            "gate_id": "target-license-check",
+                            "status": "FAIL",
+                            "evidence_ref": str(evidence_path),
+                        },
+                    ),
+                    (evidence_path,),
+                    False,
+                ),
+                detail="failed mandatory gates: target-license-check",
+                evidence_ref="evidence/attempt.json",
+                attempt_id="attempt-gate-diagnostic",
+            )
+
+        self.assertEqual(
+            failure.failed_gate_ids, ("target-license-check",)
+        )
+        self.assertIn(
+            "pyproject.toml has no [project] dependency contract",
+            failure.safe_message,
+        )
+        self.assertNotIn(credential, failure.safe_message)
+        self.assertIn("[REDACTED:github_token]", failure.safe_message)
+        self.assertIn("SAFE_REDACTION_COORDINATES", failure.safe_message)
+        diagnostics = failure.actual["gate_diagnostics"]
+        self.assertEqual(diagnostics[0]["gate_id"], "target-license-check")
+        self.assertEqual(
+            failure.expected["quality_gates"],
+            [{"gate_id": "target-license-check", "status": "PASS"}],
+        )
+
     def test_replanner_inventory_preserves_safe_failure_coordinates_and_hypotheses(
         self,
     ) -> None:
@@ -3317,6 +3371,17 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result.status, "failed_safe")
             self.assertEqual(result.reason_code, "mandatory_gate_failed")
             self.assertEqual(result.detail, "failed mandatory gates: secret-scan")
+            self.assertIsNotNone(result.failure_data)
+            assert result.failure_data is not None
+            self.assertEqual(
+                result.failure_data.failed_gate_ids, ("secret-scan",)
+            )
+            diagnostics = result.failure_data.actual["gate_diagnostics"]
+            self.assertEqual(diagnostics[0]["gate_id"], "secret-scan")
+            self.assertTrue(diagnostics[0]["summary"])
+            self.assertTrue(
+                diagnostics[0]["evidence_ref"].startswith("evidence/gate-")
+            )
             self.assertEqual(runner.calls, [])
             attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
             self.assertEqual(attempt["commands"][0]["result"], "not_run")
