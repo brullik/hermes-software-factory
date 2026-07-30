@@ -25,9 +25,11 @@ from factory.intake import IntakeService
 from factory.migrations import MIGRATIONS, apply_migrations
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
+from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
 from factory.repository import RepositoryBootstrapper
 from factory.state import StateStore
+from factory.worker import AgentWorker
 from scripts.build_legacy_2_0_19_fixture import build_fixture
 
 
@@ -664,6 +666,190 @@ def test_repair_inherits_toolchain_capabilities_from_failed_node_lineage(
         )
         assert "toolchain.container_builder" in recovered
         assert "toolchain.scanners" in recovered
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    ["mandatory_gate_failed", "model_requested_repair"],
+)
+def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
+    tmp_path: Path,
+    reason_code: str,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code=reason_code,
+    )
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(
+            str(failed["contract_ref"])
+        ).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "security-reviewer",
+                "output_schema": "security-review-result.schema.json",
+                "capability_profile": "reviewer_readonly",
+                "required_capabilities": list(
+                    CAPABILITY_PROFILES["reviewer_readonly"]
+                ),
+                "quality_gates": ["target-tests", "target-lint"],
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                   SET role='security-reviewer',
+                       output_schema='security-review-result.schema.json',
+                       capability_profile='reviewer_readonly',
+                       required_capabilities_json=?
+                   WHERE task_id='T-FAILNODEA'""",
+                (
+                    stable_json(
+                        list(CAPABILITY_PROFILES["reviewer_readonly"])
+                    ),
+                ),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
+        assert routed["stage_key"] == "replan"
+        assert routed["capability_profile"] == "planning_readonly"
+        assert routed["repair_context_ref"] is None
+        routed_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(routed["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert routed_contract["failure_id"] == failure_id
+        assert routed_contract["quality_gates"] == []
+    finally:
+        state.close()
+
+
+def test_exact_builder_repair_inherits_controller_quality_gates(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(
+            str(failed["contract_ref"])
+        ).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract["quality_gates"] = ["unit-tests", "lint"]
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        assert repair["role"] == "builder"
+        repair_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(repair["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert repair_contract["quality_gates"] == ["unit-tests", "lint"]
+    finally:
+        state.close()
+
+
+def test_legacy_mandatory_gate_repair_without_gate_contract_fails_closed(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="mandatory_gate_failed",
+    )
+    try:
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        contract_path = config.evidence_dir / Path(
+            str(repair["contract_ref"])
+        ).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        assert contract["quality_gates"] == ["target-tests", "target-lint"]
+        contract.pop("quality_gates")
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        worker = AgentWorker(
+            config,
+            state,
+            health_probe=lambda _: True,
+            repository_root=tmp_path,
+        )
+
+        with pytest.raises(
+            ExternalBlocker,
+            match="omits fresh PASS requirements",
+        ) as blocked:
+            worker.default_spec(repair)
+
+        assert blocked.value.reason_code == "invalid_quality_gate_contract"
+    finally:
+        state.close()
+
+
+def test_legacy_readonly_reviewer_repair_requires_director_replan(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                   SET role='security-reviewer',
+                       capability_profile='reviewer_readonly',
+                       required_capabilities_json=?
+                   WHERE task_id=?""",
+                (
+                    stable_json(
+                        list(CAPABILITY_PROFILES["reviewer_readonly"])
+                    ),
+                    repair_id,
+                ),
+            )
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        worker = AgentWorker(
+            config,
+            state,
+            health_probe=lambda _: True,
+            repository_root=tmp_path,
+        )
+
+        with pytest.raises(
+            ExternalBlocker,
+            match="Director replan is required",
+        ) as blocked:
+            worker.default_spec(repair)
+
+        assert blocked.value.reason_code == "plan_contract_violation"
     finally:
         state.close()
 

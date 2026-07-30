@@ -87,7 +87,7 @@ def _replan_mandatory_gate_ids(
     source_failure_id: str | None,
     max_depth: int = 24,
 ) -> tuple[str, ...]:
-    """Return quality gates from the bounded causal chain of a replan."""
+    """Return executable gate or reviewer blocker IDs from a causal chain."""
 
     if not source_failure_id:
         return ()
@@ -104,7 +104,10 @@ def _replan_mandatory_gate_ids(
         failure = by_id.get(current_id)
         if failure is None:
             break
-        if str(failure.get("reason_code") or "") == "mandatory_gate_failed":
+        if str(failure.get("reason_code") or "") in {
+            "mandatory_gate_failed",
+            "model_requested_repair",
+        }:
             try:
                 raw_gate_ids = json.loads(
                     str(failure.get("failed_gate_ids_json") or "[]")

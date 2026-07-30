@@ -924,6 +924,70 @@ class AgentWorker:
             else "task-contract.schema.json"
         )
         self.schemas.validate(contract_schema, contract)
+        failure_id = str(task.get("failure_id") or "")
+        if str(task.get("stage_key") or "") == "repair" and failure_id:
+            failure = next(
+                (
+                    item
+                    for item in self.state.list_failures(
+                        str(task["product_id"])
+                    )
+                    if str(item.get("failure_id") or "") == failure_id
+                ),
+                None,
+            )
+            if failure is None:
+                raise ExternalBlocker(
+                    f"repair task {task_id} has no durable source failure",
+                    reason_code="plan_contract_violation",
+                )
+            if (
+                str(task.get("capability_profile") or "")
+                == "reviewer_readonly"
+                and str(failure.get("failure_class") or "")
+                in {"semantic", "policy"}
+            ):
+                raise ExternalBlocker(
+                    "read-only reviewer repair cannot satisfy an actionable "
+                    f"failure for {task_id}; a Director replan is required",
+                    reason_code="plan_contract_violation",
+                )
+            if str(failure.get("reason_code") or "") == "mandatory_gate_failed":
+                try:
+                    required_gate_ids = json.loads(
+                        str(failure.get("failed_gate_ids_json") or "[]")
+                    )
+                except json.JSONDecodeError:
+                    required_gate_ids = []
+                configured_gate_ids = contract.get("quality_gates", [])
+                if (
+                    not isinstance(required_gate_ids, list)
+                    or not required_gate_ids
+                    or any(
+                        not isinstance(value, str) or not value
+                        for value in required_gate_ids
+                    )
+                    or not isinstance(configured_gate_ids, list)
+                ):
+                    raise ExternalBlocker(
+                        "mandatory-gate repair contract is invalid for "
+                        f"{task_id}",
+                        reason_code="invalid_quality_gate_contract",
+                    )
+                missing_gate_ids = sorted(
+                    set(required_gate_ids)
+                    - {
+                        str(value)
+                        for value in configured_gate_ids
+                        if isinstance(value, str) and value
+                    }
+                )
+                if missing_gate_ids:
+                    raise ExternalBlocker(
+                        "mandatory-gate repair contract omits fresh PASS "
+                        f"requirements for: {', '.join(missing_gate_ids)}",
+                        reason_code="invalid_quality_gate_contract",
+                    )
         role = str(task.get("role") or contract.get("producer", {}).get("role", ""))
         output_schema = str(task.get("output_schema") or "")
         if not role or not output_schema:
