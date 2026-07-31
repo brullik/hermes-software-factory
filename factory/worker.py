@@ -581,6 +581,39 @@ def _replanner_scope_policy(
     }
 
 
+def _current_replan_frontier(
+    implementation_nodes: Sequence[Mapping[str, Any]],
+    *,
+    recovery_plan_digests: Sequence[str],
+    affected: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    """Keep executable nodes, plus only this recovery's superseded frontier."""
+
+    lineage_digests = set(recovery_plan_digests)
+
+    def belongs_to_current_frontier(node: Mapping[str, Any]) -> bool:
+        graph_status = str(node.get("graph_status") or "")
+        if graph_status not in {"ACCEPTED", "SUPERSEDED", "CANCELLED"}:
+            return True
+        return bool(
+            lineage_digests
+            and graph_status == "SUPERSEDED"
+            and str(node.get("blocked_reason") or "")
+            == "semantic_lifecycle_migration"
+            and str(node.get("blocked_ref") or "") in lineage_digests
+        )
+
+    selected = [
+        node for node in implementation_nodes if belongs_to_current_frontier(node)
+    ]
+    affected_task_id = str(affected.get("task_id") or "")
+    if not any(
+        str(node.get("task_id") or "") == affected_task_id for node in selected
+    ):
+        selected.append(affected)
+    return selected
+
+
 def _replanner_hypothesis_inventory(
     hypotheses: list[dict[str, Any]],
     *,
@@ -2445,6 +2478,8 @@ class AgentWorker:
                     "goal_ids": goal_ids,
                     "task_id": str(task["task_id"]),
                     "graph_status": str(task.get("graph_status") or ""),
+                    "blocked_reason": str(task.get("blocked_reason") or ""),
+                    "blocked_ref": str(task.get("blocked_ref") or ""),
                     "accepted_result": (
                         {
                             "result_ref": str(task.get("result_ref") or ""),
@@ -2545,15 +2580,32 @@ class AgentWorker:
         if len(causal_node_keys) != 1:
             return None
         affected_coordinate = causal_node_keys[0]
+        causal_task_ids = {
+            str(value)
+            for value in scope_policy["causal_task_ids"]
+            if isinstance(value, str) and value
+        }
         affected = next(
             (
                 node
                 for node in implementation_nodes
                 if str(node.get("node_key") or "").casefold() == affected_coordinate
+                and str(node.get("task_id") or "") in causal_task_ids
                 and str(node.get("graph_status") or "") != "ACCEPTED"
             ),
             None,
         )
+        if affected is None:
+            affected = next(
+                (
+                    node
+                    for node in reversed(implementation_nodes)
+                    if str(node.get("node_key") or "").casefold()
+                    == affected_coordinate
+                    and str(node.get("graph_status") or "") != "ACCEPTED"
+                ),
+                None,
+            )
         if affected is None:
             return None
         affected_key = str(affected.get("node_key") or "")
@@ -2562,11 +2614,13 @@ class AgentWorker:
             for node in implementation_nodes
             if str(node.get("graph_status") or "") == "ACCEPTED"
         }
-        proposed_nodes = [
-            node
-            for node in implementation_nodes
-            if str(node.get("graph_status") or "") != "ACCEPTED"
-        ]
+        proposed_nodes = _current_replan_frontier(
+            implementation_nodes,
+            recovery_plan_digests=self.state.recovery_plan_digests_for_task(
+                task_id
+            ),
+            affected=affected,
+        )
         if not proposed_nodes or len(proposed_nodes) > 32:
             return None
         proposed_keys = {

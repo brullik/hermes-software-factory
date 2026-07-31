@@ -944,6 +944,39 @@ class StateStore:
             ).fetchone()
             return dict(row) if row else None
 
+    def recovery_plan_digests_for_task(self, task_id: str) -> tuple[str, ...]:
+        """Return the bounded applied-recovery lineage for one task."""
+
+        with self._lock:
+            digests: list[str] = []
+            visited: set[str] = set()
+            current_task_id = task_id
+            while (
+                current_task_id
+                and current_task_id not in visited
+                and len(visited) < 16
+            ):
+                visited.add(current_task_id)
+                row = self._connection.execute(
+                    """SELECT recovery_plan_digest
+                         FROM recovery_applications
+                        WHERE recovery_task_id=? AND status='APPLIED'
+                        ORDER BY applied_at DESC LIMIT 1""",
+                    (current_task_id,),
+                ).fetchone()
+                if row is not None:
+                    digest = str(row["recovery_plan_digest"] or "")
+                    if digest and digest not in digests:
+                        digests.append(digest)
+                task = self._connection.execute(
+                    "SELECT source_task_id FROM tasks WHERE task_id=?",
+                    (current_task_id,),
+                ).fetchone()
+                current_task_id = (
+                    str(task["source_task_id"] or "") if task is not None else ""
+                )
+            return tuple(digests)
+
     def list_tasks(self, product_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
             if product_id is None:

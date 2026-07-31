@@ -1150,6 +1150,39 @@ def test_failed_safe_replanner_loop_requires_explicit_fingerprinted_recovery(
     )
     assert recovery_task["graph_status"] == "READY"
     assert recovery_task["failure_id"] == failure_id
+    assert (
+        state.recovery_plan_digests_for_task(str(recovery_task["task_id"]))
+        == (recovery["plan_digest"],)
+    )
+    source = state.get_task("T-FAILED-REPLANNER")
+    assert source is not None
+    assert source["blocked_reason"] == "semantic_lifecycle_migration"
+    assert source["blocked_ref"] == recovery["plan_digest"]
+    second_digest = "f" * 64
+    state.add_task(
+        task_id="T-SECOND-RECOVERY",
+        product_id=product_id,
+        title="Second bounded recovery",
+        role="replanner",
+        output_schema="plan-proposal-v1.schema.json",
+        stage_key="semantic-lifecycle-recovery",
+        source_task_id=str(recovery_task["task_id"]),
+        graph_status="READY",
+    )
+    with state._lock, state._connection:
+        state._connection.execute(
+            """
+            INSERT INTO recovery_applications
+                (recovery_plan_digest, product_id, recovery_task_id,
+                 status, applied_at)
+            VALUES (?, ?, 'T-SECOND-RECOVERY', 'APPLIED', ?)
+            """,
+            (second_digest, product_id, now),
+        )
+    assert state.recovery_plan_digests_for_task("T-SECOND-RECOVERY") == (
+        second_digest,
+        recovery["plan_digest"],
+    )
     with state._lock:
         incident = state._connection.execute(
             "SELECT status FROM controller_incidents WHERE incident_id=?",
