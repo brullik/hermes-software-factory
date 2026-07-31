@@ -865,6 +865,23 @@ def test_exact_safe_scope_expansion_compiles_without_provider_call(
                     root_failure_id,
                 ),
             )
+        failed = state.get_task("T-FAILNODEA")
+        product = state.get_product("product-autonomy")
+        assert failed is not None and product is not None
+        for index in range(40):
+            state.add_task(
+                task_id=f"T-HISTORICAL-SUPERSEDED-{index:02d}",
+                product_id="product-autonomy",
+                title=f"Historical superseded Builder {index}",
+                role="builder",
+                output_schema="attempt-result.schema.json",
+                contract_ref=str(failed["contract_ref"]),
+                stage_key=f"historical-repair-{index:02d}",
+                plan_id=str(product["active_plan_id"]),
+                plan_node_id=f"historical-repair-{index:02d}",
+                capability_profile="builder_workspace",
+                graph_status="SUPERSEDED",
+            )
         replanner_id = FailureRouter(config, state, artifacts).route(root_failure_id)
         replanner = state.get_task(replanner_id)
         assert replanner is not None

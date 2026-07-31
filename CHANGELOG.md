@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.36 - 2026-07-31
+
+- Build deterministic replan proposals from the current executable frontier,
+  excluding historical `SUPERSEDED` and `CANCELLED` Builder nodes from the
+  bounded node budget.
+- Preserve only the nodes superseded by the exact fingerprinted recovery
+  lineage currently being executed, following at most 16 durable plan digests
+  so a bounded second recovery retains the first recovery's open frontier.
+- Select the affected Builder through causal task identity before falling back
+  to the latest matching semantic node, preventing stale same-name repairs from
+  displacing the active root cause.
+
 ## 2.2.35 - 2026-07-31
 
 - Bind deterministic scope expansion to the latest affected Builder semantic

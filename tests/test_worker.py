@@ -35,6 +35,7 @@ from factory.worker import (
     SubprocessHermesRunner,
     TaskExecutionSpec,
     WorkerResult,
+    _current_replan_frontier,
     _mandatory_gate_failure_data,
     _normalized_output_status,
     _replanner_failure_inventory,
@@ -45,6 +46,63 @@ from factory.worker import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_current_replan_frontier_excludes_only_historical_superseded_nodes() -> None:
+    digest = "a" * 64
+    affected = {
+        "task_id": "T-AFFECTED",
+        "node_key": "affected",
+        "graph_status": "SUPERSEDED",
+        "blocked_reason": "semantic_lifecycle_migration",
+        "blocked_ref": digest,
+    }
+    nodes = [
+        {
+            "task_id": "T-ACCEPTED",
+            "graph_status": "ACCEPTED",
+        },
+        {
+            "task_id": "T-HISTORICAL",
+            "graph_status": "SUPERSEDED",
+            "blocked_reason": "semantic_lifecycle_migration",
+            "blocked_ref": "b" * 64,
+        },
+        affected,
+        {
+            "task_id": "T-RECOVERY-PEER",
+            "graph_status": "SUPERSEDED",
+            "blocked_reason": "semantic_lifecycle_migration",
+            "blocked_ref": digest,
+        },
+        {
+            "task_id": "T-PRIOR-RECOVERY-PEER",
+            "graph_status": "SUPERSEDED",
+            "blocked_reason": "semantic_lifecycle_migration",
+            "blocked_ref": "c" * 64,
+        },
+        {
+            "task_id": "T-READY",
+            "graph_status": "READY",
+        },
+        {
+            "task_id": "T-CANCELLED",
+            "graph_status": "CANCELLED",
+        },
+    ]
+
+    frontier = _current_replan_frontier(
+        nodes,
+        recovery_plan_digests=(digest, "c" * 64),
+        affected=affected,
+    )
+
+    assert [node["task_id"] for node in frontier] == [
+        "T-AFFECTED",
+        "T-RECOVERY-PEER",
+        "T-PRIOR-RECOVERY-PEER",
+        "T-READY",
+    ]
 
 
 def make_retry_due(state: StateStore, task_id: str) -> None:
