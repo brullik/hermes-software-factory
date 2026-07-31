@@ -24,12 +24,13 @@ from factory.failure_router import FailureRouter
 from factory.intake import IntakeService
 from factory.migrations import MIGRATIONS, apply_migrations
 from factory.pipeline import PipelineCoordinator
+from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
 from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
 from factory.repository import RepositoryBootstrapper
 from factory.state import StateStore
-from factory.worker import AgentWorker
+from factory.worker import AgentWorker, _plan_contract_repair_findings
 from scripts.build_legacy_2_0_19_fixture import build_fixture
 
 
@@ -1890,6 +1891,24 @@ def test_transport_diagnostic_accepts_plan_contract_reason_codes(
         "transport-diagnostic.schema.json",
         diagnostic,
     ) == []
+
+
+def test_plan_contract_repair_findings_preserve_each_failed_gate_id() -> None:
+    error = PlanContractViolation(
+        "fresh implementation slices omitted two release gates",
+        failed_gate_ids=(
+            "RELEASE-EVIDENCE-SUBJECT-MISMATCH",
+            "RELEASE-PREREQUISITES-MISSING",
+        ),
+    )
+
+    findings = _plan_contract_repair_findings(error, str(error))
+
+    assert [item["id"] for item in findings] == [
+        "RELEASE-EVIDENCE-SUBJECT-MISMATCH",
+        "RELEASE-PREREQUISITES-MISSING",
+    ]
+    assert all(item["id"] in item["required_fix"] for item in findings)
 
 
 def test_available_capability_inventory_selects_specific_runtime_scope(

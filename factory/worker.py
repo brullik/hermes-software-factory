@@ -128,6 +128,39 @@ _WORKSPACE_COPY_IGNORES = (
 )
 
 
+def _plan_contract_repair_findings(
+    error: PlanContractViolation,
+    safe_message: str,
+) -> list[dict[str, str]]:
+    """Keep controller-owned gate coordinates structural across replans."""
+
+    if error.failed_gate_ids:
+        return [
+            {
+                "id": gate_id,
+                "severity": "high",
+                "description": safe_message,
+                "required_fix": (
+                    "Create or update a fresh implementation slice whose objective "
+                    "or acceptance_intents explicitly names and resolves mandatory "
+                    f"gate {gate_id}."
+                ),
+            }
+            for gate_id in error.failed_gate_ids
+        ]
+    return [
+        {
+            "id": error.reason_code.upper(),
+            "severity": "high",
+            "description": safe_message,
+            "required_fix": (
+                "Correct the exact BacklogPlan field identified by the safe "
+                "validator diagnostic."
+            ),
+        }
+    ]
+
+
 def _failed_gate_detail(results: list[dict[str, Any]]) -> str:
     failed = sorted(
         str(item["gate_id"])
@@ -3980,16 +4013,12 @@ class AgentWorker:
                     if isinstance(error, PlanContractViolation)
                     else "schema_validation"
                 )
-                repair_diagnostic_output = {
-                    "status": "repair_required",
-                    "summary": safe_message,
-                    "findings": [
+                repair_findings = (
+                    _plan_contract_repair_findings(error, safe_message)
+                    if isinstance(error, PlanContractViolation)
+                    else [
                         {
-                            "id": (
-                                semantic_reason.upper()
-                                if semantic_reason in _PLAN_CONTRACT_REASONS
-                                else "BACKLOG_PLAN_SEMANTIC_VALIDATION"
-                            ),
+                            "id": "BACKLOG_PLAN_SEMANTIC_VALIDATION",
                             "severity": "high",
                             "description": safe_message,
                             "required_fix": (
@@ -3997,7 +4026,12 @@ class AgentWorker:
                                 "by the safe validator diagnostic."
                             ),
                         }
-                    ],
+                    ]
+                )
+                repair_diagnostic_output = {
+                    "status": "repair_required",
+                    "summary": safe_message,
+                    "findings": repair_findings,
                 }
                 diagnostic = self._transport_diagnostic(
                     spec,
