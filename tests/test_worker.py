@@ -39,6 +39,7 @@ from factory.worker import (
     _normalized_output_status,
     _replanner_failure_inventory,
     _replanner_hypothesis_inventory,
+    _replanner_scope_policy,
     _workspace_snapshot,
     public_github_repository_url,
 )
@@ -708,6 +709,59 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(failures[0]["causal_depth"], 0)
         self.assertEqual(failures[1]["status"], "RESOLVED")
         self.assertEqual(failures[1]["causal_depth"], 1)
+
+        scope_policy = _replanner_scope_policy(
+            [
+                {
+                    "failure_id": "failure-root",
+                    "parent_failure_id": None,
+                    "task_id": "T-ROOT",
+                    "failure_class": "semantic",
+                    "reason_code": "mandatory_gate_failed",
+                    "status": "RESOLVED",
+                    "safe_message": "target-tests failed",
+                    "failed_gate_ids_json": '["target-tests"]',
+                    "expected_json": "{}",
+                    "actual_json": (
+                        '{"scope_reassessment_required":true,'
+                        '"blocked_allowed_paths":["src/**","tests/**"],'
+                        '"provider_scope_findings":[{"code":"SCOPE_INSUFFICIENT",'
+                        '"text":"scripts/image_security_verify.py is outside '
+                        'allowed task scope."}]}'
+                    ),
+                    "evidence_ref": "evidence/failure-root.json",
+                },
+                {
+                    "failure_id": "failure-child",
+                    "parent_failure_id": "failure-root",
+                    "task_id": "T-REPLANNER",
+                    "failure_class": "semantic",
+                    "reason_code": "needs_replan",
+                    "status": "OPEN",
+                    "safe_message": "planning scope remained contradictory",
+                    "failed_gate_ids_json": '["needs_replan"]',
+                    "expected_json": "{}",
+                    "actual_json": "{}",
+                    "evidence_ref": "evidence/failure-child.json",
+                },
+            ],
+            source_failure_id="failure-child",
+        )
+
+        self.assertTrue(scope_policy["allow_bounded_expansion"])
+        self.assertEqual(
+            scope_policy["failed_allowed_paths"],
+            ["src/**", "tests/**"],
+        )
+        self.assertEqual(
+            scope_policy["required_scope_paths"],
+            ["scripts/image_security_verify.py"],
+        )
+        self.assertIn("target-tests", scope_policy["failed_mandatory_gate_ids"])
+        self.assertEqual(
+            scope_policy["proposal_scope_field"],
+            "slices[].scope",
+        )
         self.assertIn(
             "pyproject.toml has no [project] dependency contract",
             failures[1]["safe_message"],
@@ -718,6 +772,100 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertEqual(hypotheses[0]["status"], "EXHAUSTED")
         self.assertEqual(hypotheses[0]["attempts_used"], 3)
+
+    def test_replanner_context_keeps_only_causal_root_latest_and_hypotheses(
+        self,
+    ) -> None:
+        failures = [
+            {
+                "failure_id": "failure-root",
+                "parent_failure_id": None,
+                "task_id": "T-ROOT",
+                "failure_class": "semantic",
+                "reason_code": "mandatory_gate_failed",
+                "status": "RESOLVED",
+                "safe_message": "root",
+                "failed_gate_ids_json": '["target-tests"]',
+                "expected_json": "{}",
+                "actual_json": "{}",
+                "evidence_ref": "evidence/root.json",
+            },
+            {
+                "failure_id": "failure-middle",
+                "parent_failure_id": "failure-root",
+                "task_id": "T-MIDDLE",
+                "failure_class": "semantic",
+                "reason_code": "plan_contract_violation",
+                "status": "RESOLVED",
+                "safe_message": "middle",
+                "failed_gate_ids_json": '["PLAN_CONTRACT_VIOLATION"]',
+                "expected_json": "{}",
+                "actual_json": "{}",
+                "evidence_ref": "evidence/middle.json",
+            },
+            {
+                "failure_id": "failure-latest",
+                "parent_failure_id": "failure-middle",
+                "task_id": "T-LATEST",
+                "failure_class": "semantic",
+                "reason_code": "needs_replan",
+                "status": "OPEN",
+                "safe_message": "latest",
+                "failed_gate_ids_json": '["needs_replan"]',
+                "expected_json": "{}",
+                "actual_json": "{}",
+                "evidence_ref": "evidence/latest.json",
+            },
+            {
+                "failure_id": "failure-unrelated",
+                "parent_failure_id": None,
+                "task_id": "T-UNRELATED",
+                "failure_class": "semantic",
+                "reason_code": "unrelated",
+                "status": "OPEN",
+                "safe_message": "unrelated",
+                "failed_gate_ids_json": "[]",
+                "expected_json": "{}",
+                "actual_json": "{}",
+                "evidence_ref": "evidence/unrelated.json",
+            },
+        ]
+        inventory = _replanner_failure_inventory(
+            failures,
+            source_failure_id="failure-latest",
+        )
+        self.assertEqual(
+            [item["failure_id"] for item in inventory],
+            ["failure-latest", "failure-root"],
+        )
+
+        hypotheses = _replanner_hypothesis_inventory(
+            [
+                {
+                    "hypothesis_id": "hypothesis-causal",
+                    "failure_id": "failure-middle",
+                    "status": "ACTIVE",
+                    "statement": "causal",
+                    "required_evidence_json": "[]",
+                    "semantic_budget": 3,
+                    "attempts_used": 1,
+                },
+                {
+                    "hypothesis_id": "hypothesis-unrelated",
+                    "failure_id": "failure-unrelated",
+                    "status": "ACTIVE",
+                    "statement": "unrelated",
+                    "required_evidence_json": "[]",
+                    "semantic_budget": 3,
+                    "attempts_used": 1,
+                },
+            ],
+            failure_ids=("failure-latest", "failure-middle", "failure-root"),
+        )
+        self.assertEqual(
+            [item["hypothesis_id"] for item in hypotheses],
+            ["hypothesis-causal"],
+        )
 
     def test_replanner_implementation_inventory_includes_accepted_result(
         self,
