@@ -121,9 +121,7 @@ def test_AUT_P0_028_architecture_review_has_no_builder_or_test_prerequisite(
         if edge["to"] == architecture["node_id"] and edge["required"]
     }
     assert predecessors == set()
-    assert architecture["task_contract"]["consumes_evidence_types"] == [
-        "architecture_package"
-    ]
+    assert architecture["task_contract"]["consumes_evidence_types"] == ["architecture_package"]
 
 
 def test_AUT_P0_029_release_review_without_security_is_rejected_pre_ingestion(
@@ -133,10 +131,7 @@ def test_AUT_P0_029_release_review_without_security_is_rejected_pre_ingestion(
     plan["edges"] = [
         edge
         for edge in plan["edges"]
-        if not (
-            edge["from"] == "security-review"
-            and edge["to"] == "release-readiness-review"
-        )
+        if not (edge["from"] == "security-review" and edge["to"] == "release-readiness-review")
     ]
     with pytest.raises(
         PlanContractViolation,
@@ -150,11 +145,7 @@ def test_AUT_P0_030_one_reviewer_node_cannot_close_product_goal(
     tmp_path: Path,
 ) -> None:
     plan = compiled_plan(tmp_path)
-    plan["nodes"] = [
-        node
-        for node in plan["nodes"]
-        if node["node_id"] == "architecture-review"
-    ]
+    plan["nodes"] = [node for node in plan["nodes"] if node["node_id"] == "architecture-review"]
     plan["edges"] = []
     with pytest.raises(PlanContractViolation, match="implementation slice"):
         validate_compiled_plan(plan)
@@ -166,9 +157,7 @@ def test_AUT_P0_032_plan_compiler_is_deterministic_and_controller_owned(
     first = compiled_plan(tmp_path)
     second = compiled_plan(tmp_path)
     assert first == second
-    assert len({node["task_contract"]["task_id"] for node in first["nodes"]}) == len(
-        first["nodes"]
-    )
+    assert len({node["task_contract"]["task_id"] for node in first["nodes"]}) == len(first["nodes"])
     for node in first["nodes"]:
         contract = node["task_contract"]
         assert contract["lifecycle_stage"]
@@ -267,10 +256,7 @@ def test_replan_compiler_merges_and_reuses_accepted_lineage_nodes(
         if node["task_contract"]["lifecycle_stage"] == "architecture-review"
     )
     assert set(implementations) == {"architecture-review", "container-runtime"}
-    assert (
-        implementations["architecture-review"]["supersedes_task_id"]
-        == "T-ACCEPTED-FOUNDATION"
-    )
+    assert implementations["architecture-review"]["supersedes_task_id"] == "T-ACCEPTED-FOUNDATION"
     assert implementations["container-runtime"]["supersedes_task_id"] is None
     assert architecture["supersedes_task_id"] == "T-ACCEPTED-ARCH-REVIEW"
     assert architecture["dependencies"] == ["T-ARCHITECTURE-SOURCE"]
@@ -342,6 +328,7 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
             "target-license-check",
         ),
         blocked_replan_scope_paths=("tests/**",),
+        required_replan_scope_paths=("scripts/image_security_verify.py",),
     )
 
     with pytest.raises(
@@ -355,9 +342,7 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
             semantic,
             context,
             inherited_nodes=[inherited_dependency],
-            accepted_nodes={
-                "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
-            },
+            accepted_nodes={"semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"},
         )
     assert blocked.value.failed_gate_ids == (
         "target-dependency-audit",
@@ -371,18 +356,13 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
     semantic["nodes"][1]["scope"] = ["tests/**"]
     with pytest.raises(
         PlanContractViolation,
-        match=(
-            "fresh implementation slices do not expand the failed "
-            "allowed_paths scope"
-        ),
+        match=("fresh implementation slices do not expand the failed allowed_paths scope"),
     ) as blocked_scope:
         PlanCompiler(policy_digest=policy_digest(config)).compile(
             semantic,
             context,
             inherited_nodes=[inherited_dependency],
-            accepted_nodes={
-                "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
-            },
+            accepted_nodes={"semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"},
         )
     assert blocked_scope.value.failed_gate_ids == (
         "target-dependency-audit",
@@ -390,13 +370,30 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
     )
 
     semantic["nodes"][1]["scope"] = ["Dockerfile", "tests/**"]
+    with pytest.raises(
+        PlanContractViolation,
+        match=(
+            "fresh implementation slices do not cover required scope paths: "
+            "scripts/image_security_verify.py"
+        ),
+    ) as required_scope:
+        PlanCompiler(policy_digest=policy_digest(config)).compile(
+            semantic,
+            context,
+            inherited_nodes=[inherited_dependency],
+            accepted_nodes={"semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"},
+        )
+    assert required_scope.value.failed_gate_ids == (
+        "target-dependency-audit",
+        "target-license-check",
+    )
+
+    semantic["nodes"][1]["scope"] = ["scripts/**", "tests/**"]
     compiled = PlanCompiler(policy_digest=policy_digest(config)).compile(
         semantic,
         context,
         inherited_nodes=[inherited_dependency],
-        accepted_nodes={
-            "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
-        },
+        accepted_nodes={"semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"},
     )
     implementations = [
         node["task_contract"]
@@ -404,8 +401,7 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
         if node["task_contract"]["lifecycle_stage"] == "implementation-slice"
     ]
     assert any(
-        node["semantic_node_key"] == "image-security"
-        and node["supersedes_task_id"] is None
+        node["semantic_node_key"] == "image-security" and node["supersedes_task_id"] is None
         for node in implementations
     )
 
@@ -533,21 +529,13 @@ def test_AUT_P0_038_product_acceptance_is_mandatory_between_staging_and_producti
     tmp_path: Path,
 ) -> None:
     plan = compiled_plan(tmp_path)
-    required_edges = {
-        (edge["from"], edge["to"])
-        for edge in plan["edges"]
-        if edge["required"]
-    }
+    required_edges = {(edge["from"], edge["to"]) for edge in plan["edges"] if edge["required"]}
     assert ("staging", "product-acceptance") in required_edges
     assert ("product-acceptance", "production") in required_edges
     broken = deepcopy(plan)
-    broken["nodes"] = [
-        node for node in broken["nodes"] if node["node_id"] != "product-acceptance"
-    ]
+    broken["nodes"] = [node for node in broken["nodes"] if node["node_id"] != "product-acceptance"]
     broken["edges"] = [
-        edge
-        for edge in broken["edges"]
-        if "product-acceptance" not in {edge["from"], edge["to"]}
+        edge for edge in broken["edges"] if "product-acceptance" not in {edge["from"], edge["to"]}
     ]
     with pytest.raises(PlanContractViolation, match="product-acceptance") as captured:
         validate_compiled_plan(broken)
@@ -558,14 +546,8 @@ def test_AUT_P1_012_evidence_types_are_not_interchangeable(
     tmp_path: Path,
 ) -> None:
     plan = compiled_plan(tmp_path)
-    architecture = next(
-        node
-        for node in plan["nodes"]
-        if node["node_id"] == "architecture-review"
-    )
-    architecture["task_contract"]["consumes_evidence_types"] = [
-        "security_review"
-    ]
+    architecture = next(node for node in plan["nodes"] if node["node_id"] == "architecture-review")
+    architecture["task_contract"]["consumes_evidence_types"] = ["security_review"]
     with pytest.raises(PlanContractViolation, match="consumes_evidence_types") as captured:
         validate_compiled_plan(plan)
     assert captured.value.reason_code == "evidence_profile_mismatch"
@@ -705,14 +687,10 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
         task for task in state.list_tasks(product_id) if task["plan_id"] == first_plan_id
     ]
     first_architecture = next(
-        task
-        for task in first_tasks
-        if task["lifecycle_stage"] == "architecture-review"
+        task for task in first_tasks if task["lifecycle_stage"] == "architecture-review"
     )
     first_implementation = next(
-        task
-        for task in first_tasks
-        if task["lifecycle_stage"] == "implementation-slice"
+        task for task in first_tasks if task["lifecycle_stage"] == "implementation-slice"
     )
     with state._lock, state._connection:
         for task, label in (
@@ -806,10 +784,7 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
         implementation_contracts["core-journey"]["supersedes_task_id"]
         == first_implementation["task_id"]
     )
-    assert (
-        architecture_contract["supersedes_task_id"]
-        == first_architecture["task_id"]
-    )
+    assert architecture_contract["supersedes_task_id"] == first_architecture["task_id"]
 
     state.ingest_plan(
         runtime_plan,
@@ -827,9 +802,7 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
         if task.get("semantic_node_key")
     }
     second_architecture = next(
-        task
-        for task in second_tasks
-        if task["lifecycle_stage"] == "architecture-review"
+        task for task in second_tasks if task["lifecycle_stage"] == "architecture-review"
     )
     assert reused["core-journey"]["graph_status"] == "ACCEPTED"
     assert reused["core-journey"]["result_ref"] == first_implementation["result_ref"]
@@ -846,9 +819,7 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
         )
     }
     assert lineage["core-journey"].graph_status == "ACCEPTED"
-    assert lineage["runtime-extension"].proposal_node["depends_on"] == [
-        "core-journey"
-    ]
+    assert lineage["runtime-extension"].proposal_node["depends_on"] == ["core-journey"]
     state.close()
 
 
@@ -862,9 +833,7 @@ class MissingBuildToolProbe:
         del product
         reasons = {
             "toolchain.make": "controller_toolchain_make_missing",
-            "toolchain.container_builder": (
-                "controller_toolchain_container_builder_unavailable"
-            ),
+            "toolchain.container_builder": ("controller_toolchain_container_builder_unavailable"),
         }
         if capability in reasons:
             return CapabilityCheck(
@@ -1041,13 +1010,16 @@ def test_maintenance_closes_intake_and_recovery_apply_is_restart_safe(
 
     replay = apply_recovery_plan(config, state, recovery)
     assert replay["applications"][0]["status"] == "REPLAYED"
-    assert len(
-        [
-            task
-            for task in state.list_tasks(product_id)
-            if task.get("stage_key") == "semantic-lifecycle-recovery"
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                task
+                for task in state.list_tasks(product_id)
+                if task.get("stage_key") == "semantic-lifecycle-recovery"
+            ]
+        )
+        == 1
+    )
     state.leave_maintenance()
     assert not state.maintenance_active()
     state.close()
@@ -1092,8 +1064,7 @@ def test_deploy_maintenance_auto_resumes_after_expiry_and_drain(
     lease_id = str(maintenance["maintenance_lease_id"])
     with state._lock, state._connection:
         state._connection.execute(
-            "UPDATE factory_runtime_state SET maintenance_expires_at=? "
-            "WHERE singleton_id=1",
+            "UPDATE factory_runtime_state SET maintenance_expires_at=? WHERE singleton_id=1",
             ("2000-01-01T00:00:00Z",),
         )
     assert state.maintenance_active()
@@ -1119,10 +1090,7 @@ def test_deploy_maintenance_auto_resumes_after_expiry_and_drain(
     assert next_claim["task_id"] != claimed["task_id"]
     runtime = state.maintenance_status()
     assert runtime["maintenance_recovery_count"] == 1
-    assert any(
-        event["event_type"] == "maintenance_auto_resumed"
-        for event in state.events()
-    )
+    assert any(event["event_type"] == "maintenance_auto_resumed" for event in state.events())
     state.close()
 
 
@@ -1224,13 +1192,9 @@ def test_manual_maintenance_requires_explicit_release(tmp_path: Path) -> None:
 def test_migration_014_recovers_exact_stale_prompt_hotfix(tmp_path: Path) -> None:
     config = configured(tmp_path)
     state = StateStore(config.database_path)
-    state.enter_maintenance(
-        "prompt-input-limit-and-error-classification-hotfix"
-    )
+    state.enter_maintenance("prompt-input-limit-and-error-classification-hotfix")
     with state._lock, state._connection:
-        state._connection.execute(
-            "DELETE FROM schema_migrations WHERE version=14"
-        )
+        state._connection.execute("DELETE FROM schema_migrations WHERE version=14")
         state._connection.execute(
             """UPDATE factory_runtime_state
                SET maintenance_mode='manual', maintenance_owner=NULL,
@@ -1246,10 +1210,7 @@ def test_migration_014_recovers_exact_stale_prompt_hotfix(tmp_path: Path) -> Non
     assert not runtime["maintenance_active"]
     assert runtime["maintenance_mode"] == "deploy"
     assert runtime["maintenance_recovery_count"] == 1
-    assert any(
-        event["event_type"] == "maintenance_auto_resumed"
-        for event in restarted.events()
-    )
+    assert any(event["event_type"] == "maintenance_auto_resumed" for event in restarted.events())
     restarted.close()
 
 
@@ -1302,9 +1263,7 @@ def test_AUT_P1_011_maintenance_drains_claims_and_sqlite_busy_is_bounded(
     assert next_claim is not None
     assert next_claim["task_id"] != claimed["task_id"]
     with state._lock:
-        busy_timeout = int(
-            state._connection.execute("PRAGMA busy_timeout").fetchone()[0]
-        )
+        busy_timeout = int(state._connection.execute("PRAGMA busy_timeout").fetchone()[0])
     assert busy_timeout == 30_000
     state.close()
 
@@ -1360,9 +1319,7 @@ def test_active_legacy_state_enters_maintenance_during_recovery_migration(
     state.close()
     connection = sqlite3.connect(config.database_path)
     try:
-        connection.execute(
-            "DELETE FROM schema_migrations WHERE version IN (13,14,15)"
-        )
+        connection.execute("DELETE FROM schema_migrations WHERE version IN (13,14,15)")
         connection.execute("DROP TABLE factory_runtime_state")
         connection.execute("DROP TABLE recovery_applications")
         connection.commit()
@@ -1421,9 +1378,7 @@ def test_migration_015_closes_hypothesis_for_resolved_failure(
                        '[]', 'ACTIVE', 3, 1, ?)""",
             (product_id, sha256_text("stale-diagnosis"), now),
         )
-        state._connection.execute(
-            "DELETE FROM schema_migrations WHERE version=15"
-        )
+        state._connection.execute("DELETE FROM schema_migrations WHERE version=15")
     state.close()
 
     restarted = StateStore(config.database_path)
@@ -1476,11 +1431,7 @@ def test_migration_016_reconciles_proven_duplicate_accepted_repairs(
         start=1,
     ):
         failure_id = f"failure-redundant-{index}"
-        root_failure_id = (
-            f"failure-redundant-root-{index}"
-            if index == 1
-            else failure_id
-        )
+        root_failure_id = f"failure-redundant-root-{index}" if index == 1 else failure_id
         timestamp = f"2026-07-30T00:00:0{index}Z"
         with state._lock, state._connection:
             state._connection.execute(
@@ -1555,9 +1506,7 @@ def test_migration_016_reconciles_proven_duplicate_accepted_repairs(
                 ),
             )
     with state._lock, state._connection:
-        state._connection.execute(
-            "DELETE FROM schema_migrations WHERE version=16"
-        )
+        state._connection.execute("DELETE FROM schema_migrations WHERE version=16")
     state.close()
 
     restarted = StateStore(config.database_path)
@@ -1567,14 +1516,10 @@ def test_migration_016_reconciles_proven_duplicate_accepted_repairs(
     assert canonical["graph_status"] == "ACCEPTED"
     assert redundant is not None
     assert redundant["graph_status"] == "REJECTED"
-    assert (
-        redundant["terminal_reason"]
-        == "redundant_accepted_repair_branch"
-    )
+    assert redundant["terminal_reason"] == "redundant_accepted_repair_branch"
     assert redundant["result_ref"] == "internal://T-ACCEPTED-REPAIR-B"
     assert any(
-        event["event_type"]
-        == "redundant_accepted_repair_reconciled"
+        event["event_type"] == "redundant_accepted_repair_reconciled"
         for event in restarted.events(product_id)
     )
     restarted.close()
@@ -1586,9 +1531,7 @@ def test_AUT_P0_033_release_version_must_match_all_evidence(
     version = "3.4.5"
     (tmp_path / "VERSION").write_text(f"{version}\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text(
-        "[project]\n"
-        'name = "hermes-software-factory-spec"\n'
-        f'version = "{version}"\n',
+        f'[project]\nname = "hermes-software-factory-spec"\nversion = "{version}"\n',
         encoding="utf-8",
     )
     (tmp_path / "CHANGELOG.md").write_text(
@@ -1614,9 +1557,7 @@ def test_AUT_P0_033_release_version_must_match_all_evidence(
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
             "hermes_software_factory_spec-3.4.5.dist-info/METADATA",
-            "Metadata-Version: 2.4\n"
-            "Name: hermes-software-factory-spec\n"
-            f"Version: {version}\n",
+            f"Metadata-Version: 2.4\nName: hermes-software-factory-spec\nVersion: {version}\n",
         )
     release_record = tmp_path / "release.json"
     release_record.write_text(
@@ -1720,10 +1661,7 @@ def test_AUT_P0_037_large_failure_history_compacts_to_one_recovery_root(
         )
         == 1
     )
-    assert (
-        sum(task.get("graph_status") == "SUPERSEDED" for task in tasks)
-        == 700
-    )
+    assert sum(task.get("graph_status") == "SUPERSEDED" for task in tasks) == 700
     with state._lock:
         history_count = int(
             state._connection.execute(
@@ -1740,26 +1678,16 @@ def test_AUT_P0_037_large_failure_history_compacts_to_one_recovery_root(
         )
     assert history_count == 700
     assert resolved_count == 700
-    assert apply_recovery_plan(config, state, recovery)["applications"][0][
-        "status"
-    ] == "REPLAYED"
+    assert apply_recovery_plan(config, state, recovery)["applications"][0]["status"] == "REPLAYED"
     state.close()
 
 
 def test_rootless_bootstrap_enters_trusted_release_root_before_runuser() -> None:
     root = Path(__file__).resolve().parents[1]
-    script = (
-        root / "scripts" / "bootstrap" / "upgrade-autonomy-runtime.sh"
-    ).read_text(encoding="utf-8")
-    assert script.index('cd "${ROOT_DIR}"') < script.index(
-        'runuser -u "${SERVICE_USER}"'
+    script = (root / "scripts" / "bootstrap" / "upgrade-autonomy-runtime.sh").read_text(
+        encoding="utf-8"
     )
-    probe_created = script.index(
-        'PROBE_DIR="$(mktemp -d "${STATE_DIR}/podman-preflight.XXXXXX")"'
-    )
-    probe_owned = script.index(
-        'chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}"'
-    )
-    assert probe_created < probe_owned < script.index(
-        'runuser -u "${SERVICE_USER}"'
-    )
+    assert script.index('cd "${ROOT_DIR}"') < script.index('runuser -u "${SERVICE_USER}"')
+    probe_created = script.index('PROBE_DIR="$(mktemp -d "${STATE_DIR}/podman-preflight.XXXXXX")"')
+    probe_owned = script.index('chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}"')
+    assert probe_created < probe_owned < script.index('runuser -u "${SERVICE_USER}"')

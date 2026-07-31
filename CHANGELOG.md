@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.32 - 2026-07-31
+
+- Extract exact, sanitized production file coordinates from scope findings and
+  persist them as controller-owned `scope_required_paths`.
+- Preserve required paths byte-for-byte in the Replanner Context Pack, including
+  recovery from safe findings written by older runtimes.
+- Reject replans until fresh bounded implementation scopes cover every required
+  production path, while retaining causal mandatory-gate and blocked-scope checks.
+
 ## 2.2.31 - 2026-07-31
 
 - Derive safe repository path coordinates directly from controller-owned gate

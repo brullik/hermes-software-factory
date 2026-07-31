@@ -140,11 +140,7 @@ def executable_plan(
         ("C", "T-NODEC001", "accept-c"),
         ("D", "T-NODED001", "accept-d"),
     ]
-    edge_values = (
-        edges
-        if edges is not None
-        else [("A", "B"), ("A", "C"), ("B", "C"), ("B", "D")]
-    )
+    edge_values = edges if edges is not None else [("A", "B"), ("A", "C"), ("B", "C"), ("B", "D")]
     acceptance_ids = [criterion for _, _, criterion in specs]
     return {
         "schema_version": "2.0",
@@ -196,9 +192,7 @@ def executable_plan(
             }
             for source, target in edge_values
         ],
-        "completion_criteria": [
-            "Every mandatory node and root goal has immutable PASS evidence"
-        ],
+        "completion_criteria": ["Every mandatory node and root goal has immutable PASS evidence"],
         "summary": "Executable multi-node product graph",
     }
 
@@ -350,13 +344,16 @@ def test_AUT_P0_001_scheduler_rotates_products_before_task_priority(
 
         assert rotated is not None
         assert rotated["product_id"] == second.product_id
-        assert int(
-            state._connection.execute(
-                "SELECT priority FROM tasks "
-                "WHERE product_id=? AND role='builder' AND status='PENDING'",
-                (first.product_id,),
-            ).fetchone()[0]
-        ) == 1000
+        assert (
+            int(
+                state._connection.execute(
+                    "SELECT priority FROM tasks "
+                    "WHERE product_id=? AND role='builder' AND status='PENDING'",
+                    (first.product_id,),
+                ).fetchone()[0]
+            )
+            == 1000
+        )
         state.complete_task(str(rotated["task_id"]), "worker-b")
         resumed = state.claim_task(worker_id="worker-c")
         assert resumed is not None
@@ -596,9 +593,7 @@ def failed_two_node_graph(
 
 
 def test_AUT_P0_005_lineage_is_preserved_through_repair(tmp_path: Path) -> None:
-    config, state, artifacts, failure_id, root_id = failed_two_node_graph(
-        tmp_path
-    )
+    config, state, artifacts, failure_id, root_id = failed_two_node_graph(tmp_path)
     try:
         repair_id = FailureRouter(config, state, artifacts).route(failure_id)
         failed = state.get_task("T-FAILNODEA")
@@ -641,9 +636,9 @@ def test_repair_inherits_toolchain_capabilities_from_failed_node_lineage(
         assert "toolchain.container_builder" in required
         assert "toolchain.scanners" in required
         contract = json.loads(
-            (
-                config.evidence_dir / Path(str(repair["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(repair["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert contract["required_capabilities"] == required
 
@@ -686,24 +681,19 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
     try:
         failed = state.get_task("T-FAILNODEA")
         assert failed is not None
-        contract_path = config.evidence_dir / Path(
-            str(failed["contract_ref"])
-        ).name
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         contract.update(
             {
                 "role": "security-reviewer",
                 "output_schema": "security-review-result.schema.json",
                 "capability_profile": "reviewer_readonly",
-                "required_capabilities": list(
-                    CAPABILITY_PROFILES["reviewer_readonly"]
-                ),
+                "required_capabilities": list(CAPABILITY_PROFILES["reviewer_readonly"]),
                 "quality_gates": ["target-tests", "target-lint"],
             }
         )
         contract_path.write_text(
-            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True)
-            + "\n",
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         with state._lock, state._connection:
@@ -714,11 +704,7 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
                        capability_profile='reviewer_readonly',
                        required_capabilities_json=?
                    WHERE task_id='T-FAILNODEA'""",
-                (
-                    stable_json(
-                        list(CAPABILITY_PROFILES["reviewer_readonly"])
-                    ),
-                ),
+                (stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),),
             )
 
         routed_id = FailureRouter(config, state, artifacts).route(failure_id)
@@ -730,10 +716,9 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
         assert routed["capability_profile"] == "planning_readonly"
         assert routed["repair_context_ref"] is None
         routed_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(routed["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(routed["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert routed_contract["failure_id"] == failure_id
         assert routed_contract["quality_gates"] == []
@@ -748,14 +733,11 @@ def test_exact_builder_repair_inherits_controller_quality_gates(
     try:
         failed = state.get_task("T-FAILNODEA")
         assert failed is not None
-        contract_path = config.evidence_dir / Path(
-            str(failed["contract_ref"])
-        ).name
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         contract["quality_gates"] = ["unit-tests", "lint"]
         contract_path.write_text(
-            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True)
-            + "\n",
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 
@@ -765,10 +747,9 @@ def test_exact_builder_repair_inherits_controller_quality_gates(
         assert repair is not None
         assert repair["role"] == "builder"
         repair_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(repair["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(repair["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert repair_contract["quality_gates"] == ["unit-tests", "lint"]
     finally:
@@ -788,9 +769,7 @@ def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
                 (
                     stable_json(
                         {
-                            "required_fixes": [
-                                "Repair the Compose runtime root cause."
-                            ],
+                            "required_fixes": ["Repair the Compose runtime root cause."],
                             "scope_reassessment_required": True,
                             "blocked_allowed_paths": ["tests/**"],
                             "provider_scope_findings": [
@@ -798,8 +777,7 @@ def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
                                     "code": "FULL_SUITE_UNRELATED_FAILURE",
                                     "severity": "medium",
                                     "text": (
-                                        "The mandatory gate failure is outside "
-                                        "allowed task scope."
+                                        "The mandatory gate failure is outside allowed task scope."
                                     ),
                                 }
                             ],
@@ -817,10 +795,9 @@ def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
         assert routed["stage_key"] == "replan"
         assert routed["repair_context_ref"] is None
         contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(routed["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(routed["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert "allowed_paths were too narrow" in contract["objective"]
         assert "tests-only substitute is invalid" in contract["objective"]
@@ -839,15 +816,12 @@ def test_legacy_mandatory_gate_repair_without_gate_contract_fails_closed(
         repair_id = FailureRouter(config, state, artifacts).route(failure_id)
         repair = state.get_task(repair_id)
         assert repair is not None
-        contract_path = config.evidence_dir / Path(
-            str(repair["contract_ref"])
-        ).name
+        contract_path = config.evidence_dir / Path(str(repair["contract_ref"])).name
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         assert contract["quality_gates"] == ["target-tests", "target-lint"]
         contract.pop("quality_gates")
         contract_path.write_text(
-            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True)
-            + "\n",
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         worker = AgentWorker(
@@ -882,9 +856,7 @@ def test_legacy_readonly_reviewer_repair_requires_director_replan(
                        required_capabilities_json=?
                    WHERE task_id=?""",
                 (
-                    stable_json(
-                        list(CAPABILITY_PROFILES["reviewer_readonly"])
-                    ),
+                    stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),
                     repair_id,
                 ),
             )
@@ -932,19 +904,14 @@ def test_AUT_P0_005_failure_router_replays_partial_artifacts_idempotently(
         ):
             router.route(failure_id)
         task_artifacts = sorted(config.evidence_dir.glob("task-T-*.json"))
-        repair_artifacts = sorted(
-            config.evidence_dir.glob("repair-brief-T-*.json")
-        )
+        repair_artifacts = sorted(config.evidence_dir.glob("repair-brief-T-*.json"))
         monkeypatch.setattr(state, "add_task", original_add_task)
 
         repair_task_id = router.route(failure_id)
 
         assert state.get_task(repair_task_id) is not None
         assert sorted(config.evidence_dir.glob("task-T-*.json")) == task_artifacts
-        assert (
-            sorted(config.evidence_dir.glob("repair-brief-T-*.json"))
-            == repair_artifacts
-        )
+        assert sorted(config.evidence_dir.glob("repair-brief-T-*.json")) == repair_artifacts
     finally:
         state.close()
 
@@ -1031,10 +998,7 @@ def test_AUT_P0_006_failed_dependency_routes_and_unblocks_after_repair(
         redundant_repair = state.get_task(redundant_repair_id)
         assert redundant_repair is not None
         assert redundant_repair["graph_status"] == "SUPERSEDED"
-        assert (
-            redundant_repair["terminal_reason"]
-            == "redundant_repair_suppressed"
-        )
+        assert redundant_repair["terminal_reason"] == "redundant_repair_suppressed"
         assert any(
             event["event_type"] == "redundant_repair_work_suppressed"
             for event in state.events("product-autonomy")
@@ -1178,9 +1142,7 @@ def test_inflight_outcome_cannot_cancel_a_newer_owner_pause(
 def test_AUT_P0_006_only_causal_leaf_failure_creates_recovery_work(
     tmp_path: Path,
 ) -> None:
-    config, state, artifacts, parent_failure_id, _ = failed_two_node_graph(
-        tmp_path
-    )
+    config, state, artifacts, parent_failure_id, _ = failed_two_node_graph(tmp_path)
     child_failure_id = "failure-causal-leaf"
     now = "2026-07-29T00:00:01Z"
     try:
@@ -1229,15 +1191,17 @@ def test_AUT_P0_006_only_causal_leaf_failure_creates_recovery_work(
         }
         assert failures[parent_failure_id] == "OPEN"
         assert failures[child_failure_id] == "ROUTED"
-        assert len(
-            [
-                task
-                for task in state.list_tasks("product-autonomy")
-                if task["failure_id"]
-                in {parent_failure_id, child_failure_id}
-                and task["graph_status"] in {"READY", "CLAIMED"}
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    task
+                    for task in state.list_tasks("product-autonomy")
+                    if task["failure_id"] in {parent_failure_id, child_failure_id}
+                    and task["graph_status"] in {"READY", "CLAIMED"}
+                ]
+            )
+            == 1
+        )
     finally:
         state.close()
 
@@ -1347,15 +1311,12 @@ def test_AUT_P0_006_missing_contract_reconstructs_safe_replan_coordinate(
         assert routed is not None
         assert routed["role"] == "replanner"
         routed_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(routed["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(routed["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert routed_contract["allowed_paths"] == ["artifacts/**"]
-        assert {
-            item["criterion_id"] for item in routed_contract["acceptance"]
-        } == {
+        assert {item["criterion_id"] for item in routed_contract["acceptance"]} == {
             "AC-REPLAN-FAILURE-CHAIN",
             "AC-REPLAN-EXECUTABLE-HANDOFF",
             "AC-REPLAN-PRESERVE-ACCEPTED",
@@ -1372,9 +1333,7 @@ def test_AUT_P0_006_missing_contract_reconstructs_safe_replan_coordinate(
         ).fetchone()
         assert incident is not None
         assert incident["status"] == "RESOLVED"
-        assert str(incident["evidence_ref"]).startswith(
-            "state://task-contract/"
-        )
+        assert str(incident["evidence_ref"]).startswith("state://task-contract/")
     finally:
         state.close()
 
@@ -1389,9 +1348,7 @@ def test_replanner_uses_planning_acceptance_not_failed_security_acceptance(
     failed_contract_path = config.evidence_dir / "task-T-FAILNODEA.json"
     failed_product_criterion = "No blocking security finding remains."
     try:
-        failed_contract = json.loads(
-            failed_contract_path.read_text(encoding="utf-8")
-        )
+        failed_contract = json.loads(failed_contract_path.read_text(encoding="utf-8"))
         failed_contract["role"] = "security-reviewer"
         failed_contract["acceptance"] = [
             {
@@ -1445,30 +1402,23 @@ def test_replanner_uses_planning_acceptance_not_failed_security_acceptance(
         assert routed["parent_task_id"] == "T-FAILNODEA"
         assert routed["root_task_id"] == root_id
         assert routed["failure_id"] == failure_id
-        assert routed["root_context_ref"] == (
-            "evidence/intake-product-autonomy.json"
-        )
+        assert routed["root_context_ref"] == ("evidence/intake-product-autonomy.json")
         routed_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(routed["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(routed["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
-        criterion_ids = {
-            str(item["criterion_id"])
-            for item in routed_contract["acceptance"]
-        }
+        criterion_ids = {str(item["criterion_id"]) for item in routed_contract["acceptance"]}
         assert criterion_ids == {
             "AC-REPLAN-FAILURE-CHAIN",
             "AC-REPLAN-EXECUTABLE-HANDOFF",
             "AC-REPLAN-PRESERVE-ACCEPTED",
             "AC-REPLAN-SEMANTIC-ONLY",
         }
-        assert failed_product_criterion not in stable_json(
-            routed_contract["acceptance"]
-        )
-        assert "failed acceptance criteria and mandatory gate IDs" in (
-            routed_contract["acceptance"][0]["verification"]
+        assert failed_product_criterion not in stable_json(routed_contract["acceptance"])
+        assert (
+            "failed acceptance criteria and mandatory gate IDs"
+            in (routed_contract["acceptance"][0]["verification"])
         )
     finally:
         state.close()
@@ -1520,9 +1470,7 @@ def test_AUT_P0_006_one_product_reconcile_failure_does_not_stop_another(
         ).fetchone()
         assert incident is not None
         assert incident["status"] == "OPEN"
-        assert str(incident["evidence_ref"]).startswith(
-            "state://product-reconcile/"
-        )
+        assert str(incident["evidence_ref"]).startswith("state://product-reconcile/")
 
         monkeypatch.setattr(
             reconciler,
@@ -1554,10 +1502,9 @@ def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
         repair = state.get_task(repair_id)
         assert repair is not None
         brief = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(repair["repair_context_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(repair["repair_context_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert brief["failed_task_id"] == "T-FAILNODEA"
         assert brief["failure_id"] == failure_id
@@ -1565,13 +1512,14 @@ def test_AUT_P0_010_localized_repair_brief_keeps_exact_cause_and_scope(
         assert brief["inherited_goal_ref"] == repair["root_context_ref"]
         assert brief["allowed_paths"] == ["src/a/**"]
         assert "target-tests" in brief["failed_gate_ids"]
-        assert any(
-            "transaction boundary" in fix for fix in brief["required_fixes"]
+        assert any("transaction boundary" in fix for fix in brief["required_fixes"])
+        assert (
+            ArtifactStore(config).validate(
+                "repair-brief-v2.schema.json",
+                brief,
+            )
+            == []
         )
-        assert ArtifactStore(config).validate(
-            "repair-brief-v2.schema.json",
-            brief,
-        ) == []
     finally:
         state.close()
 
@@ -1592,11 +1540,7 @@ def test_AUT_P0_010_repair_brief_maps_non_gate_failure_to_safe_reason_code(
                 """,
                 (
                     json.dumps(
-                        {
-                            "required_fixes": [
-                                "Restrict changes to the task allowlisted paths."
-                            ]
-                        }
+                        {"required_fixes": ["Restrict changes to the task allowlisted paths."]}
                     ),
                     failure_id,
                 ),
@@ -1606,20 +1550,19 @@ def test_AUT_P0_010_repair_brief_maps_non_gate_failure_to_safe_reason_code(
         repair = state.get_task(repair_id)
         assert repair is not None
         brief = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(repair["repair_context_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(repair["repair_context_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert brief["failed_gate_ids"] == ["scope_violation"]
+        assert "Restrict changes to the task allowlisted paths." in brief["required_fixes"]
         assert (
-            "Restrict changes to the task allowlisted paths."
-            in brief["required_fixes"]
+            ArtifactStore(config).validate(
+                "repair-brief-v2.schema.json",
+                brief,
+            )
+            == []
         )
-        assert ArtifactStore(config).validate(
-            "repair-brief-v2.schema.json",
-            brief,
-        ) == []
     finally:
         state.close()
 
@@ -1635,9 +1578,7 @@ def test_AUT_P0_011_needs_replan_activates_real_plan_revision(
         result = PipelineReconciler(config, state, artifacts).reconcile_once()
         assert result.replanned == 1
         replanner = next(
-            task
-            for task in state.list_tasks("product-autonomy")
-            if task["role"] == "replanner"
+            task for task in state.list_tasks("product-autonomy") if task["role"] == "replanner"
         )
         assert replanner["capability_profile"] == "planning_readonly"
         claimed = state.claim_task(worker_id="replanner-worker")
@@ -1667,9 +1608,7 @@ def test_AUT_P0_011_needs_replan_activates_real_plan_revision(
                 contract,
                 filename=f"task-{contract['task_id']}.json",
             )
-            node["task_contract_ref"] = (
-                f"evidence/task-{contract['task_id']}.json"
-            )
+            node["task_contract_ref"] = f"evidence/task-{contract['task_id']}.json"
         plan_path = artifacts.write(
             "backlog-plan-v2.schema.json",
             replacement_plan,
@@ -1740,9 +1679,7 @@ def test_AUT_P0_012_hypothesis_budget_exhaustion_changes_hypothesis(
         assert reassessment is not None
         assert reassessment["role"] == "replanner"
         hypotheses = state.list_hypotheses("product-autonomy")
-        exhausted = next(
-            item for item in hypotheses if item["hypothesis_id"] == old_hypothesis_id
-        )
+        exhausted = next(item for item in hypotheses if item["hypothesis_id"] == old_hypothesis_id)
         active = next(item for item in hypotheses if item["status"] == "ACTIVE")
         assert exhausted["status"] == "EXHAUSTED"
         assert active["parent_hypothesis_id"] == old_hypothesis_id
@@ -1794,15 +1731,9 @@ def test_diagnosis_reassessment_reuses_one_hypothesis_for_three_attempts(
                     lease_token=str(claimed["lease_token"]),
                     expected_task_revision=int(claimed["task_revision"]),
                     expected_plan_revision=1,
-                    idempotency_key=sha256_text(
-                        f"diagnosis-reassessment-{attempt_number}"
-                    ),
-                    result_ref=(
-                        f"evidence/diagnosis-reassessment-{attempt_number}.json"
-                    ),
-                    result_digest=sha256_text(
-                        f"diagnosis-reassessment-{attempt_number}"
-                    ),
+                    idempotency_key=sha256_text(f"diagnosis-reassessment-{attempt_number}"),
+                    result_ref=(f"evidence/diagnosis-reassessment-{attempt_number}.json"),
+                    result_digest=sha256_text(f"diagnosis-reassessment-{attempt_number}"),
                     status="FAILED_SEMANTIC",
                     failure=FailureData(
                         failure_class="semantic",
@@ -1811,9 +1742,7 @@ def test_diagnosis_reassessment_reuses_one_hypothesis_for_three_attempts(
                             "fresh implementation slices do not cover failed "
                             "mandatory gates: target-tests"
                         ),
-                        evidence_ref=(
-                            f"evidence/diagnosis-reassessment-{attempt_number}.json"
-                        ),
+                        evidence_ref=(f"evidence/diagnosis-reassessment-{attempt_number}.json"),
                         parent_failure_id=parent_failure_id,
                         failed_gate_ids=("target-tests",),
                     ),
@@ -1831,9 +1760,7 @@ def test_diagnosis_reassessment_reuses_one_hypothesis_for_three_attempts(
                 assert next_task["hypothesis_id"] != diagnosis_hypothesis_id
                 hypotheses = state.list_hypotheses("product-autonomy")
                 exhausted = next(
-                    item
-                    for item in hypotheses
-                    if item["hypothesis_id"] == diagnosis_hypothesis_id
+                    item for item in hypotheses if item["hypothesis_id"] == diagnosis_hypothesis_id
                 )
                 replacement = next(
                     item
@@ -1842,10 +1769,7 @@ def test_diagnosis_reassessment_reuses_one_hypothesis_for_three_attempts(
                 )
                 assert exhausted["status"] == "EXHAUSTED"
                 assert exhausted["attempts_used"] == 3
-                assert (
-                    replacement["parent_hypothesis_id"]
-                    == diagnosis_hypothesis_id
-                )
+                assert replacement["parent_hypothesis_id"] == diagnosis_hypothesis_id
             diagnosis_task_id = next_task_id
     finally:
         state.close()
@@ -1905,8 +1829,7 @@ def test_AUT_P0_031_second_identical_same_role_failure_opens_replan_circuit(
         events = [
             json.loads(event["payload_json"])
             for event in state.events("product-autonomy")
-            if event["event_type"] == "failure_routed"
-            and event["task_id"] == routed_id
+            if event["event_type"] == "failure_routed" and event["task_id"] == routed_id
         ]
         assert events[-1]["same_role_problem_count"] == 2
     finally:
@@ -1961,13 +1884,14 @@ def test_AUT_P0_013_context_pack_has_bounded_safe_file_excerpts(
     assert excerpts["large.py"]["redactions"][0]["location"].startswith("line ")
     assert excerpts["binary.bin"]["binary"] is True
     assert excerpts["binary.bin"]["content"] == ""
-    assert result.artifact["capability_contract"]["available"][0]["scope"] == {
-        "runtime": "podman"
-    }
-    assert ArtifactStore(config).validate(
-        "context-pack-v2.schema.json",
-        result.artifact,
-    ) == []
+    assert result.artifact["capability_contract"]["available"][0]["scope"] == {"runtime": "podman"}
+    assert (
+        ArtifactStore(config).validate(
+            "context-pack-v2.schema.json",
+            result.artifact,
+        )
+        == []
+    )
 
 
 def test_replanner_context_preserves_exact_structural_coordinates_under_budget(
@@ -2005,6 +1929,9 @@ def test_replanner_context_preserves_exact_structural_coordinates_under_budget(
             {
                 "failure_id": "failure-structural-context",
                 "reason_code": "target_dependency_audit_failed",
+                "scope_required_paths": [
+                    "scripts/image_security_verify.py",
+                ],
                 "safe_message": "bounded failure diagnostic " * 500,
             }
         ],
@@ -2029,9 +1956,7 @@ def test_replanner_context_preserves_exact_structural_coordinates_under_budget(
     failure = bounded["unresolved_failure_inventory"][0]
     assert bounded["policy_digest"] == policy
     assert bounded["plan_id"] == "PLAN-STRUCTURAL-CONTEXT"
-    assert bounded["accepted_unaffected_node_keys"] == [
-        "runtime-service-foundation"
-    ]
+    assert bounded["accepted_unaffected_node_keys"] == ["runtime-service-foundation"]
     assert node["node_key"] == "dependency-audit-runtime-inventory"
     assert node["task_id"] == "T-STRUCTURAL-CONTEXT"
     assert node["capability_profile"] == "builder_workspace"
@@ -2041,12 +1966,11 @@ def test_replanner_context_preserves_exact_structural_coordinates_under_budget(
         "scripts/dependency_audit.py",
     ]
     assert node["quality_gates"] == ["target-dependency-audit"]
-    assert node["accepted_result"]["result_ref"] == (
-        "evidence/result-structural-context.json"
-    )
+    assert node["accepted_result"]["result_ref"] == ("evidence/result-structural-context.json")
     assert node["accepted_result"]["result_digest"] == result_digest
     assert failure["failure_id"] == "failure-structural-context"
     assert failure["reason_code"] == "target_dependency_audit_failed"
+    assert failure["scope_required_paths"] == ["scripts/image_security_verify.py"]
     assert len(node["objective"]) < len(plan_summary["implementation_nodes"][0]["objective"])
     assert len(node["accepted_result"]["summary"]) < len(
         plan_summary["implementation_nodes"][0]["accepted_result"]["summary"]
@@ -2054,10 +1978,13 @@ def test_replanner_context_preserves_exact_structural_coordinates_under_budget(
     assert len(failure["safe_message"]) < len(
         plan_summary["unresolved_failure_inventory"][0]["safe_message"]
     )
-    assert ArtifactStore(config).validate(
-        "context-pack-v2.schema.json",
-        result.artifact,
-    ) == []
+    assert (
+        ArtifactStore(config).validate(
+            "context-pack-v2.schema.json",
+            result.artifact,
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -2094,10 +2021,13 @@ def test_transport_diagnostic_accepts_plan_contract_reason_codes(
         "usage_ref": None,
     }
 
-    assert ArtifactStore(config).validate(
-        "transport-diagnostic.schema.json",
-        diagnostic,
-    ) == []
+    assert (
+        ArtifactStore(config).validate(
+            "transport-diagnostic.schema.json",
+            diagnostic,
+        )
+        == []
+    )
 
 
 def test_plan_contract_repair_findings_preserve_each_failed_gate_id() -> None:
@@ -2175,18 +2105,14 @@ def test_AUT_P0_014_capability_preflight_controls_ready_frontier(
             plan_id="PLAN-CAPABILITY-1",
             root_task_id=root_id,
             parent_plan_id=str(product["active_plan_id"]),
-            node_specs=[
-                ("release-staging", "T-RELEASECAP", "accept-release")
-            ],
+            node_specs=[("release-staging", "T-RELEASECAP", "accept-release")],
             edges=[],
         )
         contract = plan["nodes"][0]["task_contract"]
         contract["role"] = "release-operator"
         contract["output_schema"] = "release-operation-result.schema.json"
         contract["capability_profile"] = "release_staging"
-        contract["required_capabilities"] = list(
-            CAPABILITY_PROFILES["release_staging"]
-        )
+        contract["required_capabilities"] = list(CAPABILITY_PROFILES["release_staging"])
         for capability in CAPABILITY_PROFILES["release_staging"]:
             if capability == "github.pull_request.create":
                 continue
@@ -2250,9 +2176,7 @@ def test_AUT_P0_015_routine_technical_gaps_never_require_owner(
         ).preflight_product("product-autonomy")
         assert checks
         events = state.events("product-autonomy")
-        assert not any(
-            event["event_type"] == "owner_action_required" for event in events
-        )
+        assert not any(event["event_type"] == "owner_action_required" for event in events)
         incidents = state._connection.execute(
             "SELECT * FROM controller_incidents WHERE product_id=?",
             ("product-autonomy",),
@@ -2297,9 +2221,7 @@ def test_AUT_P0_016_observation_is_atomic_with_production_release(
         contract["role"] = "release-operator"
         contract["output_schema"] = "release-operation-result.schema.json"
         contract["capability_profile"] = "release_production"
-        contract["required_capabilities"] = list(
-            CAPABILITY_PROFILES["release_production"]
-        )
+        contract["required_capabilities"] = list(CAPABILITY_PROFILES["release_production"])
         for capability in CAPABILITY_PROFILES["release_production"]:
             state.grant_capability(
                 product_id="product-autonomy",
@@ -2350,8 +2272,7 @@ def test_AUT_P0_016_observation_is_atomic_with_production_release(
         with pytest.raises(RuntimeError, match="after_successor_write"):
             state.commit_task_outcome(outcome, fault_injector=crash)
         assert not any(
-            task["stage_key"] == "observation"
-            for task in state.list_tasks("product-autonomy")
+            task["stage_key"] == "observation" for task in state.list_tasks("product-autonomy")
         )
         state.commit_task_outcome(outcome)
         observations = [
@@ -2371,8 +2292,7 @@ def test_AUT_P0_016_observation_is_atomic_with_production_release(
         )
         with state._lock, state._connection:
             state._connection.execute(
-                "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' "
-                "WHERE task_id=?",
+                "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' WHERE task_id=?",
                 (observation["task_id"],),
             )
         next_task = state.claim_task(worker_id="observer")
@@ -2404,9 +2324,7 @@ def test_AUT_P0_017_completion_reducer_requires_all_evidence_and_is_idempotent(
             plan_id="PLAN-COMPLETE-1",
             root_task_id=root_id,
             parent_plan_id=str(product["active_plan_id"]),
-            node_specs=[
-                ("observation", "T-OBSERVATION1", "accept-observation")
-            ],
+            node_specs=[("observation", "T-OBSERVATION1", "accept-observation")],
             edges=[],
         )
         persist_and_ingest_plan(
@@ -2448,10 +2366,10 @@ def test_AUT_P0_017_completion_reducer_requires_all_evidence_and_is_idempotent(
         )
         for evidence_type in (
             "independent_review",
-                "required_checks",
-                "staging",
-                "product_acceptance",
-                "production",
+            "required_checks",
+            "staging",
+            "product_acceptance",
+            "production",
             "rollback",
             "observation",
         ):
@@ -2500,24 +2418,22 @@ def test_AUT_P0_017_completion_reducer_requires_all_evidence_and_is_idempotent(
         )
         assert completed.completed
         assert completed.completion_evidence_ref is not None
-        completion_path = (
-            config.evidence_dir
-            / Path(completed.completion_evidence_ref).name
-        )
+        completion_path = config.evidence_dir / Path(completed.completion_evidence_ref).name
         completion = json.loads(completion_path.read_text(encoding="utf-8"))
-        assert artifacts.validate(
-            "completion-evidence.schema.json",
-            completion,
-        ) == []
+        assert (
+            artifacts.validate(
+                "completion-evidence.schema.json",
+                completion,
+            )
+            == []
+        )
         replay = state.reduce_completion(
             "product-autonomy",
             artifacts=artifacts,
         )
         assert replay == completed
         completion_outbox = [
-            row
-            for row in state.list_outbox()
-            if row["event_type"] == "product_completed"
+            row for row in state.list_outbox() if row["event_type"] == "product_completed"
         ]
         assert len(completion_outbox) == 1
     finally:
@@ -2570,8 +2486,7 @@ def test_AUT_P0_018_restart_and_lease_loss_preserve_graph_lineage(
     )
     with state._lock, state._connection:
         state._connection.execute(
-            "UPDATE tasks SET lease_until='2000-01-01T00:00:00Z' "
-            "WHERE task_id=?",
+            "UPDATE tasks SET lease_until='2000-01-01T00:00:00Z' WHERE task_id=?",
             (first["task_id"],),
         )
     state.close()
@@ -2623,15 +2538,11 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
             ).fetchall()
         ]
         assert versions == [version for version, _, _ in MIGRATIONS]
-        assert database.with_suffix(
-            database.suffix + ".pre-autonomy-v2.bak"
-        ).is_file()
+        assert database.with_suffix(database.suffix + ".pre-autonomy-v2.bak").is_file()
     finally:
         state.close()
 
-    repository_database = build_fixture(
-        tmp_path / "legacy_2_0_19_repository.db"
-    )
+    repository_database = build_fixture(tmp_path / "legacy_2_0_19_repository.db")
     connection = sqlite3.connect(repository_database)
     try:
         connection.execute(
@@ -2646,15 +2557,11 @@ def test_AUT_P0_019_legacy_migration_preserves_rows_and_builds_graph(
         product = repository_state.get_product("legacy-product")
         assert product is not None
         assert product["delivery_mode"] == "existing_repository"
-        assert product["repository_url"] == (
-            "https://github.com/example/legacy-product"
-        )
+        assert product["repository_url"] == ("https://github.com/example/legacy-product")
         assert product["repository_name"] == "legacy-product"
         assert product["goal_text"] != product["idea"]
         plan = repository_state.list_plans("legacy-product")
-        assert json.loads(plan[0]["goals_json"])[0]["statement"] == (
-            product["goal_text"]
-        )
+        assert json.loads(plan[0]["goals_json"])[0]["statement"] == (product["goal_text"])
     finally:
         repository_state.close()
 
@@ -2832,18 +2739,13 @@ def test_AUT_P0_019_workspace_collision_migration_collapses_incident_tree(
         assert duplicate["graph_status"] == "SUPERSEDED"
         assert descendant["graph_status"] == "SUPERSEDED"
         assert unrelated["graph_status"] == "READY"
-        assert {
-            failure["status"]
-            for failure in restarted.list_failures("product-autonomy")
-        } == {"RESOLVED"}
+        assert {failure["status"] for failure in restarted.list_failures("product-autonomy")} == {
+            "RESOLVED"
+        }
         incidents = restarted._connection.execute(
-            "SELECT status, resolved_at FROM controller_incidents "
-            "ORDER BY incident_id"
+            "SELECT status, resolved_at FROM controller_incidents ORDER BY incident_id"
         ).fetchall()
-        assert all(
-            row["status"] == "RESOLVED" and row["resolved_at"]
-            for row in incidents
-        )
+        assert all(row["status"] == "RESOLVED" and row["resolved_at"] for row in incidents)
         event = next(
             event
             for event in restarted.events("product-autonomy")
@@ -2942,18 +2844,15 @@ def test_AUT_P0_019_failure_lineage_migration_closes_proven_ancestors(
                 """,
                 (product_id, now),
             )
-            state._connection.execute(
-                "DELETE FROM schema_migrations WHERE version=6"
-            )
+            state._connection.execute("DELETE FROM schema_migrations WHERE version=6")
     finally:
         state.close()
 
     restarted = StateStore(config.database_path)
     try:
-        assert {
-            failure["status"]
-            for failure in restarted.list_failures(product_id)
-        } == {"RESOLVED"}
+        assert {failure["status"] for failure in restarted.list_failures(product_id)} == {
+            "RESOLVED"
+        }
         incident = restarted._connection.execute(
             """
             SELECT status, resolved_at
@@ -3026,9 +2925,7 @@ def test_AUT_P0_019_causal_leaf_migration_supersedes_duplicate_recovery(
                         now,
                     ),
                 )
-            state._connection.execute(
-                "DELETE FROM schema_migrations WHERE version=7"
-            )
+            state._connection.execute("DELETE FROM schema_migrations WHERE version=7")
     finally:
         state.close()
 
@@ -3041,22 +2938,15 @@ def test_AUT_P0_019_causal_leaf_migration_supersedes_duplicate_recovery(
         assert parent["blocked_reason"] == "causal_leaf_superseded"
         assert parent["blocked_ref"] == leaf["task_id"]
         assert leaf["graph_status"] == "READY"
-        assert {
-            failure["status"]
-            for failure in restarted.list_failures(product_id)
-        } == {"ROUTED"}
+        assert {failure["status"] for failure in restarted.list_failures(product_id)} == {"ROUTED"}
         event = next(
             event
             for event in restarted.events(product_id)
             if event["event_type"] == "causal_recovery_deduplicated"
         )
         payload = json.loads(event["payload_json"])
-        assert payload["superseded_task_ids"] == [
-            "T-CAUSAL-PARENT-RECOVERY"
-        ]
-        assert payload["surviving_descendant_task_ids"] == [
-            "T-CAUSAL-LEAF-RECOVERY"
-        ]
+        assert payload["superseded_task_ids"] == ["T-CAUSAL-PARENT-RECOVERY"]
+        assert payload["surviving_descendant_task_ids"] == ["T-CAUSAL-LEAF-RECOVERY"]
         versions = [
             int(row[0])
             for row in restarted._connection.execute(
@@ -3117,9 +3007,7 @@ def test_AUT_P0_019_invalid_output_schema_migration_reopens_replan(
             failure_id=failure_id,
         )
         with state._lock, state._connection:
-            state._connection.execute(
-                "DELETE FROM schema_migrations WHERE version IN (8,9)"
-            )
+            state._connection.execute("DELETE FROM schema_migrations WHERE version IN (8,9)")
     finally:
         state.close()
 
@@ -3195,9 +3083,7 @@ def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
         contender = sqlite3.connect(database, timeout=5)
         contender.set_trace_callback(
             lambda sql: (
-                reached_writer_lock.set()
-                if sql.strip().upper() == "BEGIN IMMEDIATE"
-                else None
+                reached_writer_lock.set() if sql.strip().upper() == "BEGIN IMMEDIATE" else None
             )
         )
         try:
@@ -3228,9 +3114,7 @@ def test_AUT_P0_019_concurrent_start_rechecks_migration_under_writer_lock(
     try:
         versions = [
             int(row[0])
-            for row in verified.execute(
-                "SELECT version FROM schema_migrations ORDER BY version"
-            )
+            for row in verified.execute("SELECT version FROM schema_migrations ORDER BY version")
         ]
     finally:
         verified.close()
@@ -3258,15 +3142,11 @@ def test_AUT_P0_019_plan_candidate_reports_existing_idempotency_coordinate(
             node_specs=[("A", "T-NEW-IDENTITY", "accept-identity")],
             edges=[],
         )
-        plan["nodes"][0]["task_contract"]["idempotency_key"] = sha256_text(
-            "existing-plan-identity"
-        )
+        plan["nodes"][0]["task_contract"]["idempotency_key"] = sha256_text("existing-plan-identity")
 
         with pytest.raises(
             ValueError,
-            match=(
-                r"nodes\[0\]\.task_contract\.idempotency_key already exists"
-            ),
+            match=(r"nodes\[0\]\.task_contract\.idempotency_key already exists"),
         ):
             state.validate_plan_candidate(plan)
 
@@ -3305,11 +3185,7 @@ def test_AUT_P0_019_plan_candidate_reports_existing_plan_digest_coordinate(
             created_by_task_id=root_task_id,
         )
         plans_before = state.list_plans("product-autonomy")
-        existing = next(
-            item
-            for item in plans_before
-            if item["plan_id"] == "PLAN-DIGEST-IDENTITY"
-        )
+        existing = next(item for item in plans_before if item["plan_id"] == "PLAN-DIGEST-IDENTITY")
         plan = executable_plan(
             config,
             product_id="product-autonomy",
@@ -3322,10 +3198,7 @@ def test_AUT_P0_019_plan_candidate_reports_existing_plan_digest_coordinate(
 
         with pytest.raises(
             ValueError,
-            match=(
-                "BacklogPlan plan_id already exists with a different "
-                "immutable digest"
-            ),
+            match=("BacklogPlan plan_id already exists with a different immutable digest"),
         ):
             state.validate_plan_candidate(plan)
 
@@ -3419,9 +3292,7 @@ def test_AUT_P0_018_registered_but_noncanonical_output_schema_is_rejected(
             node_specs=[("A", "T-WRONG-REGISTERED-SCHEMA", "accept-schema")],
             edges=[],
         )
-        plan["nodes"][0]["task_contract"]["output_schema"] = (
-            "test-package-result.schema.json"
-        )
+        plan["nodes"][0]["task_contract"]["output_schema"] = "test-package-result.schema.json"
 
         with pytest.raises(
             ValueError,
@@ -3450,14 +3321,10 @@ def test_AUT_P0_018_unregistered_quality_gate_is_rejected_before_plan_ingest(
             product_id="product-autonomy",
             plan_id="PLAN-UNREGISTERED-QUALITY-GATE",
             root_task_id="T-UNREGISTERED-QUALITY-GATE-ROOT",
-            node_specs=[
-                ("A", "T-UNREGISTERED-QUALITY-GATE", "accept-quality-gate")
-            ],
+            node_specs=[("A", "T-UNREGISTERED-QUALITY-GATE", "accept-quality-gate")],
             edges=[],
         )
-        plan["nodes"][0]["task_contract"]["quality_gates"] = [
-            "package_integrity"
-        ]
+        plan["nodes"][0]["task_contract"]["quality_gates"] = ["package_integrity"]
 
         with pytest.raises(
             ValueError,
@@ -3485,9 +3352,7 @@ def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
             "product-autonomy",
             "task-specifier",
         )
-        root_task_id = str(
-            json.loads(root_path.read_text(encoding="utf-8"))["task_id"]
-        )
+        root_task_id = str(json.loads(root_path.read_text(encoding="utf-8"))["task_id"])
         with state._lock, state._connection:
             state._connection.execute(
                 """
@@ -3577,9 +3442,7 @@ def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
         assert len(reanchored) == 1
         assert reanchored[0]["plan_id"] == current_product["active_plan_id"]
         assert reanchored[0]["supersedes_task_id"] == active[0]["task_id"]
-        claimed_reanchored = state.claim_task(
-            worker_id="reanchored-liveness-replanner"
-        )
+        claimed_reanchored = state.claim_task(worker_id="reanchored-liveness-replanner")
         assert claimed_reanchored is not None
         assert claimed_reanchored["task_id"] == reanchored[0]["task_id"]
         failures = state.list_failures("product-autonomy")
@@ -3594,9 +3457,7 @@ def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
             """,
             ("product-autonomy",),
         ).fetchall()
-        assert [tuple(row) for row in incidents] == [
-            ("liveness_invariant_violation", "OPEN")
-        ]
+        assert [tuple(row) for row in incidents] == [("liveness_invariant_violation", "OPEN")]
     finally:
         state.close()
 
@@ -3756,9 +3617,7 @@ def test_AUT_P0_008_outcome_replay_is_idempotent(tmp_path: Path) -> None:
 def test_AUT_P0_009_safe_internal_diagnostic_is_precise_and_redacted() -> None:
     token = "ghp_" + "A" * 24
     try:
-        raise RuntimeError(
-            f"database migration checksum mismatch; credential={token}"
-        )
+        raise RuntimeError(f"database migration checksum mismatch; credential={token}")
     except RuntimeError as error:
         diagnostic = safe_exception_diagnostic(error)
     assert diagnostic["exception_type"] == "RuntimeError"
