@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from itertools import pairwise
 from typing import Any
 
@@ -22,9 +22,13 @@ class PlanContractViolation(ValueError):
         message: str,
         *,
         reason_code: str = "plan_contract_violation",
+        failed_gate_ids: Iterable[str] = (),
     ) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+        self.failed_gate_ids = tuple(
+            dict.fromkeys(str(value) for value in failed_gate_ids if str(value))
+        )
 
 
 def _typed_contracts(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:

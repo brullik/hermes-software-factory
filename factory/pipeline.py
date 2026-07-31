@@ -89,6 +89,11 @@ def _replan_mandatory_gate_ids(
 ) -> tuple[str, ...]:
     """Return executable gate or reviewer blocker IDs from a causal chain."""
 
+    non_executable_coordinates = {
+        "BACKLOG_PLAN_SEMANTIC_VALIDATION",
+        "OUTPUT_SCHEMA_VALIDATION",
+        "PLAN_CONTRACT_VIOLATION",
+    }
     if not source_failure_id:
         return ()
     by_id = {
@@ -107,6 +112,7 @@ def _replan_mandatory_gate_ids(
         if str(failure.get("reason_code") or "") in {
             "mandatory_gate_failed",
             "model_requested_repair",
+            "plan_contract_violation",
         }:
             try:
                 raw_gate_ids = json.loads(
@@ -118,7 +124,11 @@ def _replan_mandatory_gate_ids(
                 gate_ids.extend(
                     str(value)
                     for value in raw_gate_ids
-                    if isinstance(value, str) and value
+                    if (
+                        isinstance(value, str)
+                        and value
+                        and value not in non_executable_coordinates
+                    )
                 )
         current_id = str(failure.get("parent_failure_id") or "")
     return tuple(dict.fromkeys(gate_ids))

@@ -216,7 +216,8 @@ class PlanCompiler:
         if missing:
             raise PlanContractViolation(
                 "fresh implementation slices do not cover failed mandatory gates: "
-                + ", ".join(missing)
+                + ", ".join(missing),
+                failed_gate_ids=missing,
             )
 
     @staticmethod

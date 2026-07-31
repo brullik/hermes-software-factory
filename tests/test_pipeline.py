@@ -42,7 +42,11 @@ class PipelineTests(unittest.TestCase):
                 "failure_id": "failure-replan",
                 "parent_failure_id": "failure-repair",
                 "reason_code": "plan_contract_violation",
-                "failed_gate_ids_json": '["PLAN_CONTRACT_VIOLATION"]',
+                "failed_gate_ids_json": (
+                    '["PLAN_CONTRACT_VIOLATION", '
+                    '"RELEASE-EVIDENCE-SUBJECT-MISMATCH", '
+                    '"RELEASE-PREREQUISITES-MISSING"]'
+                ),
             },
             {
                 "failure_id": "failure-unrelated",
@@ -58,6 +62,8 @@ class PipelineTests(unittest.TestCase):
                 source_failure_id="failure-replan",
             ),
             (
+                "RELEASE-EVIDENCE-SUBJECT-MISMATCH",
+                "RELEASE-PREREQUISITES-MISSING",
                 "MODEL_REPAIR_REQUIRED",
                 "target-dependency-audit",
                 "target-license-check",

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.27 - 2026-07-31
+
+- Preserve every omitted mandatory gate ID as a first-class structural finding
+  when a Replanner proposal fails plan compilation, rather than collapsing the
+  diagnosis to the generic `PLAN_CONTRACT_VIOLATION` coordinate.
+- Carry exact gate IDs forward through subsequent bounded causal replans while
+  filtering non-executable controller sentinels, so the next Director can build
+  a complete fresh repair slice without relying on truncated narrative text.
+- Add regression coverage for compiler exceptions, Worker repair findings, and
+  multi-generation replan gate inheritance.
+
 ## 2.2.26 - 2026-07-31
 
 - Make paused-product resume atomic: reconcile the prior runnable frontier and

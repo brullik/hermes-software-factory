@@ -349,7 +349,7 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
             "fresh implementation slices do not cover failed mandatory gates: "
             "target-dependency-audit, target-license-check"
         ),
-    ):
+    ) as blocked:
         PlanCompiler(policy_digest=policy_digest(config)).compile(
             semantic,
             context,
@@ -358,6 +358,10 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
                 "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
             },
         )
+    assert blocked.value.failed_gate_ids == (
+        "target-dependency-audit",
+        "target-license-check",
+    )
 
     semantic["nodes"][1]["objective"] = (
         "Repair target-dependency-audit and target-license-check by adding the "
