@@ -253,6 +253,146 @@ class FactoryRuntimeTests(unittest.TestCase):
             self.assertEqual(json.loads(event["payload_json"])["previous_status"], "FAILED_SAFE")
             state.close()
 
+    def test_owner_resume_is_atomic_and_selects_only_the_causal_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "controller.db")
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="cli",
+                idea="idea",
+                idempotency_key="selective-owner-resume",
+            )
+            state.transition_product("product", "CONTRACT_DRAFTED")
+            state.add_task(
+                task_id="ancestor",
+                product_id="product",
+                title="Historical failed ancestor",
+            )
+            claimed = state.claim_task(worker_id="worker")
+            self.assertIsNotNone(claimed)
+            state.complete_task(
+                "ancestor",
+                "worker",
+                "FAILED_SAFE",
+                reason_code="schema_validation",
+                detail="safe historical failure",
+                result_ref="evidence/failure-ancestor.json",
+                failure_kind="semantic",
+            )
+            state.add_task(
+                task_id="causal-leaf",
+                product_id="product",
+                title="Current recovery leaf",
+                parent_task_id="ancestor",
+                source_task_id="ancestor",
+                supersedes_task_id="ancestor",
+            )
+            state.transition_product("product", "PAUSED")
+            with state._lock, state._connection:
+                state._connection.execute(
+                    """UPDATE tasks
+                       SET status='PENDING', graph_status='READY',
+                           terminal_reason=NULL, terminal_detail=NULL,
+                           result_ref=NULL, failure_kind=NULL
+                       WHERE task_id='ancestor'"""
+                )
+                state._record_event(
+                    "product",
+                    "ancestor",
+                    "task_requeued",
+                    {
+                        "attempt_kind": "owner_resume",
+                        "previous_status": "FAILED_SAFE",
+                        "reason": "owner_resume",
+                    },
+                )
+
+            product = WorkflowEngine(state).resume("product", "IMPLEMENTING")
+
+            self.assertEqual(product["status"], "IMPLEMENTING")
+            ancestor = state.get_task("ancestor")
+            self.assertIsNotNone(ancestor)
+            assert ancestor is not None
+            self.assertEqual(ancestor["status"], "FAILED_SAFE")
+            self.assertEqual(ancestor["graph_status"], "FAILED_SEMANTIC")
+            self.assertEqual(
+                ancestor["result_ref"],
+                "evidence/failure-ancestor.json",
+            )
+            self.assertEqual(ancestor["terminal_reason"], "schema_validation")
+            self.assertEqual(ancestor["failure_kind"], "semantic")
+            claimed_leaf = state.claim_task(worker_id="resume-worker")
+            self.assertIsNotNone(claimed_leaf)
+            assert claimed_leaf is not None
+            self.assertEqual(claimed_leaf["task_id"], "causal-leaf")
+            event_types = [
+                event["event_type"]
+                for event in state.events("product")
+            ]
+            self.assertIn("owner_resume_ancestor_reconciled", event_types)
+            state.close()
+
+    def test_owner_resume_leaves_open_semantic_failure_to_router(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "controller.db")
+            state.create_product(
+                product_id="product",
+                owner_id="owner",
+                source="cli",
+                idea="idea",
+                idempotency_key="router-owned-resume",
+            )
+            state.transition_product("product", "CONTRACT_DRAFTED")
+            state.add_task(
+                task_id="failed",
+                product_id="product",
+                title="Router-owned failure",
+            )
+            claimed = state.claim_task(worker_id="worker")
+            self.assertIsNotNone(claimed)
+            state.complete_task(
+                "failed",
+                "worker",
+                "FAILED_SAFE",
+                reason_code="plan_contract_violation",
+                detail="safe causal coordinate",
+                result_ref="evidence/failure-failed.json",
+                failure_kind="semantic",
+            )
+            now = "2026-07-31T00:00:00Z"
+            with state._lock, state._connection:
+                state._connection.execute(
+                    """INSERT INTO failures
+                       (failure_id, product_id, task_id, attempt_id,
+                        parent_failure_id, failure_class, reason_code,
+                        fingerprint, safe_message, exception_type,
+                        stack_fingerprint, evidence_ref, status, retryable,
+                        owner_action_eligible, expected_json, actual_json,
+                        failed_gate_ids_json, first_seen_at, last_seen_at)
+                       VALUES ('failure-router-owned', 'product', 'failed', NULL,
+                               NULL, 'semantic', 'plan_contract_violation',
+                               'router-owned-fingerprint', 'safe causal coordinate',
+                               NULL, NULL, 'evidence/failure-failed.json', 'OPEN',
+                               0, 0, '{}', '{}', '[]', ?, ?)""",
+                    (now, now),
+                )
+
+            WorkflowEngine(state).resume("product", "IMPLEMENTING")
+
+            failed = state.get_task("failed")
+            self.assertIsNotNone(failed)
+            assert failed is not None
+            self.assertEqual(failed["status"], "FAILED_SAFE")
+            self.assertEqual(failed["graph_status"], "FAILED_SEMANTIC")
+            self.assertFalse(
+                any(
+                    event["event_type"] == "task_requeued"
+                    for event in state.events("product")
+                )
+            )
+            state.close()
+
     def test_conflict_keys_serialize_same_file_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = StateStore(Path(directory) / "controller.db")
