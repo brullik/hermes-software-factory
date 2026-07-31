@@ -4,6 +4,7 @@ import json
 import sqlite3
 import zipfile
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -354,13 +355,17 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
         "missing executable dependency contract"
     )
     semantic["nodes"][1]["scope"] = ["tests/**"]
+    blocked_only_context = replace(
+        context,
+        required_replan_scope_paths=(),
+    )
     with pytest.raises(
         PlanContractViolation,
         match=("fresh implementation slices do not expand the failed allowed_paths scope"),
     ) as blocked_scope:
         PlanCompiler(policy_digest=policy_digest(config)).compile(
             semantic,
-            context,
+            blocked_only_context,
             inherited_nodes=[inherited_dependency],
             accepted_nodes={"semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"},
         )
@@ -387,6 +392,23 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
         "target-dependency-audit",
         "target-license-check",
     )
+
+    semantic["nodes"][1]["scope"] = ["tests/**"]
+    with pytest.raises(
+        PlanContractViolation,
+        match=(
+            "fresh implementation slices do not cover required scope paths: "
+            "scripts/image_security_verify.py"
+        ),
+    ):
+        PlanCompiler(policy_digest=policy_digest(config)).compile(
+            semantic,
+            context,
+            inherited_nodes=[inherited_dependency],
+            accepted_nodes={
+                "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
+            },
+        )
 
     semantic["nodes"][1]["scope"] = ["scripts/**", "tests/**"]
     compiled = PlanCompiler(policy_digest=policy_digest(config)).compile(

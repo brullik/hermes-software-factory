@@ -208,6 +208,18 @@ class PlanCompiler:
                 + ", ".join(missing),
                 failed_gate_ids=missing,
             )
+        fresh_scopes = [str(value) for node in fresh_slices for value in node.get("scope", [])]
+        missing_required_paths = [
+            path
+            for path in dict.fromkeys(str(value) for value in required_scope_paths)
+            if path and not path_is_covered(path, fresh_scopes)
+        ]
+        if missing_required_paths:
+            raise PlanContractViolation(
+                "fresh implementation slices do not cover required scope paths: "
+                + ", ".join(missing_required_paths),
+                failed_gate_ids=mandatory_gate_ids,
+            )
         if blocked_scope_paths:
             blocked = tuple(dict.fromkeys(str(value) for value in blocked_scope_paths))
 
@@ -222,7 +234,6 @@ class PlanCompiler:
                             return True
                 return False
 
-            fresh_scopes = [str(value) for node in fresh_slices for value in node.get("scope", [])]
             if not any(not covered_by_blocked_scope(value) for value in fresh_scopes):
                 raise PlanContractViolation(
                     "fresh implementation slices do not expand the failed "
@@ -230,18 +241,6 @@ class PlanCompiler:
                     "outside: " + ", ".join(blocked),
                     failed_gate_ids=mandatory_gate_ids,
                 )
-        fresh_scopes = [str(value) for node in fresh_slices for value in node.get("scope", [])]
-        missing_required_paths = [
-            path
-            for path in dict.fromkeys(str(value) for value in required_scope_paths)
-            if path and not path_is_covered(path, fresh_scopes)
-        ]
-        if missing_required_paths:
-            raise PlanContractViolation(
-                "fresh implementation slices do not cover required scope paths: "
-                + ", ".join(missing_required_paths),
-                failed_gate_ids=mandatory_gate_ids,
-            )
 
     @staticmethod
     def _quality_gates(stage_key: str, external_repository: bool) -> list[str]:

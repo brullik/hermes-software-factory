@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.33 - 2026-07-31
+
+- Promote scope reassessment and exact required repository paths through the
+  complete causal failure chain into every descendant Replanner objective.
+- Validate exact required paths before the generic blocked-scope expansion check
+  so failed proposals receive the actionable file coordinate immediately.
+- Emit a dedicated repair finding that tells the next Director attempt to add
+  the controller-owned path while preserving gates and forbidden paths.
+
 ## 2.2.32 - 2026-07-31
 
 - Extract exact, sanitized production file coordinates from scope findings and

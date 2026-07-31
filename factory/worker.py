@@ -135,6 +135,19 @@ def _plan_contract_repair_findings(
 ) -> list[dict[str, str]]:
     """Keep controller-owned gate coordinates structural across replans."""
 
+    if "required scope paths:" in safe_message:
+        return [
+            {
+                "id": "REQUIRED-REPLAN-SCOPE-PATHS",
+                "severity": "high",
+                "description": safe_message,
+                "required_fix": (
+                    "Add every exact controller-owned repository path named in "
+                    "the validator diagnostic to a fresh implementation slice "
+                    "scope while preserving mandatory gates and forbidden paths."
+                ),
+            }
+        ]
     if error.failed_gate_ids:
         return [
             {

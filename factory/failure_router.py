@@ -52,21 +52,41 @@ class FailureRouter:
         self.artifacts = artifacts or ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)
 
-    @staticmethod
-    def _scope_reassessment_required(failure: dict[str, Any]) -> bool:
-        try:
-            actual = json.loads(str(failure.get("actual_json") or "{}"))
-        except json.JSONDecodeError:
-            return False
-        return isinstance(actual, dict) and actual.get("scope_reassessment_required") is True
+    def _causal_scope_evidence(
+        self,
+        failure: dict[str, Any],
+        *,
+        product_id: str,
+        max_depth: int = 24,
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Promote exact scope evidence through plan-contract descendants."""
 
-    @staticmethod
-    def _scope_required_paths(failure: dict[str, Any]) -> tuple[str, ...]:
-        try:
-            actual = json.loads(str(failure.get("actual_json") or "{}"))
-        except json.JSONDecodeError:
-            return ()
-        return derive_scope_required_paths(actual) if isinstance(actual, dict) else ()
+        failures = {
+            str(item.get("failure_id") or ""): item
+            for item in self.state.list_failures(product_id)
+            if str(item.get("failure_id") or "")
+        }
+        current_id = str(failure.get("failure_id") or "")
+        visited: set[str] = set()
+        reassessment_required = False
+        required_paths: list[str] = []
+        while current_id and current_id not in visited and len(visited) < max_depth:
+            visited.add(current_id)
+            current = failures.get(current_id)
+            if current is None:
+                break
+            try:
+                actual = json.loads(str(current.get("actual_json") or "{}"))
+            except json.JSONDecodeError:
+                actual = {}
+            if isinstance(actual, dict):
+                reassessment_required = (
+                    reassessment_required
+                    or actual.get("scope_reassessment_required") is True
+                )
+                required_paths.extend(derive_scope_required_paths(actual))
+            current_id = str(current.get("parent_failure_id") or "")
+        return reassessment_required, tuple(dict.fromkeys(required_paths))
 
     def _same_role_problem_count(
         self,
@@ -747,8 +767,13 @@ class FailureRouter:
                 raise RuntimeError("failure source task is missing")
             failed = dict(failed_row)
             reason = str(failure["reason_code"])
-            scope_reassessment_required = self._scope_reassessment_required(dict(failure))
-            required_scope_paths = self._scope_required_paths(dict(failure))
+            (
+                scope_reassessment_required,
+                required_scope_paths,
+            ) = self._causal_scope_evidence(
+                dict(failure),
+                product_id=str(failed["product_id"]),
+            )
             active_plan_id = self._active_plan_id(str(failed["product_id"]))
             if active_plan_id:
                 failed["plan_id"] = active_plan_id

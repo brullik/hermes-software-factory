@@ -777,7 +777,8 @@ def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
                                     "code": "FULL_SUITE_UNRELATED_FAILURE",
                                     "severity": "medium",
                                     "text": (
-                                        "The mandatory gate failure is outside allowed task scope."
+                                        "scripts/image_security_verify.py is outside "
+                                        "allowed task scope."
                                     ),
                                 }
                             ],
@@ -801,6 +802,80 @@ def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
         )
         assert "allowed_paths were too narrow" in contract["objective"]
         assert "tests-only substitute is invalid" in contract["objective"]
+        assert "scripts/image_security_verify.py" in contract["objective"]
+    finally:
+        state.close()
+
+
+def test_plan_contract_descendant_promotes_causal_required_scope_path(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, parent_failure_id, _ = failed_two_node_graph(tmp_path)
+    child_failure_id = "failure-required-scope-descendant"
+    now = "2026-07-31T00:00:00Z"
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE failures SET actual_json=? WHERE failure_id=?",
+                (
+                    stable_json(
+                        {
+                            "scope_reassessment_required": True,
+                            "blocked_allowed_paths": ["src/**", "tests/**"],
+                            "provider_scope_findings": [
+                                {
+                                    "code": "SCOPE_INSUFFICIENT",
+                                    "severity": "high",
+                                    "text": (
+                                        "scripts/image_security_verify.py is outside "
+                                        "allowed task scope."
+                                    ),
+                                }
+                            ],
+                        }
+                    ),
+                    parent_failure_id,
+                ),
+            )
+            state._connection.execute(
+                """
+                INSERT INTO failures
+                    (failure_id, product_id, task_id, parent_failure_id,
+                     failure_class, reason_code, fingerprint, safe_message,
+                     evidence_ref, status, retryable,
+                     owner_action_eligible, expected_json, actual_json,
+                     failed_gate_ids_json, first_seen_at, last_seen_at)
+                VALUES (?, 'product-autonomy', 'T-FAILNODEA', ?,
+                        'semantic', 'plan_contract_violation', ?,
+                        'Fresh plan did not expand its scope.',
+                        'internal://required-scope-descendant', 'OPEN', 0, 0,
+                        '{}', '{}', '["target-tests"]', ?, ?)
+                """,
+                (
+                    child_failure_id,
+                    parent_failure_id,
+                    sha256_text(child_failure_id),
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                "UPDATE tasks SET failure_id=? WHERE task_id='T-FAILNODEA'",
+                (child_failure_id,),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(child_failure_id)
+
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        contract = json.loads(
+            (config.evidence_dir / Path(str(routed["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert routed["role"] == "replanner"
+        assert "allowed_paths were too narrow" in contract["objective"]
+        assert "scripts/image_security_verify.py" in contract["objective"]
     finally:
         state.close()
 
@@ -2046,6 +2121,32 @@ def test_plan_contract_repair_findings_preserve_each_failed_gate_id() -> None:
         "RELEASE-PREREQUISITES-MISSING",
     ]
     assert all(item["id"] in item["required_fix"] for item in findings)
+
+
+def test_plan_contract_repair_finding_prioritizes_exact_required_path() -> None:
+    error = PlanContractViolation(
+        "fresh implementation slices do not cover required scope paths: "
+        "scripts/image_security_verify.py",
+        failed_gate_ids=("target-tests", "target-lint"),
+    )
+
+    findings = _plan_contract_repair_findings(error, str(error))
+
+    assert findings == [
+        {
+            "id": "REQUIRED-REPLAN-SCOPE-PATHS",
+            "severity": "high",
+            "description": (
+                "fresh implementation slices do not cover required scope paths: "
+                "scripts/image_security_verify.py"
+            ),
+            "required_fix": (
+                "Add every exact controller-owned repository path named in "
+                "the validator diagnostic to a fresh implementation slice "
+                "scope while preserving mandatory gates and forbidden paths."
+            ),
+        }
+    ]
 
 
 def test_available_capability_inventory_selects_specific_runtime_scope(
