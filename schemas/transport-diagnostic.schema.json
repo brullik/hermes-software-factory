@@ -29,7 +29,16 @@
     "product_id": {"type": "string", "minLength": 8},
     "task_id": {"type": "string", "minLength": 4},
     "attempt_id": {"type": "string", "minLength": 4},
-    "reason_code": {"enum": ["malformed_transport", "schema_validation"]},
+    "reason_code": {
+      "enum": [
+        "malformed_transport",
+        "schema_validation",
+        "plan_contract_violation",
+        "missing_declared_predecessor",
+        "evidence_profile_mismatch",
+        "completion_unreachable"
+      ]
+    },
     "raw_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "raw_chars": {"type": "integer", "minimum": 0},
     "safe_head": {"type": "string", "maxLength": 2000},
