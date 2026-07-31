@@ -479,9 +479,7 @@ class WorkerTests(unittest.TestCase):
                 attempt_id="attempt-gate-diagnostic",
             )
 
-        self.assertEqual(
-            failure.failed_gate_ids, ("target-license-check",)
-        )
+        self.assertEqual(failure.failed_gate_ids, ("target-license-check",))
         self.assertIn(
             "pyproject.toml has no [project] dependency contract",
             failure.safe_message,
@@ -506,9 +504,7 @@ class WorkerTests(unittest.TestCase):
                     {
                         "status": "FAIL",
                         "exit_code": 1,
-                        "summary": (
-                            "ComposeTopologyBlackBoxTests failed in compose.yml"
-                        ),
+                        "summary": ("ComposeTopologyBlackBoxTests failed in compose.yml"),
                     }
                 ),
                 encoding="utf-8",
@@ -534,8 +530,10 @@ class WorkerTests(unittest.TestCase):
                             "code": "FULL_SUITE_UNRELATED_FAILURE",
                             "severity": "medium",
                             "text": (
-                                "The Compose failure is outside allowed task scope "
-                                "and was not modified."
+                                "tests/unit/test_image_security_verify.py fails "
+                                "because scripts/image_security_verify.py returns "
+                                "success for malformed scanner output; the production "
+                                "file is outside allowed task scope."
                             ),
                         }
                     ]
@@ -554,6 +552,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             failure.actual["provider_scope_findings"][0]["code"],
             "FULL_SUITE_UNRELATED_FAILURE",
+        )
+        self.assertEqual(
+            failure.actual["scope_required_paths"],
+            ["scripts/image_security_verify.py"],
         )
         self.assertTrue(
             any(
@@ -643,12 +645,10 @@ class WorkerTests(unittest.TestCase):
                     ),
                     "failed_gate_ids_json": '["target-dependency-audit"]',
                     "expected_json": (
-                        '{"quality_gates":['
-                        '{"gate_id":"target-dependency-audit","status":"PASS"}]}'
+                        '{"quality_gates":[{"gate_id":"target-dependency-audit","status":"PASS"}]}'
                     ),
                     "actual_json": (
-                        '{"required_fixes":['
-                        '"Add an explicit [project] dependency contract."]}'
+                        '{"required_fixes":["Add an explicit [project] dependency contract."]}'
                     ),
                     "evidence_ref": "evidence/failure-root.json",
                 },
@@ -664,10 +664,16 @@ class WorkerTests(unittest.TestCase):
                     "expected_json": '{"allowed_paths":["src/**"]}',
                     "actual_json": (
                         '{"violating_paths":["Dockerfile"],'
-                        '"required_fixes":["Add the required path to a new plan."]}'
+                        '"required_fixes":["Add the required path to a new plan."],'
+                        '"scope_reassessment_required":true,'
+                        '"blocked_allowed_paths":["src/**","tests/**"],'
+                        '"provider_scope_findings":[{"code":"SCOPE_INSUFFICIENT",'
+                        '"text":"tests/unit/test_image_security_verify.py fails '
+                        "because scripts/image_security_verify.py is outside "
+                        'allowed task scope."}]}'
                     ),
                     "evidence_ref": "evidence/failure-context.json",
-                }
+                },
             ],
             source_failure_id="failure-context",
         )
@@ -689,6 +695,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             failures[0]["actual"]["violating_paths"],
             ["Dockerfile"],
+        )
+        self.assertEqual(
+            failures[0]["scope_required_paths"],
+            ["scripts/image_security_verify.py"],
         )
         self.assertEqual(
             failures[0]["expected"]["allowed_paths"],
@@ -744,9 +754,7 @@ class WorkerTests(unittest.TestCase):
                 "role": "builder",
                 "output_schema": "attempt-result.schema.json",
                 "conflict_keys": [f"{product_id}:src"],
-                "required_capabilities": list(
-                    CAPABILITY_PROFILES["builder_workspace"]
-                ),
+                "required_capabilities": list(CAPABILITY_PROFILES["builder_workspace"]),
                 "capability_profile": "builder_workspace",
                 "allowed_paths": ["src/**", "tests/**"],
                 "semantic_node_key": "runtime-foundation",
@@ -770,9 +778,7 @@ class WorkerTests(unittest.TestCase):
                 plan_node_id="implementation-001-runtime",
                 conflict_keys=[f"{product_id}:src"],
                 capability_profile="builder_workspace",
-                required_capabilities=list(
-                    CAPABILITY_PROFILES["builder_workspace"]
-                ),
+                required_capabilities=list(CAPABILITY_PROFILES["builder_workspace"]),
             )
             result_path = config.evidence_dir / "accepted-runtime-result.json"
             result_path.write_text(
@@ -879,9 +885,7 @@ class WorkerTests(unittest.TestCase):
                     ),
                 )
 
-            output_path, output, attempt = worker._accepted_task_artifacts(
-                reused_id
-            )
+            output_path, output, attempt = worker._accepted_task_artifacts(reused_id)
 
             self.assertTrue(output_path.is_file())
             self.assertEqual(output["status"], "completed")
@@ -960,9 +964,7 @@ class WorkerTests(unittest.TestCase):
                     ),
                 )
 
-            output_path, output, attempt = worker._accepted_task_artifacts(
-                failed_id
-            )
+            output_path, output, attempt = worker._accepted_task_artifacts(failed_id)
 
             self.assertTrue(output_path.is_file())
             self.assertEqual(output["status"], "completed")
@@ -1517,8 +1519,7 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(result)
             assert result is not None
             expected = (
-                "Invalid backlog-plan-v2.schema.json: "
-                "'forbidden_paths' is a required property"
+                "Invalid backlog-plan-v2.schema.json: 'forbidden_paths' is a required property"
             )
             self.assertEqual(result.status, "repair_scheduled")
             self.assertEqual(result.reason_code, "schema_validation")
@@ -2791,9 +2792,7 @@ class WorkerTests(unittest.TestCase):
             )
             owner_actions = list(config.evidence_dir.glob("owner-action-*.json"))
             self.assertEqual(len(owner_actions), 1)
-            owner_action = json.loads(
-                owner_actions[0].read_text(encoding="utf-8")
-            )
+            owner_action = json.loads(owner_actions[0].read_text(encoding="utf-8"))
             self.assertEqual(owner_action["reason"], "missing_credential")
             self.assertNotIn("model_route_unapproved", json.dumps(owner_action))
             state.close()
@@ -2830,9 +2829,7 @@ class WorkerTests(unittest.TestCase):
                 json.loads(failure["actual_json"])["violating_paths"],
                 ["forbidden.txt"],
             )
-            self.assertTrue(
-                json.loads(failure["actual_json"])["required_fixes"]
-            )
+            self.assertTrue(json.loads(failure["actual_json"])["required_fixes"])
             state.close()
 
     def test_local_audit_directories_do_not_cross_workspace_boundary(self) -> None:
@@ -3265,9 +3262,7 @@ class WorkerTests(unittest.TestCase):
                 for index in range(32)
             )
 
-            prompt, _, context_path = worker._context_and_prompt(
-                replace(spec, evidence=evidence)
-            )
+            prompt, _, context_path = worker._context_and_prompt(replace(spec, evidence=evidence))
 
             self.assertLessEqual(len(prompt), 225_000)
             context = json.loads(context_path.read_text(encoding="utf-8"))
@@ -3656,15 +3651,11 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result.detail, "failed mandatory gates: secret-scan")
             self.assertIsNotNone(result.failure_data)
             assert result.failure_data is not None
-            self.assertEqual(
-                result.failure_data.failed_gate_ids, ("secret-scan",)
-            )
+            self.assertEqual(result.failure_data.failed_gate_ids, ("secret-scan",))
             diagnostics = result.failure_data.actual["gate_diagnostics"]
             self.assertEqual(diagnostics[0]["gate_id"], "secret-scan")
             self.assertTrue(diagnostics[0]["summary"])
-            self.assertTrue(
-                diagnostics[0]["evidence_ref"].startswith("evidence/gate-")
-            )
+            self.assertTrue(diagnostics[0]["evidence_ref"].startswith("evidence/gate-"))
             self.assertEqual(runner.calls, [])
             attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
             self.assertEqual(attempt["commands"][0]["result"], "not_run")

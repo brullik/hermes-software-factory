@@ -19,6 +19,7 @@ from .plan_semantics import PlanContractViolation
 from .policy import policy_digest
 from .registry import SchemaRegistry
 from .repair_brief import normalized_repair_findings, repair_requirements
+from .repair_scope import derive_scope_required_paths
 from .replan_lineage import (
     accepted_stage_task_id,
     architecture_source_task_id,
@@ -117,9 +118,7 @@ def _replan_mandatory_gate_ids(
             "plan_contract_violation",
         }:
             try:
-                raw_gate_ids = json.loads(
-                    str(failure.get("failed_gate_ids_json") or "[]")
-                )
+                raw_gate_ids = json.loads(str(failure.get("failed_gate_ids_json") or "[]"))
             except json.JSONDecodeError:
                 raw_gate_ids = []
             if isinstance(raw_gate_ids, list):
@@ -127,9 +126,7 @@ def _replan_mandatory_gate_ids(
                     str(value)
                     for value in raw_gate_ids
                     if (
-                        isinstance(value, str)
-                        and value
-                        and value not in non_executable_coordinates
+                        isinstance(value, str) and value and value not in non_executable_coordinates
                     )
                 )
         current_id = str(failure.get("parent_failure_id") or "")
@@ -177,10 +174,45 @@ def _replan_blocked_scope_paths(
     return tuple(dict.fromkeys(blocked_paths))
 
 
+def _replan_required_scope_paths(
+    failures: list[dict[str, Any]],
+    *,
+    source_failure_id: str | None,
+    max_depth: int = 24,
+) -> tuple[str, ...]:
+    """Return exact safe files that a fresh Director scope must cover."""
+
+    if not source_failure_id:
+        return ()
+    by_id = {
+        str(failure.get("failure_id") or ""): failure
+        for failure in failures
+        if str(failure.get("failure_id") or "")
+    }
+    current_id = source_failure_id
+    visited: set[str] = set()
+    required_paths: list[str] = []
+    while current_id and current_id not in visited and len(visited) < max_depth:
+        visited.add(current_id)
+        failure = by_id.get(current_id)
+        if failure is None:
+            break
+        try:
+            actual = json.loads(str(failure.get("actual_json") or "{}"))
+        except json.JSONDecodeError:
+            actual = {}
+        if isinstance(actual, dict):
+            required_paths.extend(derive_scope_required_paths(actual))
+        current_id = str(failure.get("parent_failure_id") or "")
+    return tuple(dict.fromkeys(required_paths))
+
+
 class PipelineCoordinator:
     """Create the next bounded task only after its predecessor is accepted."""
 
-    def __init__(self, config: FactoryConfig, state: StateStore, artifacts: ArtifactStore | None = None) -> None:
+    def __init__(
+        self, config: FactoryConfig, state: StateStore, artifacts: ArtifactStore | None = None
+    ) -> None:
         self.config = config
         self.state = state
         self.artifacts = artifacts or ArtifactStore(config)
@@ -610,7 +642,9 @@ class PipelineCoordinator:
                     dict.fromkeys([*complexity_features, "prior_semantic_failure"])
                 )
             contract = {
-                **artifact_metadata(self.config, "task-specifier", new_id("task_contract"), product_id),
+                **artifact_metadata(
+                    self.config, "task-specifier", new_id("task_contract"), product_id
+                ),
                 "task_id": task_id,
                 "title": title,
                 "objective": objective,
@@ -679,8 +713,7 @@ class PipelineCoordinator:
                 "task-specifier",
             }
             else "reviewer_readonly"
-            if definition.role
-            in {"independent-reviewer", "security-reviewer"}
+            if definition.role in {"independent-reviewer", "security-reviewer"}
             else "release_staging"
             if stage == "release-staging"
             else "release_production"
@@ -702,14 +735,10 @@ class PipelineCoordinator:
             "conflict_keys": [definition.conflict_key],
             "priority": definition.priority,
             "graph_status": (
-                "WAITING_TIME"
-                if available_at is not None and available_at > "0000"
-                else "DRAFT"
+                "WAITING_TIME" if available_at is not None and available_at > "0000" else "DRAFT"
             ),
             "capability_profile": capability_profile,
-            "required_capabilities": list(
-                CAPABILITY_PROFILES[capability_profile]
-            ),
+            "required_capabilities": list(CAPABILITY_PROFILES[capability_profile]),
             "mandatory": True,
         }
 
@@ -750,11 +779,7 @@ class PipelineCoordinator:
                 resolved = candidate.resolve()
             except OSError:
                 continue
-            if (
-                resolved.parent != evidence_root
-                or not resolved.is_file()
-                or resolved.is_symlink()
-            ):
+            if resolved.parent != evidence_root or not resolved.is_file() or resolved.is_symlink():
                 continue
             try:
                 payload = json.loads(resolved.read_text(encoding="utf-8"))
@@ -762,10 +787,7 @@ class PipelineCoordinator:
                 continue
             if not isinstance(payload, dict):
                 continue
-            if (
-                payload.get("gate_id")
-                and payload.get("status") not in {"PASS", "NOT_RUN"}
-            ):
+            if payload.get("gate_id") and payload.get("status") not in {"PASS", "NOT_RUN"}:
                 gate_id = str(payload["gate_id"])
                 failed.append(gate_id)
                 gate_summary = str(payload.get("summary") or "").strip()
@@ -788,10 +810,7 @@ class PipelineCoordinator:
             for item in test_results:
                 if not isinstance(item, dict):
                     continue
-                if (
-                    item.get("gate_id")
-                    and item.get("status") not in {"PASS", "NOT_RUN"}
-                ):
+                if item.get("gate_id") and item.get("status") not in {"PASS", "NOT_RUN"}:
                     failed.append(str(item["gate_id"]))
                 if item.get("evidence_ref"):
                     pending_refs.append(str(item["evidence_ref"]))
@@ -801,9 +820,7 @@ class PipelineCoordinator:
             detail=summary,
             failed_gate_ids=failed,
         )
-        return sorted(set(failed)), list(
-            dict.fromkeys(required_fixes or fallback_fixes)
-        )
+        return sorted(set(failed)), list(dict.fromkeys(required_fixes or fallback_fixes))
 
     def begin_repair_cycle(
         self,
@@ -843,9 +860,7 @@ class PipelineCoordinator:
             summary,
         )
         if director_instruction:
-            required_fixes = list(
-                dict.fromkeys([director_instruction, *required_fixes])
-            )
+            required_fixes = list(dict.fromkeys([director_instruction, *required_fixes]))
         brief = {
             **artifact_metadata(
                 self.config,
@@ -873,12 +888,8 @@ class PipelineCoordinator:
             "changed_files": [],
             "forbidden_actions": [str(value) for value in contract["forbidden_paths"]],
             "previous_attempt_summary": summary[:2000],
-            "definition_of_done": [
-                str(item["verification"]) for item in contract["acceptance"]
-            ],
-            "evidence_refs": list(
-                dict.fromkeys(value for value in evidence_refs if value)
-            ),
+            "definition_of_done": [str(item["verification"]) for item in contract["acceptance"]],
+            "evidence_refs": list(dict.fromkeys(value for value in evidence_refs if value)),
         }
         try:
             brief_path = self.artifacts.write(
@@ -922,14 +933,22 @@ class PipelineCoordinator:
         elif status != target:
             raise ValueError(f"Expected product {product_id} at {current}, got {status}")
 
-    def _write_risk_assessment(self, product_id: str, contract: dict[str, Any], contract_ref: str) -> Path:
+    def _write_risk_assessment(
+        self, product_id: str, contract: dict[str, Any], contract_ref: str
+    ) -> Path:
         path = self.config.evidence_dir / f"risk-{product_id}.json"
         if path.is_file():
             return path
         markers = sorted({str(marker) for marker in contract.get("risk_markers", [])})
         classification = str(contract.get("data_classification", "internal"))
         high_markers = {"payments", "real_money", "restricted_data", "irreversible_action"}
-        tier = "high" if high_markers & set(markers) or classification == "restricted" else "medium" if classification == "confidential" else "low"
+        tier = (
+            "high"
+            if high_markers & set(markers) or classification == "restricted"
+            else "medium"
+            if classification == "confidential"
+            else "low"
+        )
         controls = ["secret_scan", "independent_review", "backup_restore", "rollback"]
         if tier != "low":
             controls.append("security_review")
@@ -965,9 +984,7 @@ class PipelineCoordinator:
         role = str(task.get("role") or "")
         expected_kind = "replan_delta" if role == "replanner" else "initial"
         if str(proposal.get("proposal_kind") or "") != expected_kind:
-            raise ValueError(
-                f"{role} must return proposal_kind={expected_kind}"
-            )
+            raise ValueError(f"{role} must return proposal_kind={expected_kind}")
         product_id = str(task["product_id"])
         product = self.state.get_product(product_id)
         if product is None:
@@ -976,9 +993,7 @@ class PipelineCoordinator:
         parent_plan_id = str(product.get("active_plan_id") or "") or None
         proposed_parent = str(proposal.get("parent_plan_id") or "") or None
         if expected_kind == "replan_delta" and proposed_parent != parent_plan_id:
-            raise ValueError(
-                "replan proposal must name the active parent plan"
-            )
+            raise ValueError("replan proposal must name the active parent plan")
         if expected_kind == "initial" and proposed_parent is not None:
             raise ValueError("initial proposal cannot name a parent plan")
         source_failure_id = (
@@ -1013,6 +1028,14 @@ class PipelineCoordinator:
             if expected_kind == "replan_delta"
             else ()
         )
+        required_replan_scope_paths = (
+            _replan_required_scope_paths(
+                self.state.list_failures(product_id),
+                source_failure_id=source_failure_id,
+            )
+            if expected_kind == "replan_delta"
+            else ()
+        )
         inherited_nodes: list[dict[str, Any]] = []
         accepted_nodes: dict[str, str] = {}
         architecture_source: str | None = None
@@ -1026,13 +1049,9 @@ class PipelineCoordinator:
             accepted_implementation = [
                 node
                 for node in lineage_nodes
-                if node.graph_status == "ACCEPTED"
-                and node.result_ref
-                and node.result_digest
+                if node.graph_status == "ACCEPTED" and node.result_ref and node.result_digest
             ]
-            inherited_nodes = [
-                dict(node.proposal_node) for node in accepted_implementation
-            ]
+            inherited_nodes = [dict(node.proposal_node) for node in accepted_implementation]
             accepted_nodes.update(
                 {
                     "semantic:" + str(node.proposal_node["node_key"]): node.task_id
@@ -1046,9 +1065,7 @@ class PipelineCoordinator:
                 "architecture-review",
             )
             if accepted_architecture_review is not None:
-                accepted_nodes["lifecycle:architecture-review"] = (
-                    accepted_architecture_review
-                )
+                accepted_nodes["lifecycle:architecture-review"] = accepted_architecture_review
             else:
                 architecture_source = architecture_source_task_id(
                     self.state,
@@ -1080,6 +1097,7 @@ class PipelineCoordinator:
                 architecture_source_task_id=architecture_source,
                 mandatory_replan_gate_ids=mandatory_replan_gate_ids,
                 blocked_replan_scope_paths=blocked_replan_scope_paths,
+                required_replan_scope_paths=required_replan_scope_paths,
             ),
             accepted_nodes=accepted_nodes,
             inherited_nodes=inherited_nodes,
@@ -1129,22 +1147,14 @@ class PipelineCoordinator:
             plan = self._compile_proposal(task, output, output_path)
             return PreparedPipelineOutcome("IMPLEMENTING", plan=plan)
         if role == "product-director":
-            self._write_risk_assessment(
-                product_id, output, f"evidence/{output_path.name}"
-            )
-            successor = self.prepare_task(
-                product_id, "product-analyst", dependencies=(task_id,)
-            )
+            self._write_risk_assessment(product_id, output, f"evidence/{output_path.name}")
+            successor = self.prepare_task(product_id, "product-analyst", dependencies=(task_id,))
             return PreparedPipelineOutcome("RISK_CLASSIFIED", (successor,))
         if role == "product-analyst":
-            successor = self.prepare_task(
-                product_id, "solution-architect", dependencies=(task_id,)
-            )
+            successor = self.prepare_task(product_id, "solution-architect", dependencies=(task_id,))
             return PreparedPipelineOutcome(successors=(successor,))
         if role == "solution-architect":
-            successor = self.prepare_task(
-                product_id, "task-specifier", dependencies=(task_id,)
-            )
+            successor = self.prepare_task(product_id, "task-specifier", dependencies=(task_id,))
             return PreparedPipelineOutcome("ARCHITECTED", (successor,))
         if role == "task-specifier":
             plan = self._compile_proposal(task, output, output_path)
@@ -1154,16 +1164,13 @@ class PipelineCoordinator:
         effective_stage = lifecycle_stage or stage_key
         active_plans = self.state.list_plans(product_id)
         if any(
-            str(plan.get("plan_id")) == task_plan_id
-            and int(plan.get("revision") or 0) >= 1
+            str(plan.get("plan_id")) == task_plan_id and int(plan.get("revision") or 0) >= 1
             for plan in active_plans
         ):
             if effective_stage in {"production", "release-production"}:
                 release = output.get("release")
                 release_digest = (
-                    str(release.get("image_digest") or "")
-                    if isinstance(release, dict)
-                    else ""
+                    str(release.get("image_digest") or "") if isinstance(release, dict) else ""
                 )
                 if not re.fullmatch(r"sha256:[a-f0-9]{64}", release_digest):
                     raise ValueError(
@@ -1171,9 +1178,11 @@ class PipelineCoordinator:
                     )
                 if lifecycle_stage:
                     available_at = (
-                        datetime.now(UTC)
-                        + timedelta(seconds=self.config.observation_seconds)
-                    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                        (datetime.now(UTC) + timedelta(seconds=self.config.observation_seconds))
+                        .replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
                     return PreparedPipelineOutcome(
                         product_status="OBSERVATION",
                         downstream_bindings=(
@@ -1185,9 +1194,11 @@ class PipelineCoordinator:
                         ),
                     )
                 available_at = (
-                    datetime.now(UTC)
-                    + timedelta(seconds=self.config.observation_seconds)
-                ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    (datetime.now(UTC) + timedelta(seconds=self.config.observation_seconds))
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
                 successor = self.prepare_task(
                     product_id,
                     "observation",
@@ -1264,9 +1275,11 @@ class PipelineCoordinator:
             return PreparedPipelineOutcome("RELEASE_READY", (successor,))
         if stage_key == "release-production":
             available_at = (
-                datetime.now(UTC)
-                + timedelta(seconds=self.config.observation_seconds)
-            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                (datetime.now(UTC) + timedelta(seconds=self.config.observation_seconds))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
             successor = self.prepare_task(
                 product_id,
                 "observation",
@@ -1276,9 +1289,7 @@ class PipelineCoordinator:
             )
             return PreparedPipelineOutcome("OBSERVATION", (successor,))
         if stage_key == "observation":
-            return PreparedPipelineOutcome(
-                "OBSERVATION", run_completion_reducer=True
-            )
+            return PreparedPipelineOutcome("OBSERVATION", run_completion_reducer=True)
         return PreparedPipelineOutcome()
 
     def advance_after_legacy_v1(
@@ -1312,9 +1323,7 @@ class PipelineCoordinator:
                 raise ValueError("task-specifier must return BacklogPlan v2")
             node_paths: list[Path] = []
             for node in output.get("nodes", []):
-                if not isinstance(node, dict) or not isinstance(
-                    node.get("task_contract"), dict
-                ):
+                if not isinstance(node, dict) or not isinstance(node.get("task_contract"), dict):
                     raise TypeError("BacklogPlan v2 contains an invalid node")
                 contract = dict(node["task_contract"])
                 self.schemas.validate("task-contract-v2.schema.json", contract)
@@ -1337,8 +1346,7 @@ class PipelineCoordinator:
         task_plan_id = str(task.get("plan_id") or "")
         active_plans = self.state.list_plans(product_id)
         if any(
-            str(plan.get("plan_id")) == task_plan_id
-            and int(plan.get("revision") or 0) >= 1
+            str(plan.get("plan_id")) == task_plan_id and int(plan.get("revision") or 0) >= 1
             for plan in active_plans
         ):
             # Executable v2 plans own their complete successor graph. The
@@ -1422,12 +1430,9 @@ class PipelineCoordinator:
                     cycle=cycle,
                 )
             ]
-        if (
-            role == "release-operator"
-            and (
-                str(task.get("title")) == "Promote Approved Release"
-                or stage_key == "release-production"
-            )
+        if role == "release-operator" and (
+            str(task.get("title")) == "Promote Approved Release"
+            or stage_key == "release-production"
         ):
             self._transition_if(product_id, "RELEASE_READY", "PRODUCTION_DEPLOYED")
             self._transition_if(product_id, "PRODUCTION_DEPLOYED", "OBSERVATION")

@@ -13,6 +13,7 @@ from .common import sha256_text, stable_json
 from .config import FactoryConfig
 from .registry import SchemaRegistry
 from .repair_brief import repair_requirements
+from .repair_scope import derive_scope_required_paths
 from .state import StateStore
 
 _REPLAN_REASONS = {
@@ -57,10 +58,15 @@ class FailureRouter:
             actual = json.loads(str(failure.get("actual_json") or "{}"))
         except json.JSONDecodeError:
             return False
-        return (
-            isinstance(actual, dict)
-            and actual.get("scope_reassessment_required") is True
-        )
+        return isinstance(actual, dict) and actual.get("scope_reassessment_required") is True
+
+    @staticmethod
+    def _scope_required_paths(failure: dict[str, Any]) -> tuple[str, ...]:
+        try:
+            actual = json.loads(str(failure.get("actual_json") or "{}"))
+        except json.JSONDecodeError:
+            return ()
+        return derive_scope_required_paths(actual) if isinstance(actual, dict) else ()
 
     def _same_role_problem_count(
         self,
@@ -78,9 +84,7 @@ class FailureRouter:
             try:
                 failed_gates = sorted(
                     str(value)
-                    for value in json.loads(
-                        str(item.get("failed_gate_ids_json") or "[]")
-                    )
+                    for value in json.loads(str(item.get("failed_gate_ids_json") or "[]"))
                 )
             except (TypeError, json.JSONDecodeError):
                 failed_gates = []
@@ -134,8 +138,7 @@ class FailureRouter:
             if (
                 isinstance(payload, dict)
                 and str(payload.get("task_id") or "") == task_id
-                and str(payload.get("product_id") or "")
-                == str(task.get("product_id") or "")
+                and str(payload.get("product_id") or "") == str(task.get("product_id") or "")
             ):
                 return payload
         readonly = str(task.get("capability_profile") or "") in {
@@ -148,9 +151,7 @@ class FailureRouter:
                 {
                     "criterion_id": (
                         "reconstruct-"
-                        + sha256_text(
-                            f"{task.get('product_id')}:{task_id}:task-contract"
-                        )[:16]
+                        + sha256_text(f"{task.get('product_id')}:{task_id}:task-contract")[:16]
                     ),
                     "verification": (
                         "Reconstruct this plan node from durable task metadata "
@@ -231,29 +232,19 @@ class FailureRouter:
         if not isinstance(values, list):
             raise TypeError("failed task quality_gates are invalid")
         return list(
-            dict.fromkeys(
-                str(value)
-                for value in values
-                if isinstance(value, str) and value
-            )
+            dict.fromkeys(str(value) for value in values if isinstance(value, str) and value)
         )
 
     @staticmethod
     def _failure_gate_ids(failure: dict[str, Any]) -> list[str]:
         try:
-            values = json.loads(
-                str(failure.get("failed_gate_ids_json") or "[]")
-            )
+            values = json.loads(str(failure.get("failed_gate_ids_json") or "[]"))
         except json.JSONDecodeError:
             values = []
         if not isinstance(values, list):
             return []
         return list(
-            dict.fromkeys(
-                str(value)
-                for value in values
-                if isinstance(value, str) and value
-            )
+            dict.fromkeys(str(value) for value in values if isinstance(value, str) and value)
         )
 
     @staticmethod
@@ -394,10 +385,8 @@ class FailureRouter:
             if not parent_id:
                 break
             parent = self.state.get_task(parent_id)
-            if (
-                parent is None
-                or str(parent.get("product_id") or "")
-                != str(failed.get("product_id") or "")
+            if parent is None or str(parent.get("product_id") or "") != str(
+                failed.get("product_id") or ""
             ):
                 break
             current = parent
@@ -513,9 +502,7 @@ class FailureRouter:
         if not isinstance(required_fixes, list):
             required_fixes = []
         try:
-            raw_failed_gate_ids = json.loads(
-                str(failure.get("failed_gate_ids_json") or "[]")
-            )
+            raw_failed_gate_ids = json.loads(str(failure.get("failed_gate_ids_json") or "[]"))
         except json.JSONDecodeError:
             raw_failed_gate_ids = []
         if not isinstance(raw_failed_gate_ids, list):
@@ -526,9 +513,7 @@ class FailureRouter:
             detail=str(failure.get("safe_message") or "repair required"),
             failed_gate_ids=raw_failed_gate_ids,
         )
-        actionable_fixes = [
-            str(value) for value in required_fixes if str(value).strip()
-        ]
+        actionable_fixes = [str(value) for value in required_fixes if str(value).strip()]
         if not actionable_fixes:
             actionable_fixes = fallback_fixes
         brief = {
@@ -566,9 +551,7 @@ class FailureRouter:
             "allowed_paths": allowed_paths or ["artifacts/**"],
             "capability_gaps": [],
             "supersedes_task_id": str(failed["task_id"]),
-            "definition_of_done": [
-                str(item["verification"]) for item in inherited_acceptance
-            ],
+            "definition_of_done": [str(item["verification"]) for item in inherited_acceptance],
         }
         return self.artifacts.write(
             "repair-brief-v2.schema.json",
@@ -602,11 +585,7 @@ class FailureRouter:
                 break
             visited.add(task_id)
             depth += 1
-            parent_id = str(
-                current.get("parent_task_id")
-                or current.get("source_task_id")
-                or ""
-            )
+            parent_id = str(current.get("parent_task_id") or current.get("source_task_id") or "")
             if not parent_id:
                 break
             parent = self.state._connection.execute(
@@ -624,9 +603,7 @@ class FailureRouter:
         failure: dict[str, Any],
         failed: dict[str, Any],
     ) -> bool:
-        if str(failure.get("reason_code") or "") != (
-            "controller_exception_file_not_found_error"
-        ):
+        if str(failure.get("reason_code") or "") != ("controller_exception_file_not_found_error"):
             return False
         output_schema = str(failed.get("output_schema") or "")
         if (
@@ -651,25 +628,14 @@ class FailureRouter:
         anchored = dict(routed)
         anchored["plan_id"] = active_plan_id
         original = self._contract(routed)
-        allowed_paths = [
-            str(value)
-            for value in original.get("allowed_paths", ["artifacts/**"])
-        ]
+        allowed_paths = [str(value) for value in original.get("allowed_paths", ["artifacts/**"])]
         role = str(routed.get("role") or "replanner")
-        output_schema = str(
-            routed.get("output_schema") or "plan-proposal-v1.schema.json"
-        )
-        capability_profile = str(
-            routed.get("capability_profile") or "planning_readonly"
-        )
+        output_schema = str(routed.get("output_schema") or "plan-proposal-v1.schema.json")
+        capability_profile = str(routed.get("capability_profile") or "planning_readonly")
         contract, path = self._write_contract(
             failed=anchored,
             failure=failure,
-            hypothesis_id=(
-                str(routed["hypothesis_id"])
-                if routed.get("hypothesis_id")
-                else None
-            ),
+            hypothesis_id=(str(routed["hypothesis_id"]) if routed.get("hypothesis_id") else None),
             role=role,
             output_schema=output_schema,
             capability_profile=capability_profile,
@@ -688,11 +654,7 @@ class FailureRouter:
                 if role != "replanner"
                 else None
             ),
-            quality_gates=(
-                self._quality_gates(original)
-                if role != "replanner"
-                else None
-            ),
+            quality_gates=(self._quality_gates(original) if role != "replanner" else None),
         )
         task_id = str(contract["task_id"])
         if self.state.get_task(task_id) is None:
@@ -705,9 +667,7 @@ class FailureRouter:
                 contract_ref=f"evidence/{path.name}",
                 stage_key="active-plan-reanchor",
                 dependencies=[],
-                conflict_keys=[
-                    str(value) for value in contract["conflict_keys"]
-                ],
+                conflict_keys=[str(value) for value in contract["conflict_keys"]],
                 priority=int(contract["priority"]),
                 root_task_id=str(contract["root_task_id"]),
                 parent_task_id=str(contract["parent_task_id"]),
@@ -719,17 +679,12 @@ class FailureRouter:
                 active_context_ref=str(contract["active_context_ref"]),
                 failure_id=str(failure["failure_id"]),
                 hypothesis_id=(
-                    str(contract["hypothesis_id"])
-                    if contract.get("hypothesis_id")
-                    else None
+                    str(contract["hypothesis_id"]) if contract.get("hypothesis_id") else None
                 ),
                 capability_profile=capability_profile,
                 idempotency_key=str(contract["idempotency_key"]),
                 supersedes_task_id=str(routed["task_id"]),
-                required_capabilities=[
-                    str(value)
-                    for value in contract["required_capabilities"]
-                ],
+                required_capabilities=[str(value) for value in contract["required_capabilities"]],
                 graph_status="READY",
             )
         with self.state._lock, self.state._connection:
@@ -766,20 +721,16 @@ class FailureRouter:
             failure = dict(failure_row)
             if str(failure["status"]) == "ROUTED":
                 routed = self.state._connection.execute(
-                    "SELECT * FROM tasks WHERE failure_id=? "
-                    "ORDER BY created_at DESC LIMIT 1",
+                    "SELECT * FROM tasks WHERE failure_id=? ORDER BY created_at DESC LIMIT 1",
                     (failure_id,),
                 ).fetchone()
                 if routed is None:
                     return ""
                 routed_task = dict(routed)
-                active_plan_id = self._active_plan_id(
-                    str(routed_task["product_id"])
-                )
+                active_plan_id = self._active_plan_id(str(routed_task["product_id"]))
                 if (
                     active_plan_id
-                    and str(routed_task.get("plan_id") or "")
-                    != active_plan_id
+                    and str(routed_task.get("plan_id") or "") != active_plan_id
                     and str(routed_task.get("graph_status") or "")
                     not in {"ACCEPTED", "CANCELLED", "SUPERSEDED"}
                 ):
@@ -796,9 +747,8 @@ class FailureRouter:
                 raise RuntimeError("failure source task is missing")
             failed = dict(failed_row)
             reason = str(failure["reason_code"])
-            scope_reassessment_required = self._scope_reassessment_required(
-                dict(failure)
-            )
+            scope_reassessment_required = self._scope_reassessment_required(dict(failure))
+            required_scope_paths = self._scope_required_paths(dict(failure))
             active_plan_id = self._active_plan_id(str(failed["product_id"]))
             if active_plan_id:
                 failed["plan_id"] = active_plan_id
@@ -833,8 +783,7 @@ class FailureRouter:
                     )
             controller_recovery_depth = self._controller_recovery_depth(failed)
             controller_handoff = (
-                str(failed.get("role") or "") == "incident-recovery"
-                and reason == "needs_replan"
+                str(failed.get("role") or "") == "incident-recovery" and reason == "needs_replan"
             )
             controller_fault = (
                 not invalid_plan_output_schema
@@ -849,18 +798,13 @@ class FailureRouter:
             hypothesis_id: str | None = None
             attempts_used = 0
             same_role_problem_count = 0
-            diagnosis_reassessment = (
-                str(failed.get("stage_key") or "")
-                == "diagnosis-reassessment"
-            )
+            diagnosis_reassessment = str(failed.get("stage_key") or "") == "diagnosis-reassessment"
             if not controller_fault and not controller_handoff:
                 same_role_problem_count = self._same_role_problem_count(
                     dict(failure),
                     dict(failed),
                 )
-                inherited_hypothesis_id = str(
-                    failed.get("hypothesis_id") or ""
-                )
+                inherited_hypothesis_id = str(failed.get("hypothesis_id") or "")
                 if inherited_hypothesis_id:
                     hypothesis = self.state._connection.execute(
                         """SELECT * FROM hypotheses
@@ -905,23 +849,19 @@ class FailureRouter:
                     hypothesis_id = str(hypothesis["hypothesis_id"])
                     attempts_used = int(hypothesis["attempts_used"] or 0)
             repeated_problem_requires_reassessment = (
-                same_role_problem_count >= 2
-                and not diagnosis_reassessment
+                same_role_problem_count >= 2 and not diagnosis_reassessment
             )
             needs_replan = (
                 invalid_plan_output_schema
                 or controller_handoff
                 or reason in _REPLAN_REASONS
                 or (
-                    str(failed.get("capability_profile") or "")
-                    == "reviewer_readonly"
-                    and str(failure.get("failure_class") or "")
-                    in {"semantic", "policy"}
+                    str(failed.get("capability_profile") or "") == "reviewer_readonly"
+                    and str(failure.get("failure_class") or "") in {"semantic", "policy"}
                 )
                 or (
                     reason == "mandatory_gate_failed"
-                    and str(failed.get("capability_profile") or "")
-                    != "builder_workspace"
+                    and str(failed.get("capability_profile") or "") != "builder_workspace"
                 )
                 or attempts_used >= 3
                 or repeated_problem_requires_reassessment
@@ -975,9 +915,7 @@ class FailureRouter:
                             ]
                         )
                     )
-                    hypothesis_id = (
-                        f"hypothesis-{reassessment_signature[:20]}"
-                    )
+                    hypothesis_id = f"hypothesis-{reassessment_signature[:20]}"
                     self.state._connection.execute(
                         """INSERT OR IGNORE INTO hypotheses
                            (hypothesis_id, product_id, failure_id,
@@ -998,11 +936,7 @@ class FailureRouter:
                     )
                     suffix = "diagnosis-reassessment"
                 else:
-                    suffix = (
-                        "diagnosis-reassessment"
-                        if diagnosis_reassessment
-                        else "replan"
-                    )
+                    suffix = "diagnosis-reassessment" if diagnosis_reassessment else "replan"
                 role = "replanner"
                 output_schema = "plan-proposal-v1.schema.json"
                 capability_profile = "planning_readonly"
@@ -1019,14 +953,16 @@ class FailureRouter:
                         "files named by controller gate diagnostics; a tests-only "
                         "substitute is invalid."
                     )
+                    if required_scope_paths:
+                        objective += (
+                            " Required safe repository paths: "
+                            + ", ".join(required_scope_paths)
+                            + "."
+                        )
             else:
                 role = str(failed.get("role") or "builder")
-                output_schema = str(
-                    failed.get("output_schema") or "attempt-result.schema.json"
-                )
-                capability_profile = str(
-                    failed.get("capability_profile") or "builder_workspace"
-                )
+                output_schema = str(failed.get("output_schema") or "attempt-result.schema.json")
+                capability_profile = str(failed.get("capability_profile") or "builder_workspace")
                 suffix = "repair"
                 objective = (
                     "Repair the exact failed plan node while preserving its root goal, "
@@ -1043,8 +979,7 @@ class FailureRouter:
                 for value in (
                     ["artifacts/**"]
                     if bool(original.get("_reconstructed"))
-                    and capability_profile
-                    in {"planning_readonly", "reviewer_readonly"}
+                    and capability_profile in {"planning_readonly", "reviewer_readonly"}
                     else original.get("allowed_paths", ["artifacts/**"])
                 )
             ]
@@ -1101,8 +1036,7 @@ class FailureRouter:
                     hypothesis_id=hypothesis_id,
                     parent_hypothesis_id=(
                         str(hypothesis["parent_hypothesis_id"])
-                        if hypothesis is not None
-                        and hypothesis["parent_hypothesis_id"]
+                        if hypothesis is not None and hypothesis["parent_hypothesis_id"]
                         else None
                     ),
                     repair_task_id=str(contract["task_id"]),
@@ -1134,9 +1068,7 @@ class FailureRouter:
                 capability_profile=capability_profile,
                 idempotency_key=str(contract["idempotency_key"]),
                 supersedes_task_id=str(contract["supersedes_task_id"]),
-                required_capabilities=[
-                    str(value) for value in contract["required_capabilities"]
-                ],
+                required_capabilities=[str(value) for value in contract["required_capabilities"]],
                 graph_status="READY",
             )
             if repair_ref is not None:
@@ -1172,10 +1104,7 @@ class FailureRouter:
 
     def route_open_failures(self, product_id: str) -> list[str]:
         failures = self.state.list_failures(product_id)
-        by_id = {
-            str(failure["failure_id"]): failure
-            for failure in failures
-        }
+        by_id = {str(failure["failure_id"]): failure for failure in failures}
         failures_with_live_descendants: set[str] = set()
         for failure in failures:
             if str(failure["status"]) == "RESOLVED":
@@ -1186,11 +1115,7 @@ class FailureRouter:
                 seen.add(parent_id)
                 failures_with_live_descendants.add(parent_id)
                 parent = by_id.get(parent_id)
-                parent_id = (
-                    str(parent.get("parent_failure_id") or "")
-                    if parent is not None
-                    else ""
-                )
+                parent_id = str(parent.get("parent_failure_id") or "") if parent is not None else ""
         routed: list[str] = []
         for failure in failures:
             if str(failure["status"]) != "OPEN":
@@ -1204,10 +1129,8 @@ class FailureRouter:
             if (
                 bool(failure["retryable"])
                 and task is not None
-                and str(task.get("next_attempt_kind") or "")
-                in {"transient_retry", "repair"}
-                and str(task.get("graph_status") or "")
-                in {"WAITING_TIME", "READY", "CLAIMED"}
+                and str(task.get("next_attempt_kind") or "") in {"transient_retry", "repair"}
+                and str(task.get("graph_status") or "") in {"WAITING_TIME", "READY", "CLAIMED"}
             ):
                 # The worker has already scheduled a bounded, in-place retry.
                 # Routing the same open FailureEnvelope at the same time would

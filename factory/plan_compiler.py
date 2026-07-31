@@ -15,6 +15,7 @@ from .lifecycle import (
     stage_contract,
 )
 from .plan_semantics import PlanContractViolation, validate_compiled_plan
+from .repair_scope import path_is_covered
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class CompileContext:
     architecture_source_task_id: str | None = None
     mandatory_replan_gate_ids: tuple[str, ...] = ()
     blocked_replan_scope_paths: tuple[str, ...] = ()
+    required_replan_scope_paths: tuple[str, ...] = ()
 
 
 def _node_key(value: str) -> str:
@@ -62,9 +64,7 @@ def _valid_path_scope(value: object) -> bool:
     path = str(value)
     if not path or path != path.strip() or not _PATH_GLOB.fullmatch(path):
         return False
-    if path.startswith("/") or any(
-        segment in {"", ".", ".."} for segment in path.split("/")
-    ):
+    if path.startswith("/") or any(segment in {"", ".", ".."} for segment in path.split("/")):
         return False
     name = path.rsplit("/", 1)[-1]
     return (
@@ -102,12 +102,8 @@ class PlanCompiler:
             if not isinstance(scope, list) or not scope:
                 raise ValueError(f"PlanProposal node {key} needs bounded scope")
             if any(str(value).strip() in {"*", "**", "**/*"} for value in scope):
-                raise ValueError(
-                    f"PlanProposal node {key} uses an unbounded repository scope"
-                )
-            invalid_scope = [
-                str(value) for value in scope if not _valid_path_scope(value)
-            ]
+                raise ValueError(f"PlanProposal node {key} uses an unbounded repository scope")
+            invalid_scope = [str(value) for value in scope if not _valid_path_scope(value)]
             if invalid_scope:
                 raise ValueError(
                     "PlanProposal node "
@@ -116,17 +112,11 @@ class PlanCompiler:
                 )
             raw_dependencies = node.get("depends_on", [])
             if not isinstance(raw_dependencies, list):
-                raise TypeError(
-                    f"PlanProposal node {key}.depends_on must be an array"
-                )
-            normalized_dependencies = [
-                _node_key(str(value)) for value in raw_dependencies
-            ]
+                raise TypeError(f"PlanProposal node {key}.depends_on must be an array")
+            normalized_dependencies = [_node_key(str(value)) for value in raw_dependencies]
             unknown = set(normalized_dependencies) - known_keys
             if unknown:
-                raise ValueError(
-                    f"PlanProposal node {key} depends on unknown node {min(unknown)}"
-                )
+                raise ValueError(f"PlanProposal node {key} depends on unknown node {min(unknown)}")
             if key in normalized_dependencies:
                 raise ValueError(f"PlanProposal node {key} depends on itself")
             dependencies[key] = normalized_dependencies
@@ -136,9 +126,7 @@ class PlanCompiler:
             node_goals = {str(value) for value in raw_goals}
             unknown_goals = node_goals - known_goals
             if unknown_goals:
-                raise ValueError(
-                    f"PlanProposal node {key} maps unknown goal {min(unknown_goals)}"
-                )
+                raise ValueError(f"PlanProposal node {key} maps unknown goal {min(unknown_goals)}")
             mapped_goals.update(node_goals)
 
         mandatory_goals = {
@@ -148,9 +136,7 @@ class PlanCompiler:
         }
         missing_goals = mandatory_goals - mapped_goals
         if missing_goals:
-            raise ValueError(
-                f"mandatory goal has no implementation slice: {min(missing_goals)}"
-            )
+            raise ValueError(f"mandatory goal has no implementation slice: {min(missing_goals)}")
 
         indegree = {key: 0 for key in node_keys}
         adjacency: dict[str, list[str]] = {key: [] for key in node_keys}
@@ -176,6 +162,7 @@ class PlanCompiler:
         inherited_by_key: Mapping[str, Mapping[str, Any]],
         mandatory_gate_ids: Sequence[str],
         blocked_scope_paths: Sequence[str],
+        required_scope_paths: Sequence[str],
     ) -> None:
         """Require a replan to schedule fresh work for every failed mandatory gate."""
 
@@ -235,22 +222,26 @@ class PlanCompiler:
                             return True
                 return False
 
-            fresh_scopes = [
-                str(value)
-                for node in fresh_slices
-                for value in node.get("scope", [])
-            ]
-            if not any(
-                not covered_by_blocked_scope(value)
-                for value in fresh_scopes
-            ):
+            fresh_scopes = [str(value) for node in fresh_slices for value in node.get("scope", [])]
+            if not any(not covered_by_blocked_scope(value) for value in fresh_scopes):
                 raise PlanContractViolation(
                     "fresh implementation slices do not expand the failed "
                     "allowed_paths scope; add bounded production root-cause paths "
-                    "outside: "
-                    + ", ".join(blocked),
+                    "outside: " + ", ".join(blocked),
                     failed_gate_ids=mandatory_gate_ids,
                 )
+        fresh_scopes = [str(value) for node in fresh_slices for value in node.get("scope", [])]
+        missing_required_paths = [
+            path
+            for path in dict.fromkeys(str(value) for value in required_scope_paths)
+            if path and not path_is_covered(path, fresh_scopes)
+        ]
+        if missing_required_paths:
+            raise PlanContractViolation(
+                "fresh implementation slices do not cover required scope paths: "
+                + ", ".join(missing_required_paths),
+                failed_gate_ids=mandatory_gate_ids,
+            )
 
     @staticmethod
     def _quality_gates(stage_key: str, external_repository: bool) -> list[str]:
@@ -330,9 +321,7 @@ class PlanCompiler:
         ]
         if not proposed_slices:
             raise ValueError("PlanProposal requires at least one implementation_slice")
-        proposed_keys = [
-            _node_key(str(node.get("node_key") or "")) for node in proposed_slices
-        ]
+        proposed_keys = [_node_key(str(node.get("node_key") or "")) for node in proposed_slices]
         if len(set(proposed_keys)) != len(proposed_keys):
             raise ValueError("PlanProposal node_key values must be unique")
         inherited_by_key: dict[str, dict[str, Any]] = {}
@@ -349,6 +338,7 @@ class PlanCompiler:
                 inherited_by_key,
                 context.mandatory_replan_gate_ids,
                 context.blocked_replan_scope_paths,
+                context.required_replan_scope_paths,
             )
         merged_by_key = dict(inherited_by_key)
         for key, node in zip(proposed_keys, proposed_slices, strict=True):

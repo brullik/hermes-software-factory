@@ -18,6 +18,7 @@ from factory.pipeline import (
     PipelineCoordinator,
     _replan_blocked_scope_paths,
     _replan_mandatory_gate_ids,
+    _replan_required_scope_paths,
 )
 from factory.policy import policy_digest
 from factory.state import StateStore
@@ -32,9 +33,7 @@ class PipelineTests(unittest.TestCase):
                 "failure_id": "failure-root",
                 "parent_failure_id": None,
                 "reason_code": "mandatory_gate_failed",
-                "failed_gate_ids_json": (
-                    '["target-dependency-audit", "target-license-check"]'
-                ),
+                "failed_gate_ids_json": ('["target-dependency-audit", "target-license-check"]'),
             },
             {
                 "failure_id": "failure-repair",
@@ -82,6 +81,15 @@ class PipelineTests(unittest.TestCase):
                     {
                         "scope_reassessment_required": True,
                         "blocked_allowed_paths": ["tests/**"],
+                        "provider_scope_findings": [
+                            {
+                                "code": "SCOPE_INSUFFICIENT",
+                                "text": (
+                                    "scripts/image_security_verify.py is outside "
+                                    "allowed task scope."
+                                ),
+                            }
+                        ],
                     }
                 ),
             },
@@ -108,6 +116,13 @@ class PipelineTests(unittest.TestCase):
                 source_failure_id="failure-child",
             ),
             ("tests/**",),
+        )
+        self.assertEqual(
+            _replan_required_scope_paths(
+                failures,
+                source_failure_id="failure-child",
+            ),
+            ("scripts/image_security_verify.py",),
         )
 
     def test_different_products_have_disjoint_workspace_locks(self) -> None:
@@ -206,7 +221,9 @@ class PipelineTests(unittest.TestCase):
     def test_executable_plan_runs_from_durable_dependency_frontier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config = make_config(root, selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"))
+            config = make_config(
+                root, selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            )
             state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
             artifacts = ArtifactStore(config)
             product_id = "deterministic-pipeline-product"
@@ -226,9 +243,7 @@ class PipelineTests(unittest.TestCase):
             ):
                 state.transition_product(product_id, status)
             specifier_path = pipeline.create_task(product_id, "task-specifier")
-            specifier_id = str(
-                json.loads(specifier_path.read_text(encoding="utf-8"))["task_id"]
-            )
+            specifier_id = str(json.loads(specifier_path.read_text(encoding="utf-8"))["task_id"])
             specifier = state.claim_task(worker_id="task-specifier-worker")
             self.assertIsNotNone(specifier)
             assert specifier is not None
@@ -296,17 +311,13 @@ class PipelineTests(unittest.TestCase):
                             "mandatory": True,
                         }
                     ],
-                    "required_capabilities": list(
-                        CAPABILITY_PROFILES[profile]
-                    ),
+                    "required_capabilities": list(CAPABILITY_PROFILES[profile]),
                     "capability_profile": profile,
                     "allowed_paths": ["artifacts/**"],
                     "forbidden_paths": ["secrets/**"],
                     "risk_tier": "medium",
                     "model_floor": "luna",
-                    "idempotency_key": sha256_text(
-                        f"{plan_id}:{node_id}:{task_id}"
-                    ),
+                    "idempotency_key": sha256_text(f"{plan_id}:{node_id}:{task_id}"),
                     "status": "DRAFT",
                     "priority": 10,
                     "critical_path_rank": 0,
@@ -334,10 +345,7 @@ class PipelineTests(unittest.TestCase):
                         "goal_id": "root-goal",
                         "statement": "Deliver a verified release candidate",
                         "mandatory": True,
-                        "acceptance_ids": [
-                            f"accept-{node_id}"
-                            for node_id, *_ in node_specs
-                        ],
+                        "acceptance_ids": [f"accept-{node_id}" for node_id, *_ in node_specs],
                     }
                 ],
                 "nodes": [
@@ -394,22 +402,13 @@ class PipelineTests(unittest.TestCase):
                 claimed_ids,
                 [task_id for _, task_id, _, _ in node_specs],
             )
-            planned = [
-                task
-                for task in state.list_tasks(product_id)
-                if task["plan_id"] == plan_id
-            ]
+            planned = [task for task in state.list_tasks(product_id) if task["plan_id"] == plan_id]
             self.assertEqual(len(planned), 4)
-            self.assertTrue(
-                all(task["graph_status"] == "ACCEPTED" for task in planned)
-            )
+            self.assertTrue(all(task["graph_status"] == "ACCEPTED" for task in planned))
             edges = state.list_edges(plan_id)
             self.assertEqual(len(edges), 3)
             self.assertEqual(
-                {
-                    (edge["from_task_id"], edge["to_task_id"])
-                    for edge in edges
-                },
+                {(edge["from_task_id"], edge["to_task_id"]) for edge in edges},
                 {
                     ("T-PIPEBUILD1", "T-PIPETEST01"),
                     ("T-PIPETEST01", "T-PIPESEC001"),
