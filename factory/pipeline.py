@@ -136,6 +136,47 @@ def _replan_mandatory_gate_ids(
     return tuple(dict.fromkeys(gate_ids))
 
 
+def _replan_blocked_scope_paths(
+    failures: list[dict[str, Any]],
+    *,
+    source_failure_id: str | None,
+    max_depth: int = 24,
+) -> tuple[str, ...]:
+    """Return the failed Builder scope when evidence requires Director expansion."""
+
+    if not source_failure_id:
+        return ()
+    by_id = {
+        str(failure.get("failure_id") or ""): failure
+        for failure in failures
+        if str(failure.get("failure_id") or "")
+    }
+    current_id = source_failure_id
+    visited: set[str] = set()
+    blocked_paths: list[str] = []
+    while current_id and current_id not in visited and len(visited) < max_depth:
+        visited.add(current_id)
+        failure = by_id.get(current_id)
+        if failure is None:
+            break
+        try:
+            actual = json.loads(str(failure.get("actual_json") or "{}"))
+        except json.JSONDecodeError:
+            actual = {}
+        if (
+            isinstance(actual, dict)
+            and actual.get("scope_reassessment_required") is True
+            and isinstance(actual.get("blocked_allowed_paths"), list)
+        ):
+            blocked_paths.extend(
+                str(value)
+                for value in actual["blocked_allowed_paths"]
+                if isinstance(value, str) and value
+            )
+        current_id = str(failure.get("parent_failure_id") or "")
+    return tuple(dict.fromkeys(blocked_paths))
+
+
 class PipelineCoordinator:
     """Create the next bounded task only after its predecessor is accepted."""
 
@@ -964,6 +1005,14 @@ class PipelineCoordinator:
             if expected_kind == "replan_delta"
             else ()
         )
+        blocked_replan_scope_paths = (
+            _replan_blocked_scope_paths(
+                self.state.list_failures(product_id),
+                source_failure_id=source_failure_id,
+            )
+            if expected_kind == "replan_delta"
+            else ()
+        )
         inherited_nodes: list[dict[str, Any]] = []
         accepted_nodes: dict[str, str] = {}
         architecture_source: str | None = None
@@ -1030,6 +1079,7 @@ class PipelineCoordinator:
                 proposal_artifact_ref=f"evidence/{proposal_path.name}",
                 architecture_source_task_id=architecture_source,
                 mandatory_replan_gate_ids=mandatory_replan_gate_ids,
+                blocked_replan_scope_paths=blocked_replan_scope_paths,
             ),
             accepted_nodes=accepted_nodes,
             inherited_nodes=inherited_nodes,

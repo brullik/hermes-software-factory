@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.30 - 2026-07-31
+
+- Preserve sanitized Builder findings that prove mandatory gate root causes are
+  outside the current task's `allowed_paths`, together with the exact blocked
+  scope and controller-owned gate diagnostics.
+- Route an insufficient-scope failure directly to the Replanner instead of
+  retrying a Builder that is contractually unable to edit the root-cause files.
+- Reject a replan whose fresh implementation slices remain entirely inside the
+  failed scope, forcing a bounded expansion to production root-cause paths
+  while keeping forbidden paths intact.
+
 ## 2.2.29 - 2026-07-31
 
 - Keep equivalent Director diagnosis-reassessment proposals in one bounded

@@ -30,6 +30,7 @@ class CompileContext:
     proposal_artifact_ref: str
     architecture_source_task_id: str | None = None
     mandatory_replan_gate_ids: tuple[str, ...] = ()
+    blocked_replan_scope_paths: tuple[str, ...] = ()
 
 
 def _node_key(value: str) -> str:
@@ -174,6 +175,7 @@ class PlanCompiler:
         proposed_slices: Sequence[Mapping[str, Any]],
         inherited_by_key: Mapping[str, Mapping[str, Any]],
         mandatory_gate_ids: Sequence[str],
+        blocked_scope_paths: Sequence[str],
     ) -> None:
         """Require a replan to schedule fresh work for every failed mandatory gate."""
 
@@ -219,6 +221,36 @@ class PlanCompiler:
                 + ", ".join(missing),
                 failed_gate_ids=missing,
             )
+        if blocked_scope_paths:
+            blocked = tuple(dict.fromkeys(str(value) for value in blocked_scope_paths))
+
+            def covered_by_blocked_scope(value: object) -> bool:
+                candidate = str(value)
+                for pattern in blocked:
+                    if candidate == pattern:
+                        return True
+                    if pattern.endswith("/**"):
+                        prefix = pattern[:-3].rstrip("/")
+                        if candidate.startswith(prefix + "/"):
+                            return True
+                return False
+
+            fresh_scopes = [
+                str(value)
+                for node in fresh_slices
+                for value in node.get("scope", [])
+            ]
+            if not any(
+                not covered_by_blocked_scope(value)
+                for value in fresh_scopes
+            ):
+                raise PlanContractViolation(
+                    "fresh implementation slices do not expand the failed "
+                    "allowed_paths scope; add bounded production root-cause paths "
+                    "outside: "
+                    + ", ".join(blocked),
+                    failed_gate_ids=mandatory_gate_ids,
+                )
 
     @staticmethod
     def _quality_gates(stage_key: str, external_repository: bool) -> list[str]:
@@ -316,6 +348,7 @@ class PlanCompiler:
                 proposed_slices,
                 inherited_by_key,
                 context.mandatory_replan_gate_ids,
+                context.blocked_replan_scope_paths,
             )
         merged_by_key = dict(inherited_by_key)
         for key, node in zip(proposed_keys, proposed_slices, strict=True):
