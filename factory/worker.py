@@ -62,7 +62,11 @@ from .repair_brief import (
     repair_finding_detail,
     repair_requirements,
 )
-from .repair_scope import derive_scope_required_paths, path_is_covered
+from .repair_scope import (
+    derive_scope_required_paths,
+    infer_unique_test_source_paths,
+    path_is_covered,
+)
 from .replan_lineage import implementation_lineage
 from .repository import RepositoryBootstrapper, build_repository_bootstrapper
 from .state import StateStore, is_sqlite_busy
@@ -196,6 +200,7 @@ def _mandatory_gate_failure_data(
     attempt_id: str,
     output: Mapping[str, Any] | None = None,
     allowed_paths: list[str] | None = None,
+    repository_root: Path | None = None,
 ) -> FailureData:
     """Preserve safe controller gate diagnostics for the next autonomous role."""
 
@@ -272,6 +277,20 @@ def _mandatory_gate_failure_data(
         for coordinate in diagnostic_scope_coordinates
         if not path_is_covered(coordinate, blocked_allowed_paths)
     ]
+    inferred_source_coordinates = (
+        list(
+            infer_unique_test_source_paths(
+                repository_root,
+                diagnostic_scope_coordinates,
+                blocked_allowed_paths,
+            )
+        )
+        if repository_root is not None
+        else []
+    )
+    outside_scope_coordinates = list(
+        dict.fromkeys([*outside_scope_coordinates, *inferred_source_coordinates])
+    )
     scope_findings: list[dict[str, str]] = []
     raw_findings = output.get("findings", []) if output is not None else []
     if isinstance(raw_findings, list):
@@ -319,6 +338,18 @@ def _mandatory_gate_failure_data(
                 )[:1200],
             }
         )
+    if inferred_source_coordinates:
+        scope_findings.append(
+            {
+                "code": "CONTROLLER_UNIQUE_TEST_SOURCE_OUTSIDE_ALLOWED_PATHS",
+                "severity": "high",
+                "text": (
+                    "Controller resolved a failing test to one uniquely imported "
+                    "local production module outside the failed task scope: "
+                    + ", ".join(inferred_source_coordinates[:20])
+                )[:1200],
+            }
+        )
     required_fixes = [f"Resolve {item['gate_id']}: {item['summary']}" for item in diagnostics]
     if scope_findings:
         required_fixes.append(
@@ -350,6 +381,7 @@ def _mandatory_gate_failure_data(
             "blocked_allowed_paths": blocked_allowed_paths,
             "provider_scope_findings": scope_findings,
             "diagnostic_scope_coordinates": diagnostic_scope_coordinates,
+            "inferred_source_coordinates": inferred_source_coordinates,
             "outside_scope_coordinates": outside_scope_coordinates,
             "scope_required_paths": scope_required_paths,
         },
@@ -2434,6 +2466,7 @@ class AgentWorker:
         spec: TaskExecutionSpec,
         *,
         tier: Tier,
+        repository_root: Path,
     ) -> dict[str, Any] | None:
         """Build an exact replan delta without a provider when scope is proven.
 
@@ -2483,6 +2516,7 @@ class AgentWorker:
                 for value in spec.task_contract.get("forbidden_paths", [])
                 if isinstance(value, str) and value
             ],
+            repository_root=repository_root,
         )
         required_paths = [
             str(value)
@@ -2503,19 +2537,11 @@ class AgentWorker:
             product_id,
             active_plan_id,
         )
-        causal_node_keys: list[str] = []
-        for causal_task_id in scope_policy["causal_task_ids"]:
-            causal_task = self.state.get_task(str(causal_task_id))
-            if causal_task is None:
-                continue
-            node_key = str(
-                causal_task.get("semantic_node_key")
-                or causal_task.get("plan_node_id")
-                or causal_task.get("stage_key")
-                or ""
-            ).casefold()
-            if node_key and node_key not in causal_node_keys:
-                causal_node_keys.append(node_key)
+        causal_node_keys = [
+            str(value).casefold()
+            for value in scope_policy["affected_semantic_node_keys"]
+            if isinstance(value, str) and value
+        ]
         if len(causal_node_keys) != 1:
             return None
         affected_coordinate = causal_node_keys[0]
@@ -3831,16 +3857,17 @@ class AgentWorker:
                 reason_code="release_adapter_missing",
             )
         tier = spec.requested_tier or Tier(str(spec.task_contract["model_floor"]))
-        deterministic_output = self._deterministic_scope_expansion_output(
-            spec,
-            tier=tier,
-        )
         lease = self.workspace.acquire(
             product_id=str(spec.task_contract["product_id"]),
             task_id=str(spec.task_contract["task_id"]),
             worker_id=self.worker_id,
         )
         try:
+            deterministic_output = self._deterministic_scope_expansion_output(
+                spec,
+                tier=tier,
+                repository_root=lease.path,
+            )
             spec = replace(
                 spec,
                 subject_sha=sha256_text(stable_json(_workspace_snapshot(lease.path))),
@@ -3956,6 +3983,7 @@ class AgentWorker:
                         detail=gate_detail,
                         evidence_ref=f"evidence/{result_path.name}",
                         attempt_id=attempt.attempt_id,
+                        repository_root=lease.path,
                     ),
                 )
             if deterministic_output is not None:
@@ -4440,6 +4468,7 @@ class AgentWorker:
                         attempt_id=attempt.attempt_id,
                         output=output,
                         allowed_paths=[str(path) for path in spec.task_contract["allowed_paths"]],
+                        repository_root=lease.path,
                     ),
                 )
             reported_output_status = str(output.get("status"))

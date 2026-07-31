@@ -185,11 +185,28 @@ def state_audit(state: StateStore) -> dict[str, Any]:
     }
 
 
-def build_recovery_plan(state: StateStore) -> dict[str, Any]:
+def build_recovery_plan(
+    state: StateStore,
+    *,
+    include_failed_safe: bool = False,
+    product_ids: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if include_failed_safe and not product_ids:
+        raise ValueError("FAILED_SAFE recovery requires an explicit product selection")
+    selected_products = set(product_ids)
     actions: list[dict[str, Any]] = []
     for product in state.list_products():
         product_id = str(product["product_id"])
-        if str(product["status"]) in TERMINAL_PRODUCTS:
+        if selected_products and product_id not in selected_products:
+            continue
+        status = str(product["status"])
+        failed_safe_selected = (
+            include_failed_safe
+            and status == "FAILED_SAFE"
+            and str(product.get("terminal_reason") or "")
+            == "replanner_problem_budget_exhausted"
+        )
+        if status in TERMINAL_PRODUCTS and not failed_safe_selected:
             continue
         plan = _rows(
             state,
@@ -218,8 +235,29 @@ def build_recovery_plan(state: StateStore) -> dict[str, Any]:
             and task.get("result_digest")
             and str(task.get("role") or "") == "solution-architect"
         ]
+        latest_failure_rows = (
+            _rows(
+                state,
+                """SELECT failure_id, task_id
+                     FROM failures
+                    WHERE product_id=?
+                    ORDER BY last_seen_at DESC, rowid DESC
+                    LIMIT 1""",
+                (product_id,),
+            )
+            if failed_safe_selected
+            else []
+        )
+        source_failure_id = (
+            str(latest_failure_rows[0]["failure_id"]) if latest_failure_rows else None
+        )
+        latest_failure_task_id = (
+            str(latest_failure_rows[0]["task_id"]) if latest_failure_rows else ""
+        )
         latest_source = (
-            supersede[-1]
+            latest_failure_task_id
+            if latest_failure_task_id
+            else supersede[-1]
             if supersede
             else preserve[-1]
             if preserve
@@ -248,6 +286,7 @@ def build_recovery_plan(state: StateStore) -> dict[str, Any]:
                     architecture_sources[-1] if architecture_sources else None
                 ),
                 "source_task_id": latest_source,
+                "source_failure_id": source_failure_id,
                 "resume_status": resume_status,
                 "action": "compile_semantic_lifecycle_revision",
             }
@@ -394,7 +433,7 @@ def _recovery_contract(
             product.get("root_goal_ref") or f"evidence/intake-{product_id}.json"
         ),
         "active_context_ref": f"evidence/task-{task_id}.json",
-        "failure_id": None,
+        "failure_id": action.get("source_failure_id"),
         "hypothesis_id": None,
         "supersedes_task_id": None,
         "title": "Recompile product into the semantic lifecycle",
@@ -527,14 +566,14 @@ def apply_recovery_plan(
                         cycle, root_task_id, parent_task_id, source_task_id,
                         plan_id, plan_node_id, task_revision, root_context_ref,
                         active_context_ref, capability_profile, idempotency_key,
-                        graph_status, required_capabilities_json, mandatory,
+                        graph_status, required_capabilities_json, mandatory, failure_id,
                         critical_path_rank)
                        VALUES (?, ?, ?, 'replanner',
                                'plan-proposal-v1.schema.json', ?, 1000,
                         'PENDING', ?, ?, ?, ?,
                                'semantic-lifecycle-recovery', 0, ?, ?, ?, ?,
                                ?, ?, ?, ?, 'planning_readonly', ?, 'READY',
-                               ?, 1, 0)""",
+                               ?, 1, ?, 0)""",
                     (
                         str(contract["task_id"]),
                         product_id,
@@ -554,6 +593,7 @@ def apply_recovery_plan(
                         str(contract["active_context_ref"]),
                         str(contract["idempotency_key"]),
                         stable_json(contract["required_capabilities"]),
+                        contract.get("failure_id"),
                     ),
                 )
                 for dependency_id in contract["dependencies"]:

@@ -628,6 +628,72 @@ class WorkerTests(unittest.TestCase):
             "CONTROLLER_SCOPE_COORDINATE_OUTSIDE_ALLOWED_PATHS",
         )
 
+    def test_mandatory_gate_failure_infers_unique_production_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_path = root / "tests" / "unit" / "test_server.py"
+            test_path.parent.mkdir(parents=True)
+            test_path.write_text(
+                "from server import create_server\n\ndef test_ready():\n    assert create_server\n",
+                encoding="utf-8",
+            )
+            source_path = root / "container" / "server.py"
+            source_path.parent.mkdir()
+            source_path.write_text(
+                "def create_server():\n    return object()\n",
+                encoding="utf-8",
+            )
+            evidence_path = root / "gate-target-tests.json"
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "exit_code": 1,
+                        "summary": (
+                            "RuntimeTests.test_ready failed\n"
+                            "tests/unit/test_server.py:31: AssertionError"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            failure = _mandatory_gate_failure_data(
+                QualityGateRun(
+                    (
+                        {
+                            "gate_id": "target-tests",
+                            "status": "FAIL",
+                            "evidence_ref": str(evidence_path),
+                        },
+                    ),
+                    (evidence_path,),
+                    False,
+                ),
+                detail="failed mandatory gates: target-tests",
+                evidence_ref="evidence/attempt.json",
+                attempt_id="attempt-controller-source-coordinate",
+                allowed_paths=["tests/**"],
+                repository_root=root,
+            )
+
+        self.assertEqual(
+            failure.actual["inferred_source_coordinates"],
+            ["container/server.py"],
+        )
+        self.assertEqual(
+            failure.actual["scope_required_paths"],
+            ["container/server.py"],
+        )
+        self.assertTrue(
+            any(
+                finding["code"]
+                == "CONTROLLER_UNIQUE_TEST_SOURCE_OUTSIDE_ALLOWED_PATHS"
+                for finding in failure.actual["provider_scope_findings"]
+            )
+        )
+
     def test_replanner_inventory_preserves_safe_failure_coordinates_and_hypotheses(
         self,
     ) -> None:

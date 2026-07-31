@@ -292,7 +292,18 @@ def recovery_plan_command(args: argparse.Namespace) -> int:
                 raise TypeError("recovery plan must be a JSON object")
             plan = loaded
         else:
-            plan = build_recovery_plan(state)
+            selected_products = (
+                (str(args.product_id),)
+                if getattr(args, "product_id", None)
+                else ()
+            )
+            plan = build_recovery_plan(
+                state,
+                include_failed_safe=bool(
+                    getattr(args, "include_failed_safe", False)
+                ),
+                product_ids=selected_products,
+            )
         verification = verify_recovery_preconditions(state, plan) if args.dry_run else None
         if args.output:
             write_json_atomic(args.output, plan)
@@ -746,6 +757,8 @@ def build_parser() -> argparse.ArgumentParser:
     recovery_plan = subparsers.add_parser("recovery-plan")
     recovery_plan.add_argument("--config", type=Path)
     recovery_plan.add_argument("--all-active", action="store_true")
+    recovery_plan.add_argument("--product-id")
+    recovery_plan.add_argument("--include-failed-safe", action="store_true")
     recovery_plan.add_argument("--output", type=Path)
     recovery_plan.add_argument("--plan", type=Path)
     recovery_plan.add_argument("--dry-run", action="store_true")

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
 from .policy import policy_digest
-from .repair_scope import derive_scope_required_paths
+from .repair_scope import derive_scope_required_paths, infer_unique_test_source_paths
 from .state import StateStore
 
 _CONTROL_GATE_IDS = {
@@ -45,6 +46,7 @@ def build_scope_recovery_directive(
     product_id: str,
     source_failure_id: str,
     forbidden_paths: Sequence[str] = (),
+    repository_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build one compact, stable directive from a single causal chain."""
 
@@ -80,6 +82,27 @@ def build_scope_recovery_directive(
                     for value in blocked
                     if isinstance(value, str) and value
                 )
+            coordinates = actual.get("diagnostic_scope_coordinates", [])
+            if (
+                repository_root is not None
+                and isinstance(coordinates, list)
+                and isinstance(blocked, list)
+            ):
+                required_paths.extend(
+                    infer_unique_test_source_paths(
+                        repository_root,
+                        [
+                            str(value)
+                            for value in coordinates
+                            if isinstance(value, str) and value
+                        ],
+                        [
+                            str(value)
+                            for value in blocked
+                            if isinstance(value, str) and value
+                        ],
+                    )
+                )
         failed_gate_ids.extend(
             str(value)
             for value in _json_list(failure.get("failed_gate_ids_json"))
@@ -92,19 +115,24 @@ def build_scope_recovery_directive(
             if task is not None:
                 causal_tasks.append(task)
 
-    root_product_task = next(
+    affected_product_task = next(
         (
-            task
-            for task in reversed(causal_tasks)
-            if str(task.get("role") or "")
-            not in {"replanner", "incident-recovery"}
+            task for task in causal_tasks if str(task.get("role") or "") == "builder"
         ),
-        causal_tasks[-1] if causal_tasks else {},
+        next(
+            (
+                task
+                for task in causal_tasks
+                if str(task.get("role") or "")
+                not in {"replanner", "incident-recovery"}
+            ),
+            causal_tasks[0] if causal_tasks else {},
+        ),
     )
     affected_key = str(
-        root_product_task.get("semantic_node_key")
-        or root_product_task.get("plan_node_id")
-        or root_product_task.get("stage_key")
+        affected_product_task.get("semantic_node_key")
+        or affected_product_task.get("plan_node_id")
+        or affected_product_task.get("stage_key")
         or ""
     ).casefold()
     required_paths = list(dict.fromkeys(required_paths))
