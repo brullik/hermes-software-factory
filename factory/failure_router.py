@@ -835,6 +835,10 @@ class FailureRouter:
             hypothesis_id: str | None = None
             attempts_used = 0
             same_role_problem_count = 0
+            diagnosis_reassessment = (
+                str(failed.get("stage_key") or "")
+                == "diagnosis-reassessment"
+            )
             if not controller_fault and not controller_handoff:
                 same_role_problem_count = self._same_role_problem_count(
                     dict(failure),
@@ -886,6 +890,10 @@ class FailureRouter:
                 else:
                     hypothesis_id = str(hypothesis["hypothesis_id"])
                     attempts_used = int(hypothesis["attempts_used"] or 0)
+            repeated_problem_requires_reassessment = (
+                same_role_problem_count >= 2
+                and not diagnosis_reassessment
+            )
             needs_replan = (
                 invalid_plan_output_schema
                 or controller_handoff
@@ -902,7 +910,7 @@ class FailureRouter:
                     != "builder_workspace"
                 )
                 or attempts_used >= 3
-                or same_role_problem_count >= 2
+                or repeated_problem_requires_reassessment
                 or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
             )
             if controller_fault:
@@ -932,7 +940,7 @@ class FailureRouter:
             elif needs_replan:
                 if (
                     attempts_used >= 3
-                    or same_role_problem_count >= 2
+                    or repeated_problem_requires_reassessment
                     or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
                 ):
                     assert hypothesis_id is not None
@@ -975,7 +983,11 @@ class FailureRouter:
                     )
                     suffix = "diagnosis-reassessment"
                 else:
-                    suffix = "replan"
+                    suffix = (
+                        "diagnosis-reassessment"
+                        if diagnosis_reassessment
+                        else "replan"
+                    )
                 role = "replanner"
                 output_schema = "plan-proposal-v1.schema.json"
                 capability_profile = "planning_readonly"

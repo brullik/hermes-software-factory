@@ -1699,6 +1699,105 @@ def test_AUT_P0_012_hypothesis_budget_exhaustion_changes_hypothesis(
         state.close()
 
 
+def test_diagnosis_reassessment_reuses_one_hypothesis_for_three_attempts(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        router = FailureRouter(config, state, artifacts)
+        initial_repair_id = router.route(failure_id)
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        old_hypothesis_id = str(failed["hypothesis_id"])
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks SET status='DONE', graph_status='SUPERSEDED'
+                   WHERE task_id=?""",
+                (initial_repair_id,),
+            )
+            state._connection.execute(
+                "UPDATE hypotheses SET attempts_used=3 WHERE hypothesis_id=?",
+                (old_hypothesis_id,),
+            )
+            state._connection.execute(
+                "UPDATE failures SET status='OPEN' WHERE failure_id=?",
+                (failure_id,),
+            )
+        diagnosis_task_id = router.route(failure_id)
+        diagnosis = state.get_task(diagnosis_task_id)
+        assert diagnosis is not None
+        diagnosis_hypothesis_id = str(diagnosis["hypothesis_id"])
+        assert diagnosis["stage_key"] == "diagnosis-reassessment"
+
+        parent_failure_id = failure_id
+        for attempt_number in range(1, 4):
+            claimed = state.claim_task(worker_id="diagnosis-worker")
+            assert claimed is not None
+            assert claimed["task_id"] == diagnosis_task_id
+            committed = state.commit_task_outcome(
+                TaskOutcome(
+                    task_id=diagnosis_task_id,
+                    worker_id="diagnosis-worker",
+                    lease_token=str(claimed["lease_token"]),
+                    expected_task_revision=int(claimed["task_revision"]),
+                    expected_plan_revision=1,
+                    idempotency_key=sha256_text(
+                        f"diagnosis-reassessment-{attempt_number}"
+                    ),
+                    result_ref=(
+                        f"evidence/diagnosis-reassessment-{attempt_number}.json"
+                    ),
+                    result_digest=sha256_text(
+                        f"diagnosis-reassessment-{attempt_number}"
+                    ),
+                    status="FAILED_SEMANTIC",
+                    failure=FailureData(
+                        failure_class="semantic",
+                        reason_code="plan_contract_violation",
+                        safe_message=(
+                            "fresh implementation slices do not cover failed "
+                            "mandatory gates: target-tests"
+                        ),
+                        evidence_ref=(
+                            f"evidence/diagnosis-reassessment-{attempt_number}.json"
+                        ),
+                        parent_failure_id=parent_failure_id,
+                        failed_gate_ids=("target-tests",),
+                    ),
+                )
+            )
+            assert committed.failure_id is not None
+            parent_failure_id = committed.failure_id
+            next_task_id = router.route(committed.failure_id)
+            next_task = state.get_task(next_task_id)
+            assert next_task is not None
+            assert next_task["stage_key"] == "diagnosis-reassessment"
+            if attempt_number < 3:
+                assert next_task["hypothesis_id"] == diagnosis_hypothesis_id
+            else:
+                assert next_task["hypothesis_id"] != diagnosis_hypothesis_id
+                hypotheses = state.list_hypotheses("product-autonomy")
+                exhausted = next(
+                    item
+                    for item in hypotheses
+                    if item["hypothesis_id"] == diagnosis_hypothesis_id
+                )
+                replacement = next(
+                    item
+                    for item in hypotheses
+                    if item["hypothesis_id"] == next_task["hypothesis_id"]
+                )
+                assert exhausted["status"] == "EXHAUSTED"
+                assert exhausted["attempts_used"] == 3
+                assert (
+                    replacement["parent_hypothesis_id"]
+                    == diagnosis_hypothesis_id
+                )
+            diagnosis_task_id = next_task_id
+    finally:
+        state.close()
+
+
 def test_AUT_P0_031_second_identical_same_role_failure_opens_replan_circuit(
     tmp_path: Path,
 ) -> None:
