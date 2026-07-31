@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.31 - 2026-07-31
+
+- Derive safe repository path coordinates directly from controller-owned gate
+  diagnostics and compare them with the failed task's `allowed_paths`.
+- Trigger scope reassessment when a failed gate names an out-of-scope path even
+  if the Builder reports only a task-local verification pass and omits its prior
+  scope finding.
+- Persist both all diagnostic coordinates and the out-of-scope subset so the
+  Replanner receives deterministic structural evidence without secret values.
+
 ## 2.2.30 - 2026-07-31
 
 - Preserve sanitized Builder findings that prove mandatory gate root causes are
