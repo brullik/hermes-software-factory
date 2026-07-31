@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.28 - 2026-07-31
+
+- Preserve a newer explicit owner pause when an already claimed task commits
+  its result with an older pipeline lifecycle transition.
+- Commit useful in-flight task evidence and successor state without allowing
+  that outcome to overwrite owner, terminal, or rollback product states.
+- Emit durable `product_transition_suppressed` evidence with safe current and
+  requested statuses whenever a stale outcome transition is rejected.
+
 ## 2.2.27 - 2026-07-31
 
 - Preserve every omitted mandatory gate ID as a first-class structural finding

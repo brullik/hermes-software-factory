@@ -49,6 +49,15 @@ ACTIVE_GRAPH_STATUSES = {
     "FAILED_TRANSIENT",
     "FAILED_SEMANTIC",
 }
+OUTCOME_PROTECTED_PRODUCT_STATUSES = {
+    "BLOCKED_OWNER",
+    "CANCELLED",
+    "COMPLETED",
+    "FAILED_SAFE",
+    "PAUSED",
+    "ROLLED_BACK",
+    "ROLLING_BACK",
+}
 PLANNING_ONLY_ROLES = {
     "product-director",
     "product-analyst",
@@ -1992,11 +2001,30 @@ class AutonomyStore:
                     self.connection, str(task["product_id"])
                 )
                 inject("after_frontier_recompute")
+                suppressed_product_transition: dict[str, str] | None = None
                 if outcome.product_status is not None:
-                    self.connection.execute(
-                        "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                        (outcome.product_status, now, str(task["product_id"])),
-                    )
+                    current_product = self.connection.execute(
+                        "SELECT status FROM products WHERE product_id=?",
+                        (str(task["product_id"]),),
+                    ).fetchone()
+                    if current_product is None:
+                        raise KeyError(str(task["product_id"]))
+                    current_product_status = str(current_product["status"])
+                    if (
+                        current_product_status
+                        in OUTCOME_PROTECTED_PRODUCT_STATUSES
+                        and current_product_status != outcome.product_status
+                    ):
+                        suppressed_product_transition = {
+                            "current_status": current_product_status,
+                            "requested_status": outcome.product_status,
+                            "reason": "newer_owner_or_terminal_state",
+                        }
+                    else:
+                        self.connection.execute(
+                            "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                            (outcome.product_status, now, str(task["product_id"])),
+                        )
                 logical_events: list[dict[str, Any]] = [
                     {
                         "event_type": "task_result_committed",
@@ -2008,6 +2036,16 @@ class AutonomyStore:
                         },
                     }
                 ]
+                if suppressed_product_transition is not None:
+                    logical_events.append(
+                        {
+                            "event_type": "product_transition_suppressed",
+                            "payload": {
+                                "task_id": outcome.task_id,
+                                **suppressed_product_transition,
+                            },
+                        }
+                    )
                 if successor_ids:
                     logical_events.append(
                         {
