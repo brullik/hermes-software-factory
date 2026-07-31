@@ -562,6 +562,69 @@ class WorkerTests(unittest.TestCase):
             )
         )
 
+    def test_mandatory_gate_failure_detects_controller_path_outside_scope(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "gate-target-lint.json"
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "exit_code": 1,
+                        "summary": (
+                            "E902 No such file or directory (os error 2)\n"
+                            "--> src:1:1\n"
+                            "tests/unit/test_safe.py:14:2: assertion context"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            failure = _mandatory_gate_failure_data(
+                QualityGateRun(
+                    (
+                        {
+                            "gate_id": "target-lint",
+                            "status": "FAIL",
+                            "evidence_ref": str(evidence_path),
+                        },
+                    ),
+                    (evidence_path,),
+                    False,
+                ),
+                detail="failed mandatory gates: target-lint",
+                evidence_ref="evidence/attempt.json",
+                attempt_id="attempt-controller-scope-coordinate",
+                output={
+                    "findings": [
+                        {
+                            "code": "FRESH_VERIFICATION_PASS",
+                            "severity": "info",
+                            "text": "The task-local tests passed.",
+                        }
+                    ]
+                },
+                allowed_paths=["tests/**"],
+            )
+
+        self.assertIs(
+            failure.actual["scope_reassessment_required"],
+            True,
+        )
+        self.assertEqual(
+            failure.actual["diagnostic_scope_coordinates"],
+            ["src", "tests/unit/test_safe.py"],
+        )
+        self.assertEqual(
+            failure.actual["outside_scope_coordinates"],
+            ["src"],
+        )
+        self.assertEqual(
+            failure.actual["provider_scope_findings"][0]["code"],
+            "CONTROLLER_SCOPE_COORDINATE_OUTSIDE_ALLOWED_PATHS",
+        )
+
     def test_replanner_inventory_preserves_safe_failure_coordinates_and_hypotheses(
         self,
     ) -> None:

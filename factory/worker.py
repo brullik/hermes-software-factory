@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -244,6 +245,47 @@ def _mandatory_gate_failure_data(
         if diagnostic_message
         else detail
     )[:4000]
+    blocked_allowed_paths = list(
+        dict.fromkeys(str(value) for value in (allowed_paths or []) if str(value))
+    )
+
+    def path_is_allowed(path: str) -> bool:
+        for pattern in blocked_allowed_paths:
+            if fnmatchcase(path, pattern):
+                return True
+            if pattern.endswith("/**"):
+                prefix = pattern[:-3].rstrip("/")
+                if path == prefix or path.startswith(prefix + "/"):
+                    return True
+        return False
+
+    diagnostic_scope_coordinates: list[str] = []
+    coordinate_patterns = (
+        re.compile(r"(?m)^\s*-->\s+([A-Za-z0-9_.@+/-]+):\d+(?::\d+)?"),
+        re.compile(r"(?m)^\s*([A-Za-z0-9_.@+/-]+\.py):\d+(?::\d+)?"),
+    )
+    for diagnostic in diagnostics:
+        for pattern in coordinate_patterns:
+            for match in pattern.finditer(str(diagnostic["summary"])):
+                coordinate = match.group(1)
+                if (
+                    coordinate.startswith("/")
+                    or "\\" in coordinate
+                    or any(
+                        part in {"", ".", ".."}
+                        for part in coordinate.split("/")
+                    )
+                ):
+                    continue
+                diagnostic_scope_coordinates.append(coordinate)
+    diagnostic_scope_coordinates = list(
+        dict.fromkeys(diagnostic_scope_coordinates)
+    )
+    outside_scope_coordinates = [
+        coordinate
+        for coordinate in diagnostic_scope_coordinates
+        if not path_is_allowed(coordinate)
+    ]
     scope_findings: list[dict[str, str]] = []
     raw_findings = output.get("findings", []) if output is not None else []
     if isinstance(raw_findings, list):
@@ -280,9 +322,18 @@ def _mandatory_gate_failure_data(
                         "text": normalized,
                     }
                 )
-    blocked_allowed_paths = list(
-        dict.fromkeys(str(value) for value in (allowed_paths or []) if str(value))
-    )
+    if outside_scope_coordinates:
+        scope_findings.append(
+            {
+                "code": "CONTROLLER_SCOPE_COORDINATE_OUTSIDE_ALLOWED_PATHS",
+                "severity": "high",
+                "text": (
+                    "Controller gate diagnostics name repository coordinates "
+                    "outside the failed task scope: "
+                    + ", ".join(outside_scope_coordinates[:20])
+                )[:1200],
+            }
+        )
     required_fixes = [
         f"Resolve {item['gate_id']}: {item['summary']}"
         for item in diagnostics
@@ -313,6 +364,8 @@ def _mandatory_gate_failure_data(
             "scope_reassessment_required": bool(scope_findings),
             "blocked_allowed_paths": blocked_allowed_paths,
             "provider_scope_findings": scope_findings,
+            "diagnostic_scope_coordinates": diagnostic_scope_coordinates,
+            "outside_scope_coordinates": outside_scope_coordinates,
         },
         failed_gate_ids=unique_gate_ids,
     )
