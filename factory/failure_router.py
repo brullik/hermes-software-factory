@@ -11,6 +11,7 @@ from .artifacts import ArtifactStore
 from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
+from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
 from .repair_brief import repair_requirements
 from .repair_scope import derive_scope_required_paths
@@ -38,6 +39,7 @@ _CONTROLLER_PREFIXES = (
     "repair_requeue_",
 )
 _MAX_CONTROLLER_RECOVERY_DEPTH = 3
+_MAX_REPLANNER_ATTEMPTS_PER_CAUSAL_PROBLEM = 3
 
 
 class FailureRouter:
@@ -101,6 +103,19 @@ class FailureRouter:
         }
 
         def signature(item: dict[str, Any]) -> str:
+            scope_reassessment, _required_paths = self._causal_scope_evidence(
+                item,
+                product_id=str(failed["product_id"]),
+            )
+            if scope_reassessment:
+                directive = build_scope_recovery_directive(
+                    self.config,
+                    self.state,
+                    list(failures.values()),
+                    product_id=str(failed["product_id"]),
+                    source_failure_id=str(item.get("failure_id") or ""),
+                )
+                return str(directive["root_problem_signature"])
             try:
                 failed_gates = sorted(
                     str(value)
@@ -139,6 +154,68 @@ class FailureRouter:
                 count += 1
             failure_id = str(item.get("parent_failure_id") or "")
         return count
+
+    def _terminate_replanner_loop(
+        self,
+        *,
+        failed: dict[str, Any],
+        failure: dict[str, Any],
+        same_role_problem_count: int,
+    ) -> str:
+        """Stop an exhausted control-plane loop without inventing product success."""
+
+        now = str(failure.get("last_seen_at") or failure.get("first_seen_at") or "")
+        incident_id = (
+            "incident-"
+            + sha256_text(
+                stable_json(
+                    [
+                        failed["product_id"],
+                        failure["failure_id"],
+                        "replanner_problem_budget_exhausted",
+                    ]
+                )
+            )[:20]
+        )
+        with self.state._lock, self.state._connection:
+            self.state._connection.execute(
+                "UPDATE failures SET status='ROUTED', last_seen_at=? WHERE failure_id=?",
+                (now, failure["failure_id"]),
+            )
+            self.state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at)
+                   VALUES (?, ?, ?, 'replanner_problem_budget_exhausted',
+                           ?, 'OPEN', ?)""",
+                (
+                    incident_id,
+                    failed["product_id"],
+                    failed["task_id"],
+                    failure["evidence_ref"],
+                    now,
+                ),
+            )
+            self.state._connection.execute(
+                """UPDATE products
+                   SET status='FAILED_SAFE',
+                       terminal_reason='replanner_problem_budget_exhausted',
+                       updated_at=?
+                   WHERE product_id=?""",
+                (now, failed["product_id"]),
+            )
+            self.state._record_event(
+                str(failed["product_id"]),
+                str(failed["task_id"]),
+                "replanner_loop_terminated",
+                {
+                    "failure_id": str(failure["failure_id"]),
+                    "incident_id": incident_id,
+                    "same_role_problem_count": same_role_problem_count,
+                    "reason_code": "replanner_problem_budget_exhausted",
+                },
+            )
+        return str(failed["task_id"])
 
     def _contract(self, task: dict[str, Any]) -> dict[str, Any]:
         reference = str(task.get("contract_ref") or "")
@@ -428,6 +505,7 @@ class FailureRouter:
         required_capabilities: list[str] | None = None,
         acceptance: list[dict[str, Any]] | None = None,
         quality_gates: list[str] | None = None,
+        model_floor: str = "terra",
     ) -> tuple[dict[str, Any], Path]:
         task_id = (
             "T-"
@@ -480,7 +558,7 @@ class FailureRouter:
             "allowed_paths": allowed_paths or ["artifacts/**"],
             "forbidden_paths": ["secrets/**", "production/**"],
             "risk_tier": "medium",
-            "model_floor": "terra",
+            "model_floor": model_floor,
             "idempotency_key": sha256_text(
                 f"failure-route:{failure['failure_id']}:{node_suffix}:{task_revision}"
             ),
@@ -774,6 +852,17 @@ class FailureRouter:
                 dict(failure),
                 product_id=str(failed["product_id"]),
             )
+            original = self._contract(failed)
+            original_allowed_paths = [
+                str(value)
+                for value in original.get("allowed_paths", ["artifacts/**"])
+                if isinstance(value, str) and value
+            ]
+            legacy_replanner_scope_contract = (
+                str(failed.get("role") or "") == "replanner"
+                and scope_reassessment_required
+                and original_allowed_paths != ["artifacts/**"]
+            )
             active_plan_id = self._active_plan_id(str(failed["product_id"]))
             if active_plan_id:
                 failed["plan_id"] = active_plan_id
@@ -874,8 +963,22 @@ class FailureRouter:
                     hypothesis_id = str(hypothesis["hypothesis_id"])
                     attempts_used = int(hypothesis["attempts_used"] or 0)
             repeated_problem_requires_reassessment = (
-                same_role_problem_count >= 2 and not diagnosis_reassessment
+                same_role_problem_count >= 2
+                and not diagnosis_reassessment
+                and not legacy_replanner_scope_contract
             )
+            if (
+                str(failed.get("role") or "") == "replanner"
+                and scope_reassessment_required
+                and same_role_problem_count
+                >= _MAX_REPLANNER_ATTEMPTS_PER_CAUSAL_PROBLEM
+                and not legacy_replanner_scope_contract
+            ):
+                return self._terminate_replanner_loop(
+                    failed=failed,
+                    failure=failure,
+                    same_role_problem_count=same_role_problem_count,
+                )
             needs_replan = (
                 invalid_plan_output_schema
                 or controller_handoff
@@ -918,7 +1021,14 @@ class FailureRouter:
                     "evidence; do not consume a product semantic budget."
                 )
             elif needs_replan:
-                if (
+                if legacy_replanner_scope_contract:
+                    suffix = "scope-contract-correction"
+                    objective = (
+                        "Correct the controller-created Replanner contract that "
+                        "incorrectly inherited a failed Builder write scope. Return "
+                        "one bounded replan_delta using the typed replan scope policy."
+                    )
+                elif (
                     attempts_used >= 3
                     or repeated_problem_requires_reassessment
                     or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
@@ -965,11 +1075,12 @@ class FailureRouter:
                 role = "replanner"
                 output_schema = "plan-proposal-v1.schema.json"
                 capability_profile = "planning_readonly"
-                objective = (
-                    "Create plan revision N+1 from the inherited root goal, active "
-                    "plan, affected node, complete failure chain, repository excerpts, "
-                    "and capability inventory. Preserve accepted unaffected nodes."
-                )
+                if not legacy_replanner_scope_contract:
+                    objective = (
+                        "Create plan revision N+1 from the inherited root goal, active "
+                        "plan, affected node, complete failure chain, repository excerpts, "
+                        "and capability inventory. Preserve accepted unaffected nodes."
+                    )
                 if scope_reassessment_required:
                     objective += (
                         " The failed Builder proved its allowed_paths were too narrow. "
@@ -993,21 +1104,35 @@ class FailureRouter:
                     "Repair the exact failed plan node while preserving its root goal, "
                     "acceptance, scope, failure, and hypothesis lineage."
                 )
-            original = self._contract(failed)
             if bool(original.get("_reconstructed")):
                 self._record_contract_reconstruction(
                     failed=failed,
                     failure=failure,
                 )
-            allowed_paths = [
-                str(value)
-                for value in (
-                    ["artifacts/**"]
-                    if bool(original.get("_reconstructed"))
-                    and capability_profile in {"planning_readonly", "reviewer_readonly"}
-                    else original.get("allowed_paths", ["artifacts/**"])
-                )
-            ]
+            # ``allowed_paths`` is the write boundary of the *current* task.
+            # A Replanner is a read-only planning task and must never inherit a
+            # failed Builder's repository write scope.  The latter describes the
+            # exact scope that proved insufficient and belongs in the typed
+            # replan scope policy, not in the Replanner's own execution sandbox.
+            #
+            # Keeping these concepts separate is essential: otherwise a failure
+            # such as ``scripts/foo.py is outside src/**`` produces a Replanner
+            # contract that still permits only ``src/**``.  The model then cannot
+            # propose the controller-requested scope expansion and the router
+            # creates an unbounded chain of semantically identical replans.
+            if role == "replanner":
+                allowed_paths = ["artifacts/**"]
+            else:
+                allowed_paths = [
+                    str(value)
+                    for value in (
+                        ["artifacts/**"]
+                        if bool(original.get("_reconstructed"))
+                        and capability_profile
+                        in {"planning_readonly", "reviewer_readonly"}
+                        else original.get("allowed_paths", ["artifacts/**"])
+                    )
+                ]
             if role == "incident-recovery":
                 contract_acceptance = self._controller_incident_acceptance()
             elif role == "replanner":
@@ -1051,6 +1176,7 @@ class FailureRouter:
                     else None
                 ),
                 quality_gates=repair_quality_gates,
+                model_floor=("sol" if suffix == "scope-contract-correction" else "terra"),
             )
             repair_ref: str | None = None
             if suffix == "repair":

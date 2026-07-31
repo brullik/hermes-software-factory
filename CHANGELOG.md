@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.34 - 2026-07-31
+
+- Separate a Replanner's read-only artifact write boundary from the future
+  implementation scopes it is authorized to propose.
+- Add a controller-owned `replan_scope_policy` carrying the failed scope,
+  exact required production paths, mandatory gates, and affected semantic nodes.
+- Recover historical Replanner contracts that inherited Builder paths with one
+  bounded Sol correction attempt, then stop an unchanged causal scope loop
+  fail-safe instead of generating unlimited diagnosis hypotheses.
+- Compile a proven single-node exact scope expansion deterministically without
+  a provider call, while preserving the remaining unaccepted semantic nodes.
+- Bind compact Recovery Directives to a stable root-problem signature derived
+  from product, policy, semantic node, mandatory gates, and exact safe paths.
+- Add production-derived regressions for the exact
+  `scripts/image_security_verify.py` scope deadlock.
+
 ## 2.2.33 - 2026-07-31
 
 - Promote scope reassessment and exact required repository paths through the

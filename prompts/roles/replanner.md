@@ -21,6 +21,12 @@
    acceptance intents.
    `scope` — только массив относительных POSIX path-glob координат репозитория
    (`src/**`, `tests/**`, `README.md`); prose в `scope` недопустим.
+   `Task Contract.allowed_paths` ограничивает только запись текущей read-only
+   planning-задачи и **не** ограничивает `slices[].scope` будущей реализации.
+   Для новой реализации авторитетен
+   `plan_summary.replan_scope_policy`: включи каждый `required_scope_path` и,
+   когда `allow_bounded_expansion=true`, выйди за пределы
+   `failed_allowed_paths`, не нарушая forbidden paths.
 4. Не повторяй идентичную гипотезу с теми же evidence.
 5. Верни `proposal_kind=replan_delta`, точный активный `parent_plan_id` и
    `source_failure_id`.
@@ -32,8 +38,9 @@
 7. Свяжи каждый обязательный goal с исполнимым implementation slice.
 8. Используй controller-owned `plan_summary.policy_digest`,
    `implementation_nodes`, `accepted_unaffected_node_keys`,
-   `unresolved_failure_inventory` и `hypothesis_inventory`; не объявляй их
-   отсутствующими и не подменяй placeholder-значениями.
+   `unresolved_failure_inventory`, `hypothesis_inventory` и
+   `replan_scope_policy`; не объявляй их отсутствующими и не подменяй
+   placeholder-значениями.
 
 ## Запрещено
 

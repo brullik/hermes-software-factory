@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_worker import make_config, selected_registry
+from test_worker import FakeRunner, make_config, selected_registry
 
 from factory.artifacts import ArtifactStore
 from factory.autonomy import (
@@ -28,6 +28,7 @@ from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
 from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
+from factory.recovery_directive import build_scope_recovery_directive
 from factory.repository import RepositoryBootstrapper
 from factory.state import StateStore
 from factory.worker import AgentWorker, _plan_contract_repair_findings
@@ -803,6 +804,193 @@ def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
         assert "allowed_paths were too narrow" in contract["objective"]
         assert "tests-only substitute is invalid" in contract["objective"]
         assert "scripts/image_security_verify.py" in contract["objective"]
+        assert contract["allowed_paths"] == ["artifacts/**"]
+    finally:
+        state.close()
+
+
+def test_exact_safe_scope_expansion_compiles_without_provider_call(
+    tmp_path: Path,
+) -> None:
+    """LOOP-P1-002: one proven path expands the plan deterministically."""
+
+    config, state, artifacts, root_failure_id, _ = failed_two_node_graph(tmp_path)
+    runner = FakeRunner("{}")
+    try:
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        active_plan_id = str(product["active_plan_id"])
+        state.add_task(
+            task_id="T-ACCEPTED-ARCHITECTURE",
+            product_id="product-autonomy",
+            title="Accepted architecture source",
+            role="solution-architect",
+            plan_id=active_plan_id,
+            stage_key="architecture-source",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE products SET delivery_mode=NULL WHERE product_id=?",
+                ("product-autonomy",),
+            )
+            state._connection.execute(
+                """
+                UPDATE tasks
+                   SET status='SUCCEEDED', graph_status='ACCEPTED',
+                       result_ref='internal://architecture-package',
+                       result_digest=?
+                 WHERE task_id='T-ACCEPTED-ARCHITECTURE'
+                """,
+                (sha256_text("architecture-package"),),
+            )
+            state._connection.execute(
+                "UPDATE failures SET actual_json=? WHERE failure_id=?",
+                (
+                    stable_json(
+                        {
+                            "scope_reassessment_required": True,
+                            "blocked_allowed_paths": ["src/a/**"],
+                            "provider_scope_findings": [
+                                {
+                                    "code": "SCOPE_INSUFFICIENT",
+                                    "severity": "high",
+                                    "text": (
+                                        "scripts/image_security_verify.py is outside "
+                                        "allowed task scope."
+                                    ),
+                                }
+                            ],
+                        }
+                    ),
+                    root_failure_id,
+                ),
+            )
+        replanner_id = FailureRouter(config, state, artifacts).route(root_failure_id)
+        replanner = state.get_task(replanner_id)
+        assert replanner is not None
+        contract = json.loads(
+            (
+                config.evidence_dir / Path(str(replanner["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert contract["allowed_paths"] == ["artifacts/**"]
+
+        worker = AgentWorker(
+            config,
+            state,
+            runner=runner,
+            health_probe=lambda _: True,
+            repository_root=Path(__file__).resolve().parents[1],
+        )
+        result = worker.run_once()
+
+        assert result is not None
+        assert result.status == "completed"
+        assert runner.calls == []
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        assert int(product["active_plan_revision"]) == 2
+        implementation = next(
+            task
+            for task in state.list_tasks("product-autonomy")
+            if task["plan_id"] == product["active_plan_id"]
+            and task["semantic_node_key"] == "a"
+            and task["lifecycle_stage"] == "implementation-slice"
+        )
+        compiled_contract = json.loads(
+            (
+                config.evidence_dir / Path(str(implementation["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert "scripts/image_security_verify.py" in compiled_contract["allowed_paths"]
+        result_artifact = json.loads(
+            Path(str(result.artifact_ref)).read_text(encoding="utf-8")
+        )
+        assert result_artifact["producer"]["provider"] == "controller"
+        assert (
+            result_artifact["commands"][0]["command_id"]
+            == "controller-deterministic-scope-expansion"
+        )
+    finally:
+        state.close()
+
+
+def test_scope_recovery_signature_is_stable_across_reason_transitions(
+    tmp_path: Path,
+) -> None:
+    """LOOP-P0-005: wording and control reason codes cannot reset the budget."""
+
+    config, state, _, root_failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE failures SET actual_json=? WHERE failure_id=?",
+                (
+                    stable_json(
+                        {
+                            "scope_reassessment_required": True,
+                            "blocked_allowed_paths": ["src/a/**"],
+                            "provider_scope_findings": [
+                                {
+                                    "code": "SCOPE_INSUFFICIENT",
+                                    "severity": "high",
+                                    "text": (
+                                        "scripts/image_security_verify.py is outside "
+                                        "allowed task scope."
+                                    ),
+                                }
+                            ],
+                        }
+                    ),
+                    root_failure_id,
+                ),
+            )
+        root_failure = state.list_failures("product-autonomy")[-1]
+        signatures: set[str] = set()
+        for index, reason_code in enumerate(
+            (
+                "mandatory_gate_failed",
+                "plan_contract_violation",
+                "model_requested_repair",
+                "needs_replan",
+            )
+        ):
+            child_id = f"failure-signature-{index}"
+            child = {
+                **root_failure,
+                "failure_id": child_id,
+                "parent_failure_id": root_failure_id,
+                "reason_code": reason_code,
+                "safe_message": f"different wording {index}",
+                "failed_gate_ids_json": stable_json(
+                    ["target-tests"]
+                    if reason_code == "mandatory_gate_failed"
+                    else [reason_code]
+                ),
+                "actual_json": "{}",
+            }
+            directive = build_scope_recovery_directive(
+                config,
+                state,
+                [root_failure, child],
+                product_id="product-autonomy",
+                source_failure_id=child_id,
+                forbidden_paths=["secrets/**", "production/**"],
+            )
+            signatures.add(str(directive["root_problem_signature"]))
+            assert directive["root_failure_id"] == root_failure_id
+            assert directive["required_scope_paths"] == [
+                "scripts/image_security_verify.py"
+            ]
+            assert directive["failed_mandatory_gate_ids"] == [
+                "target-tests",
+                "target-lint",
+            ]
+            assert directive["forbidden_paths"] == [
+                "secrets/**",
+                "production/**",
+            ]
+        assert len(signatures) == 1
     finally:
         state.close()
 
@@ -3725,3 +3913,171 @@ def test_AUT_P0_009_safe_internal_diagnostic_is_precise_and_redacted() -> None:
     assert "database migration checksum mismatch" in diagnostic["safe_message"]
     assert token not in json.dumps(diagnostic)
     assert len(str(diagnostic["stack_fingerprint"])) == 64
+
+
+def test_legacy_replanner_scope_contract_gets_one_bounded_correction_then_stops(
+    tmp_path: Path,
+) -> None:
+    """A historical Builder scope must not be inherited forever by Replanner."""
+
+    config, state, artifacts, root_failure_id, _ = failed_two_node_graph(tmp_path)
+    router = FailureRouter(config, state, artifacts)
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE failures SET actual_json=? WHERE failure_id=?",
+                (
+                    stable_json(
+                        {
+                            "scope_reassessment_required": True,
+                            "blocked_allowed_paths": ["src/**", "tests/**"],
+                            "provider_scope_findings": [
+                                {
+                                    "code": "SCOPE_INSUFFICIENT",
+                                    "severity": "high",
+                                    "text": (
+                                        "scripts/image_security_verify.py is outside "
+                                        "allowed task scope."
+                                    ),
+                                }
+                            ],
+                        }
+                    ),
+                    root_failure_id,
+                ),
+            )
+
+        legacy_replanner_id = router.route(root_failure_id)
+        legacy_replanner = state.get_task(legacy_replanner_id)
+        assert legacy_replanner is not None
+        legacy_contract_path = (
+            config.evidence_dir / Path(str(legacy_replanner["contract_ref"])).name
+        )
+        legacy_contract = json.loads(legacy_contract_path.read_text(encoding="utf-8"))
+        # Reproduce the exact pre-fix production contract.
+        legacy_contract["allowed_paths"] = ["src/**", "tests/**"]
+        legacy_contract_path.write_text(
+            json.dumps(legacy_contract, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        claimed = state.claim_task(worker_id="legacy-replanner")
+        assert claimed is not None
+        assert claimed["task_id"] == legacy_replanner_id
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=legacy_replanner_id,
+                worker_id="legacy-replanner",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("legacy-replanner-failed"),
+                result_ref="internal://legacy-replanner-failed",
+                result_digest=sha256_text("legacy-replanner-failed"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="semantic",
+                    reason_code="needs_replan",
+                    safe_message=(
+                        "Required scripts/image_security_verify.py is outside "
+                        "the inherited src/** and tests/** planning scope."
+                    ),
+                    evidence_ref="internal://legacy-replanner-failed",
+                    parent_failure_id=root_failure_id,
+                    failed_gate_ids=("needs_replan",),
+                ),
+            )
+        )
+        legacy_failure_id = str(state.get_task(legacy_replanner_id)["failure_id"])
+
+        correction_id = router.route(legacy_failure_id)
+        correction = state.get_task(correction_id)
+        assert correction is not None
+        assert correction["role"] == "replanner"
+        assert correction["stage_key"] == "scope-contract-correction"
+        correction_contract = json.loads(
+            (
+                config.evidence_dir / Path(str(correction["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert correction_contract["allowed_paths"] == ["artifacts/**"]
+        assert correction_contract["model_floor"] == "sol"
+        assert "typed replan scope policy" in correction_contract["objective"]
+
+        # One corrected Sol attempt is allowed. If it still returns the same
+        # structural problem, one diagnosis task may run, then the controller
+        # terminates the causal loop instead of creating an unlimited chain.
+        claimed = state.claim_task(worker_id="scope-correction")
+        assert claimed is not None and claimed["task_id"] == correction_id
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=correction_id,
+                worker_id="scope-correction",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("scope-correction-failed"),
+                result_ref="internal://scope-correction-failed",
+                result_digest=sha256_text("scope-correction-failed"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="semantic",
+                    reason_code="needs_replan",
+                    safe_message="The same required scope path remains unhandled.",
+                    evidence_ref="internal://scope-correction-failed",
+                    parent_failure_id=legacy_failure_id,
+                    failed_gate_ids=("needs_replan",),
+                ),
+            )
+        )
+        correction_failure_id = str(state.get_task(correction_id)["failure_id"])
+        diagnosis_id = router.route(correction_failure_id)
+        diagnosis = state.get_task(diagnosis_id)
+        assert diagnosis is not None
+        assert diagnosis["stage_key"] == "diagnosis-reassessment"
+
+        claimed = state.claim_task(worker_id="diagnosis")
+        assert claimed is not None and claimed["task_id"] == diagnosis_id
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=diagnosis_id,
+                worker_id="diagnosis",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("diagnosis-failed"),
+                result_ref="internal://diagnosis-failed",
+                result_digest=sha256_text("diagnosis-failed"),
+                status="FAILED_SEMANTIC",
+                failure=FailureData(
+                    failure_class="semantic",
+                    reason_code="model_requested_repair",
+                    safe_message="The same scope correction still did not compile.",
+                    evidence_ref="internal://diagnosis-failed",
+                    parent_failure_id=correction_failure_id,
+                    failed_gate_ids=("MODEL_REPAIR_REQUIRED",),
+                ),
+            )
+        )
+        diagnosis_failure_id = str(state.get_task(diagnosis_id)["failure_id"])
+        tasks_before = len(state.list_tasks("product-autonomy"))
+
+        terminal_task_id = router.route(diagnosis_failure_id)
+
+        assert terminal_task_id == diagnosis_id
+        assert len(state.list_tasks("product-autonomy")) == tasks_before
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        assert product["status"] == "FAILED_SAFE"
+        assert product["terminal_reason"] == "replanner_problem_budget_exhausted"
+        incident = state._connection.execute(
+            """SELECT reason_code, status FROM controller_incidents
+               WHERE product_id=? ORDER BY created_at DESC LIMIT 1""",
+            ("product-autonomy",),
+        ).fetchone()
+        assert incident is not None
+        assert incident["reason_code"] == "replanner_problem_budget_exhausted"
+        assert incident["status"] == "OPEN"
+    finally:
+        state.close()

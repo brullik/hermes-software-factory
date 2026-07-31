@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,6 +47,7 @@ from .policy import policy_digest
 from .prompting import PromptCompiler
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine, QualityGateRun, UnknownQualityGatesError
+from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
 from .release import ReleaseExecutor, ReleasePolicyError, validate_release_operation
 from .release_executor import (
@@ -423,14 +424,12 @@ def _replanner_failure_inventory(
     seed_ids: list[str] = []
     if source_failure_id and source_failure_id in by_id:
         seed_ids.append(source_failure_id)
-    for failure in reversed(failures):
-        failure_id = str(failure.get("failure_id") or "")
-        if (
-            failure_id
-            and failure_id not in seed_ids
-            and str(failure.get("status") or "") != "RESOLVED"
-        ):
-            seed_ids.append(failure_id)
+    if not seed_ids:
+        for failure in reversed(failures):
+            failure_id = str(failure.get("failure_id") or "")
+            if failure_id and str(failure.get("status") or "") != "RESOLVED":
+                seed_ids.append(failure_id)
+                break
 
     relevant: list[tuple[dict[str, Any], int, bool]] = []
     included: set[str] = set()
@@ -450,6 +449,8 @@ def _replanner_failure_inventory(
             depth += 1
         if len(relevant) >= 24:
             break
+    if len(relevant) > 2:
+        relevant = [relevant[0], relevant[-1]]
 
     inventory: list[dict[str, Any]] = []
     for failure, causal_depth, chain_seed in relevant:
@@ -478,14 +479,91 @@ def _replanner_failure_inventory(
     return inventory
 
 
+def _replanner_scope_policy(
+    failures: list[dict[str, Any]],
+    *,
+    source_failure_id: str | None = None,
+) -> dict[str, Any]:
+    """Separate the Replanner sandbox from future implementation scope.
+
+    ``TaskContract.allowed_paths`` controls what the current agent may write.
+    For a read-only Replanner that is always the artifact boundary.  A failed
+    Builder's scope and the controller-proven files that must be added to a
+    future implementation slice are different data and are carried here as a
+    typed, controller-owned policy.
+    """
+
+    inventory = _replanner_failure_inventory(
+        failures,
+        source_failure_id=source_failure_id,
+    )
+    blocked_paths: list[str] = []
+    required_paths: list[str] = []
+    failed_gate_ids: list[str] = []
+    source_task_ids: list[str] = []
+    non_executable_gate_ids = {
+        "needs_replan",
+        "model_requested_repair",
+        "MODEL_REPAIR_REQUIRED",
+        "PLAN_CONTRACT_VIOLATION",
+    }
+    for failure in inventory:
+        actual = failure.get("actual")
+        if isinstance(actual, Mapping) and actual.get("scope_reassessment_required") is True:
+            blocked = actual.get("blocked_allowed_paths", [])
+            if isinstance(blocked, list):
+                blocked_paths.extend(
+                    str(value)
+                    for value in blocked
+                    if isinstance(value, str) and value
+                )
+        required = failure.get("scope_required_paths", [])
+        if isinstance(required, list):
+            required_paths.extend(
+                str(value)
+                for value in required
+                if isinstance(value, str) and value
+            )
+        gates = failure.get("failed_gate_ids", [])
+        if isinstance(gates, list):
+            failed_gate_ids.extend(
+                str(value)
+                for value in gates
+                if (
+                    isinstance(value, str)
+                    and value
+                    and value not in non_executable_gate_ids
+                )
+            )
+        task_id = str(failure.get("task_id") or "")
+        if task_id:
+            source_task_ids.append(task_id)
+    return {
+        "current_task_allowed_paths_semantics": "planning_artifact_write_scope_only",
+        "proposal_scope_field": "slices[].scope",
+        "allow_bounded_expansion": bool(blocked_paths or required_paths),
+        "failed_allowed_paths": list(dict.fromkeys(blocked_paths)),
+        "required_scope_paths": list(dict.fromkeys(required_paths)),
+        "failed_mandatory_gate_ids": list(dict.fromkeys(failed_gate_ids)),
+        "causal_task_ids": list(dict.fromkeys(source_task_ids)),
+    }
+
+
 def _replanner_hypothesis_inventory(
     hypotheses: list[dict[str, Any]],
+    *,
+    failure_ids: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
+    causal_failure_ids = set(failure_ids or ())
     relevant = [
         hypothesis
         for hypothesis in hypotheses
         if str(hypothesis.get("status") or "") in {"ACTIVE", "EXHAUSTED"}
-    ][-24:]
+        and (
+            not causal_failure_ids
+            or str(hypothesis.get("failure_id") or "") in causal_failure_ids
+        )
+    ][-4:]
     return [
         {
             "hypothesis_id": str(hypothesis.get("hypothesis_id") or ""),
@@ -1193,6 +1271,14 @@ class AgentWorker:
                 "failed mandatory gate into future executable slices that require fresh evidence. "
                 "Mark the planning result completed when that handoff is valid; do not return "
                 "needs_replan merely because those future product gates have not run yet."
+            )
+            decisions.append(
+                "The Replanner Task Contract allowed_paths restrict only this read-only "
+                "planning task's own artifact writes. They do not restrict future "
+                "implementation slices. For slices[].scope, follow the controller-owned "
+                "plan_summary.replan_scope_policy: preserve forbidden paths, include every "
+                "required_scope_path, and expand beyond failed_allowed_paths when "
+                "allow_bounded_expansion is true."
             )
         if prompt_role in {"task-specifier", "replanner"}:
             decisions.append(
@@ -2213,7 +2299,387 @@ class AgentWorker:
                     ),
                 }
             )
+        if inventory:
+            return inventory
+
+        # Migrated pre-semantic plans may not have a proposal artifact, while
+        # their immutable Builder contracts still contain enough information
+        # for a safe one-node scope correction. Reconstruct only active-plan
+        # Builder semantics; recovery and lifecycle tasks are never included.
+        builder_tasks = [
+            task
+            for task in self.state.list_tasks(product_id)
+            if str(task.get("plan_id") or "") == active_plan_id
+            and str(task.get("role") or "") == "builder"
+            and str(task.get("stage_key") or "")
+            not in {"repair", "replan", "diagnosis-reassessment"}
+        ]
+
+        def semantic_key(task: Mapping[str, Any]) -> str:
+            raw = str(
+                task.get("semantic_node_key")
+                or task.get("plan_node_id")
+                or task.get("stage_key")
+                or task.get("task_id")
+                or ""
+            )
+            return re.sub(r"[^a-z0-9]+", "-", raw.casefold()).strip("-")[:80]
+
+        task_keys = {
+            str(task["task_id"]): semantic_key(task)
+            for task in builder_tasks
+        }
+        criterion_goals: dict[str, list[str]] = {}
+        active_plan = next(
+            (
+                plan
+                for plan in self.state.list_plans(product_id)
+                if str(plan.get("plan_id") or "") == active_plan_id
+            ),
+            None,
+        )
+        if active_plan is not None:
+            try:
+                plan_goals = json.loads(str(active_plan.get("goals_json") or "[]"))
+            except json.JSONDecodeError:
+                plan_goals = []
+            if isinstance(plan_goals, list):
+                for goal in plan_goals:
+                    if not isinstance(goal, Mapping):
+                        continue
+                    goal_id = str(goal.get("goal_id") or "")
+                    acceptance_ids = goal.get("acceptance_ids", [])
+                    if not goal_id or not isinstance(acceptance_ids, list):
+                        continue
+                    for criterion_id in acceptance_ids:
+                        value = str(criterion_id)
+                        if value:
+                            criterion_goals.setdefault(value, []).append(goal_id)
+        for task in builder_tasks:
+            contract = self._safe_evidence_object(str(task.get("contract_ref") or ""))
+            if not contract:
+                continue
+            try:
+                dependency_task_ids = json.loads(
+                    str(task.get("dependencies_json") or "[]")
+                )
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(dependency_task_ids, list):
+                continue
+            acceptance = contract.get("acceptance", [])
+            raw_goal_ids = contract.get("goal_ids", [])
+            if not isinstance(acceptance, list) or not isinstance(raw_goal_ids, list):
+                continue
+            goal_ids = [
+                str(value)
+                for value in raw_goal_ids
+                if isinstance(value, str) and value
+            ]
+            if not goal_ids:
+                goal_ids = list(
+                    dict.fromkeys(
+                        goal_id
+                        for item in acceptance
+                        if isinstance(item, Mapping)
+                        for goal_id in criterion_goals.get(
+                            str(item.get("criterion_id") or ""),
+                            [],
+                        )
+                    )
+                )
+            result = self._safe_evidence_object(str(task.get("result_ref") or ""))
+            inventory.append(
+                {
+                    "node_key": semantic_key(task),
+                    "stage_kind": "implementation_slice",
+                    "title": str(contract.get("title") or task.get("title") or ""),
+                    "objective": str(contract.get("objective") or ""),
+                    "depends_on": [
+                        task_keys[str(value)]
+                        for value in dependency_task_ids
+                        if str(value) in task_keys
+                    ],
+                    "scope": [
+                        str(value)
+                        for value in contract.get("allowed_paths", [])
+                        if isinstance(value, str) and value
+                    ],
+                    "acceptance_intents": [
+                        str(item.get("verification") or "")
+                        for item in acceptance
+                        if isinstance(item, Mapping) and item.get("verification")
+                    ],
+                    "goal_ids": goal_ids,
+                    "task_id": str(task["task_id"]),
+                    "graph_status": str(task.get("graph_status") or ""),
+                    "accepted_result": (
+                        {
+                            "result_ref": str(task.get("result_ref") or ""),
+                            "result_digest": str(task.get("result_digest") or ""),
+                            "summary": _bounded_context_value(
+                                str(result.get("summary") or "")
+                            ),
+                            "output_ref": str(result.get("output_ref") or ""),
+                        }
+                        if str(task.get("graph_status") or "") == "ACCEPTED"
+                        else None
+                    ),
+                }
+            )
         return inventory
+
+    def _deterministic_scope_expansion_output(
+        self,
+        spec: TaskExecutionSpec,
+        *,
+        tier: Tier,
+    ) -> dict[str, Any] | None:
+        """Build an exact replan delta without a provider when scope is proven.
+
+        This fast path is deliberately narrow.  It is used only when one causal
+        semantic node and one or more safe exact repository paths are known,
+        every dependency of that node is already accepted, and the correction
+        is a strict bounded expansion of the prior scope.  Any ambiguity falls
+        back to the normal Replanner instead of guessing.
+        """
+
+        if spec.role != "replanner" or spec.output_schema != "plan-proposal-v1.schema.json":
+            return None
+        task_id = str(spec.task_contract["task_id"])
+        task = self.state.get_task(task_id)
+        if task is None:
+            return None
+        product_id = str(task["product_id"])
+        product = self.state.get_product(product_id)
+        active_plan_id = str(product.get("active_plan_id") or "") if product else ""
+        source_failure_id = str(task.get("failure_id") or "")
+        if not active_plan_id or not source_failure_id:
+            return None
+        active_plan = next(
+            (
+                plan
+                for plan in self.state.list_plans(product_id)
+                if str(plan.get("plan_id") or "") == active_plan_id
+            ),
+            None,
+        )
+        if active_plan is None:
+            return None
+
+        failures = self.state.list_failures(product_id)
+        failure_inventory = _replanner_failure_inventory(
+            failures,
+            source_failure_id=source_failure_id,
+        )
+        scope_policy = build_scope_recovery_directive(
+            self.config,
+            self.state,
+            failures,
+            product_id=product_id,
+            source_failure_id=source_failure_id,
+            forbidden_paths=[
+                str(value)
+                for value in spec.task_contract.get("forbidden_paths", [])
+                if isinstance(value, str) and value
+            ],
+        )
+        required_paths = [
+            str(value)
+            for value in scope_policy["required_scope_paths"]
+            if isinstance(value, str) and value
+        ]
+        if not scope_policy["allow_bounded_expansion"] or not required_paths:
+            return None
+        forbidden_paths = [
+            str(value)
+            for value in spec.task_contract.get("forbidden_paths", [])
+            if isinstance(value, str) and value
+        ]
+        if enforce_changed_paths(required_paths, required_paths, forbidden_paths):
+            return None
+
+        implementation_nodes = self._replanner_implementation_inventory(
+            product_id,
+            active_plan_id,
+        )
+        causal_node_keys: list[str] = []
+        for causal_task_id in scope_policy["causal_task_ids"]:
+            causal_task = self.state.get_task(str(causal_task_id))
+            if causal_task is None:
+                continue
+            node_key = str(
+                causal_task.get("semantic_node_key")
+                or causal_task.get("plan_node_id")
+                or causal_task.get("stage_key")
+                or ""
+            ).casefold()
+            if node_key and node_key not in causal_node_keys:
+                causal_node_keys.append(node_key)
+        if len(causal_node_keys) != 1:
+            return None
+        affected_coordinate = causal_node_keys[0]
+        affected = next(
+            (
+                node
+                for node in implementation_nodes
+                if str(node.get("node_key") or "").casefold() == affected_coordinate
+                and str(node.get("graph_status") or "") != "ACCEPTED"
+            ),
+            None,
+        )
+        if affected is None:
+            return None
+        affected_key = str(affected.get("node_key") or "")
+        accepted_keys = {
+            str(node.get("node_key") or "")
+            for node in implementation_nodes
+            if str(node.get("graph_status") or "") == "ACCEPTED"
+        }
+        proposed_nodes = [
+            node
+            for node in implementation_nodes
+            if str(node.get("graph_status") or "") != "ACCEPTED"
+        ]
+        if not proposed_nodes or len(proposed_nodes) > 32:
+            return None
+        proposed_keys = {
+            str(node.get("node_key") or "")
+            for node in proposed_nodes
+        }
+        raw_dependencies = affected.get("depends_on", [])
+        if not isinstance(raw_dependencies, list) or any(
+            str(value) not in accepted_keys | proposed_keys for value in raw_dependencies
+        ):
+            return None
+        original_scope = [
+            str(value)
+            for value in affected.get("scope", [])
+            if isinstance(value, str) and value
+        ]
+        fresh_paths = [
+            path for path in required_paths if not path_is_covered(path, original_scope)
+        ]
+        if not original_scope or not fresh_paths:
+            return None
+
+        raw_acceptance = affected.get("acceptance_intents", [])
+        acceptance_intents = [
+            str(value)
+            for value in raw_acceptance
+            if isinstance(value, str) and value
+        ]
+        failed_gate_ids = [
+            str(value)
+            for value in scope_policy["failed_mandatory_gate_ids"]
+            if isinstance(value, str) and value
+        ]
+        acceptance_intents.extend(
+            f"Fresh {gate_id} PASS evidence is required for this corrected implementation."
+            for gate_id in failed_gate_ids
+        )
+        acceptance_intents.extend(
+            f"The corrected implementation scope includes {path}."
+            for path in fresh_paths
+        )
+        objective = str(affected.get("objective") or "")
+        objective += (
+            " Apply the controller-proven bounded scope expansion for "
+            + ", ".join(fresh_paths)
+            + "."
+        )
+        if failed_gate_ids:
+            objective += (
+                " Produce fresh PASS evidence for "
+                + ", ".join(failed_gate_ids)
+                + "."
+            )
+        try:
+            raw_goals = json.loads(str(active_plan.get("goals_json") or "[]"))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(raw_goals, list) or not raw_goals:
+            return None
+        goals = [
+            {
+                "goal_id": str(goal.get("goal_id") or ""),
+                "statement": str(goal.get("statement") or ""),
+                "mandatory": bool(goal.get("mandatory", True)),
+            }
+            for goal in raw_goals
+            if isinstance(goal, Mapping)
+        ]
+        if not goals or any(not goal["goal_id"] or not goal["statement"] for goal in goals):
+            return None
+        evidence_refs = [
+            str(item.get("evidence_ref") or "")
+            for item in failure_inventory
+            if str(item.get("evidence_ref") or "")
+        ]
+        metadata = artifact_metadata(
+            self.config,
+            "replanner",
+            new_id("plan-proposal"),
+            product_id,
+        )
+        semantic_nodes: list[dict[str, Any]] = []
+        for node in proposed_nodes:
+            node_key = str(node.get("node_key") or "")
+            scope = [
+                str(value)
+                for value in node.get("scope", [])
+                if isinstance(value, str) and value
+            ]
+            node_objective = str(node.get("objective") or "")
+            node_acceptance = [
+                str(value)
+                for value in node.get("acceptance_intents", [])
+                if isinstance(value, str) and value
+            ]
+            if node_key == affected_key:
+                scope = list(dict.fromkeys([*original_scope, *fresh_paths]))
+                node_objective = objective
+                node_acceptance = list(dict.fromkeys(acceptance_intents))
+            semantic_nodes.append(
+                {
+                    "node_key": node_key,
+                    "stage_kind": "implementation_slice",
+                    "title": str(node.get("title") or ""),
+                    "objective": node_objective,
+                    "depends_on": [
+                        str(value)
+                        for value in node.get("depends_on", [])
+                        if isinstance(value, str) and value
+                    ],
+                    "scope": scope,
+                    "acceptance_intents": node_acceptance,
+                    "goal_ids": [
+                        str(value)
+                        for value in node.get("goal_ids", [])
+                        if isinstance(value, str) and value
+                    ],
+                }
+            )
+        return {
+            **metadata,
+            "producer": {
+                "role": "replanner",
+                "tier": tier.value,
+                "provider": None,
+                "model": None,
+            },
+            "status": "completed",
+            "proposal_kind": "replan_delta",
+            "parent_plan_id": active_plan_id,
+            "source_failure_id": source_failure_id,
+            "goals": goals,
+            "nodes": semantic_nodes,
+            "summary": (
+                "Controller compiled an exact bounded scope-expansion proposal "
+                "without a provider call."
+            ),
+            "evidence_refs": list(dict.fromkeys(evidence_refs)),
+        }
 
     def _context_and_prompt(
         self,
@@ -2269,6 +2735,23 @@ class AgentWorker:
                 str(task["product_id"]),
                 str(active_plan["plan_id"]),
             )
+            source_failure_id = str(task.get("failure_id") or "") or None
+            failure_inventory = _replanner_failure_inventory(
+                failures,
+                source_failure_id=source_failure_id,
+            )
+            scope_policy = build_scope_recovery_directive(
+                self.config,
+                self.state,
+                failures,
+                product_id=str(task["product_id"]),
+                source_failure_id=str(source_failure_id or ""),
+                forbidden_paths=[
+                    str(value)
+                    for value in task.get("forbidden_paths", [])
+                    if isinstance(value, str) and value
+                ],
+            )
             plan_summary.update(
                 {
                     "policy_digest": policy_digest(self.config),
@@ -2278,13 +2761,16 @@ class AgentWorker:
                         for node in implementation_nodes
                         if node["graph_status"] == "ACCEPTED"
                     ],
-                    "unresolved_failure_inventory": _replanner_failure_inventory(
-                        failures,
-                        source_failure_id=str(task.get("failure_id") or "") or None,
-                    ),
+                    "unresolved_failure_inventory": failure_inventory,
                     "hypothesis_inventory": _replanner_hypothesis_inventory(
-                        self.state.list_hypotheses(str(task["product_id"]))
+                        self.state.list_hypotheses(str(task["product_id"])),
+                        failure_ids=[
+                            str(value)
+                            for value in scope_policy["causal_failure_ids"]
+                            if isinstance(value, str) and value
+                        ],
                     ),
+                    "replan_scope_policy": scope_policy,
                 }
             )
         try:
@@ -2631,14 +3117,23 @@ class AgentWorker:
             "changed_files": changed_files or [],
             "commands": [
                 {
-                    "command_id": "hermes-oneshot",
+                    "command_id": (
+                        "controller-deterministic-scope-expansion"
+                        if selection.provider == "controller"
+                        else "hermes-oneshot"
+                    ),
                     "result": command_result,
                     "artifact_ref": command_ref,
                 }
             ],
             "test_results": test_results,
             "assumptions": [
-                "The provider route was selected only after the configured health probe."
+                (
+                    "No provider was called; the controller used only typed causal "
+                    "scope evidence and immutable active-plan data."
+                    if selection.provider == "controller"
+                    else "The provider route was selected only after the configured health probe."
+                )
             ],
             "findings": findings,
             "evidence_refs": evidence_refs,
@@ -3336,6 +3831,10 @@ class AgentWorker:
                 reason_code="release_adapter_missing",
             )
         tier = spec.requested_tier or Tier(str(spec.task_contract["model_floor"]))
+        deterministic_output = self._deterministic_scope_expansion_output(
+            spec,
+            tier=tier,
+        )
         lease = self.workspace.acquire(
             product_id=str(spec.task_contract["product_id"]),
             task_id=str(spec.task_contract["task_id"]),
@@ -3375,7 +3874,17 @@ class AgentWorker:
                         evidence=(*spec.evidence, review_evidence),
                         decisions=(*spec.decisions, *review_decisions),
                     )
-            selection = self._select(tier)
+            selection = (
+                ModelSelection(
+                    provider="controller",
+                    alias="deterministic",
+                    model="scope-expansion-v1",
+                    tier=tier.value,
+                    cli_provider=None,
+                )
+                if deterministic_output is not None
+                else self._select(tier)
+            )
             prompt, prompt_digest, context_path = self._context_and_prompt(
                 spec,
                 repository_root=lease.path,
@@ -3449,13 +3958,23 @@ class AgentWorker:
                         attempt_id=attempt.attempt_id,
                     ),
                 )
-            active_runner = self.planning_runner if spec.role in _PLANNING_ROLES else self.runner
-            run = active_runner.run(
-                selection=selection,
-                prompt=prompt,
-                cwd=lease.path,
-                usage_path=usage_path,
-            )
+            if deterministic_output is not None:
+                deterministic_text = stable_json(deterministic_output)
+                run = HermesRunResult(
+                    status="PASS",
+                    output=deterministic_text,
+                    output_digest=sha256_text(deterministic_text),
+                )
+            else:
+                active_runner = (
+                    self.planning_runner if spec.role in _PLANNING_ROLES else self.runner
+                )
+                run = active_runner.run(
+                    selection=selection,
+                    prompt=prompt,
+                    cwd=lease.path,
+                    usage_path=usage_path,
+                )
             if run.status != "PASS":
                 reason_code = run.reason_code or "process_crash_before_result"
                 route_action = self._route(
