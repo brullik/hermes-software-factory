@@ -40,6 +40,21 @@ _RECOVERABLE_PRODUCT_STATUSES = {
     "ROLLING_BACK",
     "ROLLED_BACK",
 }
+_PAUSED_RESUME_STATUSES = {
+    "IDEA_RECEIVED",
+    "CONTRACT_DRAFTED",
+    "CONTRACT_VALIDATED",
+    "RISK_CLASSIFIED",
+    "ARCHITECTED",
+    "BACKLOG_READY",
+    "IMPLEMENTING",
+    "INTEGRATING",
+    "STAGING_DEPLOYED",
+    "PRODUCT_ACCEPTANCE",
+    "RELEASE_READY",
+    "PRODUCTION_DEPLOYED",
+    "OBSERVATION",
+}
 
 
 def is_sqlite_busy(error: BaseException) -> bool:
@@ -626,22 +641,7 @@ class StateStore:
             "BLOCKED_OWNER": {"IMPLEMENTING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
             "ROLLING_BACK": {"ROLLED_BACK", "FAILED_SAFE"},
             "ROLLED_BACK": {"IMPLEMENTING", "STAGING_DEPLOYED", "FAILED_SAFE"},
-            "PAUSED": {
-                "IDEA_RECEIVED",
-                "CONTRACT_DRAFTED",
-                "CONTRACT_VALIDATED",
-                "RISK_CLASSIFIED",
-                "ARCHITECTED",
-                "BACKLOG_READY",
-                "IMPLEMENTING",
-                "INTEGRATING",
-                "STAGING_DEPLOYED",
-                "PRODUCT_ACCEPTANCE",
-                "RELEASE_READY",
-                "PRODUCTION_DEPLOYED",
-                "OBSERVATION",
-                "CANCELLED",
-            },
+            "PAUSED": {*_PAUSED_RESUME_STATUSES, "CANCELLED"},
             "CANCELLED": set(),
             "COMPLETED": set(),
             "FAILED_SAFE": set(),
@@ -672,6 +672,56 @@ class StateStore:
             ).fetchone()
             assert updated is not None
             return dict(updated)
+
+    def resume_product(
+        self,
+        product_id: str,
+        resume_status: str,
+    ) -> dict[str, Any]:
+        """Atomically restore the causal frontier before making a product runnable."""
+
+        if resume_status not in _PAUSED_RESUME_STATUSES:
+            raise ValueError("resume status must be an active lifecycle state")
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT * FROM products WHERE product_id=?",
+                    (product_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(product_id)
+                current = str(row["status"])
+                if current in {"CANCELLED", "COMPLETED", "FAILED_SAFE"}:
+                    raise ValueError(f"cannot resume terminal product {product_id}")
+
+                now = utc_now()
+                self._reconcile_owner_resume_ancestors_locked(
+                    product_id,
+                    now=now,
+                )
+                self._requeue_resumable_tasks_locked(product_id, now=now)
+                if current == "PAUSED":
+                    self._connection.execute(
+                        "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                        (resume_status, now, product_id),
+                    )
+                    self._record_event(
+                        product_id,
+                        None,
+                        "product_transition",
+                        {"from": current, "to": resume_status},
+                    )
+                updated = self._connection.execute(
+                    "SELECT * FROM products WHERE product_id=?",
+                    (product_id,),
+                ).fetchone()
+                assert updated is not None
+                self._connection.commit()
+                return dict(updated)
+            except Exception:
+                self._connection.rollback()
+                raise
 
     def add_task(
         self,
@@ -1502,47 +1552,213 @@ class StateStore:
                 },
             )
 
-    def requeue_resumable_tasks(self, product_id: str) -> list[str]:
-        """Explicitly return blocked or failed-safe tasks to the owner queue.
+    def _latest_task_event_payload_locked(
+        self,
+        task_id: str,
+        event_types: tuple[str, ...],
+    ) -> dict[str, Any]:
+        placeholders = ",".join("?" for _ in event_types)
+        row = self._connection.execute(
+            f"""SELECT payload_json FROM events
+                WHERE task_id=? AND event_type IN ({placeholders})
+                ORDER BY event_id DESC LIMIT 1""",
+            (task_id, *event_types),
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
-        Resume is an operator action, so retrying a stopped task is intentional.
-        The attempt manager still rejects an identical prompt digest, preventing
-        an unchanged task from consuming another provider call.
+    def _reconcile_owner_resume_ancestors_locked(
+        self,
+        product_id: str,
+        *,
+        now: str,
+    ) -> list[str]:
+        """Close only historical ancestors reopened by the legacy broad resume."""
+
+        rows = self._connection.execute(
+            """SELECT task_id FROM tasks AS task
+               WHERE product_id=? AND status='PENDING' AND graph_status='READY'
+                 AND EXISTS (
+                     SELECT 1 FROM tasks AS child
+                     WHERE child.product_id=task.product_id
+                       AND child.supersedes_task_id=task.task_id
+                 )
+               ORDER BY created_at, task_id""",
+            (product_id,),
+        ).fetchall()
+        reconciled: list[str] = []
+        for row in rows:
+            task_id = str(row["task_id"])
+            requeue = self._latest_task_event_payload_locked(
+                task_id,
+                ("task_requeued",),
+            )
+            if str(requeue.get("reason") or "") != "owner_resume":
+                continue
+            previous_status = str(requeue.get("previous_status") or "")
+            if previous_status not in {"BLOCKED_EXTERNAL", "FAILED_SAFE"}:
+                continue
+            restored_graph_status = (
+                "WAITING_EXTERNAL"
+                if previous_status == "BLOCKED_EXTERNAL"
+                else "FAILED_SEMANTIC"
+            )
+            children = [
+                str(child["task_id"])
+                for child in self._connection.execute(
+                    """SELECT task_id FROM tasks
+                       WHERE product_id=? AND supersedes_task_id=?
+                       ORDER BY created_at, task_id""",
+                    (product_id, task_id),
+                ).fetchall()
+            ]
+            result_event = self._latest_task_event_payload_locked(
+                task_id,
+                ("task_result_committed", "task_completed"),
+            )
+            failure = self._connection.execute(
+                """SELECT failure_class, reason_code, safe_message, evidence_ref
+                   FROM failures WHERE product_id=? AND task_id=?
+                   ORDER BY last_seen_at DESC, failure_id DESC LIMIT 1""",
+                (product_id, task_id),
+            ).fetchone()
+            result_ref = str(result_event.get("result_ref") or "") or (
+                str(failure["evidence_ref"] or "")
+                if failure is not None
+                else None
+            )
+            failure_kind = (
+                str(failure["failure_class"] or "")
+                if failure is not None
+                else str(result_event.get("failure_kind") or "") or None
+            )
+            terminal_reason = (
+                str(failure["reason_code"] or "")
+                if failure is not None
+                else str(result_event.get("reason_code") or "") or None
+            )
+            terminal_detail = (
+                str(failure["safe_message"] or "")
+                if failure is not None
+                else str(result_event.get("detail") or "") or None
+            )
+            updated = self._connection.execute(
+                """UPDATE tasks
+                   SET status=?, graph_status=?, available_at=NULL,
+                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                       heartbeat_at=NULL, next_tier=NULL,
+                       next_attempt_kind='initial', repair_context_ref=NULL,
+                       terminal_reason=?, terminal_detail=?, result_ref=?,
+                       failure_kind=?, updated_at=?
+                   WHERE task_id=? AND product_id=?
+                     AND status='PENDING' AND graph_status='READY'""",
+                (
+                    previous_status,
+                    restored_graph_status,
+                    terminal_reason,
+                    terminal_detail,
+                    result_ref,
+                    failure_kind,
+                    now,
+                    task_id,
+                    product_id,
+                ),
+            ).rowcount
+            if not updated:
+                continue
+            reconciled.append(task_id)
+            self._record_event(
+                product_id,
+                task_id,
+                "owner_resume_ancestor_reconciled",
+                {
+                    "restored_status": previous_status,
+                    "successor_task_ids": children,
+                    "reason": "historical_owner_resume_has_recovery_successor",
+                },
+            )
+        return reconciled
+
+    def _requeue_resumable_tasks_locked(
+        self,
+        product_id: str,
+        *,
+        now: str,
+    ) -> list[str]:
+        rows = self._connection.execute(
+            """SELECT task.task_id, task.status FROM tasks AS task
+               WHERE task.product_id=?
+                 AND task.graph_status IN ('WAITING_EXTERNAL','FAILED_SEMANTIC')
+                 AND (
+                     task.status='BLOCKED_EXTERNAL'
+                     OR (
+                         task.status='FAILED_SAFE'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM failures AS failure
+                             WHERE failure.product_id=task.product_id
+                               AND failure.task_id=task.task_id
+                               AND failure.status!='RESOLVED'
+                         )
+                     )
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM tasks AS child
+                     WHERE child.product_id=task.product_id
+                       AND child.supersedes_task_id=task.task_id
+                 )
+               ORDER BY task.created_at, task.task_id""",
+            (product_id,),
+        ).fetchall()
+        task_ids = [str(row["task_id"]) for row in rows]
+        for row in rows:
+            task_id = str(row["task_id"])
+            previous_status = str(row["status"])
+            self._connection.execute(
+                """UPDATE tasks
+                   SET status='PENDING', graph_status='READY',
+                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                       heartbeat_at=NULL, next_tier=NULL, next_attempt_kind='initial',
+                       repair_context_ref=NULL, terminal_reason=NULL, terminal_detail=NULL,
+                       result_ref=NULL, failure_kind=NULL, updated_at=?
+                   WHERE task_id=? AND product_id=? AND status=?""",
+                (now, task_id, product_id, previous_status),
+            )
+            self._record_event(
+                product_id,
+                task_id,
+                "task_requeued",
+                {
+                    "attempt_kind": "owner_resume",
+                    "previous_status": previous_status,
+                    "reason": "owner_resume",
+                },
+            )
+        return task_ids
+
+    def requeue_resumable_tasks(self, product_id: str) -> list[str]:
+        """Return only unresolved owner-action leaves to the runnable queue.
+
+        Durable semantic failures remain owned by the causal FailureRouter.
+        Historical tasks with recovery successors are restored to their terminal
+        state before selecting leaves, so an owner resume cannot reopen every
+        failed task in a product.
         """
 
         with self._lock, self._connection:
-            rows = self._connection.execute(
-                """SELECT task_id, status FROM tasks
-                   WHERE product_id=? AND status IN ('BLOCKED_EXTERNAL', 'FAILED_SAFE')
-                   ORDER BY created_at""",
-                (product_id,),
-            ).fetchall()
-            task_ids = [str(row["task_id"]) for row in rows]
             now = utc_now()
-            for row in rows:
-                task_id = str(row["task_id"])
-                previous_status = str(row["status"])
-                self._connection.execute(
-                    """UPDATE tasks
-                       SET status='PENDING', graph_status='READY',
-                           lease_owner=NULL, lease_until=NULL, lease_token=NULL,
-                           heartbeat_at=NULL, next_tier=NULL, next_attempt_kind='initial',
-                           repair_context_ref=NULL, terminal_reason=NULL, terminal_detail=NULL,
-                           result_ref=NULL, failure_kind=NULL, updated_at=?
-                       WHERE task_id=? AND product_id=? AND status=?""",
-                    (now, task_id, product_id, previous_status),
-                )
-                self._record_event(
-                    product_id,
-                    task_id,
-                    "task_requeued",
-                    {
-                        "attempt_kind": "owner_resume",
-                        "previous_status": previous_status,
-                        "reason": "owner_resume",
-                    },
-                )
-            return task_ids
+            self._reconcile_owner_resume_ancestors_locked(
+                product_id,
+                now=now,
+            )
+            return self._requeue_resumable_tasks_locked(
+                product_id,
+                now=now,
+            )
 
     def events(self, product_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:

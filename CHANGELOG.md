@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.26 - 2026-07-31
+
+- Make paused-product resume atomic: reconcile the prior runnable frontier and
+  select owner-action work in the same SQLite transaction before the product
+  becomes visible as active to workers.
+- Restore historical tasks accidentally reopened by legacy broad owner-resume
+  only when a durable superseding recovery task proves they are causal
+  ancestors, retaining their terminal evidence and emitting an audit event.
+- Requeue only causal leaves that are genuinely waiting for owner action;
+  leave non-resolved semantic failures to the FailureRouter instead of
+  reopening every historical `FAILED_SAFE` task in the product.
+
 ## 2.2.25 - 2026-07-31
 
 - Preserve controller-owned Replanner identifiers, SHA-256 digests, evidence
