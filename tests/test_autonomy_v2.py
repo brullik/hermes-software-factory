@@ -1067,6 +1067,61 @@ def test_AUT_P0_006_retryable_in_place_repair_is_not_double_routed(
         state.close()
 
 
+def test_inflight_outcome_cannot_cancel_a_newer_owner_pause(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-INFLIGHT-OWNER-PAUSE",
+            product_id="product-autonomy",
+            title="Finish work already claimed before an owner pause",
+            role="replanner",
+            priority=100,
+        )
+        claimed = state.claim_task(worker_id="inflight-worker")
+        assert claimed is not None
+        state.transition_product("product-autonomy", "PAUSED")
+
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-INFLIGHT-OWNER-PAUSE",
+                worker_id="inflight-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                idempotency_key=sha256_text("inflight-owner-pause"),
+                result_ref="evidence/inflight-owner-pause.json",
+                result_digest=sha256_text("inflight-owner-pause"),
+                status="ACCEPTED",
+                product_status="IMPLEMENTING",
+            )
+        )
+
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        assert product["status"] == "PAUSED"
+        task = state.get_task("T-INFLIGHT-OWNER-PAUSE")
+        assert task is not None
+        assert task["graph_status"] == "ACCEPTED"
+        suppressed = [
+            json.loads(str(event["payload_json"]))
+            for event in state.events("product-autonomy")
+            if event["event_type"] == "product_transition_suppressed"
+        ]
+        assert suppressed == [
+            {
+                "current_status": "PAUSED",
+                "reason": "newer_owner_or_terminal_state",
+                "requested_status": "IMPLEMENTING",
+                "task_id": "T-INFLIGHT-OWNER-PAUSE",
+            }
+        ]
+    finally:
+        state.close()
+
+
 def test_AUT_P0_006_only_causal_leaf_failure_creates_recovery_work(
     tmp_path: Path,
 ) -> None:
