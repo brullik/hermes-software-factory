@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.35 - 2026-07-31
+
+- Bind deterministic scope expansion to the latest affected Builder semantic
+  node instead of historical reviewer and Replanner tasks in the causal chain.
+- Resolve a failing `test_<module>.py` to an exact local production source only
+  when its AST import and repository match are unique; ambiguous mappings remain
+  fail-closed and never broaden the implementation scope.
+- Carry inferred production coordinates through the typed Recovery Directive
+  and compile the corrected revision without a provider call.
+- Add an explicitly selected, fingerprint-bound maintenance recovery plan for a
+  `FAILED_SAFE` product whose bounded Replanner loop ended in a controller
+  incident, preserving all historical tasks, failures, and evidence.
+
 ## 2.2.34 - 2026-07-31
 
 - Separate a Replanner's read-only artifact write boundary from the future

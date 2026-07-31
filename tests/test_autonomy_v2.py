@@ -995,6 +995,76 @@ def test_scope_recovery_signature_is_stable_across_reason_transitions(
         state.close()
 
 
+def test_recovery_directive_targets_latest_builder_not_historical_root_role(
+    tmp_path: Path,
+) -> None:
+    config, state, _, root_failure_id, _ = failed_two_node_graph(tmp_path)
+    child_failure_id = "failure-replanner-child"
+    now = "2026-07-31T00:00:00Z"
+    try:
+        state.add_task(
+            task_id="T-REPLANNER-HISTORY",
+            product_id="product-autonomy",
+            title="Historical replanner failure",
+            role="replanner",
+            stage_key="diagnosis-reassessment",
+            graph_status="FAILED_SEMANTIC",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE failures SET actual_json=? WHERE failure_id=?",
+                (
+                    stable_json(
+                        {
+                            "scope_reassessment_required": True,
+                            "blocked_allowed_paths": ["src/a/**", "tests/**"],
+                            "scope_required_paths": [
+                                "scripts/image_security_verify.py"
+                            ],
+                        }
+                    ),
+                    root_failure_id,
+                ),
+            )
+            state._connection.execute(
+                """
+                INSERT INTO failures
+                    (failure_id, product_id, task_id, parent_failure_id,
+                     failure_class, reason_code, fingerprint, safe_message,
+                     evidence_ref, status, retryable,
+                     owner_action_eligible, expected_json, actual_json,
+                     failed_gate_ids_json, first_seen_at, last_seen_at)
+                VALUES (?, 'product-autonomy', 'T-REPLANNER-HISTORY', ?,
+                        'semantic', 'plan_contract_violation', ?,
+                        'Historical Replanner retained the old scope.',
+                        'internal://replanner-child', 'OPEN', 0, 0,
+                        '{}', '{}', '["target-tests"]', ?, ?)
+                """,
+                (
+                    child_failure_id,
+                    root_failure_id,
+                    sha256_text(child_failure_id),
+                    now,
+                    now,
+                ),
+            )
+        directive = build_scope_recovery_directive(
+            config,
+            state,
+            state.list_failures("product-autonomy"),
+            product_id="product-autonomy",
+            source_failure_id=child_failure_id,
+            forbidden_paths=["secrets/**"],
+        )
+
+        assert directive["affected_semantic_node_keys"] == ["a"]
+        assert directive["required_scope_paths"] == [
+            "scripts/image_security_verify.py"
+        ]
+    finally:
+        state.close()
+
+
 def test_plan_contract_descendant_promotes_causal_required_scope_path(
     tmp_path: Path,
 ) -> None:

@@ -1047,6 +1047,123 @@ def test_maintenance_closes_intake_and_recovery_apply_is_restart_safe(
     state.close()
 
 
+def test_failed_safe_replanner_loop_requires_explicit_fingerprinted_recovery(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "build-and-release-a-complete-private-runtime-recovery"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Finish the canary after a corrected controller release",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="runtime-recovery",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    state.add_task(
+        task_id="T-FAILED-REPLANNER",
+        product_id=product_id,
+        title="Bounded Replanner loop",
+        role="replanner",
+        output_schema="plan-proposal-v1.schema.json",
+        contract_ref="evidence/task-T-FAILED-REPLANNER.json",
+        stage_key="diagnosis-reassessment",
+        graph_status="FAILED_SEMANTIC",
+    )
+    now = "2026-07-31T00:00:00Z"
+    failure_id = "failure-failed-safe-replanner"
+    with state._lock, state._connection:
+        state._connection.execute(
+            """
+            INSERT INTO failures
+                (failure_id, product_id, task_id, failure_class, reason_code,
+                 fingerprint, safe_message, evidence_ref, status, retryable,
+                 owner_action_eligible, expected_json, actual_json,
+                 failed_gate_ids_json, first_seen_at, last_seen_at)
+            VALUES (?, ?, 'T-FAILED-REPLANNER', 'semantic',
+                    'plan_contract_violation', ?,
+                    'The bounded Replanner loop exhausted its prior hypothesis.',
+                    'internal://failed-safe-replanner', 'ROUTED', 0, 0,
+                    '{}', '{}', '["target-tests"]', ?, ?)
+            """,
+            (
+                failure_id,
+                product_id,
+                sha256_text(failure_id),
+                now,
+                now,
+            ),
+        )
+        state._connection.execute(
+            "UPDATE tasks SET failure_id=? WHERE task_id='T-FAILED-REPLANNER'",
+            (failure_id,),
+        )
+        state._connection.execute(
+            """UPDATE products
+                  SET status='FAILED_SAFE',
+                      terminal_reason='replanner_problem_budget_exhausted'
+                WHERE product_id=?""",
+            (product_id,),
+        )
+        state._connection.execute(
+            """
+            INSERT INTO controller_incidents
+                (incident_id, product_id, task_id, reason_code,
+                 evidence_ref, status, created_at)
+            VALUES ('incident-replanner-loop', ?, 'T-FAILED-REPLANNER',
+                    'replanner_problem_budget_exhausted',
+                    'internal://failed-safe-replanner', 'OPEN', ?)
+            """,
+            (product_id, now),
+        )
+
+    assert build_recovery_plan(state)["actions"] == []
+    with pytest.raises(ValueError, match="explicit product"):
+        build_recovery_plan(state, include_failed_safe=True)
+
+    recovery = build_recovery_plan(
+        state,
+        include_failed_safe=True,
+        product_ids=(product_id,),
+    )
+    assert len(recovery["actions"]) == 1
+    assert recovery["actions"][0]["source_failure_id"] == failure_id
+    assert verify_recovery_preconditions(state, recovery)["status"] == "PASS"
+
+    state.enter_maintenance("corrected-controller-release")
+    applied = apply_recovery_plan(config, state, recovery)
+    assert applied["applications"][0]["status"] == "APPLIED"
+    product = state.get_product(product_id)
+    assert product is not None and product["status"] == "IMPLEMENTING"
+    recovery_task = next(
+        task
+        for task in state.list_tasks(product_id)
+        if task.get("stage_key") == "semantic-lifecycle-recovery"
+    )
+    assert recovery_task["graph_status"] == "READY"
+    assert recovery_task["failure_id"] == failure_id
+    with state._lock:
+        incident = state._connection.execute(
+            "SELECT status FROM controller_incidents WHERE incident_id=?",
+            ("incident-replanner-loop",),
+        ).fetchone()
+        history_count = state._connection.execute(
+            "SELECT COUNT(*) FROM failures WHERE product_id=?",
+            (product_id,),
+        ).fetchone()[0]
+    assert incident is not None and incident["status"] == "RESOLVED"
+    assert history_count == 1
+    state.close()
+
+
 def test_deploy_maintenance_auto_resumes_after_expiry_and_drain(
     tmp_path: Path,
 ) -> None:
