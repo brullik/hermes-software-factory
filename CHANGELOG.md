@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.29 - 2026-07-31
+
+- Keep equivalent Director diagnosis-reassessment proposals in one bounded
+  hypothesis for three attempts instead of creating a fresh hypothesis after
+  every repeated plan-contract rejection.
+- Exhaust and replace that diagnosis hypothesis only after its real 3/3 budget,
+  preserving the required change-of-hypothesis rule without resetting counters.
+- Exclude generic model-repair controller sentinels from executable replan gate
+  obligations while retaining concrete target gates and reviewer finding IDs.
+
 ## 2.2.28 - 2026-07-31
 
 - Preserve a newer explicit owner pause when an already claimed task commits

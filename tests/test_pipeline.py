@@ -64,7 +64,6 @@ class PipelineTests(unittest.TestCase):
             (
                 "RELEASE-EVIDENCE-SUBJECT-MISMATCH",
                 "RELEASE-PREREQUISITES-MISSING",
-                "MODEL_REPAIR_REQUIRED",
                 "target-dependency-audit",
                 "target-license-check",
             ),

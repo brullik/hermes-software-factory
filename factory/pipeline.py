@@ -91,8 +91,10 @@ def _replan_mandatory_gate_ids(
 
     non_executable_coordinates = {
         "BACKLOG_PLAN_SEMANTIC_VALIDATION",
+        "MODEL_REPAIR_REQUIRED",
         "OUTPUT_SCHEMA_VALIDATION",
         "PLAN_CONTRACT_VIOLATION",
+        "model_requested_repair",
     }
     if not source_failure_id:
         return ()
