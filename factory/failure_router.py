@@ -51,6 +51,17 @@ class FailureRouter:
         self.artifacts = artifacts or ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)
 
+    @staticmethod
+    def _scope_reassessment_required(failure: dict[str, Any]) -> bool:
+        try:
+            actual = json.loads(str(failure.get("actual_json") or "{}"))
+        except json.JSONDecodeError:
+            return False
+        return (
+            isinstance(actual, dict)
+            and actual.get("scope_reassessment_required") is True
+        )
+
     def _same_role_problem_count(
         self,
         failure: dict[str, Any],
@@ -785,6 +796,9 @@ class FailureRouter:
                 raise RuntimeError("failure source task is missing")
             failed = dict(failed_row)
             reason = str(failure["reason_code"])
+            scope_reassessment_required = self._scope_reassessment_required(
+                dict(failure)
+            )
             active_plan_id = self._active_plan_id(str(failed["product_id"]))
             if active_plan_id:
                 failed["plan_id"] = active_plan_id
@@ -911,6 +925,7 @@ class FailureRouter:
                 )
                 or attempts_used >= 3
                 or repeated_problem_requires_reassessment
+                or scope_reassessment_required
                 or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
             )
             if controller_fault:
@@ -996,6 +1011,14 @@ class FailureRouter:
                     "plan, affected node, complete failure chain, repository excerpts, "
                     "and capability inventory. Preserve accepted unaffected nodes."
                 )
+                if scope_reassessment_required:
+                    objective += (
+                        " The failed Builder proved its allowed_paths were too narrow. "
+                        "Create fresh implementation work whose bounded scope expands "
+                        "beyond the failed scope and includes the production root-cause "
+                        "files named by controller gate diagnostics; a tests-only "
+                        "substitute is invalid."
+                    )
             else:
                 role = str(failed.get("role") or "builder")
                 output_schema = str(

@@ -775,6 +775,59 @@ def test_exact_builder_repair_inherits_controller_quality_gates(
         state.close()
 
 
+def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE failures
+                      SET actual_json=?
+                    WHERE failure_id=?""",
+                (
+                    stable_json(
+                        {
+                            "required_fixes": [
+                                "Repair the Compose runtime root cause."
+                            ],
+                            "scope_reassessment_required": True,
+                            "blocked_allowed_paths": ["tests/**"],
+                            "provider_scope_findings": [
+                                {
+                                    "code": "FULL_SUITE_UNRELATED_FAILURE",
+                                    "severity": "medium",
+                                    "text": (
+                                        "The mandatory gate failure is outside "
+                                        "allowed task scope."
+                                    ),
+                                }
+                            ],
+                        }
+                    ),
+                    failure_id,
+                ),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "replanner"
+        assert routed["stage_key"] == "replan"
+        assert routed["repair_context_ref"] is None
+        contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(routed["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert "allowed_paths were too narrow" in contract["objective"]
+        assert "tests-only substitute is invalid" in contract["objective"]
+    finally:
+        state.close()
+
+
 def test_legacy_mandatory_gate_repair_without_gate_contract_fails_closed(
     tmp_path: Path,
 ) -> None:

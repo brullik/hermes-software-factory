@@ -14,7 +14,11 @@ from factory.autonomy import (
 )
 from factory.common import sha256_text
 from factory.intake import IntakeService
-from factory.pipeline import PipelineCoordinator, _replan_mandatory_gate_ids
+from factory.pipeline import (
+    PipelineCoordinator,
+    _replan_blocked_scope_paths,
+    _replan_mandatory_gate_ids,
+)
 from factory.policy import policy_digest
 from factory.state import StateStore
 
@@ -67,6 +71,43 @@ class PipelineTests(unittest.TestCase):
                 "target-dependency-audit",
                 "target-license-check",
             ),
+        )
+
+    def test_replan_scope_inventory_uses_only_causal_scope_failure(self) -> None:
+        failures = [
+            {
+                "failure_id": "failure-root",
+                "parent_failure_id": None,
+                "actual_json": json.dumps(
+                    {
+                        "scope_reassessment_required": True,
+                        "blocked_allowed_paths": ["tests/**"],
+                    }
+                ),
+            },
+            {
+                "failure_id": "failure-child",
+                "parent_failure_id": "failure-root",
+                "actual_json": "{}",
+            },
+            {
+                "failure_id": "failure-unrelated",
+                "parent_failure_id": None,
+                "actual_json": json.dumps(
+                    {
+                        "scope_reassessment_required": True,
+                        "blocked_allowed_paths": ["docs/**"],
+                    }
+                ),
+            },
+        ]
+
+        self.assertEqual(
+            _replan_blocked_scope_paths(
+                failures,
+                source_failure_id="failure-child",
+            ),
+            ("tests/**",),
         )
 
     def test_different_products_have_disjoint_workspace_locks(self) -> None:

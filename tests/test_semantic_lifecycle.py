@@ -341,6 +341,7 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
             "target-dependency-audit",
             "target-license-check",
         ),
+        blocked_replan_scope_paths=("tests/**",),
     )
 
     with pytest.raises(
@@ -367,6 +368,28 @@ def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
         "Repair target-dependency-audit and target-license-check by adding the "
         "missing executable dependency contract"
     )
+    semantic["nodes"][1]["scope"] = ["tests/**"]
+    with pytest.raises(
+        PlanContractViolation,
+        match=(
+            "fresh implementation slices do not expand the failed "
+            "allowed_paths scope"
+        ),
+    ) as blocked_scope:
+        PlanCompiler(policy_digest=policy_digest(config)).compile(
+            semantic,
+            context,
+            inherited_nodes=[inherited_dependency],
+            accepted_nodes={
+                "semantic:dependency-contract": "T-ACCEPTED-DEPENDENCIES"
+            },
+        )
+    assert blocked_scope.value.failed_gate_ids == (
+        "target-dependency-audit",
+        "target-license-check",
+    )
+
+    semantic["nodes"][1]["scope"] = ["Dockerfile", "tests/**"]
     compiled = PlanCompiler(policy_digest=policy_digest(config)).compile(
         semantic,
         context,

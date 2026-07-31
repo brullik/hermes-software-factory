@@ -180,6 +180,8 @@ def _mandatory_gate_failure_data(
     detail: str,
     evidence_ref: str,
     attempt_id: str,
+    output: Mapping[str, Any] | None = None,
+    allowed_paths: list[str] | None = None,
 ) -> FailureData:
     """Preserve safe controller gate diagnostics for the next autonomous role."""
 
@@ -242,6 +244,57 @@ def _mandatory_gate_failure_data(
         if diagnostic_message
         else detail
     )[:4000]
+    scope_findings: list[dict[str, str]] = []
+    raw_findings = output.get("findings", []) if output is not None else []
+    if isinstance(raw_findings, list):
+        for finding in raw_findings[:20]:
+            if not isinstance(finding, Mapping):
+                continue
+            code = str(finding.get("code") or "")[:120]
+            severity = str(finding.get("severity") or "info")[:40]
+            raw_text = str(finding.get("text") or "")
+            safe_text, _ = redact_text(raw_text)
+            safe_text, _ = redact_secret_candidates(safe_text)
+            normalized = safe_text.strip()[:1200]
+            if not normalized:
+                continue
+            scope_marker = code.upper() in {
+                "FULL_SUITE_UNRELATED_FAILURE",
+                "OUTSIDE_ALLOWED_SCOPE",
+                "SCOPE_BLOCKED",
+                "SCOPE_INSUFFICIENT",
+            } or any(
+                marker in normalized.lower()
+                for marker in (
+                    "outside allowed task scope",
+                    "outside the allowed task scope",
+                    "outside allowed paths",
+                    "outside the allowed paths",
+                )
+            )
+            if scope_marker:
+                scope_findings.append(
+                    {
+                        "code": code or "SCOPE_INSUFFICIENT",
+                        "severity": severity,
+                        "text": normalized,
+                    }
+                )
+    blocked_allowed_paths = list(
+        dict.fromkeys(str(value) for value in (allowed_paths or []) if str(value))
+    )
+    required_fixes = [
+        f"Resolve {item['gate_id']}: {item['summary']}"
+        for item in diagnostics
+    ]
+    if scope_findings:
+        required_fixes.append(
+            "Director must create a fresh implementation slice whose allowed_paths "
+            "expand beyond the failed task scope to include the production root-cause "
+            "files named by the controller gate diagnostics. Do not classify a "
+            "mandatory gate failure as unrelated or substitute tests-only fixtures. "
+            "Preserve all forbidden paths."
+        )
     return FailureData(
         failure_class="semantic",
         reason_code="mandatory_gate_failed",
@@ -256,10 +309,10 @@ def _mandatory_gate_failure_data(
         },
         actual={
             "gate_diagnostics": diagnostics,
-            "required_fixes": [
-                f"Resolve {item['gate_id']}: {item['summary']}"
-                for item in diagnostics
-            ],
+            "required_fixes": required_fixes,
+            "scope_reassessment_required": bool(scope_findings),
+            "blocked_allowed_paths": blocked_allowed_paths,
+            "provider_scope_findings": scope_findings,
         },
         failed_gate_ids=unique_gate_ids,
     )
@@ -3880,6 +3933,11 @@ class AgentWorker:
                         detail=gate_detail,
                         evidence_ref=f"evidence/{result_path.name}",
                         attempt_id=attempt.attempt_id,
+                        output=output,
+                        allowed_paths=[
+                            str(path)
+                            for path in spec.task_contract["allowed_paths"]
+                        ],
                     ),
                 )
             reported_output_status = str(output.get("status"))

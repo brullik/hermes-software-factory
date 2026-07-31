@@ -496,6 +496,72 @@ class WorkerTests(unittest.TestCase):
             [{"gate_id": "target-license-check", "status": "PASS"}],
         )
 
+    def test_mandatory_gate_failure_preserves_scope_reassessment_signal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "gate-target-tests.json"
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "exit_code": 1,
+                        "summary": (
+                            "ComposeTopologyBlackBoxTests failed in compose.yml"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            failure = _mandatory_gate_failure_data(
+                QualityGateRun(
+                    (
+                        {
+                            "gate_id": "target-tests",
+                            "status": "FAIL",
+                            "evidence_ref": str(evidence_path),
+                        },
+                    ),
+                    (evidence_path,),
+                    False,
+                ),
+                detail="failed mandatory gates: target-tests",
+                evidence_ref="evidence/attempt.json",
+                attempt_id="attempt-scope-reassessment",
+                output={
+                    "findings": [
+                        {
+                            "code": "FULL_SUITE_UNRELATED_FAILURE",
+                            "severity": "medium",
+                            "text": (
+                                "The Compose failure is outside allowed task scope "
+                                "and was not modified."
+                            ),
+                        }
+                    ]
+                },
+                allowed_paths=["tests/**"],
+            )
+
+        self.assertIs(
+            failure.actual["scope_reassessment_required"],
+            True,
+        )
+        self.assertEqual(
+            failure.actual["blocked_allowed_paths"],
+            ["tests/**"],
+        )
+        self.assertEqual(
+            failure.actual["provider_scope_findings"][0]["code"],
+            "FULL_SUITE_UNRELATED_FAILURE",
+        )
+        self.assertTrue(
+            any(
+                "allowed_paths expand beyond the failed task scope" in item
+                for item in failure.actual["required_fixes"]
+            )
+        )
+
     def test_replanner_inventory_preserves_safe_failure_coordinates_and_hypotheses(
         self,
     ) -> None:
