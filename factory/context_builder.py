@@ -18,6 +18,60 @@ from .common import redact_text
 from .config import FactoryConfig
 
 _TRUNCATION_MARKER = "\n...[TRUNCATED_BY_CONTROLLER_TOTAL_BUDGET]...\n"
+_EXACT_STRUCTURAL_KEYS = frozenset(
+    {
+        "accepted_unaffected_node_keys",
+        "capability_profile",
+        "conflict_keys",
+        "default_branch",
+        "delivery_mode",
+        "dependencies",
+        "evidence_profile",
+        "failure_class",
+        "fingerprint",
+        "forbidden_actions",
+        "kind",
+        "lifecycle_stage",
+        "model_floor",
+        "output_schema",
+        "policy_digest",
+        "producer",
+        "proposal_kind",
+        "quality_gates",
+        "reason_code",
+        "repository_url",
+        "repository_visibility",
+        "required_capabilities",
+        "review_kind",
+        "risk_tier",
+        "role",
+        "schema_version",
+        "scope",
+        "stage_key",
+        "status",
+    }
+)
+_EXACT_STRUCTURAL_SUFFIXES = (
+    "_digest",
+    "_digests",
+    "_glob",
+    "_globs",
+    "_id",
+    "_ids",
+    "_key",
+    "_keys",
+    "_kind",
+    "_path",
+    "_paths",
+    "_ref",
+    "_refs",
+    "_role",
+    "_sha",
+    "_status",
+    "_type",
+    "_types",
+    "_version",
+)
 
 
 def _truncate_preserving_coordinates(value: str, limit: int) -> str:
@@ -35,27 +89,67 @@ def _truncate_preserving_coordinates(value: str, limit: int) -> str:
     return value[:head] + _TRUNCATION_MARKER + (value[-tail:] if tail else "")
 
 
-def _string_count(value: Any) -> int:
+def _preserves_structural_strings(key: object) -> bool:
+    normalized = str(key).strip().lower()
+    return normalized in _EXACT_STRUCTURAL_KEYS or normalized.endswith(
+        _EXACT_STRUCTURAL_SUFFIXES
+    )
+
+
+def _string_budget_profile(
+    value: Any,
+    *,
+    preserve: bool = False,
+) -> tuple[int, int]:
+    """Return exact structural chars and narrative string count."""
+
     if isinstance(value, str):
-        return 1
+        return (len(value), 0) if preserve else (0, 1)
     if isinstance(value, Mapping):
-        return sum(_string_count(item) for item in value.values())
+        exact_chars = 0
+        narrative_strings = 0
+        for key, item in value.items():
+            child_exact, child_narrative = _string_budget_profile(
+                item,
+                preserve=preserve or _preserves_structural_strings(key),
+            )
+            exact_chars += child_exact
+            narrative_strings += child_narrative
+        return exact_chars, narrative_strings
     if isinstance(value, (list, tuple)):
-        return sum(_string_count(item) for item in value)
-    return 0
+        exact_chars = 0
+        narrative_strings = 0
+        for item in value:
+            child_exact, child_narrative = _string_budget_profile(
+                item,
+                preserve=preserve,
+            )
+            exact_chars += child_exact
+            narrative_strings += child_narrative
+        return exact_chars, narrative_strings
+    return 0, 0
 
 
 def _bound_string_content(value: Any, max_chars: int) -> Any:
-    """Fairly cap aggregate string content without dropping structural entries."""
+    """Cap narrative strings without corrupting controller-owned coordinates.
+
+    Structural identifiers, digests, references, statuses, and path scopes are
+    retained byte-for-byte and consume the budget first. If those coordinates
+    alone exceed the requested budget, narrative text is emptied and the later
+    compiled-prompt ceiling fails closed rather than sending malformed identity
+    data to an agent.
+    """
 
     if max_chars < 0:
         raise ValueError("max_chars must not be negative")
-    remaining_chars = max_chars
-    remaining_strings = _string_count(value)
+    exact_chars, remaining_strings = _string_budget_profile(value)
+    remaining_chars = max(0, max_chars - exact_chars)
 
-    def visit(item: Any) -> Any:
+    def visit(item: Any, *, preserve: bool = False) -> Any:
         nonlocal remaining_chars, remaining_strings
         if isinstance(item, str):
+            if preserve:
+                return item
             limit = (
                 remaining_chars // remaining_strings
                 if remaining_strings > 0
@@ -66,9 +160,15 @@ def _bound_string_content(value: Any, max_chars: int) -> Any:
             remaining_strings -= 1
             return bounded
         if isinstance(item, Mapping):
-            return {str(key): visit(child) for key, child in item.items()}
+            return {
+                str(key): visit(
+                    child,
+                    preserve=preserve or _preserves_structural_strings(key),
+                )
+                for key, child in item.items()
+            }
         if isinstance(item, (list, tuple)):
-            return [visit(child) for child in item]
+            return [visit(child, preserve=preserve) for child in item]
         return item
 
     return visit(value)

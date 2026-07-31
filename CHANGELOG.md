@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.25 - 2026-07-31
+
+- Preserve controller-owned Replanner identifiers, SHA-256 digests, evidence
+  references, gate names, and path scopes byte-for-byte while fairly compacting
+  only narrative context, preventing a valid 64-character policy digest from
+  becoming an unsatisfiable 40-character plan contract.
+- Fail closed at the compiled-prompt ceiling if structural coordinates alone
+  exceed their Context Pack budget instead of silently corrupting those
+  coordinates and sending agents into repeated diagnosis loops.
+- Validate safe transport diagnostics for every controller-owned plan contract
+  reason code, so a semantic plan failure remains actionable evidence rather
+  than becoming a secondary controller schema exception.
+
 ## 2.2.24 - 2026-07-31
 
 - Give tool-enabled coding agents a configurable 30-minute bounded execution

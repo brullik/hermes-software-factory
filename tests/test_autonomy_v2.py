@@ -1762,6 +1762,136 @@ def test_AUT_P0_013_context_pack_has_bounded_safe_file_excerpts(
     ) == []
 
 
+def test_replanner_context_preserves_exact_structural_coordinates_under_budget(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    policy = "a" * 64
+    result_digest = "b" * 64
+    plan_summary = {
+        "plan_id": "PLAN-STRUCTURAL-CONTEXT",
+        "revision": 40,
+        "status": "ACTIVE",
+        "policy_digest": policy,
+        "accepted_unaffected_node_keys": ["runtime-service-foundation"],
+        "implementation_nodes": [
+            {
+                "node_key": "dependency-audit-runtime-inventory",
+                "task_id": "T-STRUCTURAL-CONTEXT",
+                "role": "builder",
+                "capability_profile": "builder_workspace",
+                "required_capabilities": ["toolchain.container_builder"],
+                "allowed_paths": ["pyproject.toml", "scripts/dependency_audit.py"],
+                "quality_gates": ["target-dependency-audit"],
+                "objective": "bounded objective " * 500,
+                "accepted_result": {
+                    "result_ref": "evidence/result-structural-context.json",
+                    "result_digest": result_digest,
+                    "summary": "bounded accepted result " * 500,
+                },
+            }
+        ],
+        "unresolved_failure_inventory": [
+            {
+                "failure_id": "failure-structural-context",
+                "reason_code": "target_dependency_audit_failed",
+                "safe_message": "bounded failure diagnostic " * 500,
+            }
+        ],
+    }
+
+    result = ContextBuilder(config, repository).build(
+        product_id="context-product",
+        task_id="T-STRUCTURAL-CONTEXT",
+        subject_sha="c" * 64,
+        objective="Repair the exact unresolved dependency audit coordinate",
+        acceptance=["Return a schema-valid replan delta"],
+        candidates=[],
+        allowed_paths=["**"],
+        forbidden_actions=["secret.read"],
+        output_schema="backlog-plan-v2.schema.json",
+        plan_summary=plan_summary,
+        max_plan_summary_chars=512,
+    )
+
+    bounded = result.artifact["plan_summary"]
+    node = bounded["implementation_nodes"][0]
+    failure = bounded["unresolved_failure_inventory"][0]
+    assert bounded["policy_digest"] == policy
+    assert bounded["plan_id"] == "PLAN-STRUCTURAL-CONTEXT"
+    assert bounded["accepted_unaffected_node_keys"] == [
+        "runtime-service-foundation"
+    ]
+    assert node["node_key"] == "dependency-audit-runtime-inventory"
+    assert node["task_id"] == "T-STRUCTURAL-CONTEXT"
+    assert node["capability_profile"] == "builder_workspace"
+    assert node["required_capabilities"] == ["toolchain.container_builder"]
+    assert node["allowed_paths"] == [
+        "pyproject.toml",
+        "scripts/dependency_audit.py",
+    ]
+    assert node["quality_gates"] == ["target-dependency-audit"]
+    assert node["accepted_result"]["result_ref"] == (
+        "evidence/result-structural-context.json"
+    )
+    assert node["accepted_result"]["result_digest"] == result_digest
+    assert failure["failure_id"] == "failure-structural-context"
+    assert failure["reason_code"] == "target_dependency_audit_failed"
+    assert len(node["objective"]) < len(plan_summary["implementation_nodes"][0]["objective"])
+    assert len(node["accepted_result"]["summary"]) < len(
+        plan_summary["implementation_nodes"][0]["accepted_result"]["summary"]
+    )
+    assert len(failure["safe_message"]) < len(
+        plan_summary["unresolved_failure_inventory"][0]["safe_message"]
+    )
+    assert ArtifactStore(config).validate(
+        "context-pack-v2.schema.json",
+        result.artifact,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        "plan_contract_violation",
+        "missing_declared_predecessor",
+        "evidence_profile_mismatch",
+        "completion_unreachable",
+    ],
+)
+def test_transport_diagnostic_accepts_plan_contract_reason_codes(
+    tmp_path: Path,
+    reason_code: str,
+) -> None:
+    config = configured(tmp_path)
+    diagnostic = {
+        "schema_version": "1.0",
+        "artifact_id": "transport-diagnostic-test",
+        "product_id": "context-product",
+        "task_id": "T-TRANSPORT-CONTRACT",
+        "attempt_id": "attempt-transport-contract",
+        "reason_code": reason_code,
+        "raw_sha256": "d" * 64,
+        "raw_chars": 42,
+        "safe_head": "safe coordinate",
+        "safe_tail": "safe coordinate",
+        "parser_error_type": "PlanContractViolation",
+        "parser_error_safe_message": "safe plan contract coordinate",
+        "redactions": [],
+        "provider": "openai-codex",
+        "model": "gpt-5.6-luna",
+        "context_ref": "evidence/context-T-TRANSPORT-CONTRACT.json",
+        "usage_ref": None,
+    }
+
+    assert ArtifactStore(config).validate(
+        "transport-diagnostic.schema.json",
+        diagnostic,
+    ) == []
+
+
 def test_available_capability_inventory_selects_specific_runtime_scope(
     tmp_path: Path,
 ) -> None:
