@@ -33,6 +33,7 @@ REQUIRED = [
     "IMPLEMENTATION-SPEC.md",
     "ACCEPTANCE-PLAN.md",
     "OWNER-GUIDE.md",
+    "docs/PATH-GOVERNOR.md",
     ".gitignore",
     ".editorconfig",
     "SECURITY.md",
@@ -50,6 +51,8 @@ REQUIRED = [
     "factory/lifecycle.py",
     "factory/plan_compiler.py",
     "factory/plan_semantics.py",
+    "factory/path_governor.py",
+    "factory/path_migration.py",
     "factory/recovery.py",
     "factory/quality.py",
     "factory/reconciler.py",
@@ -74,6 +77,7 @@ REQUIRED = [
     "policies/autonomy-policy.yaml",
     "policies/model-routing-policy.yaml",
     "policies/security-policy.yaml",
+    "policies/trajectory-governor.yaml",
     "schemas/product-contract.schema.json",
     "schemas/plan-proposal-v1.schema.json",
     "schemas/task-contract.schema.json",
@@ -81,6 +85,11 @@ REQUIRED = [
     "schemas/pilot-black-box.schema.json",
     "schemas/attempt-result.schema.json",
     "schemas/owner-action.schema.json",
+    "schemas/result-binding.schema.json",
+    "schemas/candidate-snapshot.schema.json",
+    "schemas/path-snapshot.schema.json",
+    "schemas/plan-delta.schema.json",
+    "schemas/path-decision-proposal.schema.json",
     "prompts/fragments/00-common-system.md",
     "prompts/roles/builder.md",
     "prompts/roles/independent-reviewer.md",
@@ -162,8 +171,8 @@ def validate() -> list[str]:
     if routing["global"]["paid_api_fallback"] != "forbidden":
         errors.append("paid API fallback must be forbidden")
 
-    if len(list((ROOT / "policies").glob("*.yaml"))) != 12:
-        errors.append("policy bundle must contain all 12 versioned policies")
+    if len(list((ROOT / "policies").glob("*.yaml"))) != 13:
+        errors.append("policy bundle must contain all 13 versioned policies")
 
     repository = load_yaml(ROOT / "policies/repository-policy.yaml")
     if repository["factory_repository"]["name"] != "hermes-software-factory":

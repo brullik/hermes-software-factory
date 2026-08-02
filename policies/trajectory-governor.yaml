@@ -1,0 +1,75 @@
+version: "1.0"
+policy_id: trajectory-governor
+
+owners:
+  controller:
+    reason_prefixes:
+      - controller_
+      - migration_
+      - artifact_
+      - repair_requeue_
+    reason_codes:
+      - task_lease_lost
+      - result_provenance_missing
+      - result_lineage_cycle
+      - result_lineage_depth_exceeded
+      - sqlite_busy_exhausted
+  product:
+    reason_codes:
+      - mandatory_gate_failed
+      - model_requested_repair
+      - scope_violation
+      - architecture_impossible
+      - needs_replan
+  external:
+    owner_action_reasons:
+      - missing_credential
+      - oauth_device_code
+      - two_factor_authentication
+      - captcha
+      - external_account_creation
+      - paid_resource_purchase
+      - dns_action_without_access
+      - legal_decision
+      - unapproved_irreversible_production_action
+
+budgets:
+  per_root_problem_signature:
+    deterministic_actions: 1
+    path_arbiter_calls: 1
+    evidence_producing_executions: 2
+    transient_retries: 3
+
+progress:
+  dimensions:
+    - unmet_mandatory_obligations
+    - unresolved_root_problem_signatures
+    - unaccepted_changed_semantic_nodes
+    - open_controller_incidents
+    - missing_candidate_evidence
+    - lineage_indirection_depth
+    - no_progress_decisions
+  plan_revision_is_progress: false
+  task_count_is_progress: false
+  require_strict_improvement_or_fresh_evidence: true
+
+path_arbiter:
+  enabled: true
+  tier: sol
+  capability_profile: planning_readonly
+  max_calls_per_signature: 1
+  state_write: false
+  sql: false
+  credentials: false
+  github_write: false
+  output_schema: path-decision-proposal.schema.json
+
+invariants:
+  - supersedes_task_id_is_audit_only
+  - accepted_semantic_node_has_direct_binding
+  - unchanged_node_does_not_create_task
+  - candidate_reviews_consume_one_snapshot
+  - controller_failure_never_routes_to_product_role
+  - one_active_recovery_branch_per_signature
+  - no_op_decision_rejected
+  - terminal_state_after_budget_exhaustion

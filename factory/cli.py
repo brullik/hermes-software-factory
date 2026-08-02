@@ -20,6 +20,7 @@ from .artifacts import ArtifactStore, artifact_metadata
 from .common import new_id, sha256_text, utc_now
 from .config import ConfigError, FactoryConfig, load_config
 from .intake import IntakeService
+from .path_migration import migrate_product_path
 from .policy import policy_digest
 from .recovery import (
     apply_recovery_plan,
@@ -349,6 +350,28 @@ def graph_verify_command(args: argparse.Namespace) -> int:
     )
     try:
         result = verify_active_graphs(config, state)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def path_migrate_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = migrate_product_path(
+            config,
+            state,
+            product_id=str(args.product_id),
+            dry_run=bool(args.dry_run),
+            repository_commit=args.repository_commit,
+            tree_digest=args.tree_digest,
+        )
         print(json.dumps(result, ensure_ascii=False))
         return 0
     finally:
@@ -771,6 +794,13 @@ def build_parser() -> argparse.ArgumentParser:
     graph_verify.add_argument("--config", type=Path)
     graph_verify.add_argument("--all-active", action="store_true")
     graph_verify.set_defaults(function=graph_verify_command)
+    path_migrate = subparsers.add_parser("path-migrate")
+    path_migrate.add_argument("--config", type=Path)
+    path_migrate.add_argument("--product-id", required=True)
+    path_migrate.add_argument("--dry-run", action="store_true")
+    path_migrate.add_argument("--repository-commit")
+    path_migrate.add_argument("--tree-digest")
+    path_migrate.set_defaults(function=path_migrate_command)
     return parser
 
 

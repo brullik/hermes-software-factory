@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bounded Plan Delta",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "proposal_kind",
+    "product_id",
+    "parent_plan_id",
+    "root_problem_signature",
+    "preserve_binding_ids",
+    "replace_semantic_node_ids",
+    "new_nodes",
+    "remove_semantic_node_ids",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "proposal_kind": {"const": "plan_delta"},
+    "product_id": {"type": "string", "minLength": 8},
+    "parent_plan_id": {"type": "string", "minLength": 4},
+    "root_problem_signature": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "preserve_binding_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "replace_semantic_node_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "new_nodes": {"type": "array", "items": {"type": "object"}},
+    "remove_semantic_node_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "summary": {"type": "string", "minLength": 10, "maxLength": 2000}
+  }
+}

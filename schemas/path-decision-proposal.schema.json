@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Path Arbiter Decision Proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "root_problem_signature",
+    "root_cause_class",
+    "recommended_action",
+    "affected_semantic_node_keys",
+    "evidence_refs",
+    "expected_progress_delta",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["proposed", "no_safe_path"]},
+    "root_problem_signature": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "root_cause_class": {
+      "enum": ["product_semantic", "controller_invariant", "external_blocker"]
+    },
+    "recommended_action": {
+      "enum": [
+        "REPAIR_NODE",
+        "REPLAN_DELTA",
+        "CONTROLLER_RECOVERY",
+        "COMPACT_LINEAGE",
+        "FAIL_SAFE"
+      ]
+    },
+    "affected_semantic_node_keys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "expected_progress_delta": {
+      "type": "object",
+      "additionalProperties": {"type": "integer"}
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "summary": {"type": "string", "minLength": 10, "maxLength": 2000}
+  }
+}

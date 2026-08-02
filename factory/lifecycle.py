@@ -12,8 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-LIFECYCLE_VERSION: Final = "3.0"
-PLAN_COMPILER_VERSION: Final = "1.3"
+LIFECYCLE_VERSION: Final = "4.0"
+PLAN_COMPILER_VERSION: Final = "2.0"
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,16 @@ STAGES: Final[dict[str, LifecycleStage]] = {
         ("architecture_review",),
         ("implementation_candidate",),
     ),
+    "candidate-snapshot": LifecycleStage(
+        "candidate-snapshot",
+        "path-governor",
+        "candidate-snapshot.schema.json",
+        "planning_readonly",
+        None,
+        "candidate-snapshot-v1",
+        ("architecture_review", "implementation_candidate"),
+        ("candidate_snapshot",),
+    ),
     "test": LifecycleStage(
         "test",
         "test-engineer",
@@ -58,7 +68,7 @@ STAGES: Final[dict[str, LifecycleStage]] = {
         "test_workspace",
         None,
         "test-evidence-v1",
-        ("implementation_candidate",),
+        ("candidate_snapshot",),
         ("test_results",),
     ),
     "security-review": LifecycleStage(
@@ -68,7 +78,7 @@ STAGES: Final[dict[str, LifecycleStage]] = {
         "reviewer_readonly",
         "security",
         "security-review-v1",
-        ("implementation_candidate", "test_results"),
+        ("candidate_snapshot", "test_results"),
         ("security_review",),
     ),
     "release-readiness-review": LifecycleStage(
@@ -78,7 +88,7 @@ STAGES: Final[dict[str, LifecycleStage]] = {
         "reviewer_readonly",
         "release_readiness",
         "release-readiness-review-v1",
-        ("implementation_candidate", "test_results", "security_review"),
+        ("candidate_snapshot", "test_results", "security_review"),
         ("independent_review",),
         ("independent_review",),
     ),
@@ -89,7 +99,7 @@ STAGES: Final[dict[str, LifecycleStage]] = {
         "release_staging",
         None,
         "staging-release-v1",
-        ("implementation_candidate", "independent_review"),
+        ("candidate_snapshot", "independent_review"),
         ("required_checks", "staging", "rollback"),
         ("required_checks", "staging", "rollback"),
     ),
@@ -133,6 +143,7 @@ STAGES: Final[dict[str, LifecycleStage]] = {
 MANDATORY_STAGE_ORDER: Final[tuple[str, ...]] = (
     "architecture-review",
     "implementation-slice",
+    "candidate-snapshot",
     "test",
     "security-review",
     "release-readiness-review",

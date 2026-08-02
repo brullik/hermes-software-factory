@@ -1192,6 +1192,140 @@ def _migration_016_redundant_accepted_repair_reconciliation(
         )
 
 
+def _migration_017_path_governor_semantic_state(
+    connection: sqlite3.Connection,
+) -> None:
+    """Install stable semantic identities and direct immutable result pointers."""
+
+    _add_columns(
+        connection,
+        "tasks",
+        (
+            ("semantic_node_id", "TEXT"),
+            ("contract_digest", "TEXT"),
+            ("result_binding_id", "TEXT"),
+            ("candidate_snapshot_id", "TEXT"),
+            ("root_problem_signature", "TEXT"),
+        ),
+    )
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS semantic_nodes (
+            semantic_node_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            semantic_node_key TEXT NOT NULL,
+            role TEXT NOT NULL,
+            lifecycle_stage TEXT NOT NULL,
+            contract_digest TEXT NOT NULL,
+            contract_ref TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(product_id, semantic_node_key, contract_digest)
+        );
+        CREATE TABLE IF NOT EXISTS result_bindings (
+            binding_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            semantic_node_id TEXT NOT NULL,
+            source_task_id TEXT NOT NULL,
+            source_attempt_id TEXT NOT NULL,
+            result_ref TEXT NOT NULL,
+            result_digest TEXT NOT NULL,
+            output_schema TEXT NOT NULL,
+            contract_digest TEXT NOT NULL,
+            policy_digest TEXT NOT NULL,
+            candidate_digest TEXT,
+            accepted_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            UNIQUE(product_id, semantic_node_id, result_digest)
+        );
+        CREATE TABLE IF NOT EXISTS plan_memberships (
+            plan_id TEXT NOT NULL,
+            semantic_node_id TEXT NOT NULL,
+            binding_id TEXT,
+            execution_task_id TEXT,
+            membership_state TEXT NOT NULL,
+            mandatory INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(plan_id, semantic_node_id),
+            CHECK (
+                (binding_id IS NOT NULL AND execution_task_id IS NULL)
+                OR (binding_id IS NULL AND execution_task_id IS NOT NULL)
+            )
+        );
+        CREATE TABLE IF NOT EXISTS candidate_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            plan_id TEXT NOT NULL,
+            repository_commit TEXT NOT NULL,
+            tree_digest TEXT NOT NULL,
+            architecture_binding_id TEXT NOT NULL,
+            snapshot_digest TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS candidate_snapshot_items (
+            snapshot_id TEXT NOT NULL,
+            semantic_node_id TEXT NOT NULL,
+            binding_id TEXT NOT NULL,
+            PRIMARY KEY(snapshot_id, semantic_node_id)
+        );
+        CREATE TABLE IF NOT EXISTS path_decisions (
+            decision_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            root_problem_signature TEXT,
+            action TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            path_snapshot_digest TEXT NOT NULL,
+            decision_payload_json TEXT NOT NULL,
+            progress_before_json TEXT NOT NULL,
+            expected_progress_after_json TEXT NOT NULL,
+            evidence_digest TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            applied_at TEXT,
+            UNIQUE(
+                product_id,
+                path_snapshot_digest,
+                action,
+                root_problem_signature
+            )
+        );
+        CREATE TABLE IF NOT EXISTS problem_budgets (
+            product_id TEXT NOT NULL,
+            root_problem_signature TEXT NOT NULL,
+            deterministic_actions_used INTEGER NOT NULL DEFAULT 0,
+            arbiter_calls_used INTEGER NOT NULL DEFAULT 0,
+            execution_attempts_used INTEGER NOT NULL DEFAULT 0,
+            last_progress_vector_json TEXT NOT NULL,
+            last_evidence_digest TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(product_id, root_problem_signature)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_result_bindings_one_active
+            ON result_bindings(product_id, semantic_node_id)
+            WHERE status='ACTIVE';
+        CREATE INDEX IF NOT EXISTS idx_result_bindings_task
+            ON result_bindings(product_id, source_task_id, status);
+        CREATE INDEX IF NOT EXISTS idx_semantic_nodes_product
+            ON semantic_nodes(product_id, semantic_node_key, status);
+        CREATE INDEX IF NOT EXISTS idx_plan_memberships_binding
+            ON plan_memberships(plan_id, binding_id, membership_state);
+        CREATE INDEX IF NOT EXISTS idx_candidate_snapshots_product
+            ON candidate_snapshots(product_id, plan_id, status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_path_decisions_active_problem
+            ON path_decisions(product_id, root_problem_signature)
+            WHERE status IN ('PROPOSED','APPLYING');
+        CREATE INDEX IF NOT EXISTS idx_tasks_result_binding
+            ON tasks(product_id, result_binding_id, graph_status);
+        CREATE INDEX IF NOT EXISTS idx_tasks_candidate_snapshot
+            ON tasks(product_id, candidate_snapshot_id, graph_status);
+        """
+    )
+
+
 def _legacy_graph_status(status: str, dependency_statuses: list[str]) -> str:
     if status == "CLAIMED":
         return "CLAIMED"
@@ -1385,6 +1519,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         16,
         "redundant-accepted-repair-reconciliation",
         _migration_016_redundant_accepted_repair_reconciliation,
+    ),
+    (
+        17,
+        "path-governor-semantic-state",
+        _migration_017_path_governor_semantic_state,
     ),
 )
 

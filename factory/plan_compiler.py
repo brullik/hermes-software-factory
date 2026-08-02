@@ -553,6 +553,17 @@ class PlanCompiler:
             )
             implementation_by_key[key] = compiled_node_id
 
+        candidate_snapshot = add_node(
+            "candidate-snapshot",
+            "candidate-snapshot",
+            "Freeze immutable candidate snapshot",
+            (
+                "Materialize one controller-owned snapshot over the accepted "
+                "architecture and implementation result bindings."
+            ),
+            ("The candidate snapshot is immutable and complete." ,),
+            scope=("artifacts/**",),
+        )
         test = add_node(
             "test",
             "test",
@@ -629,9 +640,11 @@ class PlanCompiler:
                     edge(dependency, implementation)
             else:
                 edge(architecture_review, implementation)
-            edge(implementation, test)
-            edge(implementation, security, "evidence_from")
-            edge(implementation, release_review, "evidence_from")
+            edge(implementation, candidate_snapshot, "evidence_from")
+        edge(architecture_review, candidate_snapshot, "evidence_from")
+        edge(candidate_snapshot, test)
+        edge(candidate_snapshot, security, "evidence_from")
+        edge(candidate_snapshot, release_review, "evidence_from")
         edge(test, security)
         edge(test, release_review, "evidence_from")
         edge(security, release_review)

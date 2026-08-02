@@ -2429,6 +2429,7 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
         assert set(lifecycle_tasks) == {
             "architecture-review",
             "implementation-slice",
+            "candidate-snapshot",
             "test",
             "security-review",
             "release-readiness-review",
@@ -2479,9 +2480,11 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
             ]
         )
         capability_reconciler.reconcile_once()
+        reconciler = PipelineReconciler(config, state, artifacts)
         for _ in range(14):
             if str(state.get_product(product_id)["status"]) == "COMPLETED":
                 break
+            reconciler.reconcile_once()
             result = worker.run_once()
             assert result is not None, {
                 str(task.get("lifecycle_stage")): (

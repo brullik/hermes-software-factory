@@ -117,6 +117,7 @@
       "enum": [
         "architecture-review",
         "implementation-slice",
+        "candidate-snapshot",
         "test",
         "security-review",
         "release-readiness-review",

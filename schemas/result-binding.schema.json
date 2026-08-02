@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Immutable Result Binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "binding_id",
+    "product_id",
+    "semantic_node_id",
+    "source_task_id",
+    "source_attempt_id",
+    "result_ref",
+    "result_digest",
+    "output_schema",
+    "contract_digest",
+    "policy_digest",
+    "accepted_at",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "binding_id": {"type": "string", "pattern": "^RB-[A-Z0-9_-]{8,}$"},
+    "product_id": {"type": "string", "minLength": 8},
+    "semantic_node_id": {"type": "string", "pattern": "^SN-[A-Z0-9_-]{8,}$"},
+    "source_task_id": {"type": "string", "pattern": "^T-[A-Z0-9_-]{4,}$"},
+    "source_attempt_id": {"type": "string", "minLength": 8},
+    "result_ref": {"type": "string", "minLength": 1},
+    "result_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "output_schema": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+\\.schema\\.json$"
+    },
+    "contract_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "candidate_digest": {
+      "type": ["string", "null"],
+      "pattern": "^(sha256:)?[a-f0-9]{64}$"
+    },
+    "accepted_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["ACTIVE", "SUPERSEDED", "REVOKED"]}
+  }
+}

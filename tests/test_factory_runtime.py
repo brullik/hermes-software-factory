@@ -126,7 +126,7 @@ class FactoryRuntimeTests(unittest.TestCase):
 
     def test_default_config_resolves_repository_resources(self) -> None:
         config = load_config(ROOT / "config" / "factory-config.example.yaml")
-        self.assertEqual(len(config.policy_paths()), 12)
+        self.assertEqual(len(config.policy_paths()), 13)
         self.assertEqual(config.schema_root(), (ROOT / "schemas").resolve())
         self.assertEqual(PromptCompiler(config).root, (ROOT / "prompts").resolve())
         self.assertEqual(config.agent_execution_timeout_seconds, 1800)

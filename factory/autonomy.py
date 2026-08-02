@@ -16,6 +16,7 @@ from scripts.prompt_compiler import (
 )
 
 from .common import redact_text, sha256_text, stable_json, utc_now
+from .path_governor import PathGovernor, semantic_node_id, task_contract_digest
 
 if TYPE_CHECKING:
     from .state import StateStore
@@ -65,6 +66,7 @@ PLANNING_ONLY_ROLES = {
     "task-specifier",
     "replanner",
     "incident-recovery",
+    "path-governor",
 }
 IMMUTABLE_SCHEMA_ROOT = Path(__file__).resolve().parent.parent / "schemas"
 
@@ -75,6 +77,7 @@ CANONICAL_ROLE_OUTPUT_SCHEMAS: dict[str, str] = {
     "task-specifier": "plan-proposal-v1.schema.json",
     "replanner": "plan-proposal-v1.schema.json",
     "incident-recovery": "incident-result.schema.json",
+    "path-governor": "candidate-snapshot.schema.json",
     "builder": "attempt-result.schema.json",
     "test-engineer": "test-package-result.schema.json",
     "security-reviewer": "security-review-result.schema.json",
@@ -195,6 +198,7 @@ _PLANNING_PROFILE_ROLES = {
     "solution-architect",
     "task-specifier",
     "replanner",
+    "path-governor",
 }
 _TEST_PROFILE_ROLES = {"test-engineer", "product-tester"}
 _REVIEW_PROFILE_ROLES = {"security-reviewer", "independent-reviewer"}
@@ -409,6 +413,10 @@ class TaskOutcome:
     result_ref: str
     result_digest: str
     status: str
+    accepted_result_ref: str | None = None
+    accepted_result_digest: str | None = None
+    accepted_policy_digest: str | None = None
+    candidate_digest: str | None = None
     expected_task_revision: int = 1
     expected_plan_revision: int | None = None
     lease_token: str | None = None
@@ -434,6 +442,24 @@ class TaskOutcome:
             raise ValueError("outcome idempotency key is required")
         if not re.fullmatch(r"[a-f0-9]{64}", self.result_digest):
             raise ValueError("outcome result digest must be a lowercase SHA-256")
+        accepted_values = (
+            self.accepted_result_ref,
+            self.accepted_result_digest,
+            self.accepted_policy_digest,
+        )
+        if any(value is not None for value in accepted_values):
+            if self.status not in TERMINAL_SUCCESS or not all(accepted_values):
+                raise ValueError(
+                    "accepted result provenance is complete only for terminal success"
+                )
+            if not re.fullmatch(r"[a-f0-9]{64}", str(self.accepted_result_digest)):
+                raise ValueError("accepted result digest must be a lowercase SHA-256")
+            if not re.fullmatch(r"[a-f0-9]{64}", str(self.accepted_policy_digest)):
+                raise ValueError("accepted policy digest must be a lowercase SHA-256")
+        if self.candidate_digest is not None and not re.fullmatch(
+            r"(?:sha256:)?[a-f0-9]{64}", self.candidate_digest
+        ):
+            raise ValueError("candidate digest must be an immutable SHA-256")
         if (
             self.status in {"FAILED_TRANSIENT", "FAILED_SEMANTIC", "REJECTED"}
             and self.failure is None
@@ -1109,6 +1135,10 @@ class AutonomyStore:
             if creator is not None and creator[0]
             else created_by_task_id
         )
+        governor = PathGovernor(
+            connection,
+            policy_digest=str(plan["policy_digest"]),
+        )
         node_to_task: dict[str, str] = {}
         contracts_by_node: dict[str, dict[str, Any]] = {}
         for rank, node in enumerate(plan["nodes"]):
@@ -1119,7 +1149,6 @@ class AutonomyStore:
                 contract.get("task_id")
                 or f"T-{sha256_text(f'{product_id}:{plan_id}:{node_id}:{revision}')[:16].upper()}"
             )
-            node_to_task[node_id] = task_id
             required = [
                 str(value)
                 for value in contract.get(
@@ -1138,11 +1167,13 @@ class AutonomyStore:
             supersedes_task_id = contract.get("supersedes_task_id")
             reused_result_ref: str | None = None
             reused_result_digest: str | None = None
+            reused_binding_id: str | None = None
             initial_graph_status = "DRAFT"
             initial_legacy_status = "WAITING"
             if supersedes_task_id:
                 superseded = connection.execute(
-                    """SELECT product_id, graph_status, result_ref, result_digest
+                    """SELECT product_id, graph_status, result_ref, result_digest,
+                              result_binding_id
                        FROM tasks WHERE task_id=?""",
                     (str(supersedes_task_id),),
                 ).fetchone()
@@ -1155,6 +1186,42 @@ class AutonomyStore:
                     reused_result_digest = (
                         str(superseded["result_digest"] or "") or None
                     )
+                    reused_binding_id = (
+                        str(superseded["result_binding_id"] or "") or None
+                    )
+            semantic_contract_digest = task_contract_digest(contract)
+            semantic_identity = semantic_node_id(contract, semantic_contract_digest)
+            if reused_binding_id:
+                bound = connection.execute(
+                    """SELECT semantic_node_id, source_task_id, contract_digest
+                         FROM result_bindings
+                        WHERE binding_id=? AND product_id=? AND status='ACTIVE'""",
+                    (reused_binding_id, product_id),
+                ).fetchone()
+                if (
+                    bound is None
+                    or str(bound["semantic_node_id"]) != semantic_identity
+                    or str(bound["contract_digest"]) != semantic_contract_digest
+                ):
+                    raise ValueError(
+                        "accepted inherited node binding conflicts with its semantic contract"
+                    )
+                node_to_task[node_id] = str(bound["source_task_id"])
+                connection.execute(
+                    """INSERT OR REPLACE INTO plan_memberships
+                       (plan_id, semantic_node_id, binding_id, execution_task_id,
+                        membership_state, mandatory, created_at)
+                       VALUES (?, ?, ?, NULL, 'BOUND', ?, ?)""",
+                    (
+                        plan_id,
+                        semantic_identity,
+                        reused_binding_id,
+                        int(bool(node.get("mandatory", True))),
+                        now,
+                    ),
+                )
+                continue
+            node_to_task[node_id] = task_id
             connection.execute(
                 """INSERT INTO tasks
                    (task_id, product_id, title, role, output_schema, contract_ref,
@@ -1169,10 +1236,11 @@ class AutonomyStore:
                      lifecycle_stage, review_kind, evidence_profile,
                      consumes_evidence_types_json, produces_evidence_types_json,
                      completion_obligation_ids_json, goal_ids_json,
-                     semantic_node_key, production_side_effects)
+                     semantic_node_key, production_side_effects,
+                     semantic_node_id, contract_digest, result_binding_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
@@ -1219,8 +1287,12 @@ class AutonomyStore:
                     stable_json(contract.get("goal_ids", [])),
                     contract.get("semantic_node_key"),
                     int(bool(contract.get("production_side_effects", False))),
+                    semantic_identity,
+                    semantic_contract_digest,
+                    reused_binding_id,
                 ),
             )
+            governor.register_execution_membership(task_id)
             if supersedes_task_id:
                 connection.execute(
                     """INSERT OR IGNORE INTO task_edges
@@ -1742,6 +1814,25 @@ class AutonomyStore:
                             outcome.attempt_id,
                         ),
                     )
+                result_binding_id: str | None = None
+                if outcome.accepted_result_ref is not None:
+                    if outcome.attempt_id is None:
+                        raise ValueError("accepted result requires a source attempt")
+                    accepted_binding = PathGovernor(
+                        self.connection,
+                        policy_digest=str(outcome.accepted_policy_digest),
+                    ).bind_result(
+                        task_id=outcome.task_id,
+                        source_task_id=outcome.task_id,
+                        source_attempt_id=outcome.attempt_id,
+                        result_ref=outcome.accepted_result_ref,
+                        result_digest=str(outcome.accepted_result_digest),
+                        output_schema=str(task["output_schema"] or ""),
+                        candidate_digest=outcome.candidate_digest,
+                        accepted_at=now,
+                    )
+                    result_binding_id = accepted_binding.binding_id
+                inject("after_result_binding_write")
                 failure_id: str | None = None
                 hypothesis_id: str | None = None
                 if outcome.failure is not None:
@@ -1840,12 +1931,16 @@ class AutonomyStore:
                             created_by_task_id=outcome.task_id,
                         )
                     )
-                for binding in outcome.downstream_bindings:
-                    lifecycle_stage = str(binding.get("lifecycle_stage") or "")
-                    digest = str(
-                        binding.get("required_predecessor_digest") or ""
+                for downstream_binding in outcome.downstream_bindings:
+                    lifecycle_stage = str(
+                        downstream_binding.get("lifecycle_stage") or ""
                     )
-                    available_at = str(binding.get("available_at") or "")
+                    digest = str(
+                        downstream_binding.get("required_predecessor_digest") or ""
+                    )
+                    available_at = str(
+                        downstream_binding.get("available_at") or ""
+                    )
                     if lifecycle_stage != "observation":
                         raise ValueError(
                             "only observation may receive a downstream release binding"
@@ -2033,6 +2128,7 @@ class AutonomyStore:
                             "status": outcome.status,
                             "result_ref": outcome.result_ref,
                             "result_digest": outcome.result_digest,
+                            "result_binding_id": result_binding_id,
                         },
                     }
                 ]
@@ -2099,6 +2195,7 @@ class AutonomyStore:
                     "successor_ids": successor_ids,
                     "failure_id": failure_id,
                     "hypothesis_id": hypothesis_id,
+                    "result_binding_id": result_binding_id,
                 }
                 self.connection.execute(
                     """INSERT INTO task_outcomes
