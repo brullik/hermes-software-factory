@@ -16,12 +16,14 @@ from scripts.quality_gate import load_catalog
 
 from .artifacts import ArtifactStore, artifact_metadata
 from .capabilities import CapabilityReconciler
-from .common import new_id, sha256_text, stable_json, utc_now
+from .common import new_id, sha256_file, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
 from .failure_router import FailureRouter
 from .owner_actions import OwnerActionService
+from .path_governor import PathGovernor
+from .path_migration import git_candidate
 from .pipeline import PipelineCoordinator
-from .policy import load_policies, owner_action_allowed
+from .policy import load_policies, owner_action_allowed, policy_digest
 from .repair_brief import (
     builder_result_is_controller_complete,
     builder_result_is_locally_complete,
@@ -1216,11 +1218,165 @@ class PipelineReconciler:
                 )
         return self.failure_router.route(failure_id)
 
+    def _materialize_candidate_snapshot(self, product_id: str) -> bool:
+        """Complete a ready controller-only fan-in task without an agent call."""
+
+        task_row = self.state._connection.execute(
+            """SELECT task.* FROM tasks AS task
+                 JOIN products AS product ON product.active_plan_id=task.plan_id
+                WHERE task.product_id=? AND task.role='path-governor'
+                  AND task.lifecycle_stage='candidate-snapshot'
+                  AND task.graph_status='READY' AND task.status='PENDING'
+                ORDER BY task.created_at, task.task_id LIMIT 1""",
+            (product_id,),
+        ).fetchone()
+        if task_row is None:
+            return False
+        task = dict(task_row)
+        incoming = self.state._connection.execute(
+            """SELECT upstream.lifecycle_stage, upstream.result_binding_id,
+                      upstream.graph_status
+                 FROM task_edges AS edge
+                 JOIN tasks AS upstream ON upstream.task_id=edge.from_task_id
+                WHERE edge.plan_id=? AND edge.to_task_id=? AND edge.required=1
+                ORDER BY upstream.lifecycle_stage, upstream.task_id""",
+            (str(task["plan_id"]), str(task["task_id"])),
+        ).fetchall()
+        if not incoming or any(
+            str(row["graph_status"]) not in {"ACCEPTED", "SUPERSEDED"}
+            or not str(row["result_binding_id"] or "")
+            for row in incoming
+        ):
+            return False
+        architecture = [
+            str(row["result_binding_id"])
+            for row in incoming
+            if str(row["lifecycle_stage"]) == "architecture-review"
+        ]
+        bindings = sorted({str(row["result_binding_id"]) for row in incoming})
+        if len(architecture) != 1 or not any(
+            str(row["lifecycle_stage"]) == "implementation-slice" for row in incoming
+        ):
+            raise RuntimeError(
+                "candidate snapshot fan-in requires one architecture and implementation"
+            )
+        repository_commit, tree_digest = git_candidate(self.config, product_id)
+        now = utc_now()
+        with self.state._lock:
+            self.state._connection.execute("BEGIN IMMEDIATE")
+            try:
+                governor = PathGovernor(
+                    self.state._connection,
+                    policy_digest=policy_digest(self.config),
+                )
+                snapshot_id = governor.create_candidate_snapshot(
+                    product_id=product_id,
+                    plan_id=str(task["plan_id"]),
+                    repository_commit=repository_commit,
+                    tree_digest=tree_digest,
+                    architecture_binding_id=architecture[0],
+                    result_binding_ids=bindings,
+                    created_at=now,
+                )
+                snapshot = self.state._connection.execute(
+                    "SELECT * FROM candidate_snapshots WHERE snapshot_id=?",
+                    (snapshot_id,),
+                ).fetchone()
+                if snapshot is None:
+                    raise RuntimeError("candidate snapshot was not persisted")
+                payload = {
+                    "schema_version": "1.0",
+                    "snapshot_id": snapshot_id,
+                    "product_id": product_id,
+                    "plan_id": str(task["plan_id"]),
+                    "repository_commit": repository_commit,
+                    "tree_digest": tree_digest,
+                    "architecture_binding_id": architecture[0],
+                    "result_binding_ids": bindings,
+                    "snapshot_digest": str(snapshot["snapshot_digest"]),
+                    "created_at": now,
+                    "status": "FROZEN",
+                }
+                path = self.artifacts.write(
+                    "candidate-snapshot.schema.json",
+                    payload,
+                    filename=f"candidate-snapshot-{snapshot_id}.json",
+                )
+                attempt_id = f"attempt-path-{sha256_text(snapshot_id)[:20]}"
+                self.state._connection.execute(
+                    """INSERT OR IGNORE INTO attempts
+                       (attempt_id, task_id, tier, attempt_kind, prompt_digest,
+                        reason_code, status, semantic_counted, created_at,
+                        completed_at, result_digest)
+                       VALUES (?, ?, 'deterministic', 'initial', ?, NULL,
+                               'completed', 0, ?, ?, ?)""",
+                    (
+                        attempt_id,
+                        str(task["task_id"]),
+                        sha256_text(f"path-governor:{snapshot_id}"),
+                        now,
+                        now,
+                        sha256_file(path),
+                    ),
+                )
+                self.state._connection.execute(
+                    """UPDATE tasks SET status='DONE', graph_status='ACCEPTED',
+                              result_ref=?, result_digest=?, candidate_snapshot_id=?,
+                              updated_at=? WHERE task_id=?""",
+                    (
+                        f"evidence/{path.name}",
+                        sha256_file(path),
+                        snapshot_id,
+                        now,
+                        str(task["task_id"]),
+                    ),
+                )
+                governor.bind_result(
+                    task_id=str(task["task_id"]),
+                    source_task_id=str(task["task_id"]),
+                    source_attempt_id=attempt_id,
+                    result_ref=f"evidence/{path.name}",
+                    result_digest=sha256_file(path),
+                    output_schema="candidate-snapshot.schema.json",
+                    candidate_digest=str(snapshot["snapshot_digest"]),
+                    accepted_at=now,
+                )
+                self.state._connection.execute(
+                    """UPDATE tasks SET candidate_snapshot_id=?, updated_at=?
+                        WHERE task_id IN (
+                            SELECT to_task_id FROM task_edges
+                             WHERE plan_id=? AND from_task_id=? AND required=1
+                        )""",
+                    (snapshot_id, now, str(task["plan_id"]), str(task["task_id"])),
+                )
+                from .autonomy import AutonomyStore
+
+                AutonomyStore(self.state)._recompute_frontier(
+                    self.state._connection, product_id
+                )
+                self.state._record_event(
+                    product_id,
+                    str(task["task_id"]),
+                    "candidate_snapshot_frozen",
+                    {
+                        "snapshot_id": snapshot_id,
+                        "binding_count": len(bindings),
+                        "repository_commit": repository_commit,
+                    },
+                )
+                self.state._connection.commit()
+                return True
+            except Exception:
+                self.state._connection.rollback()
+                raise
+
     def reconcile_product(self, product: dict[str, Any]) -> str:
         product_id = str(product["product_id"])
         status = str(product["status"])
         if status in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
             return "ignored"
+        if self._materialize_candidate_snapshot(product_id):
+            return "successor"
         plans = self.state.list_plans(product_id)
         active_v2 = any(
             str(plan.get("status")) == "ACTIVE" and int(plan.get("revision") or 0) >= 1

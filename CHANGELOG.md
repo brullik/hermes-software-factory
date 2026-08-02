@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.3.0 - 2026-08-02
+
+- Add the deterministic Path Governor as the sole owner of trajectory,
+  accepted-result reuse, root-problem budgets, and fail-safe loop termination.
+- Replace runtime traversal of `supersedes_task_id` with immutable O(1) Result
+  Bindings; retain an exact-cycle, 10,000-node legacy reader only for
+  transactional migration.
+- Add one controller-owned Candidate Snapshot fan-in between accepted
+  implementation work and Test/Security/Release review, preventing direct
+  dependency expansion across dozens of historical Builder tasks.
+- Add migration 17 and the idempotent `factory path-migrate` recovery command
+  for paused production products, including fresh Test creation without a new
+  plan revision.
+- Add bounded Plan Delta memberships, stable root-problem signatures, one-shot
+  read-only Path Arbiter validation, monotonic progress vectors, and exact
+  deterministic/arbiter/execution budgets.
+- Add LOOP-P0-001 through LOOP-P0-014 and LOOP-P1-001 through LOOP-P1-002,
+  covering 10,000-node lineage, depth 147, literal cycles, 500 deltas,
+  Candidate Snapshot fan-in, crash replay, bounded storage, and service E2E.
+
 ## 2.2.37 - 2026-08-02
 
 - Promote controller-observed `violating_paths` into the typed scope-recovery

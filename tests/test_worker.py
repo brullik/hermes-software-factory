@@ -22,9 +22,10 @@ from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
 from factory.hermes_stdin import _invoke_hermes, read_stdin_prompt
 from factory.intake import IntakeService
+from factory.path_governor import ResultLineageIdentityError
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
-from factory.providers import ExternalBlocker, ModelSelection
+from factory.providers import ModelSelection
 from factory.quality import QualityGateRun
 from factory.reconciler import PipelineReconciler
 from factory.state import StateStore
@@ -1169,9 +1170,21 @@ class WorkerTests(unittest.TestCase):
                     "UPDATE tasks SET result_digest=? WHERE task_id=?",
                     ("f" * 64, reused_id),
                 )
+            # supersedes_task_id and the reused task's legacy attempt digest are
+            # audit-only after direct binding materialisation.
+            rebound_path, _, _ = worker._accepted_task_artifacts(reused_id)
+            self.assertEqual(rebound_path, output_path)
+            with state._lock, state._connection:
+                state._connection.execute(
+                    """UPDATE result_bindings SET result_digest=?
+                        WHERE binding_id=(
+                            SELECT result_binding_id FROM tasks WHERE task_id=?
+                        )""",
+                    ("f" * 64, reused_id),
+                )
             with self.assertRaisesRegex(
-                ExternalBlocker,
-                "reuse lineage is invalid",
+                ResultLineageIdentityError,
+                "artifact conflicts",
             ):
                 worker._accepted_task_artifacts(reused_id)
             state.close()
@@ -1258,11 +1271,14 @@ class WorkerTests(unittest.TestCase):
                 supersedes_task_id=failed_id,
                 graph_status="ACCEPTED",
             )
-            with self.assertRaisesRegex(
-                ExternalBlocker,
-                "replacement lineage is ambiguous",
-            ):
-                worker._accepted_task_artifacts(failed_id)
+            # Once the controller materialises a direct binding, later audit
+            # lineage branches cannot make runtime result lookup ambiguous.
+            stable_path, stable_output, stable_attempt = worker._accepted_task_artifacts(
+                failed_id
+            )
+            self.assertEqual(stable_path, output_path)
+            self.assertEqual(stable_output, output)
+            self.assertEqual(stable_attempt, attempt)
             state.close()
 
     def test_incident_recovery_containment_requires_director_replan(self) -> None:

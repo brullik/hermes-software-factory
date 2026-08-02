@@ -1230,6 +1230,7 @@ class StateStore:
                          ON scheduling.product_id=tasks.product_id
                        WHERE tasks.graph_status='READY'
                          AND tasks.status='PENDING'
+                         AND COALESCE(tasks.role, '')!='path-governor'
                          AND plans.status='ACTIVE'
                          AND products.status NOT IN ('CANCELLED', 'COMPLETED', 'FAILED_SAFE', 'PAUSED')
                        ORDER BY COALESCE(scheduling.last_claimed_sequence, 0),

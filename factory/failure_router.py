@@ -11,6 +11,7 @@ from .artifacts import ArtifactStore
 from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
+from .path_governor import failure_owner, stable_root_problem_signature
 from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
 from .repair_brief import repair_requirements
@@ -123,16 +124,17 @@ class FailureRouter:
                 )
             except (TypeError, json.JSONDecodeError):
                 failed_gates = []
-            return sha256_text(
-                stable_json(
-                    [
-                        item.get("failure_class"),
-                        item.get("reason_code"),
-                        item.get("safe_message"),
-                        item.get("exception_type"),
-                        failed_gates,
-                    ]
-                )
+            source_task = self.state.get_task(str(item.get("task_id") or "")) or failed
+            return stable_root_problem_signature(
+                {
+                    "product_id": failed["product_id"],
+                    "failure_class": item.get("failure_class"),
+                    "reason_code": item.get("reason_code"),
+                    "semantic_node_key": source_task.get("semantic_node_key"),
+                    "lifecycle_stage": source_task.get("lifecycle_stage"),
+                    "failed_gate_ids": failed_gates,
+                    "required_paths": _required_paths,
+                }
             )
 
         expected_signature = signature(failure)
@@ -899,14 +901,32 @@ class FailureRouter:
             controller_handoff = (
                 str(failed.get("role") or "") == "incident-recovery" and reason == "needs_replan"
             )
+            root_problem_signature = stable_root_problem_signature(
+                {
+                    "product_id": failed["product_id"],
+                    "failure_class": failure["failure_class"],
+                    "reason_code": reason,
+                    "semantic_node_key": failed.get("semantic_node_key"),
+                    "lifecycle_stage": failed.get("lifecycle_stage"),
+                    "failed_gate_ids": json.loads(
+                        str(failure.get("failed_gate_ids_json") or "[]")
+                    ),
+                    "required_paths": required_scope_paths,
+                }
+            )
+            self.state._connection.execute(
+                "UPDATE tasks SET root_problem_signature=? WHERE task_id=?",
+                (root_problem_signature, str(failed["task_id"])),
+            )
             controller_fault = (
                 not invalid_plan_output_schema
                 and not controller_handoff
                 and controller_recovery_depth < _MAX_CONTROLLER_RECOVERY_DEPTH
-                and (
-                    str(failure["failure_class"]) in {"controller", "transient"}
-                    or reason.startswith(_CONTROLLER_PREFIXES)
+                and failure_owner(
+                    failure_class=str(failure["failure_class"]),
+                    reason_code=reason,
                 )
+                == "controller"
             )
             hypothesis = None
             hypothesis_id: str | None = None

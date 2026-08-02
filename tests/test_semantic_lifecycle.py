@@ -630,7 +630,7 @@ def test_AUT_P0_039_compilation_is_read_only_until_atomic_plan_ingestion(
         plan_digest=prepared.plan["plan_digest"],
         created_by_task_id=creator_id,
     )
-    assert len(task_ids) == 9
+    assert len(task_ids) == 10
     assert state.get_product(product_id)["active_plan_revision"] == 1
     architecture = next(
         task
