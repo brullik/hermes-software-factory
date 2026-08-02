@@ -15,6 +15,7 @@ _REPOSITORY_PATH = re.compile(
     r"([A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)+)"
     r"(?![A-Za-z0-9_.@+/-])"
 )
+_REPOSITORY_PATH_PART = re.compile(r"[A-Za-z0-9_.@+-]+")
 _ROOT_PATH_NAMES = {
     "Dockerfile",
     "LICENSE",
@@ -46,8 +47,12 @@ def _safe_exact_repository_path(value: object) -> str | None:
     path = PurePosixPath(candidate)
     if path.is_absolute() or any(part in {"", ".", ".."} or len(part) > 128 for part in path.parts):
         return None
+    if any(_REPOSITORY_PATH_PART.fullmatch(part) is None for part in path.parts):
+        return None
     name = path.name
-    if "/" not in candidate or ("." not in name and name not in _ROOT_PATH_NAMES):
+    if "/" not in candidate and "." not in name and name not in _ROOT_PATH_NAMES:
+        return None
+    if candidate.endswith("/") or ("." not in name and name not in _ROOT_PATH_NAMES):
         return None
     return candidate
 
@@ -187,6 +192,11 @@ def derive_scope_required_paths(actual: Mapping[str, Any]) -> tuple[str, ...]:
     raw_required = actual.get("scope_required_paths")
     if isinstance(raw_required, list):
         for value in raw_required[:_MAX_REQUIRED_PATHS]:
+            include(value)
+
+    raw_violating = actual.get("violating_paths")
+    if isinstance(raw_violating, list):
+        for value in raw_violating[:_MAX_REQUIRED_PATHS]:
             include(value)
 
     raw_outside = actual.get("outside_scope_coordinates")

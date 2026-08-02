@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.37 - 2026-08-02
+
+- Promote controller-observed `violating_paths` into the typed scope-recovery
+  evidence so a fresh Builder owns the exact out-of-scope file instead of
+  inheriting and guessing around an untrusted workspace side effect.
+- Preserve the failed task's bounded `allowed_paths` and emit explicit
+  `scope_reassessment_required`, `outside_scope_coordinates`, and
+  `scope_required_paths` fields for deterministic Replanner recovery.
+- Accept only exact safe repository file coordinates; reject absolute paths,
+  parent traversal, path globs, and directory-only values fail-closed.
+
 ## 2.2.36 - 2026-07-31
 
 - Build deterministic replan proposals from the current executable frontier,

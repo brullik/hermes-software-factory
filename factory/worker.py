@@ -4364,6 +4364,17 @@ class AgentWorker:
             )
             if scope_violations:
                 violating_paths = sorted(scope_violations)[:20]
+                blocked_allowed_paths = [
+                    str(path) for path in spec.task_contract["allowed_paths"]
+                ]
+                scope_required_paths = list(
+                    derive_scope_required_paths(
+                        {
+                            "blocked_allowed_paths": blocked_allowed_paths,
+                            "violating_paths": violating_paths,
+                        }
+                    )
+                )
                 route_action = self._route(
                     spec, tier, success=False, reason_code="scope_violation", attempt=attempt
                 )
@@ -4401,15 +4412,17 @@ class AgentWorker:
                         evidence_ref=str(result_path),
                         attempt_id=attempt.attempt_id,
                         expected={
-                            "allowed_paths": [
-                                str(path) for path in spec.task_contract["allowed_paths"]
-                            ],
+                            "allowed_paths": blocked_allowed_paths,
                             "forbidden_paths": [
                                 str(path) for path in spec.task_contract["forbidden_paths"]
                             ],
                         },
                         actual={
                             "violating_paths": violating_paths,
+                            "scope_reassessment_required": bool(scope_required_paths),
+                            "blocked_allowed_paths": blocked_allowed_paths,
+                            "outside_scope_coordinates": scope_required_paths,
+                            "scope_required_paths": scope_required_paths,
                             "required_fixes": [
                                 (
                                     f"Revert {path} or return needs_replan with "

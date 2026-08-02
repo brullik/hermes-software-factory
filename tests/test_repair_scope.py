@@ -34,6 +34,26 @@ def test_scope_required_paths_recover_only_exact_out_of_scope_files() -> None:
     )
 
 
+def test_scope_required_paths_promote_only_safe_exact_violating_files() -> None:
+    actual = {
+        "blocked_allowed_paths": ["src/**"],
+        "violating_paths": [
+            "src/already_allowed.py",
+            "tests/unit/test_runtime_acceptance_contract.py",
+            "forbidden.txt",
+            "../escape.py",
+            "/absolute.py",
+            "tests/generated/",
+            "tests/*.py",
+        ],
+    }
+
+    assert derive_scope_required_paths(actual) == (
+        "tests/unit/test_runtime_acceptance_contract.py",
+        "forbidden.txt",
+    )
+
+
 def test_failing_test_maps_only_to_one_uniquely_imported_local_source(
     tmp_path,
 ) -> None:
