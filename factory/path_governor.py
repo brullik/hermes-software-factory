@@ -736,6 +736,56 @@ class PathGovernor:
             )
         return snapshot_id
 
+    def candidate_membership_bindings(
+        self,
+        *,
+        product_id: str,
+        plan_id: str,
+    ) -> tuple[str, tuple[str, ...]]:
+        """Return the authoritative architecture and implementation bindings.
+
+        Plan Delta intentionally does not clone accepted tasks into each revision.
+        Candidate construction must therefore read active ``BOUND`` memberships,
+        never historical task rows or supersession edges.
+        """
+
+        rows = self.connection.execute(
+            """SELECT node.lifecycle_stage, membership.binding_id
+                 FROM plan_memberships AS membership
+                 JOIN semantic_nodes AS node
+                   ON node.semantic_node_id=membership.semantic_node_id
+                 JOIN result_bindings AS binding
+                   ON binding.binding_id=membership.binding_id
+                WHERE membership.plan_id=?
+                  AND membership.membership_state='BOUND'
+                  AND membership.binding_id IS NOT NULL
+                  AND membership.execution_task_id IS NULL
+                  AND node.product_id=? AND node.status='ACTIVE'
+                  AND binding.product_id=? AND binding.status='ACTIVE'
+                  AND node.lifecycle_stage IN
+                      ('architecture-review','implementation-slice')
+                ORDER BY node.lifecycle_stage, node.semantic_node_key,
+                         membership.binding_id""",
+            (plan_id, product_id, product_id),
+        ).fetchall()
+        architecture = tuple(
+            str(row["binding_id"])
+            for row in rows
+            if str(row["lifecycle_stage"]) == "architecture-review"
+        )
+        implementations = tuple(
+            str(row["binding_id"])
+            for row in rows
+            if str(row["lifecycle_stage"]) == "implementation-slice"
+        )
+        if len(architecture) != 1 or not implementations:
+            raise RuntimeError(
+                "candidate snapshot memberships require exactly one active "
+                "architecture binding and at least one implementation binding"
+            )
+        bindings = tuple(sorted({*architecture, *implementations}))
+        return architecture[0], bindings
+
     def candidate_snapshot(self, snapshot_id: str) -> dict[str, Any]:
         snapshot = self.connection.execute(
             "SELECT * FROM candidate_snapshots WHERE snapshot_id=? AND status='FROZEN'",

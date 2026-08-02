@@ -4,7 +4,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from test_worker import make_config
 
+from factory.artifacts import ArtifactStore
 from factory.autonomy import TaskOutcome
 from factory.common import sha256_text
 from factory.path_governor import (
@@ -16,6 +18,7 @@ from factory.path_governor import (
     failure_owner,
     stable_root_problem_signature,
 )
+from factory.reconciler import PipelineReconciler
 from factory.state import StateStore
 
 POLICY_DIGEST = "a" * 64
@@ -317,6 +320,196 @@ def test_LOOP_P0_005_reviews_share_one_candidate_snapshot(tmp_path: Path) -> Non
             "SELECT COUNT(DISTINCT candidate_snapshot_id) FROM tasks "
             "WHERE task_id IN ('T-REVIEW1','T-REVIEW2','T-REVIEW3')"
         ).fetchone()[0] == 1
+    finally:
+        state.close()
+
+
+def test_candidate_memberships_ignore_historical_task_binding_fields(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    try:
+        with state._connection:
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-ARCH0001",
+                supersedes_task_id=None,
+                semantic_key="architecture-review",
+                lifecycle_stage="architecture-review",
+            )
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-SNAPSHOT1",
+                supersedes_task_id=None,
+                semantic_key="candidate-snapshot",
+                lifecycle_stage="candidate-snapshot",
+                graph_status="READY",
+            )
+            state._connection.execute(
+                "UPDATE tasks SET role='independent-reviewer' WHERE task_id='T-ARCH0001'"
+            )
+            state._connection.execute(
+                "UPDATE tasks SET role='path-governor' WHERE task_id='T-SNAPSHOT1'"
+            )
+        _accept_source(state, "T-ARCH0001", "attempt-architecture")
+        _accept_source(state, "T-ROOT0001", "attempt-implementation")
+        architecture = _binding(
+            state,
+            "T-ARCH0001",
+            "attempt-architecture",
+            result_digest="d" * 64,
+        )
+        implementation = _binding(
+            state,
+            "T-ROOT0001",
+            "attempt-implementation",
+            result_digest="e" * 64,
+        )
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        with state._connection:
+            governor.apply_plan_delta(
+                plan_id="PLAN-DELTA-CANDIDATE",
+                preserve_binding_ids=(architecture, implementation),
+                execution_task_ids=("T-SNAPSHOT1",),
+            )
+            state._connection.execute(
+                "UPDATE tasks SET result_binding_id=NULL "
+                "WHERE task_id IN ('T-ARCH0001','T-ROOT0001')"
+            )
+
+        selected_architecture, bindings = governor.candidate_membership_bindings(
+            product_id="product-path-governor",
+            plan_id="PLAN-DELTA-CANDIDATE",
+        )
+
+        assert selected_architecture == architecture
+        assert bindings == tuple(sorted((architecture, implementation)))
+    finally:
+        state.close()
+
+
+def test_candidate_materializer_uses_plan_delta_memberships(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    state = _state(tmp_path)
+    try:
+        with state._connection:
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-ARCH0002",
+                supersedes_task_id=None,
+                semantic_key="architecture-review",
+                lifecycle_stage="architecture-review",
+            )
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-SNAPSHOT2",
+                supersedes_task_id=None,
+                semantic_key="candidate-snapshot",
+                lifecycle_stage="candidate-snapshot",
+                graph_status="READY",
+            )
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-TEST0002",
+                supersedes_task_id=None,
+                semantic_key="test",
+                lifecycle_stage="test",
+                graph_status="BLOCKED_DEPENDENCY",
+            )
+            state._connection.execute(
+                """UPDATE tasks SET role='independent-reviewer'
+                    WHERE task_id='T-ARCH0002'"""
+            )
+            state._connection.execute(
+                """UPDATE tasks SET role='path-governor',
+                          output_schema='candidate-snapshot.schema.json',
+                          plan_id='PLAN-DELTA-MATERIALIZE',
+                          dependencies_json='[\"T-ARCH0002\",\"T-ROOT0001\"]'
+                    WHERE task_id='T-SNAPSHOT2'"""
+            )
+            state._connection.execute(
+                """UPDATE tasks SET role='test-engineer',
+                          plan_id='PLAN-DELTA-MATERIALIZE',
+                          dependencies_json='[\"T-SNAPSHOT2\"]'
+                    WHERE task_id='T-TEST0002'"""
+            )
+            state._connection.execute(
+                """UPDATE products SET active_plan_id='PLAN-DELTA-MATERIALIZE',
+                          active_plan_revision=2
+                    WHERE product_id='product-path-governor'"""
+            )
+            for source, target in (
+                ("T-ARCH0002", "T-SNAPSHOT2"),
+                ("T-ROOT0001", "T-SNAPSHOT2"),
+                ("T-SNAPSHOT2", "T-TEST0002"),
+            ):
+                state._connection.execute(
+                    """INSERT INTO task_edges
+                       (plan_id, from_task_id, to_task_id, edge_type,
+                        required, created_at)
+                       VALUES ('PLAN-DELTA-MATERIALIZE', ?, ?,
+                               'depends_on', 1, '2026-08-02T00:00:00Z')""",
+                    (source, target),
+                )
+        _accept_source(state, "T-ARCH0002", "attempt-architecture-2")
+        _accept_source(state, "T-ROOT0001", "attempt-implementation-2")
+        architecture = _binding(
+            state,
+            "T-ARCH0002",
+            "attempt-architecture-2",
+            result_digest="f" * 64,
+        )
+        implementation = _binding(
+            state,
+            "T-ROOT0001",
+            "attempt-implementation-2",
+            result_digest="1" * 64,
+        )
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        with state._connection:
+            governor.apply_plan_delta(
+                plan_id="PLAN-DELTA-MATERIALIZE",
+                preserve_binding_ids=(architecture, implementation),
+                execution_task_ids=("T-SNAPSHOT2", "T-TEST0002"),
+            )
+            state._connection.execute(
+                "UPDATE tasks SET result_binding_id=NULL "
+                "WHERE task_id IN ('T-ARCH0002','T-ROOT0001')"
+            )
+        monkeypatch.setattr(
+            "factory.reconciler.git_candidate",
+            lambda _config, _product_id: (
+                "2" * 40,
+                "sha256:" + "3" * 64,
+            ),
+        )
+
+        materialized = PipelineReconciler(
+            config,
+            state,
+            ArtifactStore(config),
+        )._materialize_candidate_snapshot("product-path-governor")
+
+        candidate = state.get_task("T-SNAPSHOT2")
+        downstream = state.get_task("T-TEST0002")
+        assert materialized
+        assert candidate is not None and candidate["graph_status"] == "ACCEPTED"
+        assert candidate["result_binding_id"]
+        assert candidate["candidate_snapshot_id"]
+        assert downstream is not None
+        assert downstream["candidate_snapshot_id"] == candidate["candidate_snapshot_id"]
+        assert state._connection.execute(
+            "SELECT COUNT(*) FROM candidate_snapshot_items WHERE snapshot_id=?",
+            (candidate["candidate_snapshot_id"],),
+        ).fetchone()[0] == 2
     finally:
         state.close()
 

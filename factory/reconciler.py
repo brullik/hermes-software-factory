@@ -1233,33 +1233,6 @@ class PipelineReconciler:
         if task_row is None:
             return False
         task = dict(task_row)
-        incoming = self.state._connection.execute(
-            """SELECT upstream.lifecycle_stage, upstream.result_binding_id,
-                      upstream.graph_status
-                 FROM task_edges AS edge
-                 JOIN tasks AS upstream ON upstream.task_id=edge.from_task_id
-                WHERE edge.plan_id=? AND edge.to_task_id=? AND edge.required=1
-                ORDER BY upstream.lifecycle_stage, upstream.task_id""",
-            (str(task["plan_id"]), str(task["task_id"])),
-        ).fetchall()
-        if not incoming or any(
-            str(row["graph_status"]) not in {"ACCEPTED", "SUPERSEDED"}
-            or not str(row["result_binding_id"] or "")
-            for row in incoming
-        ):
-            return False
-        architecture = [
-            str(row["result_binding_id"])
-            for row in incoming
-            if str(row["lifecycle_stage"]) == "architecture-review"
-        ]
-        bindings = sorted({str(row["result_binding_id"]) for row in incoming})
-        if len(architecture) != 1 or not any(
-            str(row["lifecycle_stage"]) == "implementation-slice" for row in incoming
-        ):
-            raise RuntimeError(
-                "candidate snapshot fan-in requires one architecture and implementation"
-            )
         repository_commit, tree_digest = git_candidate(self.config, product_id)
         now = utc_now()
         with self.state._lock:
@@ -1269,12 +1242,18 @@ class PipelineReconciler:
                     self.state._connection,
                     policy_digest=policy_digest(self.config),
                 )
+                architecture_binding, bindings = (
+                    governor.candidate_membership_bindings(
+                        product_id=product_id,
+                        plan_id=str(task["plan_id"]),
+                    )
+                )
                 snapshot_id = governor.create_candidate_snapshot(
                     product_id=product_id,
                     plan_id=str(task["plan_id"]),
                     repository_commit=repository_commit,
                     tree_digest=tree_digest,
-                    architecture_binding_id=architecture[0],
+                    architecture_binding_id=architecture_binding,
                     result_binding_ids=bindings,
                     created_at=now,
                 )
@@ -1291,8 +1270,8 @@ class PipelineReconciler:
                     "plan_id": str(task["plan_id"]),
                     "repository_commit": repository_commit,
                     "tree_digest": tree_digest,
-                    "architecture_binding_id": architecture[0],
-                    "result_binding_ids": bindings,
+                    "architecture_binding_id": architecture_binding,
+                    "result_binding_ids": list(bindings),
                     "snapshot_digest": str(snapshot["snapshot_digest"]),
                     "created_at": now,
                     "status": "FROZEN",
