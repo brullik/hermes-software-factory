@@ -207,6 +207,7 @@ class PipelineTests(unittest.TestCase):
                     "target-dependency-audit",
                     "target-license-check",
                     "target-secret-scan",
+                    "target-container-image-scan",
                 ],
             )
             self.assertIn("pyproject.toml", builder["allowed_paths"])

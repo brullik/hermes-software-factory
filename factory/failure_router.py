@@ -493,6 +493,7 @@ class FailureRouter:
                 [
                     "Dockerfile",
                     "docker/**",
+                    "container/**",
                     "compose*.yaml",
                     "compose*.yml",
                     "scripts/**",
@@ -1556,6 +1557,15 @@ class FailureRouter:
             repair_quality_gates: list[str] | None = None
             if suffix == "repair":
                 repair_quality_gates = self._quality_gates(original)
+                if bounded_reviewer_gate_repair and any(
+                    "container" in gate_id.lower() or "image" in gate_id.lower()
+                    for gate_id in self._failure_gate_ids(failure)
+                ):
+                    repair_quality_gates = list(
+                        dict.fromkeys(
+                            [*repair_quality_gates, "target-container-image-scan"]
+                        )
+                    )
                 if reason == "mandatory_gate_failed":
                     repair_quality_gates = list(
                         dict.fromkeys(

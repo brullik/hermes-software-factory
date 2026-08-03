@@ -98,3 +98,13 @@ gates:
     success_exit_codes: [0]
     timeout_seconds: 120
     mandatory: true
+  - id: target-container-image-scan
+    adapter: target_container_image_scan
+    command: controller:target-container-image-scan
+    allowlist_prefixes: ["controller:target-container-image-scan"]
+    scanner_path: /usr/local/bin/osv-scanner
+    scanner_sha256: 15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
+    require_root_owned: true
+    success_exit_codes: [0]
+    timeout_seconds: 900
+    mandatory: true

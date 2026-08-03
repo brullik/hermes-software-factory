@@ -12,7 +12,7 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .autonomy import CAPABILITY_PROFILES
-from .common import sha256_text, stable_json, utc_now
+from .common import sha256_file, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
 from .path_governor import PathGovernor, task_contract_digest
 from .plan_semantics import validate_compiled_plan
@@ -3127,6 +3127,422 @@ def resume_reviewer_revalidation_lineage_failure(
         "recovery_task_id": reviewer_task_id,
         "accepted_repair_task_id": repair_task_id,
         "independent_reviewer_task_id": independent_task_id,
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
+def resume_unverified_container_repair_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Replace a falsely accepted container repair with one controller-gated slot."""
+
+    if not state.maintenance_active():
+        raise ValueError("unverified container repair recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_unverified_container_repair_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.*, task.role, task.capability_profile,
+                  task.stage_key, task.graph_status,
+                  task.status AS task_status, task.root_problem_signature,
+                  task.hypothesis_id AS task_hypothesis_id,
+                  product.status AS product_status
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product
+               ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("unverified container repair failure coordinate is missing")
+    failure = rows[0]
+    try:
+        failed_gate_ids = json.loads(str(failure.get("failed_gate_ids_json") or "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("unverified container repair gates are invalid") from error
+    expected_gates = {
+        "SEC-DEFAULT-TMP-CREDENTIAL-SOURCE",
+        "SEC-CONTAINER-IMAGE-SCAN-NOT-RUN",
+    }
+    safe_message = str(failure.get("safe_message") or "")
+    root_problem_signature = str(failure.get("root_problem_signature") or "")
+    if (
+        str(failure.get("failure_class")) != "semantic"
+        or str(failure.get("reason_code")) != "model_requested_repair"
+        or str(failure.get("status")) != "OPEN"
+        or str(failure.get("role")) != "security-reviewer"
+        or str(failure.get("capability_profile") or "") != "reviewer_readonly"
+        or str(failure.get("stage_key") or "") != "security-review"
+        or str(failure.get("graph_status")) != "FAILED_SEMANTIC"
+        or str(failure.get("task_status")) != "FAILED_SAFE"
+        or str(failure.get("product_status")) != "IMPLEMENTING"
+        or not isinstance(failed_gate_ids, list)
+        or {str(value) for value in failed_gate_ids} != expected_gates
+        or not all(gate_id in safe_message for gate_id in expected_gates)
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+    ):
+        raise ValueError("failure is not the bounded unverified container repair defect")
+    reviewer_task_id = str(failure["task_id"])
+    accepted_repairs = _rows(
+        state,
+        """SELECT task_id,result_ref,result_digest,plan_id
+             FROM tasks
+            WHERE product_id=? AND supersedes_task_id=?
+              AND role='builder' AND stage_key='repair'
+              AND graph_status='ACCEPTED' AND status='DONE'
+            ORDER BY created_at,task_id""",
+        (product_id, reviewer_task_id),
+    )
+    if len(accepted_repairs) != 1:
+        raise ValueError("accepted unverified container repair coordinate is ambiguous")
+    accepted_repair = accepted_repairs[0]
+    result_ref = str(accepted_repair.get("result_ref") or "")
+    result_path = Path(result_ref)
+    if not result_path.is_absolute():
+        result_path = config.evidence_dir / result_path.name
+    evidence_root = config.evidence_dir.resolve()
+    try:
+        result_path = result_path.resolve(strict=True)
+        result_path.relative_to(evidence_root)
+    except (OSError, ValueError) as error:
+        raise ValueError("accepted repair result reference is not local evidence") from error
+    if (
+        result_path.is_symlink()
+        or result_path.parent != evidence_root
+        or sha256_file(result_path) != str(accepted_repair.get("result_digest") or "")
+    ):
+        raise ValueError("accepted repair result evidence binding is invalid")
+    try:
+        attempt_payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("accepted repair result evidence is invalid") from error
+    validation_errors = ArtifactStore(config).validate(
+        "attempt-result.schema.json", attempt_payload
+    )
+    if validation_errors:
+        raise ValueError("accepted repair result does not match its bounded schema")
+    recorded_gates = {
+        str(item.get("gate_id"))
+        for item in attempt_payload.get("test_results", [])
+        if isinstance(item, Mapping) and item.get("status") == "PASS"
+    }
+    if (
+        str(attempt_payload.get("task_id") or "") != str(accepted_repair["task_id"])
+        or str(attempt_payload.get("status") or "") != "completed"
+        or "target-container-image-scan" in recorded_gates
+    ):
+        raise ValueError("accepted repair is not missing the controller image gate")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used,arbiter_calls_used,
+                  execution_attempts_used,status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise ValueError("product problem budget changed before container repair recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("unverified container repair recovery requires a drained controller")
+    failed = state.get_task(reviewer_task_id)
+    if failed is None:
+        raise ValueError("reviewer task disappeared before container repair recovery")
+    hypothesis_id = str(failed.get("hypothesis_id") or "")
+    if not hypothesis_id:
+        raise ValueError("reviewer failure hypothesis is missing")
+    hypothesis_rows = _rows(
+        state,
+        """SELECT parent_hypothesis_id FROM hypotheses
+            WHERE hypothesis_id=? AND failure_id=? AND status='ACTIVE'""",
+        (hypothesis_id, failure_id),
+    )
+    if len(hypothesis_rows) != 1:
+        raise ValueError("reviewer failure hypothesis is not active")
+
+    from .failure_router import FailureRouter
+
+    router = FailureRouter(config, state, ArtifactStore(config))
+    allowed_paths = router._reviewer_gate_repair_paths(list(expected_gates))
+    acceptance = router._reviewer_gate_repair_acceptance(list(expected_gates))
+    original = router._contract(failed)
+    quality_gates = list(
+        dict.fromkeys(
+            [*router._quality_gates(original), "target-container-image-scan"]
+        )
+    )
+    required_capabilities = list(
+        dict.fromkeys(
+            [
+                *router._lineage_required_capabilities(failed, "builder_workspace"),
+                "toolchain.container_builder",
+                "toolchain.scanners",
+            ]
+        )
+    )
+    contract, contract_path = router._write_contract(
+        failed=failed,
+        failure=failure,
+        hypothesis_id=hypothesis_id,
+        role="builder",
+        output_schema="attempt-result.schema.json",
+        capability_profile="builder_workspace",
+        objective=(
+            "Repair every fresh Security Reviewer finding, remove the temporary-directory "
+            "credential-source fallback, and pass the controller-owned immutable image scan."
+        ),
+        allowed_paths=allowed_paths,
+        task_revision=int(failed.get("task_revision") or 1) + 1,
+        node_suffix="controller-verified-repair",
+        required_capabilities=required_capabilities,
+        acceptance=acceptance,
+        quality_gates=quality_gates,
+        model_floor="terra",
+    )
+    repair_path = router._write_repair_brief(
+        failed=failed,
+        failure=failure,
+        hypothesis_id=hypothesis_id,
+        parent_hypothesis_id=(
+            str(hypothesis_rows[0]["parent_hypothesis_id"])
+            if hypothesis_rows[0].get("parent_hypothesis_id")
+            else None
+        ),
+        repair_task_id=str(contract["task_id"]),
+        allowed_paths=allowed_paths,
+        acceptance=acceptance,
+    )
+    repair_ref = f"evidence/{repair_path.name}"
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status,reviewer.status,reviewer.graph_status,
+                          reviewer.failure_id,product.status
+                     FROM failures AS failure
+                     JOIN tasks AS reviewer ON reviewer.task_id=failure.task_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "FAILED_SAFE",
+                "FAILED_SEMANTIC",
+                failure_id,
+                "IMPLEMENTING",
+            ):
+                raise ValueError("unverified container repair state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used,arbiter_calls_used,
+                          execution_attempts_used,status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 2, "ACTIVE"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                """INSERT INTO tasks
+                   (task_id,product_id,title,role,output_schema,contract_ref,
+                    stage_key,cycle,priority,status,dependencies_json,
+                    conflict_keys_json,created_at,updated_at,root_task_id,
+                    parent_task_id,source_task_id,plan_id,plan_node_id,
+                    task_revision,root_context_ref,active_context_ref,failure_id,
+                    hypothesis_id,capability_profile,idempotency_key,
+                    supersedes_task_id,graph_status,root_problem_signature,
+                    required_capabilities_json,mandatory,critical_path_rank,
+                    repair_context_ref,next_tier,next_attempt_kind)
+                   VALUES (?,?,?,?,?,?, 'repair',0,?,'PENDING','[]',?,?,?,?,
+                           ?,?,?,?,?,?,?,?,?,?,?,?,'READY',?,?,1,0,?,'terra','repair')""",
+                (
+                    str(contract["task_id"]),
+                    product_id,
+                    str(contract["title"]),
+                    str(contract["role"]),
+                    str(contract["output_schema"]),
+                    f"evidence/{contract_path.name}",
+                    int(contract["priority"]),
+                    stable_json(contract["conflict_keys"]),
+                    now,
+                    now,
+                    str(contract["root_task_id"]),
+                    str(contract["parent_task_id"]),
+                    str(contract["source_task_id"]),
+                    str(contract["plan_id"]),
+                    str(contract["plan_node_id"]),
+                    int(contract["task_revision"]),
+                    str(contract["root_context_ref"]),
+                    str(contract["active_context_ref"]),
+                    failure_id,
+                    hypothesis_id,
+                    str(contract["capability_profile"]),
+                    str(contract["idempotency_key"]),
+                    str(contract["supersedes_task_id"]),
+                    root_problem_signature,
+                    stable_json(contract["required_capabilities"]),
+                    repair_ref,
+                ),
+            )
+            state._connection.execute(
+                """UPDATE failures SET status='ROUTED',last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='OPEN'""",
+                (now, failure_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE hypotheses SET attempts_used=attempts_used+1
+                    WHERE hypothesis_id=? AND failure_id=? AND status='ACTIVE'""",
+                (hypothesis_id, failure_id),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING',graph_status='BLOCKED_DEPENDENCY',
+                          result_ref=NULL,result_digest=NULL,result_binding_id=NULL,
+                          lease_owner=NULL,lease_until=NULL,lease_token=NULL,
+                          heartbeat_at=NULL,available_at=NULL,
+                          terminal_reason=NULL,terminal_detail=NULL,
+                          failure_kind=NULL,blocked_reason=NULL,blocked_ref=NULL,
+                          updated_at=?
+                    WHERE task_id=? AND product_id=?""",
+                (now, reviewer_task_id, product_id),
+            )
+            state._connection.execute(
+                """INSERT INTO task_edges
+                   (plan_id,from_task_id,to_task_id,edge_type,required,created_at)
+                   VALUES (?, ?, ?, 'revalidates', 1, ?)""",
+                (
+                    str(contract["plan_id"]),
+                    str(contract["task_id"]),
+                    reviewer_task_id,
+                    now,
+                ),
+            )
+            incident_id = "incident-" + sha256_text(
+                f"{failure_id}:unverified-container-repair"
+            )[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id,product_id,task_id,reason_code,evidence_ref,
+                    status,created_at,resolved_at)
+                   VALUES (?, ?, ?,
+                           'controller_unverified_container_repair_acceptance',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    str(accepted_repair["task_id"]),
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest,product_id,recovery_task_id,status,applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, str(contract["task_id"]), now),
+            )
+            state._record_event(
+                product_id,
+                str(contract["task_id"]),
+                "controller_unverified_container_repair_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "invalid_accepted_repair_task_id": str(
+                        accepted_repair["task_id"]
+                    ),
+                    "replacement_repair_task_id": str(contract["task_id"]),
+                    "reviewer_task_id": reviewer_task_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "required_gate": "target-container-image-scan",
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": str(contract["task_id"]),
+        "reviewer_task_id": reviewer_task_id,
+        "invalid_accepted_repair_task_id": str(accepted_repair["task_id"]),
+        "repair_context_ref": repair_ref,
         "root_problem_signature": root_problem_signature,
         "correction_digest": correction_digest,
         "product_budget_counters": {

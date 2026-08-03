@@ -257,6 +257,7 @@ class PlanCompiler:
                 "target-dependency-audit",
                 "target-license-check",
                 "target-secret-scan",
+                "target-container-image-scan",
             ]
         else:
             implementation = [

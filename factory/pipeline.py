@@ -372,6 +372,7 @@ class PipelineCoordinator:
                 "target-dependency-audit",
                 "target-license-check",
                 "target-secret-scan",
+                "target-container-image-scan",
             )
             if external_repository
             else ("secret-scan",)

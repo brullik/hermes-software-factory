@@ -508,6 +508,121 @@ class QualityGateTests(unittest.TestCase):
         self.assertIn("GPL-3.0-only", result["summary"])
         self.assertIn("policy_denied_licenses=", result["summary"])
 
+    def test_target_container_image_scan_builds_and_scans_exact_digest(self) -> None:
+        subject_sha = "6" * 64
+        image_digest = "sha256:" + ("7" * 64)
+        image_ref = f"localhost/hermes-quality-{subject_sha[:16]}:scan"
+        immutable_ref = f"{image_ref}@{image_digest}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            verifier = root / "scripts" / "image_security_verify.py"
+            verifier.parent.mkdir(parents=True)
+            verifier.write_text("# controller test fixture\n", encoding="utf-8")
+            containerfile = root / "container" / "Containerfile"
+            containerfile.parent.mkdir(parents=True)
+            containerfile.write_text("FROM scratch\n", encoding="utf-8")
+            scanner = root / "osv-scanner"
+            scanner.write_bytes(b"verified-image-scanner")
+            gate = {
+                "id": "target-container-image-scan",
+                "adapter": "target_container_image_scan",
+                "command": "controller:target-container-image-scan",
+                "allowlist_prefixes": ["controller:target-container-image-scan"],
+                "scanner_path": str(scanner),
+                "scanner_sha256": hashlib.sha256(scanner.read_bytes()).hexdigest(),
+                "require_root_owned": False,
+                "timeout_seconds": 60,
+                "mandatory": True,
+            }
+            calls: list[list[str]] = []
+
+            def image_runner(
+                args: list[str],
+                **kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                if "build" in args:
+                    output = Path(args[args.index("--output") + 1])
+                    output.write_text(
+                        json.dumps(
+                            {
+                                "status": "pass",
+                                "subject_sha": subject_sha,
+                                "image_ref": image_ref,
+                                "image_digest": image_digest,
+                                "immutable_image_ref": immutable_ref,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                elif "scan" in args:
+                    output = Path(args[args.index("--output") + 1])
+                    output.write_text(
+                        json.dumps(
+                            {
+                                "status": "pass",
+                                "subject_sha": subject_sha,
+                                "image_ref": immutable_ref,
+                                "image_digest": image_digest,
+                                "scanner": str(scanner.resolve()),
+                                "evidence_valid": True,
+                                "scanner_exit_code": 0,
+                                "blocking_findings": 0,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                )
+
+            with patch(
+                "scripts.quality_gate.subprocess.run",
+                side_effect=image_runner,
+            ):
+                result = run_gate(
+                    gate,
+                    root,
+                    subject_sha,
+                    python_executable="target-python",
+                )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIn(f"image_digest={image_digest}", result["summary"])
+        self.assertIn("scanner_evidence_sha256=", result["summary"])
+        self.assertIn("image_cleanup=pass", result["summary"])
+        self.assertEqual(len(calls), 3)
+        self.assertIn("build", calls[0])
+        self.assertIn("scan", calls[1])
+        self.assertEqual(calls[2][:4], ["podman", "image", "rm", "--force"])
+
+    def test_target_container_image_scan_is_not_applicable_without_container(self) -> None:
+        gate = {
+            "id": "target-container-image-scan",
+            "adapter": "target_container_image_scan",
+            "command": "controller:target-container-image-scan",
+            "allowlist_prefixes": ["controller:target-container-image-scan"],
+            "mandatory": True,
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("scripts.quality_gate.subprocess.run") as runner,
+        ):
+            result = run_gate(
+                gate,
+                Path(directory),
+                "8" * 64,
+                python_executable="target-python",
+            )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertIn("container_image_scan=not_applicable", result["summary"])
+        runner.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -107,6 +107,7 @@ CANONICAL_QUALITY_GATE_IDS = frozenset(
         "target-dependency-audit",
         "target-license-check",
         "target-secret-scan",
+        "target-container-image-scan",
     }
 )
 

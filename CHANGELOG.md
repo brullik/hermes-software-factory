@@ -33,6 +33,12 @@
   Preserve the downstream reviewer dependency and add an idempotent,
   maintenance-fenced recovery for the historical replacement-lineage defect
   without changing the Path Governor problem budget.
+- Make immutable container-image scanning a controller-owned mandatory gate for
+  external-repository security review. The gate builds the exact candidate,
+  verifies digest/subject binding, runs the pinned scanner, records actionable
+  finding coordinates, and cleans up the image. Container repairs inherit
+  `container/**` scope, and a bounded recovery replaces historical provider-only
+  completion evidence while preserving the `1:1:2` Path Governor budget.
 
 ## 2.3.10 - 2026-08-03
 
