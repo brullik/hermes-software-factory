@@ -18,6 +18,7 @@ profiles:
   - product-analyst
   - solution-architect
   - task-specifier
+  - replanner
   - product-selector
   model_alias: economy
   persistent: false
@@ -34,6 +35,7 @@ profiles:
   - product-analyst
   - solution-architect
   - task-specifier
+  - replanner
   model_alias: standard
   persistent: false
   tools:
@@ -47,6 +49,8 @@ profiles:
   role_prompts:
   - product-director
   - solution-architect
+  - replanner
+  - path-arbiter
   model_alias: expert
   persistent: false
   tools:

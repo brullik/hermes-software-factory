@@ -14,6 +14,7 @@ from .artifacts import ArtifactStore, artifact_metadata
 from .autonomy import CAPABILITY_PROFILES
 from .common import new_id, sha256_text
 from .config import FactoryConfig
+from .failure_router import FailureRouter
 from .plan_compiler import CompileContext, PlanCompiler
 from .plan_semantics import PlanContractViolation
 from .policy import policy_digest
@@ -1141,11 +1142,20 @@ class PipelineCoordinator:
         successful_statuses = {"completed", "accepted"}
         if role == "incident-recovery":
             successful_statuses.add("recovered")
+        if role == "path-arbiter":
+            successful_statuses.add("proposed")
         if output.get("status") not in successful_statuses:
             return PreparedPipelineOutcome()
         if role == "replanner":
             plan = self._compile_proposal(task, output, output_path)
             return PreparedPipelineOutcome("IMPLEMENTING", plan=plan)
+        if role == "path-arbiter":
+            successor = FailureRouter(
+                self.config,
+                self.state,
+                self.artifacts,
+            ).prepare_replanner_after_arbiter(task, output)
+            return PreparedPipelineOutcome("IMPLEMENTING", (successor,))
         if role == "product-director":
             self._write_risk_assessment(product_id, output, f"evidence/{output_path.name}")
             successor = self.prepare_task(product_id, "product-analyst", dependencies=(task_id,))

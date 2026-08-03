@@ -44,11 +44,26 @@ The product must remain `PAUSED` until post-migration invariants pass.
 ## Progress and loop exit
 
 The stable root-problem signature excludes task IDs, hypothesis IDs, attempt
-IDs, and diagnostic wording. Its budget permits one deterministic correction,
-one optional Path Arbiter call, and two evidence-producing executions. A
-decision is accepted only when the progress vector strictly improves or a new
-immutable evidence digest is produced. Exhaustion terminates in `FAILED_SAFE`;
-task count and plan revision are never considered progress.
+IDs, candidate/plan suffixes, and diagnostic wording. Mandatory-gate identity
+is derived from the stable gate coordinates instead of intermediate control
+reason codes. Its durable budget permits one deterministic correction, one
+optional Path Arbiter call, and two evidence-producing executions.
+
+The live Failure Router computes this signature before selecting a recovery,
+persists it on every routed task, consumes the matching `problem_budgets` row,
+and records the decision in `path_decisions`. The read-only arbitration slot is
+executed by the explicit Sol `path-arbiter` role with
+`path-decision-proposal.schema.json`; an accepted `REPLAN_DELTA` recommendation
+creates one bounded Replanner successor, while any repeated or unsafe
+arbitration fails closed. Plan Delta ingestion inherits the same signature and
+transactionally reserves all fresh implementation executions before activating
+the plan; an over-budget delta creates no tasks.
+
+A decision is accepted only when the progress vector strictly improves or a
+new immutable evidence digest is produced. Exhaustion terminates in
+`FAILED_SAFE` without another task; task count and plan revision are never
+considered progress. Controller-owned recovery stays on the incident/arbiter
+path and is never routed to a product role.
 
 ## Production recovery sequence
 
@@ -58,7 +73,7 @@ task count and plan revision are never considered progress.
 4. Validate binding count, literal cycle count, maximum legacy depth, Candidate
    Snapshot count, superseded Test IDs, fresh Test status, and unchanged active
    plan revision.
-5. Deploy the exact merged 2.3.3 commit and package digest.
+5. Deploy the exact merged 2.3.6 commit and package digest.
 6. Run the same dry run against production, apply once, and audit again.
 7. Resume only the selected product and observe it through `COMPLETED`.
 8. Restore the trusted production observation policy, run final backup and

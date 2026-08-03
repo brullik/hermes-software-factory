@@ -13,6 +13,7 @@ import yaml
 from test_autonomy_v2 import (
     FakePrivateRepositoryAdapter,
     FakeRepositoryAdapter,
+    accept_path_arbiter_and_prepare_replanner,
     create_v2_product,
     executable_plan,
     persist_and_ingest_plan,
@@ -497,6 +498,18 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
         )
         replanned = PipelineReconciler(config, state).reconcile_once()
         assert replanned.replanned == 1
+        arbiter = next(
+            task
+            for task in state.list_tasks(product_id)
+            if task["role"] == "path-arbiter"
+            and task["graph_status"] == "READY"
+        )
+        accept_path_arbiter_and_prepare_replanner(
+            config,
+            state,
+            ArtifactStore(config),
+            str(arbiter["task_id"]),
+        )
         replanner = next(
             task
             for task in state.list_tasks(product_id)
@@ -1229,9 +1242,21 @@ def test_AUT_P1_008_two_identical_recoveries_force_diagnosis_reassessment(
             if recovery_number < 2:
                 assert routed_task["role"] == "incident-recovery"
             else:
-                assert routed_task["role"] == "replanner"
-                assert routed_task["stage_key"] == "diagnosis-reassessment"
+                assert routed_task["role"] == "path-arbiter"
+                assert routed_task["stage_key"] == "path-arbiter"
                 assert routed_task["capability_profile"] == "planning_readonly"
+                budget = state._connection.execute(
+                    """SELECT deterministic_actions_used, arbiter_calls_used,
+                              execution_attempts_used, status
+                         FROM problem_budgets
+                        WHERE product_id=? AND root_problem_signature=?""",
+                    (
+                        "product-autonomy",
+                        routed_task["root_problem_signature"],
+                    ),
+                ).fetchone()
+                assert budget is not None
+                assert tuple(budget) == (1, 1, 2, "ACTIVE")
     finally:
         state.close()
 
@@ -1330,10 +1355,18 @@ def test_AUT_P1_008_contained_incident_routes_directly_to_fresh_product_replan(
             "product-autonomy"
         )
         assert len(replans) == 1
-        replan = state.get_task(replans[0])
+        arbiter = state.get_task(replans[0])
+        assert arbiter is not None and arbiter["role"] == "path-arbiter"
+        replan_id = accept_path_arbiter_and_prepare_replanner(
+            config,
+            state,
+            ArtifactStore(config),
+            str(arbiter["task_id"]),
+        )
+        replan = state.get_task(replan_id)
         assert replan is not None
         assert replan["role"] == "replanner"
-        assert replan["stage_key"] == "replan"
+        assert replan["stage_key"] == "replan-after-arbiter"
         assert replan["hypothesis_id"] is None
         contract = json.loads(
             (

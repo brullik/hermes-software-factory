@@ -65,6 +65,7 @@ PLANNING_ONLY_ROLES = {
     "solution-architect",
     "task-specifier",
     "replanner",
+    "path-arbiter",
     "incident-recovery",
     "path-governor",
 }
@@ -76,6 +77,7 @@ CANONICAL_ROLE_OUTPUT_SCHEMAS: dict[str, str] = {
     "solution-architect": "architecture-package.schema.json",
     "task-specifier": "plan-proposal-v1.schema.json",
     "replanner": "plan-proposal-v1.schema.json",
+    "path-arbiter": "path-decision-proposal.schema.json",
     "incident-recovery": "incident-result.schema.json",
     "path-governor": "candidate-snapshot.schema.json",
     "builder": "attempt-result.schema.json",
@@ -198,6 +200,7 @@ _PLANNING_PROFILE_ROLES = {
     "solution-architect",
     "task-specifier",
     "replanner",
+    "path-arbiter",
     "path-governor",
 }
 _TEST_PROFILE_ROLES = {"test-engineer", "product-tester"}
@@ -1128,12 +1131,19 @@ class AutonomyStore:
         if product is None:
             raise KeyError(product_id)
         creator = connection.execute(
-            "SELECT root_task_id FROM tasks WHERE task_id=?", (created_by_task_id,)
+            """SELECT root_task_id, root_problem_signature
+                 FROM tasks WHERE task_id=?""",
+            (created_by_task_id,),
         ).fetchone()
         root_task_id = (
             str(creator[0])
             if creator is not None and creator[0]
             else created_by_task_id
+        )
+        creator_root_problem_signature = (
+            str(creator["root_problem_signature"])
+            if creator is not None and creator["root_problem_signature"]
+            else None
         )
         governor = PathGovernor(
             connection,
@@ -1141,6 +1151,7 @@ class AutonomyStore:
         )
         node_to_task: dict[str, str] = {}
         contracts_by_node: dict[str, dict[str, Any]] = {}
+        recovery_execution_task_ids: list[str] = []
         for rank, node in enumerate(plan["nodes"]):
             node_id = str(node["node_id"])
             contract = dict(node["task_contract"])
@@ -1237,10 +1248,11 @@ class AutonomyStore:
                      consumes_evidence_types_json, produces_evidence_types_json,
                      completion_obligation_ids_json, goal_ids_json,
                      semantic_node_key, production_side_effects,
-                     semantic_node_id, contract_digest, result_binding_id)
+                     semantic_node_id, contract_digest, result_binding_id,
+                     root_problem_signature)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
@@ -1290,9 +1302,16 @@ class AutonomyStore:
                     semantic_identity,
                     semantic_contract_digest,
                     reused_binding_id,
+                    creator_root_problem_signature,
                 ),
             )
             governor.register_execution_membership(task_id)
+            if (
+                creator_root_problem_signature
+                and str(contract.get("lifecycle_stage") or "")
+                == "implementation-slice"
+            ):
+                recovery_execution_task_ids.append(task_id)
             if supersedes_task_id:
                 connection.execute(
                     """INSERT OR IGNORE INTO task_edges
@@ -1355,6 +1374,17 @@ class AutonomyStore:
                 "UPDATE tasks SET dependencies_json=? WHERE task_id=?",
                 (stable_json(dependencies), node_to_task[node_id]),
             )
+        if creator_root_problem_signature and recovery_execution_task_ids:
+            reservation = governor.reserve_execution_slots(
+                product_id=product_id,
+                root_problem_signature=creator_root_problem_signature,
+                count=len(recovery_execution_task_ids),
+                progress=governor.progress_vector(product_id),
+            )
+            if reservation != "CONTINUE":
+                raise ValueError(
+                    "Path Governor execution budget is exhausted for this plan delta"
+                )
         connection.execute(
             """UPDATE products
                SET active_plan_id=?, active_plan_revision=?, updated_at=?
@@ -1539,10 +1569,11 @@ class AutonomyStore:
                 plan_node_id, task_revision, root_context_ref,
                 active_context_ref, failure_id, hypothesis_id,
                 capability_profile, idempotency_key, supersedes_task_id,
-                 graph_status, required_capabilities_json, mandatory,
+                 graph_status, root_problem_signature,
+                 required_capabilities_json, mandatory,
                  critical_path_rank, required_predecessor_digest)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 str(predecessor["product_id"]),
@@ -1579,6 +1610,8 @@ class AutonomyStore:
                 ),
                 successor.get("supersedes_task_id"),
                 graph_status,
+                successor.get("root_problem_signature")
+                or predecessor["root_problem_signature"],
                 stable_json(successor.get("required_capabilities", [])),
                 int(bool(successor.get("mandatory", True))),
                 int(successor.get("critical_path_rank", 0)),

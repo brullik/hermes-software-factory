@@ -1430,7 +1430,7 @@ class PipelineReconciler:
                     str((self.state.get_task(task_id) or {}).get("role") or "")
                     for task_id in routed
                 }
-                if "replanner" in roles:
+                if roles & {"replanner", "path-arbiter"}:
                     return "replanned"
                 if "incident-recovery" in roles:
                     return "incident"

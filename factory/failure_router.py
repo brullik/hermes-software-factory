@@ -11,7 +11,8 @@ from .artifacts import ArtifactStore
 from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
-from .path_governor import failure_owner, stable_root_problem_signature
+from .path_governor import PathGovernor, failure_owner, stable_root_problem_signature
+from .policy import policy_digest
 from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
 from .repair_brief import repair_requirements
@@ -40,7 +41,13 @@ _CONTROLLER_PREFIXES = (
     "repair_requeue_",
 )
 _MAX_CONTROLLER_RECOVERY_DEPTH = 3
-_MAX_REPLANNER_ATTEMPTS_PER_CAUSAL_PROBLEM = 3
+_CONTROL_GATE_IDS = {
+    "model_requested_repair",
+    "needs_replan",
+    "plan_contract_violation",
+    "repeated_hypothesis",
+    "liveness_invariant_violation",
+}
 
 
 class FailureRouter:
@@ -157,14 +164,136 @@ class FailureRouter:
             failure_id = str(item.get("parent_failure_id") or "")
         return count
 
-    def _terminate_replanner_loop(
+    def _stable_causal_problem_signature(
+        self,
+        failure: dict[str, Any],
+        failed: dict[str, Any],
+        *,
+        scope_reassessment_required: bool,
+        required_scope_paths: tuple[str, ...],
+    ) -> str:
+        """Resolve one structural coordinate across task and wording changes."""
+
+        product_id = str(failed["product_id"])
+        inherited_signature = str(failed.get("root_problem_signature") or "")
+        if re.fullmatch(r"[a-f0-9]{64}", inherited_signature):
+            return inherited_signature
+        failures = {
+            str(item["failure_id"]): item
+            for item in self.state.list_failures(product_id)
+        }
+        if scope_reassessment_required:
+            directive = build_scope_recovery_directive(
+                self.config,
+                self.state,
+                list(failures.values()),
+                product_id=product_id,
+                source_failure_id=str(failure["failure_id"]),
+            )
+            return str(directive["root_problem_signature"])
+
+        chosen = failure
+        current = failure
+        seen: set[str] = set()
+        while current and str(current.get("failure_id") or "") not in seen:
+            current_id = str(current.get("failure_id") or "")
+            seen.add(current_id)
+            try:
+                gate_ids = {
+                    str(value)
+                    for value in json.loads(
+                        str(current.get("failed_gate_ids_json") or "[]")
+                    )
+                }
+            except (TypeError, json.JSONDecodeError):
+                gate_ids = set()
+            if gate_ids - _CONTROL_GATE_IDS:
+                chosen = current
+                break
+            parent_id = str(current.get("parent_failure_id") or "")
+            parent = failures.get(parent_id)
+            if parent is None:
+                chosen = current
+                break
+            chosen = parent
+            current = parent
+
+        try:
+            chosen_gates = [
+                str(value)
+                for value in json.loads(
+                    str(chosen.get("failed_gate_ids_json") or "[]")
+                )
+            ]
+        except (TypeError, json.JSONDecodeError):
+            chosen_gates = []
+        source_task = self.state.get_task(str(chosen.get("task_id") or "")) or failed
+        return stable_root_problem_signature(
+            {
+                "product_id": product_id,
+                "failure_class": chosen.get("failure_class"),
+                "reason_code": chosen.get("reason_code"),
+                "semantic_node_key": source_task.get("semantic_node_key"),
+                "lifecycle_stage": source_task.get("lifecycle_stage"),
+                "failed_gate_ids": chosen_gates,
+                "required_paths": required_scope_paths,
+            }
+        )
+
+    def _consume_path_budget(
         self,
         *,
         failed: dict[str, Any],
         failure: dict[str, Any],
-        same_role_problem_count: int,
+        root_problem_signature: str,
+        action_kind: str,
+        action: str,
+        reserve_execution: bool = False,
     ) -> str:
-        """Stop an exhausted control-plane loop without inventing product success."""
+        governor = PathGovernor(
+            self.state._connection,
+            policy_digest=policy_digest(self.config),
+        )
+        progress = governor.progress_vector(str(failed["product_id"]))
+        result = governor.consume_budget(
+            product_id=str(failed["product_id"]),
+            root_problem_signature=root_problem_signature,
+            action_kind=action_kind,
+            progress=progress,
+            evidence_digest=str(failure["fingerprint"]),
+        )
+        if result == "CONTINUE" and reserve_execution:
+            result = governor.reserve_execution_slots(
+                product_id=str(failed["product_id"]),
+                root_problem_signature=root_problem_signature,
+                count=1,
+                progress=progress,
+            )
+        governor.record_decision(
+            product_id=str(failed["product_id"]),
+            root_problem_signature=root_problem_signature,
+            action=action,
+            path_snapshot_digest=governor.path_snapshot_digest(
+                product_id=str(failed["product_id"]),
+                root_problem_signature=root_problem_signature,
+                progress=progress,
+                evidence_digest=str(failure["fingerprint"]),
+            ),
+            progress_before=progress,
+            expected_progress_after=progress,
+            evidence_digest=str(failure["fingerprint"]),
+            status="APPLIED" if result == "CONTINUE" else "FAILED_SAFE",
+        )
+        return result
+
+    def _terminate_path_governor_budget(
+        self,
+        *,
+        failed: dict[str, Any],
+        failure: dict[str, Any],
+        root_problem_signature: str,
+    ) -> str:
+        """Close an exhausted structural problem without creating more work."""
 
         now = str(failure.get("last_seen_at") or failure.get("first_seen_at") or "")
         incident_id = (
@@ -173,8 +302,8 @@ class FailureRouter:
                 stable_json(
                     [
                         failed["product_id"],
-                        failure["failure_id"],
-                        "replanner_problem_budget_exhausted",
+                        root_problem_signature,
+                        "path_governor_problem_budget_exhausted",
                     ]
                 )
             )[:20]
@@ -184,11 +313,17 @@ class FailureRouter:
                 "UPDATE failures SET status='ROUTED', last_seen_at=? WHERE failure_id=?",
                 (now, failure["failure_id"]),
             )
+            if failed.get("hypothesis_id"):
+                self.state._connection.execute(
+                    """UPDATE hypotheses SET status='EXHAUSTED', closed_at=?
+                        WHERE hypothesis_id=? AND status='ACTIVE'""",
+                    (now, failed["hypothesis_id"]),
+                )
             self.state._connection.execute(
                 """INSERT OR IGNORE INTO controller_incidents
                    (incident_id, product_id, task_id, reason_code,
                     evidence_ref, status, created_at)
-                   VALUES (?, ?, ?, 'replanner_problem_budget_exhausted',
+                   VALUES (?, ?, ?, 'path_governor_problem_budget_exhausted',
                            ?, 'OPEN', ?)""",
                 (
                     incident_id,
@@ -201,7 +336,7 @@ class FailureRouter:
             self.state._connection.execute(
                 """UPDATE products
                    SET status='FAILED_SAFE',
-                       terminal_reason='replanner_problem_budget_exhausted',
+                       terminal_reason='path_governor_problem_budget_exhausted',
                        updated_at=?
                    WHERE product_id=?""",
                 (now, failed["product_id"]),
@@ -209,12 +344,11 @@ class FailureRouter:
             self.state._record_event(
                 str(failed["product_id"]),
                 str(failed["task_id"]),
-                "replanner_loop_terminated",
+                "path_governor_budget_exhausted",
                 {
                     "failure_id": str(failure["failure_id"]),
                     "incident_id": incident_id,
-                    "same_role_problem_count": same_role_problem_count,
-                    "reason_code": "replanner_problem_budget_exhausted",
+                    "root_problem_signature": root_problem_signature,
                 },
             )
         return str(failed["task_id"])
@@ -455,6 +589,37 @@ class FailureRouter:
         ]
 
     @staticmethod
+    def _path_arbiter_acceptance() -> list[dict[str, Any]]:
+        """Constrain Sol arbitration to one typed, read-only recommendation."""
+
+        return [
+            {
+                "criterion_id": "AC-PATH-ARBITER-SIGNATURE",
+                "verification": (
+                    "The proposal preserves the supplied root problem signature "
+                    "and cites only the bounded Path Snapshot evidence."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-PATH-ARBITER-READONLY",
+                "verification": (
+                    "The proposal recommends REPLAN_DELTA or reports no safe path; "
+                    "it does not assign IDs, mutate state, run SQL, or use credentials."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-PATH-ARBITER-PROGRESS",
+                "verification": (
+                    "The expected progress delta addresses the unresolved structural "
+                    "problem without treating task or plan growth as progress."
+                ),
+                "mandatory": True,
+            },
+        ]
+
+    @staticmethod
     def _row_required_capabilities(task: dict[str, Any]) -> list[str]:
         try:
             values = json.loads(str(task.get("required_capabilities_json") or "[]"))
@@ -519,7 +684,9 @@ class FailureRouter:
         plan_id = str(failed["plan_id"])
         plan_node_id = f"{failed['plan_node_id']}:{node_suffix}"
         semantic_node_key = (
-            f"{plan_node_id}@plan:{plan_id}" if role == "replanner" else None
+            f"{plan_node_id}@plan:{plan_id}"
+            if role in {"replanner", "path-arbiter"}
+            else None
         )
         contract = {
             "schema_version": "2.0",
@@ -541,6 +708,8 @@ class FailureRouter:
             "title": (
                 "Replan affected product graph"
                 if role == "replanner"
+                else "Arbitrate the bounded recovery path"
+                if role == "path-arbiter"
                 else f"Repair {failed['title']}"
             ),
             "objective": objective,
@@ -582,6 +751,112 @@ class FailureRouter:
             filename=f"task-{task_id}.json",
         )
         return contract, path
+
+    def prepare_replanner_after_arbiter(
+        self,
+        task: dict[str, Any],
+        proposal: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate one read-only arbitration and prepare its bounded Replanner."""
+
+        if (
+            str(task.get("role") or "") != "path-arbiter"
+            or str(task.get("output_schema") or "")
+            != "path-decision-proposal.schema.json"
+        ):
+            raise ValueError("path arbitration source task is invalid")
+        root_problem_signature = str(task.get("root_problem_signature") or "")
+        if (
+            str(proposal.get("status") or "") != "proposed"
+            or str(proposal.get("root_problem_signature") or "")
+            != root_problem_signature
+            or str(proposal.get("recommended_action") or "") != "REPLAN_DELTA"
+        ):
+            raise ValueError("Path Arbiter proposal is not an applicable replan delta")
+        failure_id = str(task.get("failure_id") or "")
+        failure_row = self.state._connection.execute(
+            "SELECT * FROM failures WHERE failure_id=? AND product_id=?",
+            (failure_id, task["product_id"]),
+        ).fetchone()
+        if failure_row is None:
+            raise ValueError("Path Arbiter source failure is missing")
+        failure = dict(failure_row)
+        source_task_row = self.state._connection.execute(
+            "SELECT * FROM tasks WHERE task_id=? AND product_id=?",
+            (failure["task_id"], task["product_id"]),
+        ).fetchone()
+        source_task = dict(source_task_row) if source_task_row is not None else task
+        scope_reassessment_required, required_scope_paths = self._causal_scope_evidence(
+            failure,
+            product_id=str(task["product_id"]),
+        )
+        objective = (
+            "Apply the accepted Path Arbiter REPLAN_DELTA recommendation. Create "
+            "one minimal semantic plan delta from the inherited root goal, active "
+            "plan, affected nodes, complete failure chain, and immutable evidence. "
+            "Preserve every accepted unaffected node."
+        )
+        if scope_reassessment_required:
+            objective += (
+                " The failed Builder proved its allowed_paths were too narrow. "
+                "Expand the bounded implementation scope beyond the failed scope "
+                "and include every controller-derived safe root-cause path."
+            )
+            if required_scope_paths:
+                objective += " Required safe repository paths: " + ", ".join(
+                    required_scope_paths
+                ) + "."
+        contract, path = self._write_contract(
+            failed=task,
+            failure=failure,
+            hypothesis_id=(
+                str(task["hypothesis_id"]) if task.get("hypothesis_id") else None
+            ),
+            role="replanner",
+            output_schema="plan-proposal-v1.schema.json",
+            capability_profile="planning_readonly",
+            objective=objective,
+            allowed_paths=["artifacts/**"],
+            task_revision=int(task.get("task_revision") or 1) + 1,
+            node_suffix="replan-after-arbiter",
+            acceptance=(
+                self._controller_replan_acceptance()
+                if self._controller_recovery_depth(source_task) > 0
+                else self._product_replan_acceptance()
+            ),
+            model_floor="terra",
+        )
+        return {
+            "task_id": str(contract["task_id"]),
+            "title": str(contract["title"]),
+            "role": "replanner",
+            "output_schema": "plan-proposal-v1.schema.json",
+            "contract_ref": f"evidence/{path.name}",
+            "stage_key": "replan-after-arbiter",
+            "dependencies": [str(task["task_id"])],
+            "conflict_keys": [],
+            "priority": int(contract["priority"]),
+            "root_task_id": str(contract["root_task_id"]),
+            "parent_task_id": str(contract["parent_task_id"]),
+            "source_task_id": str(contract["source_task_id"]),
+            "plan_id": str(contract["plan_id"]),
+            "plan_node_id": str(contract["plan_node_id"]),
+            "semantic_node_key": str(contract["semantic_node_key"]),
+            "task_revision": int(contract["task_revision"]),
+            "root_context_ref": str(contract["root_context_ref"]),
+            "active_context_ref": str(contract["active_context_ref"]),
+            "failure_id": failure_id,
+            "hypothesis_id": contract.get("hypothesis_id"),
+            "capability_profile": "planning_readonly",
+            "idempotency_key": str(contract["idempotency_key"]),
+            "supersedes_task_id": str(contract["supersedes_task_id"]),
+            "root_problem_signature": root_problem_signature,
+            "required_capabilities": list(
+                CAPABILITY_PROFILES["planning_readonly"]
+            ),
+            "graph_status": "DRAFT",
+            "mandatory": True,
+        }
 
     def _write_repair_brief(
         self,
@@ -832,7 +1107,8 @@ class FailureRouter:
             failure = dict(failure_row)
             if str(failure["status"]) == "ROUTED":
                 routed = self.state._connection.execute(
-                    "SELECT * FROM tasks WHERE failure_id=? ORDER BY created_at DESC LIMIT 1",
+                    """SELECT * FROM tasks WHERE failure_id=?
+                       ORDER BY created_at DESC, rowid DESC LIMIT 1""",
                     (failure_id,),
                 ).fetchone()
                 if routed is None:
@@ -912,18 +1188,11 @@ class FailureRouter:
             controller_handoff = (
                 str(failed.get("role") or "") == "incident-recovery" and reason == "needs_replan"
             )
-            root_problem_signature = stable_root_problem_signature(
-                {
-                    "product_id": failed["product_id"],
-                    "failure_class": failure["failure_class"],
-                    "reason_code": reason,
-                    "semantic_node_key": failed.get("semantic_node_key"),
-                    "lifecycle_stage": failed.get("lifecycle_stage"),
-                    "failed_gate_ids": json.loads(
-                        str(failure.get("failed_gate_ids_json") or "[]")
-                    ),
-                    "required_paths": required_scope_paths,
-                }
+            root_problem_signature = self._stable_causal_problem_signature(
+                failure,
+                failed,
+                scope_reassessment_required=scope_reassessment_required,
+                required_scope_paths=required_scope_paths,
             )
             self.state._connection.execute(
                 "UPDATE tasks SET root_problem_signature=? WHERE task_id=?",
@@ -993,23 +1262,14 @@ class FailureRouter:
                 else:
                     hypothesis_id = str(hypothesis["hypothesis_id"])
                     attempts_used = int(hypothesis["attempts_used"] or 0)
+            reassessment_threshold = (
+                2 if str(failed.get("role") or "") == "incident-recovery" else 3
+            )
             repeated_problem_requires_reassessment = (
-                same_role_problem_count >= 2
+                same_role_problem_count >= reassessment_threshold
                 and not diagnosis_reassessment
                 and not legacy_replanner_scope_contract
             )
-            if (
-                str(failed.get("role") or "") == "replanner"
-                and scope_reassessment_required
-                and same_role_problem_count
-                >= _MAX_REPLANNER_ATTEMPTS_PER_CAUSAL_PROBLEM
-                and not legacy_replanner_scope_contract
-            ):
-                return self._terminate_replanner_loop(
-                    failed=failed,
-                    failure=failure,
-                    same_role_problem_count=same_role_problem_count,
-                )
             needs_replan = (
                 invalid_plan_output_schema
                 or controller_handoff
@@ -1026,7 +1286,30 @@ class FailureRouter:
                 or repeated_problem_requires_reassessment
                 or scope_reassessment_required
                 or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
+                or str(failed.get("role") or "") == "path-arbiter"
             )
+            if controller_fault or invalid_plan_output_schema or legacy_replanner_scope_contract:
+                budget_action_kind = "deterministic"
+                path_action = "CONTROLLER_RECOVERY"
+            elif needs_replan:
+                budget_action_kind = "arbiter"
+                path_action = "REPLAN_DELTA"
+            else:
+                budget_action_kind = "execution"
+                path_action = "REPAIR_NODE"
+            if self._consume_path_budget(
+                failed=failed,
+                failure=failure,
+                root_problem_signature=root_problem_signature,
+                action_kind=budget_action_kind,
+                action=path_action,
+                reserve_execution=controller_fault,
+            ) != "CONTINUE":
+                return self._terminate_path_governor_budget(
+                    failed=failed,
+                    failure=failure,
+                    root_problem_signature=root_problem_signature,
+                )
             if controller_fault:
                 incident_id = f"incident-{sha256_text(failure_id)[:20]}"
                 self.state._connection.execute(
@@ -1126,6 +1409,18 @@ class FailureRouter:
                             + ", ".join(required_scope_paths)
                             + "."
                         )
+                if budget_action_kind == "arbiter":
+                    suffix = "path-arbiter"
+                    role = "path-arbiter"
+                    output_schema = "path-decision-proposal.schema.json"
+                    capability_profile = "planning_readonly"
+                    objective = (
+                        "Evaluate the controller-supplied immutable Path Snapshot once. "
+                        "Return one read-only path decision proposal bound to the exact "
+                        "root problem signature. Recommend REPLAN_DELTA only when a "
+                        "bounded semantic delta can produce fresh evidence; otherwise "
+                        "return no_safe_path and FAIL_SAFE."
+                    )
             else:
                 role = str(failed.get("role") or "builder")
                 output_schema = str(failed.get("output_schema") or "attempt-result.schema.json")
@@ -1151,7 +1446,7 @@ class FailureRouter:
             # contract that still permits only ``src/**``.  The model then cannot
             # propose the controller-requested scope expansion and the router
             # creates an unbounded chain of semantically identical replans.
-            if role == "replanner":
+            if role in {"replanner", "path-arbiter"}:
                 allowed_paths = ["artifacts/**"]
             else:
                 allowed_paths = [
@@ -1166,6 +1461,8 @@ class FailureRouter:
                 ]
             if role == "incident-recovery":
                 contract_acceptance = self._controller_incident_acceptance()
+            elif role == "path-arbiter":
+                contract_acceptance = self._path_arbiter_acceptance()
             elif role == "replanner":
                 contract_acceptance = (
                     self._controller_replan_acceptance()
@@ -1207,7 +1504,12 @@ class FailureRouter:
                     else None
                 ),
                 quality_gates=repair_quality_gates,
-                model_floor=("sol" if suffix == "scope-contract-correction" else "terra"),
+                model_floor=(
+                    "sol"
+                    if budget_action_kind == "arbiter"
+                    or suffix == "scope-contract-correction"
+                    else "terra"
+                ),
             )
             repair_ref: str | None = None
             if suffix == "repair":
@@ -1255,6 +1557,7 @@ class FailureRouter:
                 capability_profile=capability_profile,
                 idempotency_key=str(contract["idempotency_key"]),
                 supersedes_task_id=str(contract["supersedes_task_id"]),
+                root_problem_signature=root_problem_signature,
                 required_capabilities=[str(value) for value in contract["required_capabilities"]],
                 graph_status="READY",
             )

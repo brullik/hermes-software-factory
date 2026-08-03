@@ -204,7 +204,10 @@ def build_recovery_plan(
             include_failed_safe
             and status == "FAILED_SAFE"
             and str(product.get("terminal_reason") or "")
-            == "replanner_problem_budget_exhausted"
+            in {
+                "replanner_problem_budget_exhausted",
+                "path_governor_problem_budget_exhausted",
+            }
         )
         if status in TERMINAL_PRODUCTS and not failed_safe_selected:
             continue

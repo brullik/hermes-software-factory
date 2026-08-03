@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.3.6 - 2026-08-03
+
+- Connect the durable Path Governor problem budget to the live Failure Router,
+  so task, hypothesis, candidate, and diagnostic wording changes cannot reset a
+  structural recovery branch.
+- Persist the root-problem signature through routed tasks and Plan Delta
+  ingestion; reserve at most two evidence-producing implementation executions
+  before any plan mutation, rolling the complete delta back on exhaustion.
+- Route the single read-only arbitration slot through the explicit Sol
+  `path-arbiter` role and `path-decision-proposal.schema.json`, persist every
+  applied or fail-safe path decision, and terminate exhausted branches as
+  `FAILED_SAFE` without creating another task.
+- Add production-derived regressions for mandatory-gate reason transitions,
+  controller recovery, one-arbiter/two-execution enforcement, and transactional
+  Plan Delta rejection after the durable execution budget is consumed.
+
 ## 2.3.5 - 2026-08-03
 
 - Scope every controller-generated Replanner semantic identity to the active

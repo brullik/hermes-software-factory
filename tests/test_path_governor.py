@@ -805,6 +805,27 @@ def test_LOOP_P0_007_root_signature_ignores_ids_and_reason_wording() -> None:
     }
     changed = {**baseline, "task_id": "T-TWO", "hypothesis_id": "H-TWO", "safe_message": "other"}
     assert stable_root_problem_signature(baseline) == stable_root_problem_signature(changed)
+    product_problem = {
+        "product_id": "product-path-governor",
+        "failure_class": "semantic",
+        "reason_code": "internal_blocker",
+        "semantic_node_key": "security-review@candidate:CS-ONE",
+        "lifecycle_stage": "security-review",
+        "failed_gate_ids": ["target-dependency-audit"],
+    }
+    expected = stable_root_problem_signature(product_problem)
+    for reason_code in (
+        "mandatory_gate_failed",
+        "needs_replan",
+        "model_requested_repair",
+    ):
+        assert stable_root_problem_signature(
+            {
+                **product_problem,
+                "reason_code": reason_code,
+                "semantic_node_key": "security-review@candidate:CS-TWO",
+            }
+        ) == expected
 
 
 def test_LOOP_P0_008_no_op_plan_delta_is_rejected_before_mutation(
