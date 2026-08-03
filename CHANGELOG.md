@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.4 - 2026-08-03
+
+- Scope Test, Security Review, and Release Readiness semantic identities to the
+  immutable Candidate Snapshot they consume, allowing fresh review evidence to
+  coexist with accepted bindings from an earlier candidate.
+- Re-register candidate consumers transactionally when the snapshot is frozen
+  and reject missing, cross-product, cross-plan, or mutable snapshot identity
+  fail closed.
+- Add a production-derived regression for the cross-revision Test binding
+  conflict observed while rev160 recovered into rev161.
+
 ## 2.3.3 - 2026-08-03
 
 - Scope controller-owned Candidate Snapshot semantic identity to its plan

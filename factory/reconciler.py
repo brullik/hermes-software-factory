@@ -1361,14 +1361,35 @@ class PipelineReconciler:
                     candidate_digest=str(snapshot["snapshot_digest"]),
                     accepted_at=now,
                 )
-                self.state._connection.execute(
-                    """UPDATE tasks SET candidate_snapshot_id=?, updated_at=?
-                        WHERE task_id IN (
-                            SELECT to_task_id FROM task_edges
-                             WHERE plan_id=? AND from_task_id=? AND required=1
-                        )""",
-                    (snapshot_id, now, str(task["plan_id"]), str(task["task_id"])),
-                )
+                consumer_rows = self.state._connection.execute(
+                    """SELECT target.task_id
+                         FROM task_edges AS edge
+                         JOIN tasks AS target ON target.task_id=edge.to_task_id
+                        WHERE edge.plan_id=? AND edge.from_task_id=?
+                          AND edge.required=1 AND target.product_id=?
+                          AND target.plan_id=? AND target.lifecycle_stage IN
+                              ('test','security-review',
+                               'release-readiness-review')
+                        ORDER BY target.task_id""",
+                    (
+                        str(task["plan_id"]),
+                        str(task["task_id"]),
+                        product_id,
+                        str(task["plan_id"]),
+                    ),
+                ).fetchall()
+                if not consumer_rows:
+                    raise RuntimeError(
+                        "candidate snapshot has no mandatory review consumers"
+                    )
+                for consumer_row in consumer_rows:
+                    consumer_id = str(consumer_row["task_id"])
+                    self.state._connection.execute(
+                        """UPDATE tasks SET candidate_snapshot_id=?, updated_at=?
+                            WHERE task_id=?""",
+                        (snapshot_id, now, consumer_id),
+                    )
+                    governor.register_execution_membership(consumer_id)
                 from .autonomy import AutonomyStore
 
                 AutonomyStore(self.state)._recompute_frontier(
