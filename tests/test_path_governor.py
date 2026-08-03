@@ -540,6 +540,14 @@ def test_candidate_materializer_uses_plan_delta_memberships(
             _clone_task(
                 state,
                 "T-ROOT0001",
+                "T-TEST-LEGACY",
+                supersedes_task_id=None,
+                semantic_key="test",
+                lifecycle_stage="test",
+            )
+            _clone_task(
+                state,
+                "T-ROOT0001",
                 "T-TEST0002",
                 supersedes_task_id=None,
                 semantic_key="test",
@@ -556,6 +564,11 @@ def test_candidate_materializer_uses_plan_delta_memberships(
                           plan_id='PLAN-DELTA-MATERIALIZE',
                           dependencies_json='[\"T-ARCH0002\",\"T-ROOT0001\"]'
                     WHERE task_id='T-SNAPSHOT2'"""
+            )
+            state._connection.execute(
+                """UPDATE tasks SET role='test-engineer',
+                          plan_id='PLAN-DELTA-LEGACY'
+                    WHERE task_id='T-TEST-LEGACY'"""
             )
             state._connection.execute(
                 """UPDATE tasks SET role='test-engineer',
@@ -581,6 +594,15 @@ def test_candidate_materializer_uses_plan_delta_memberships(
                                'depends_on', 1, '2026-08-02T00:00:00Z')""",
                     (source, target),
                 )
+        _accept_source(state, "T-TEST-LEGACY", "attempt-test-legacy")
+        legacy_test_binding = _binding(
+            state,
+            "T-TEST-LEGACY",
+            "attempt-test-legacy",
+            result_digest="9" * 64,
+        )
+        legacy_test = state.get_task("T-TEST-LEGACY")
+        assert legacy_test is not None
         _accept_source(state, "T-ARCH0002", "attempt-architecture-2")
         _accept_source(state, "T-ROOT0001", "attempt-implementation-2")
         architecture = _binding(
@@ -655,6 +677,23 @@ def test_candidate_materializer_uses_plan_delta_memberships(
         assert candidate["candidate_snapshot_id"]
         assert downstream is not None
         assert downstream["candidate_snapshot_id"] == candidate["candidate_snapshot_id"]
+        assert downstream["semantic_node_key"] == (
+            f"test@candidate:{candidate['candidate_snapshot_id']}"
+        )
+        assert downstream["semantic_node_id"] != legacy_test["semantic_node_id"]
+        assert downstream["contract_digest"] != legacy_test["contract_digest"]
+        assert state._connection.execute(
+            """SELECT COUNT(*) FROM plan_memberships
+                WHERE plan_id='PLAN-DELTA-MATERIALIZE'
+                  AND semantic_node_id=? AND execution_task_id='T-TEST0002'
+                  AND membership_state='EXECUTION'""",
+            (downstream["semantic_node_id"],),
+        ).fetchone()[0] == 1
+        assert state._connection.execute(
+            """SELECT binding_id FROM result_bindings
+                WHERE semantic_node_id=? AND status='ACTIVE'""",
+            (legacy_test["semantic_node_id"],),
+        ).fetchone()[0] == legacy_test_binding
         assert state._connection.execute(
             "SELECT COUNT(*) FROM candidate_snapshot_items WHERE snapshot_id=?",
             (candidate["candidate_snapshot_id"],),

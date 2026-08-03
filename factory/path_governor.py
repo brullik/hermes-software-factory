@@ -20,6 +20,11 @@ from .common import sha256_text, stable_json, utc_now
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 _TERMINAL_ACCEPTED = {"ACCEPTED", "SUPERSEDED"}
 _MAX_LEGACY_LINEAGE = 10_000
+_CANDIDATE_CONSUMER_STAGES = {
+    "test",
+    "security-review",
+    "release-readiness-review",
+}
 
 
 class ResultLineageError(RuntimeError):
@@ -598,6 +603,39 @@ class PathGovernor:
                 or task_id
             )
             scope_suffix = f"@plan:{plan_id}"
+            if not base_key.endswith(scope_suffix):
+                task["semantic_node_key"] = f"{base_key}{scope_suffix}"
+                identity_rescoped = True
+        elif (
+            str(task.get("lifecycle_stage") or "") in _CANDIDATE_CONSUMER_STAGES
+            and str(task.get("candidate_snapshot_id") or "")
+        ):
+            snapshot_id = str(task["candidate_snapshot_id"])
+            snapshot = self.connection.execute(
+                """SELECT product_id, plan_id, status
+                     FROM candidate_snapshots WHERE snapshot_id=?""",
+                (snapshot_id,),
+            ).fetchone()
+            if snapshot is None or (
+                str(snapshot["product_id"]) != str(task.get("product_id") or "")
+                or str(snapshot["plan_id"]) != plan_id
+                or str(snapshot["status"]) != "FROZEN"
+            ):
+                raise ResultLineageIdentityError(
+                    f"candidate consumer snapshot identity conflicts for {task_id}"
+                )
+            base_key = str(
+                task.get("semantic_node_key")
+                or task.get("plan_node_id")
+                or task.get("stage_key")
+                or task_id
+            )
+            scope_marker = "@candidate:"
+            scope_suffix = f"{scope_marker}{snapshot_id}"
+            if scope_marker in base_key and not base_key.endswith(scope_suffix):
+                raise ResultLineageIdentityError(
+                    f"candidate consumer identity cannot change for {task_id}"
+                )
             if not base_key.endswith(scope_suffix):
                 task["semantic_node_key"] = f"{base_key}{scope_suffix}"
                 identity_rescoped = True
