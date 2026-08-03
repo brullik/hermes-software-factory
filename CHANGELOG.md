@@ -39,6 +39,14 @@
   finding coordinates, and cleans up the image. Container repairs inherit
   `container/**` scope, and a bounded recovery replaces historical provider-only
   completion evidence while preserving the `1:1:2` Path Governor budget.
+- Initialize rootless Podman networking during installation and runtime upgrade
+  with an offline, temporary API-service container probe, then remove its image,
+  network, socket, and build context. Capability preflight now rejects a Podman
+  RunRoot outside the worker runtime and refuses Builder execution until the
+  controller-owned IPAM database and ephemeral network lifecycle are proven.
+- Classify exclusively `CONTROLLER_*` provider findings as controller-runtime
+  incidents rather than product-semantic repairs. The failed product node stays
+  unaccepted and is rerun with fresh evidence after deterministic host recovery.
 
 ## 2.3.10 - 2026-08-03
 

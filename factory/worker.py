@@ -64,6 +64,7 @@ from .release_executor import (
 from .repair_brief import (
     builder_result_is_controller_complete,
     builder_result_is_locally_complete,
+    controller_runtime_repair_findings,
     product_goals_are_proven,
     repair_finding_detail,
     repair_requirements,
@@ -4857,6 +4858,7 @@ class AgentWorker:
             ):
                 output_status = "repair_required"
             if output_status not in {"completed", "accepted"}:
+                controller_runtime_findings = controller_runtime_repair_findings(output)
                 incident_handoff = (
                     spec.role == "incident-recovery"
                     and output_status == "needs_replan"
@@ -4871,7 +4873,11 @@ class AgentWorker:
                     else _repair_request_detail(output)
                 )
                 reason_code = (
-                    "needs_replan" if output_status == "needs_replan" else "model_requested_repair"
+                    "controller_runtime_precondition_failed"
+                    if controller_runtime_findings
+                    else "needs_replan"
+                    if output_status == "needs_replan"
+                    else "model_requested_repair"
                 )
                 if incident_handoff:
                     blocker_ids = ["controller-incident-contained"]
@@ -4897,7 +4903,9 @@ class AgentWorker:
                     output_status == "repair_required" and spec.role == "security-reviewer"
                 )
                 route_action = (
-                    "builder_repair_handoff"
+                    "controller_incident_handoff"
+                    if controller_runtime_findings
+                    else "builder_repair_handoff"
                     if reviewer_handoff
                     else self._route(
                         spec,
@@ -4937,7 +4945,9 @@ class AgentWorker:
                     attempt.attempt_id,
                     detail=repair_detail,
                     failure_data=FailureData(
-                        failure_class="semantic",
+                        failure_class=(
+                            "controller" if controller_runtime_findings else "semantic"
+                        ),
                         reason_code=reason_code,
                         safe_message=repair_detail,
                         evidence_ref=f"evidence/{result_path.name}",

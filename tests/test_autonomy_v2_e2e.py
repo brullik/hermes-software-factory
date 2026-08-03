@@ -1893,6 +1893,73 @@ def test_admin_permission_proves_configure_and_merge_when_governance_is_unreadab
         )
 
 
+def test_container_capability_requires_subject_runtime_ipam_and_network_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = configured(tmp_path)
+    runtime = tmp_path / "runtime"
+    runroot = runtime / "containers"
+    networks = runroot / "networks"
+    networks.mkdir(parents=True)
+    ipam = networks / "ipam.db"
+    ipam.write_bytes(b"controller-owned-ipam")
+    ipam.chmod(0o600)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> ProbeCommandResult:
+        calls.append(argv)
+        if argv[:3] == ["podman", "info", "--format"]:
+            return ProbeCommandResult(0, str(runroot) + "\n")
+        if argv[:3] in (
+            ["podman", "network", "create"],
+            ["podman", "network", "rm"],
+        ):
+            return ProbeCommandResult(0)
+        raise AssertionError(argv)
+
+    with patch("factory.capabilities.shutil.which", return_value="/safe/podman"):
+        result = ConfiguredCapabilityProbe(config, command_runner=runner).check(
+            "toolchain.container_builder",
+            product={"product_id": "container-capability-product"},
+        )
+
+    assert result.status == "AVAILABLE"
+    assert result.scope is not None
+    assert result.scope["runtime"] == "podman"
+    assert [call[:3] for call in calls] == [
+        ["podman", "info", "--format"],
+        ["podman", "network", "create"],
+        ["podman", "network", "rm"],
+    ]
+
+
+def test_container_capability_rejects_runroot_outside_worker_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = configured(tmp_path)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "shadow-runtime"))
+
+    def runner(argv: list[str]) -> ProbeCommandResult:
+        if argv[:3] == ["podman", "info", "--format"]:
+            return ProbeCommandResult(
+                0,
+                str(tmp_path / "production-runtime" / "containers") + "\n",
+            )
+        raise AssertionError(argv)
+
+    with patch("factory.capabilities.shutil.which", return_value="/safe/podman"):
+        result = ConfiguredCapabilityProbe(config, command_runner=runner).check(
+            "toolchain.container_builder",
+            product={"product_id": "mis-scoped-container-product"},
+        )
+
+    assert result.status == "DENIED_POLICY"
+    assert result.reason_code == "controller_toolchain_container_storage_scope_mismatch"
+
+
 class QueuedRuntimeRunner:
     def __init__(self) -> None:
         self.outputs: list[str] = []

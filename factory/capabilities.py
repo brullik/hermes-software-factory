@@ -79,6 +79,7 @@ class ConfiguredCapabilityProbe:
         environment = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", ""),
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", ""),
             "GIT_TERMINAL_PROMPT": "0",
             "GCM_INTERACTIVE": "Never",
             "LANG": "C.UTF-8",
@@ -522,25 +523,73 @@ class ConfiguredCapabilityProbe:
             available = shutil.which("make") is not None
             reason = "controller_toolchain_make_missing"
         elif capability == "toolchain.container_builder":
-            probes = (
-                ("podman", ["podman", "info", "--format", "json"]),
-                ("buildctl", ["buildctl", "debug", "workers"]),
-                (
-                    "docker",
-                    ["docker", "info", "--format", "{{json .ServerVersion}}"],
-                ),
-            )
             selected = ""
-            for executable, argv in probes:
-                if shutil.which(executable) is None:
-                    continue
-                if self.command_runner(list(argv)).returncode == 0:
-                    selected = executable
-                    break
+            podman = shutil.which("podman")
+            if podman is not None:
+                info = self.command_runner(
+                    ["podman", "info", "--format", "{{.Store.RunRoot}}"]
+                )
+                runroot = info.stdout.strip().splitlines()[-1] if info.stdout.strip() else ""
+                expected_runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+                expected_runroot = (
+                    os.path.normpath(os.path.join(expected_runtime, "containers"))
+                    if expected_runtime
+                    else ""
+                )
+                normalized_runroot = os.path.normpath(runroot) if runroot else ""
+                scope.update(
+                    {
+                        "runtime": "podman",
+                        "runroot": normalized_runroot,
+                        "network_preflight": "required",
+                    }
+                )
+                if info.returncode != 0 or not normalized_runroot:
+                    reason = "controller_toolchain_container_builder_unavailable"
+                elif expected_runroot and normalized_runroot != expected_runroot:
+                    reason = "controller_toolchain_container_storage_scope_mismatch"
+                else:
+                    ipam_database = Path(normalized_runroot) / "networks" / "ipam.db"
+                    try:
+                        metadata = ipam_database.stat()
+                        current_uid = getattr(os, "geteuid", lambda: metadata.st_uid)()
+                        ownership_safe = bool(
+                            os.name == "nt"
+                            or (
+                                metadata.st_uid == current_uid
+                                and stat.S_IMODE(metadata.st_mode) == 0o600
+                            )
+                        )
+                        ipam_ready = bool(
+                            ipam_database.is_file()
+                            and not ipam_database.is_symlink()
+                            and ownership_safe
+                            and os.access(ipam_database, os.R_OK | os.W_OK)
+                        )
+                    except OSError:
+                        ipam_ready = False
+                    if not ipam_ready:
+                        reason = "controller_toolchain_container_network_uninitialized"
+                    else:
+                        network_name = f"hermes-capability-preflight-{os.getpid()}"
+                        created = self.command_runner(
+                            ["podman", "network", "create", network_name]
+                        )
+                        removed = (
+                            self.command_runner(
+                                ["podman", "network", "rm", network_name]
+                            )
+                            if created.returncode == 0
+                            else ProbeCommandResult(1)
+                        )
+                        if created.returncode == 0 and removed.returncode == 0:
+                            selected = "podman"
+                        else:
+                            reason = "controller_toolchain_container_network_unavailable"
             available = bool(selected)
             if selected:
                 scope["runtime"] = selected
-            reason = "controller_toolchain_container_builder_unavailable"
+                reason = "controller_toolchain_container_builder_unavailable"
         elif capability == "toolchain.scanners":
             root = Path(__file__).resolve().parents[1]
             scanner = Path("/usr/local/bin/osv-scanner")

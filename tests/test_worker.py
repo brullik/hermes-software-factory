@@ -4057,6 +4057,101 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("SEC-001 [medium]", attempt["summary"])
             state.close()
 
+    def test_controller_runtime_finding_is_not_routed_as_product_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / "README.md").write_text("minimal workspace\n", encoding="utf-8")
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            product_id = "P-CONTROLLER-RUNTIME-HANDOFF"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Keep controller runtime defects outside product repair",
+                idempotency_key="controller-runtime-handoff-test",
+            )
+            task_path = PipelineCoordinator(config, state, ArtifactStore(config)).create_task(
+                product_id,
+                "security-reviewer",
+            )
+            contract = json.loads(task_path.read_text(encoding="utf-8"))
+            output = {
+                **artifact_metadata(
+                    config,
+                    "security-reviewer",
+                    "controller-runtime-handoff-test",
+                    product_id,
+                ),
+                "producer": {
+                    "role": "security-reviewer",
+                    "tier": "terra",
+                    "provider": "openai_codex_subscription",
+                    "model": "gpt-5.6-terra",
+                },
+                "task_id": contract["task_id"],
+                "subject_sha": "b" * 64,
+                "status": "repair_required",
+                "changed_trust_boundaries": [],
+                "findings": [
+                    {
+                        "id": "CONTROLLER_PODMAN_IPAM_DATABASE_MISSING",
+                        "severity": "high",
+                        "category": "controller-runtime",
+                        "description": "The controller RunRoot has no initialized IPAM database.",
+                        "evidence": "controller://podman/runroot/networks",
+                        "required_fix": "Initialize and revalidate the controller-owned rootless runtime.",
+                    },
+                    {
+                        "id": "FULL_PYTEST_BLOCKED_BY_CONTROLLER_RUNTIME",
+                        "severity": "medium",
+                        "category": "controller-runtime",
+                        "description": "The full suite reached one runtime-dependent topology test.",
+                        "evidence": "tests/container/test_compose_topology.py",
+                        "required_fix": "Rerun the same immutable task after controller recovery.",
+                    },
+                ],
+                "release_blocked": True,
+                "assumptions": [],
+                "evidence_refs": ["internal://capability/container-runtime"],
+            }
+            runner = FakeRunner(json.dumps(output))
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=repository,
+            )
+            worker.quality = PassingQuality()  # type: ignore[assignment]
+            spec = TaskExecutionSpec(
+                task_contract=contract,
+                role="security-reviewer",
+                output_schema="security-review-result.schema.json",
+                subject_sha="a" * 64,
+            )
+
+            result = worker.execute(spec)
+
+            self.assertEqual(result.status, "repair_required")
+            self.assertEqual(result.reason_code, "controller_runtime_precondition_failed")
+            self.assertIsNotNone(result.failure_data)
+            assert result.failure_data is not None
+            self.assertEqual(result.failure_data.failure_class, "controller")
+            self.assertEqual(
+                result.failure_data.failed_gate_ids,
+                (
+                    "CONTROLLER_PODMAN_IPAM_DATABASE_MISSING",
+                    "FULL_PYTEST_BLOCKED_BY_CONTROLLER_RUNTIME",
+                ),
+            )
+            attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
+            self.assertIn("controller_incident_handoff", attempt["summary"])
+            state.close()
+
     def test_security_preflight_failure_skips_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

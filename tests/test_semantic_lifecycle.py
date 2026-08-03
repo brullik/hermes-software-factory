@@ -2520,7 +2520,20 @@ def test_rootless_bootstrap_enters_trusted_release_root_before_runuser() -> None
     script = (root / "scripts" / "bootstrap" / "upgrade-autonomy-runtime.sh").read_text(
         encoding="utf-8"
     )
-    assert script.index('cd "${ROOT_DIR}"') < script.index('runuser -u "${SERVICE_USER}"')
-    probe_created = script.index('PROBE_DIR="$(mktemp -d "${STATE_DIR}/podman-preflight.XXXXXX")"')
-    probe_owned = script.index('chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}"')
-    assert probe_created < probe_owned < script.index('runuser -u "${SERVICE_USER}"')
+    helper_call = 'bash "${ROOT_DIR}/scripts/bootstrap/preflight-rootless-podman.sh"'
+    assert script.index('cd "${ROOT_DIR}"') < script.index(helper_call)
+
+    helper = (
+        root / "scripts" / "bootstrap" / "preflight-rootless-podman.sh"
+    ).read_text(encoding="utf-8")
+    probe_created = helper.index(
+        'PROBE_DIR="$(mktemp -d "${STATE_DIR}/podman-network-preflight.XXXXXX")"'
+    )
+    probe_owned = helper.index('chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}"')
+    runuser = helper.index('runuser -u "${SERVICE_USER}"')
+    assert probe_created < probe_owned < runuser
+    assert helper.index('cd "${STATE_DIR}"') < runuser
+    assert 'podman_as_service system service --time=60' in helper
+    assert 'podman_remote_as_service run --rm --network podman "${PROBE_IMAGE}"' in helper
+    assert 'podman_remote_as_service network create "${PROBE_NETWORK}"' in helper
+    assert 'IPAM_DATABASE="${expected_runroot}/networks/ipam.db"' in helper

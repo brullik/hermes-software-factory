@@ -216,8 +216,8 @@ systemctl enable \
   hermes-factory-backup-offsite.timer \
   hermes-factory-osv-db.timer
 systemctl start fail2ban.service
-runuser -u "${SERVICE_USER}" -- env \
-  HOME="${STATE_DIR}" \
-  XDG_RUNTIME_DIR=/run/hermes-factory \
-  podman info --format json >/dev/null
+SERVICE_USER="${SERVICE_USER}" \
+STATE_DIR="${STATE_DIR}" \
+RUNTIME_DIR=/run/hermes-factory \
+bash "${ROOT_DIR}/scripts/bootstrap/preflight-rootless-podman.sh"
 printf 'Bootstrap files installed. Credentials, Hermes compatibility, firewall, SSH hardening, and service start require separate evidence-backed steps.\n'
