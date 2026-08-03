@@ -752,6 +752,7 @@ class StateStore:
         capability_profile: str | None = None,
         idempotency_key: str | None = None,
         supersedes_task_id: str | None = None,
+        root_problem_signature: str | None = None,
         required_capabilities: list[str] | None = None,
         mandatory: bool = True,
         graph_status: str | None = None,
@@ -895,11 +896,12 @@ class StateStore:
                  plan_id, plan_node_id, semantic_node_key, task_revision, root_context_ref,
                  active_context_ref, failure_id, hypothesis_id, capability_profile,
                  idempotency_key, supersedes_task_id, graph_status,
-                 required_capabilities_json, mandatory, critical_path_rank)
+                 root_problem_signature, required_capabilities_json, mandatory,
+                 critical_path_rank)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
@@ -932,6 +934,7 @@ class StateStore:
                     idempotency_key or sha256_text(f"task:{task_id}:{task_revision}"),
                     supersedes_task_id,
                     canonical_status,
+                    root_problem_signature,
                     json.dumps(selected_required),
                     int(mandatory),
                     critical_path_rank,

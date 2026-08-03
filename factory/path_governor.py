@@ -216,15 +216,30 @@ class ProgressVector:
 def stable_root_problem_signature(values: Mapping[str, Any]) -> str:
     """Hash semantic coordinates while excluding volatile attempt prose/ids."""
 
+    failed_gate_ids = sorted(
+        {str(value) for value in values.get("failed_gate_ids", ())}
+    )
+    owner = str(values.get("problem_owner") or "") or failure_owner(
+        failure_class=str(values.get("failure_class") or ""),
+        reason_code=str(values.get("reason_code") or ""),
+    )
+    semantic_node_key = re.sub(
+        r"@(candidate|plan):[^:@]+$",
+        "",
+        str(values.get("semantic_node_key") or ""),
+    )
+    reason_coordinate = (
+        str(values.get("controller_invariant_id") or values.get("reason_code") or "")
+        if owner in {"controller", "external"} or not failed_gate_ids
+        else "mandatory-gate"
+    )
     coordinates = {
         "product_id": str(values.get("product_id") or ""),
-        "failure_class": str(values.get("failure_class") or ""),
-        "reason_code": str(values.get("reason_code") or ""),
-        "semantic_node_key": str(values.get("semantic_node_key") or ""),
+        "problem_owner": owner,
+        "reason_coordinate": reason_coordinate,
+        "semantic_node_key": semantic_node_key,
         "lifecycle_stage": str(values.get("lifecycle_stage") or ""),
-        "failed_gate_ids": sorted(
-            {str(value) for value in values.get("failed_gate_ids", ())}
-        ),
+        "failed_gate_ids": failed_gate_ids,
         "required_paths": sorted(
             {str(value) for value in values.get("required_paths", ())}
         ),
@@ -968,6 +983,174 @@ class PathGovernor:
             (
                 stable_json(progress.as_dict()),
                 evidence_digest,
+                now,
+                product_id,
+                root_problem_signature,
+            ),
+        )
+        return "CONTINUE"
+
+    def progress_vector(self, product_id: str) -> ProgressVector:
+        """Build the durable, payload-free trajectory vector for one product."""
+
+        product = self.connection.execute(
+            "SELECT active_plan_id FROM products WHERE product_id=?",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            raise KeyError(product_id)
+        plan_id = str(product[0] or "")
+        unmet = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM plan_memberships
+                    WHERE plan_id=? AND mandatory=1 AND membership_state!='BOUND'""",
+                (plan_id,),
+            ).fetchone()[0]
+        )
+        unaccepted = int(
+            self.connection.execute(
+                """SELECT COUNT(*)
+                     FROM plan_memberships AS membership
+                     JOIN tasks AS task
+                       ON task.task_id=membership.execution_task_id
+                    WHERE membership.plan_id=?
+                      AND membership.membership_state='EXECUTION'
+                      AND task.graph_status!='ACCEPTED'""",
+                (plan_id,),
+            ).fetchone()[0]
+        )
+        open_signatures = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM problem_budgets
+                    WHERE product_id=? AND status='ACTIVE'""",
+                (product_id,),
+            ).fetchone()[0]
+        )
+        open_incidents = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM controller_incidents
+                    WHERE product_id=? AND status='OPEN'""",
+                (product_id,),
+            ).fetchone()[0]
+        )
+        candidate_stage = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM tasks
+                    WHERE product_id=? AND plan_id=?
+                      AND lifecycle_stage='candidate-snapshot'""",
+                (product_id, plan_id),
+            ).fetchone()[0]
+        )
+        frozen_candidates = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM candidate_snapshots
+                    WHERE product_id=? AND plan_id=? AND status='FROZEN'""",
+                (product_id, plan_id),
+            ).fetchone()[0]
+        )
+        missing_candidate = int(candidate_stage > 0 and frozen_candidates == 0)
+        legacy_indirection = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM tasks
+                    WHERE product_id=? AND plan_id=? AND graph_status='ACCEPTED'
+                      AND result_binding_id IS NULL""",
+                (product_id, plan_id),
+            ).fetchone()[0]
+        )
+        no_progress = int(
+            self.connection.execute(
+                """SELECT COUNT(*) FROM path_decisions
+                    WHERE product_id=? AND status IN ('REJECTED','FAILED_SAFE')""",
+                (product_id,),
+            ).fetchone()[0]
+        )
+        return ProgressVector(
+            unmet,
+            open_signatures,
+            unaccepted,
+            open_incidents,
+            missing_candidate,
+            legacy_indirection,
+            no_progress,
+        )
+
+    def path_snapshot_digest(
+        self,
+        *,
+        product_id: str,
+        root_problem_signature: str,
+        progress: ProgressVector,
+        evidence_digest: str | None = None,
+    ) -> str:
+        """Digest the typed state coordinates used for one trajectory decision."""
+
+        product = self.connection.execute(
+            """SELECT active_plan_id, active_plan_revision, status
+                 FROM products WHERE product_id=?""",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            raise KeyError(product_id)
+        return sha256_text(
+            stable_json(
+                {
+                    "product_id": product_id,
+                    "active_plan_id": str(product[0] or ""),
+                    "active_plan_revision": int(product[1] or 0),
+                    "product_status": str(product[2] or ""),
+                    "root_problem_signature": root_problem_signature,
+                    "progress_vector": progress.as_dict(),
+                    "evidence_digest": evidence_digest,
+                }
+            )
+        )
+
+    def reserve_execution_slots(
+        self,
+        *,
+        product_id: str,
+        root_problem_signature: str,
+        count: int,
+        progress: ProgressVector,
+    ) -> str:
+        """Reserve at most two evidence-producing executions for a signature."""
+
+        if count < 1:
+            raise ValueError("execution reservation count must be positive")
+        if not _SHA256.fullmatch(root_problem_signature):
+            raise ValueError("root problem signature must be a lowercase SHA-256")
+        now = utc_now()
+        self.connection.execute(
+            """INSERT OR IGNORE INTO problem_budgets
+               (product_id, root_problem_signature, deterministic_actions_used,
+                arbiter_calls_used, execution_attempts_used,
+                last_progress_vector_json, last_evidence_digest, status,
+                created_at, updated_at)
+               VALUES (?, ?, 0, 0, 0, ?, NULL, 'ACTIVE', ?, ?)""",
+            (product_id, root_problem_signature, stable_json(progress.as_dict()), now, now),
+        )
+        row = self.connection.execute(
+            """SELECT execution_attempts_used, status FROM problem_budgets
+                WHERE product_id=? AND root_problem_signature=?""",
+            (product_id, root_problem_signature),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("problem budget was not persisted")
+        if str(row["status"]) != "ACTIVE" or int(row["execution_attempts_used"]) + count > 2:
+            self.connection.execute(
+                """UPDATE problem_budgets SET status='EXHAUSTED', updated_at=?
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (now, product_id, root_problem_signature),
+            )
+            return "FAIL_SAFE"
+        self.connection.execute(
+            """UPDATE problem_budgets
+                  SET execution_attempts_used=execution_attempts_used+?,
+                      last_progress_vector_json=?, updated_at=?
+                WHERE product_id=? AND root_problem_signature=?""",
+            (
+                count,
+                stable_json(progress.as_dict()),
                 now,
                 product_id,
                 root_problem_signature,

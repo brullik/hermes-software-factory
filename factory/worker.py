@@ -105,6 +105,7 @@ _PLANNING_ROLES = {
     "solution-architect",
     "task-specifier",
     "replanner",
+    "path-arbiter",
 }
 _PLAN_CONTRACT_REASONS = {
     "plan_contract_violation",
@@ -883,6 +884,12 @@ def _normalized_output_status(
     builder_gate_deferred: bool,
     output: Mapping[str, Any] | None = None,
 ) -> str:
+    if role == "path-arbiter":
+        recommended_action = str((output or {}).get("recommended_action") or "")
+        if reported_status == "proposed" and recommended_action == "REPLAN_DELTA":
+            return "completed"
+        if reported_status in {"proposed", "no_safe_path"}:
+            return "needs_replan"
     if builder_gate_deferred:
         return "completed"
     if (
@@ -1350,6 +1357,14 @@ class AgentWorker:
                 "plan_summary.replan_scope_policy: preserve forbidden paths, include every "
                 "required_scope_path, and expand beyond failed_allowed_paths when "
                 "allow_bounded_expansion is true."
+            )
+        if prompt_role == "path-arbiter":
+            decisions.append(
+                "Evaluate exactly one controller-owned Path Snapshot. Preserve its "
+                "root_problem_signature, remain read-only, and return only a typed "
+                "REPLAN_DELTA recommendation or no_safe_path/FAIL_SAFE. Do not assign "
+                "task or plan IDs, claim PASS evidence, run SQL, use credentials, or "
+                "perform repository/GitHub actions."
             )
         if prompt_role in {"task-specifier", "replanner"}:
             decisions.append(
@@ -2997,6 +3012,57 @@ class AgentWorker:
             if active_plan is not None
             else {}
         )
+        if spec.role == "path-arbiter":
+            root_problem_signature = str(
+                task_row.get("root_problem_signature") or ""
+            )
+            governor = PathGovernor(
+                self.state._connection,
+                policy_digest=policy_digest(self.config),
+            )
+            progress = governor.progress_vector(str(task["product_id"]))
+            budget = self.state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (str(task["product_id"]), root_problem_signature),
+            ).fetchone()
+            candidate = self.state._connection.execute(
+                """SELECT snapshot_id, snapshot_digest, status
+                    FROM candidate_snapshots
+                    WHERE product_id=? AND plan_id=?
+                    ORDER BY created_at DESC, snapshot_id DESC LIMIT 1""",
+                (str(task["product_id"]), str(task_row.get("plan_id") or "")),
+            ).fetchone()
+            plan_summary["path_snapshot"] = {
+                "root_problem_signature": root_problem_signature,
+                "policy_digest": policy_digest(self.config),
+                "progress_vector": progress.as_dict(),
+                "problem_budget": (
+                    {
+                        "deterministic_actions_used": int(budget[0]),
+                        "arbiter_calls_used": int(budget[1]),
+                        "execution_attempts_used": int(budget[2]),
+                        "status": str(budget[3]),
+                    }
+                    if budget is not None
+                    else None
+                ),
+                "candidate": (
+                    {
+                        "snapshot_id": str(candidate[0]),
+                        "snapshot_digest": str(candidate[1]),
+                        "status": str(candidate[2]),
+                    }
+                    if candidate is not None
+                    else None
+                ),
+                "failure_inventory": _replanner_failure_inventory(
+                    failures,
+                    source_failure_id=str(task.get("failure_id") or "") or None,
+                ),
+            }
         if spec.role == "replanner" and active_plan is not None:
             implementation_nodes = self._replanner_implementation_inventory(
                 str(task["product_id"]),
