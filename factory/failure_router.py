@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import ArtifactStore
-from .autonomy import CAPABILITY_PROFILES
+from .autonomy import CANONICAL_ROLE_OUTPUT_SCHEMAS, CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
 from .path_governor import PathGovernor, failure_owner, stable_root_problem_signature
@@ -1396,7 +1396,7 @@ class FailureRouter:
                 )
             elif bounded_reviewer_gate_repair:
                 role = "builder"
-                output_schema = "implementation-result.schema.json"
+                output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS[role]
                 capability_profile = "builder_workspace"
                 suffix = "repair"
                 objective = (

@@ -23,13 +23,14 @@ from factory.context_builder import ContextBuilder
 from factory.failure_router import FailureRouter
 from factory.intake import IntakeService
 from factory.migrations import MIGRATIONS, apply_migrations
-from factory.path_governor import PathGovernor
+from factory.path_governor import PathGovernor, task_contract_digest
 from factory.pipeline import PipelineCoordinator
 from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
 from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
 from factory.recovery import (
+    resume_canonical_builder_schema_failure,
     resume_opaque_subject_reference_failure,
     resume_reviewer_builder_route_failure,
 )
@@ -1061,7 +1062,8 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         repair = state.get_task(repair_id)
         assert repair is not None
         assert repair["role"] == "builder"
-        assert repair["output_schema"] == "implementation-result.schema.json"
+        assert repair["output_schema"] == "attempt-result.schema.json"
+        assert (config.schema_root() / str(repair["output_schema"])).is_file()
         assert repair["capability_profile"] == "builder_workspace"
         assert repair["stage_key"] == "repair"
         assert repair["repair_context_ref"]
@@ -1215,6 +1217,8 @@ def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
         repair = state.get_task(str(applied["recovery_task_id"]))
         assert repair is not None
         assert repair["role"] == "builder"
+        assert repair["output_schema"] == "attempt-result.schema.json"
+        assert (config.schema_root() / str(repair["output_schema"])).is_file()
         assert repair["stage_key"] == "repair"
         required = json.loads(str(repair["required_capabilities_json"]))
         assert "toolchain.container_builder" in required
@@ -1263,7 +1267,7 @@ def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
 def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_reset(
     tmp_path: Path,
 ) -> None:
-    _config, state, _, parent_failure_id, _ = failed_two_node_graph(
+    config, state, artifacts, parent_failure_id, _ = failed_two_node_graph(
         tmp_path,
         reason_code="mandatory_gate_failed",
     )
@@ -1373,6 +1377,121 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
         )
         assert replay["application_status"] == "REPLAYED"
         assert replay["recovery_task_id"] == task_id
+
+        recovered_contract_path = (
+            config.evidence_dir / Path(str(recovered["contract_ref"])).name
+        )
+        invalid_contract = json.loads(
+            recovered_contract_path.read_text(encoding="utf-8")
+        )
+        invalid_contract_ref = "evidence/task-T-FAILNODEA-invalid-builder-schema.json"
+        invalid_contract.update(
+            {
+                "artifact_id": "task-contract-T-FAILNODEA-invalid-builder-schema",
+                "active_context_ref": invalid_contract_ref,
+                "output_schema": "implementation-result.schema.json",
+            }
+        )
+        invalid_contract_path = artifacts.write(
+            "task-contract-v2.schema.json",
+            invalid_contract,
+            filename=Path(invalid_contract_ref).name,
+        )
+        schema_failure_id = "failure-canonical-builder-schema"
+        with state._lock, state._connection:
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id, product_id, task_id, parent_failure_id,
+                    failure_class, reason_code, fingerprint, safe_message,
+                    exception_type, stack_fingerprint, evidence_ref, status,
+                    retryable, owner_action_eligible, expected_json, actual_json,
+                    failed_gate_ids_json, first_seen_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, 'controller',
+                           'controller_exception_file_not_found_error', ?, ?,
+                           'FileNotFoundError', ?, 'evidence/failure-envelope-schema.json',
+                           'OPEN', 0, 0, '{}', ?, '[]', ?, ?)""",
+                (
+                    schema_failure_id,
+                    product_id,
+                    task_id,
+                    parent_failure_id,
+                    sha256_text(schema_failure_id),
+                    (
+                        "C:/runtime/schemas/"
+                        "implementation-result.schema.json"
+                    ),
+                    "f" * 64,
+                    stable_json(
+                        {
+                            "traceback_excerpt": (
+                                "PromptCompiler raised FileNotFoundError for "
+                                "implementation-result.schema.json"
+                            ),
+                            "redactions": [],
+                        }
+                    ),
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET output_schema='implementation-result.schema.json',
+                          contract_ref=?, active_context_ref=?,
+                          contract_digest=NULL, semantic_node_id=NULL,
+                          result_binding_id=NULL, status='FAILED_SAFE',
+                          graph_status='FAILED_SEMANTIC', failure_id=?,
+                          terminal_reason='controller_exception_file_not_found_error'
+                    WHERE task_id=?""",
+                (
+                    f"evidence/{invalid_contract_path.name}",
+                    invalid_contract_ref,
+                    schema_failure_id,
+                    task_id,
+                ),
+            )
+
+        schema_applied = resume_canonical_builder_schema_failure(
+            config,
+            state,
+            product_id=product_id,
+            failure_id=schema_failure_id,
+            correction_evidence_digest="f" * 64,
+        )
+        assert schema_applied["application_status"] == "APPLIED"
+        schema_recovered = state.get_task(task_id)
+        assert schema_recovered is not None
+        assert schema_recovered["status"] == "PENDING"
+        assert schema_recovered["graph_status"] == "READY"
+        assert schema_recovered["failure_id"] == parent_failure_id
+        assert schema_recovered["output_schema"] == "attempt-result.schema.json"
+        corrected_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(schema_recovered["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert corrected_contract["output_schema"] == "attempt-result.schema.json"
+        assert schema_recovered["contract_digest"] == task_contract_digest(
+            corrected_contract
+        )
+        assert tuple(
+            state._connection.execute(
+                """SELECT deterministic_actions_used,arbiter_calls_used,
+                          execution_attempts_used,status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, signature),
+            ).fetchone()
+        ) == (1, 1, 2, "ACTIVE")
+        schema_replay = resume_canonical_builder_schema_failure(
+            config,
+            state,
+            product_id=product_id,
+            failure_id=schema_failure_id,
+            correction_evidence_digest="f" * 64,
+        )
+        assert schema_replay["application_status"] == "REPLAYED"
     finally:
         state.close()
 

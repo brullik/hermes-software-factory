@@ -13,7 +13,7 @@ from .artifacts import ArtifactStore
 from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json, utc_now
 from .config import FactoryConfig
-from .path_governor import PathGovernor
+from .path_governor import PathGovernor, task_contract_digest
 from .plan_semantics import validate_compiled_plan
 from .policy import policy_digest
 from .state import StateStore
@@ -1875,7 +1875,7 @@ def resume_reviewer_builder_route_failure(
     if (
         routed is None
         or str(routed.get("role") or "") != "builder"
-        or str(routed.get("output_schema") or "") != "implementation-result.schema.json"
+        or str(routed.get("output_schema") or "") != "attempt-result.schema.json"
         or str(routed.get("capability_profile") or "") != "builder_workspace"
         or str(routed.get("stage_key") or "") != "repair"
         or str(routed.get("root_problem_signature") or "") != root_problem_signature
@@ -2220,6 +2220,323 @@ def resume_opaque_subject_reference_failure(
         "root_problem_signature": root_problem_signature,
         "correction_digest": correction_digest,
         "parent_failure_id": parent_failure_id,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
+def resume_canonical_builder_schema_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Correct one controller-routed Builder to its canonical output schema."""
+
+    if not state.maintenance_active():
+        raise ValueError("canonical Builder-schema recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_canonical_builder_schema_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.failure_class, failure.reason_code,
+                  failure.safe_message, failure.exception_type,
+                  failure.stack_fingerprint, failure.actual_json,
+                  failure.status AS failure_status,
+                  failure.parent_failure_id,
+                  parent.failure_class AS parent_failure_class,
+                  parent.status AS parent_failure_status,
+                  task.task_id, task.role, task.output_schema,
+                  task.capability_profile, task.stage_key,
+                  task.graph_status, task.status AS task_status,
+                  task.contract_ref, task.semantic_node_id,
+                  task.result_binding_id, task.root_problem_signature,
+                  product.status AS product_status
+             FROM failures AS failure
+             JOIN failures AS parent
+               ON parent.failure_id=failure.parent_failure_id
+              AND parent.product_id=failure.product_id
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product
+               ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("canonical Builder-schema failure coordinate is missing")
+    row = rows[0]
+    try:
+        diagnostic = json.loads(str(row["actual_json"] or "{}"))
+    except json.JSONDecodeError as error:
+        raise ValueError("controller failure diagnostic is invalid") from error
+    traceback_excerpt = (
+        str(diagnostic.get("traceback_excerpt") or "")
+        if isinstance(diagnostic, dict)
+        else ""
+    )
+    root_problem_signature = str(row["root_problem_signature"] or "")
+    parent_failure_id = str(row["parent_failure_id"] or "")
+    invalid_schema = "implementation-result.schema.json"
+    canonical_schema = "attempt-result.schema.json"
+    if (
+        str(row["failure_class"]) != "controller"
+        or str(row["reason_code"]) != "controller_exception_file_not_found_error"
+        or str(row["failure_status"]) != "OPEN"
+        or str(row["exception_type"]) != "FileNotFoundError"
+        or not str(row["stack_fingerprint"] or "")
+        or not str(row["safe_message"] or "").endswith(f"/schemas/{invalid_schema}")
+        or "PromptCompiler" not in traceback_excerpt
+        or invalid_schema not in traceback_excerpt
+        or str(row["parent_failure_class"]) not in {"semantic", "policy"}
+        or str(row["parent_failure_status"]) != "ROUTED"
+        or not parent_failure_id
+        or str(row["role"]) != "builder"
+        or str(row["output_schema"]) != invalid_schema
+        or str(row["capability_profile"] or "") != "builder_workspace"
+        or str(row["stage_key"] or "") != "repair"
+        or str(row["graph_status"]) != "FAILED_SEMANTIC"
+        or str(row["task_status"]) != "FAILED_SAFE"
+        or row["semantic_node_id"] is not None
+        or row["result_binding_id"] is not None
+        or str(row["product_status"]) != "IMPLEMENTING"
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+        or not (config.schema_root() / canonical_schema).is_file()
+    ):
+        raise ValueError("failure is not the bounded canonical Builder-schema defect")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise ValueError("product problem budget changed before schema recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("canonical Builder-schema recovery requires a drained controller")
+
+    contract_ref = str(row["contract_ref"] or "")
+    contract_name = Path(contract_ref).name
+    contract_path = (config.evidence_dir / contract_name).resolve()
+    evidence_root = config.evidence_dir.resolve()
+    if (
+        contract_ref != f"evidence/{contract_name}"
+        or contract_path.parent != evidence_root
+        or not contract_path.is_file()
+        or contract_path.is_symlink()
+    ):
+        raise ValueError("routed Builder contract reference is invalid")
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("routed Builder contract is unreadable") from error
+    task_id = str(row["task_id"])
+    if (
+        not isinstance(contract, dict)
+        or str(contract.get("product_id") or "") != product_id
+        or str(contract.get("task_id") or "") != task_id
+        or str(contract.get("role") or "") != "builder"
+        or str(contract.get("output_schema") or "") != invalid_schema
+    ):
+        raise ValueError("routed Builder contract identity is invalid")
+    corrected_ref = (
+        f"evidence/task-{task_id}-canonical-schema-{correction_digest[:12]}.json"
+    )
+    corrected_contract = dict(contract)
+    corrected_contract.update(
+        {
+            "artifact_id": f"task-contract-{task_id}-canonical-{correction_digest[:12]}",
+            "active_context_ref": corrected_ref,
+            "output_schema": canonical_schema,
+        }
+    )
+    corrected_path = ArtifactStore(config).write(
+        "task-contract-v2.schema.json",
+        corrected_contract,
+        filename=Path(corrected_ref).name,
+    )
+    corrected_contract_digest = task_contract_digest(corrected_contract)
+
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status, task.graph_status, task.status,
+                          task.failure_id, task.output_schema, task.contract_ref,
+                          product.status
+                     FROM failures AS failure
+                     JOIN tasks AS task ON task.task_id=failure.task_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "FAILED_SEMANTIC",
+                "FAILED_SAFE",
+                failure_id,
+                invalid_schema,
+                contract_ref,
+                "IMPLEMENTING",
+            ):
+                raise ValueError("canonical Builder-schema state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 2, "ACTIVE"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                """UPDATE failures SET status='RESOLVED', last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='OPEN'""",
+                (now, failure_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING', graph_status='READY', failure_id=?,
+                          output_schema=?, contract_ref=?, active_context_ref=?,
+                          contract_digest=?, lease_owner=NULL, lease_until=NULL,
+                          lease_token=NULL, heartbeat_at=NULL, available_at=NULL,
+                          terminal_reason=NULL, terminal_detail=NULL,
+                          result_ref=NULL, result_digest=NULL, failure_kind=NULL,
+                          blocked_reason=NULL, blocked_ref=NULL, updated_at=?
+                    WHERE task_id=? AND product_id=?
+                      AND graph_status='FAILED_SEMANTIC'
+                      AND status='FAILED_SAFE'""",
+                (
+                    parent_failure_id,
+                    canonical_schema,
+                    f"evidence/{corrected_path.name}",
+                    corrected_ref,
+                    corrected_contract_digest,
+                    now,
+                    task_id,
+                    product_id,
+                ),
+            )
+            incident_id = "incident-" + sha256_text(
+                f"{failure_id}:canonical-builder-schema"
+            )[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at, resolved_at)
+                   VALUES (?, ?, ?, 'controller_canonical_builder_schema_invariant',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    task_id,
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest, product_id, recovery_task_id,
+                    status, applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, task_id, now),
+            )
+            state._record_event(
+                product_id,
+                task_id,
+                "controller_canonical_builder_schema_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "parent_failure_id": parent_failure_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "contract_ref": f"evidence/{corrected_path.name}",
+                    "contract_digest": corrected_contract_digest,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": task_id,
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "parent_failure_id": parent_failure_id,
+        "corrected_contract_ref": f"evidence/{corrected_path.name}",
+        "corrected_output_schema": canonical_schema,
         "product_budget_counters": {
             "deterministic_actions_used": 1,
             "arbiter_calls_used": 1,

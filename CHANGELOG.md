@@ -19,6 +19,10 @@
   an idempotent, maintenance-fenced recovery that resumes the same immutable
   Builder attempt under its parent semantic finding without changing any Path
   Governor counter.
+- Route bounded reviewer repairs through the registered canonical Builder
+  `attempt-result.schema.json` contract. Add an idempotent recovery that writes
+  a new immutable corrected task contract and resumes the same Builder while
+  preserving the parent finding and all Path Governor counters.
 
 ## 2.3.10 - 2026-08-03
 

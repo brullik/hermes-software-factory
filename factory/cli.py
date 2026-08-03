@@ -26,6 +26,7 @@ from .recovery import (
     apply_recovery_plan,
     build_recovery_plan,
     finalize_recovery_application,
+    resume_canonical_builder_schema_failure,
     resume_controller_compilation_failure,
     resume_opaque_subject_reference_failure,
     resume_reviewer_builder_route_failure,
@@ -437,6 +438,27 @@ def opaque_subject_reference_recovery_command(args: argparse.Namespace) -> int:
     )
     try:
         result = resume_opaque_subject_reference_failure(
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def canonical_builder_schema_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_canonical_builder_schema_failure(
+            config,
             state,
             product_id=str(args.product_id),
             failure_id=str(args.failure_id),
@@ -953,6 +975,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     opaque_subject_reference_recovery.set_defaults(
         function=opaque_subject_reference_recovery_command
+    )
+    canonical_builder_schema_recovery = subparsers.add_parser(
+        "canonical-builder-schema-recovery"
+    )
+    canonical_builder_schema_recovery.add_argument("--config", type=Path)
+    canonical_builder_schema_recovery.add_argument("--product-id", required=True)
+    canonical_builder_schema_recovery.add_argument("--failure-id", required=True)
+    canonical_builder_schema_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    canonical_builder_schema_recovery.set_defaults(
+        function=canonical_builder_schema_recovery_command
     )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)
