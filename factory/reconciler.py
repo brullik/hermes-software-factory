@@ -14,7 +14,7 @@ from typing import Any
 from scripts.model_router import FailureClass, Tier, classify_failure, next_tier
 from scripts.quality_gate import load_catalog
 
-from .artifacts import ArtifactStore, artifact_metadata
+from .artifacts import ArtifactConflictError, ArtifactStore, artifact_metadata
 from .capabilities import CapabilityReconciler
 from .common import new_id, sha256_file, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
@@ -1242,6 +1242,7 @@ class PipelineReconciler:
                     self.state._connection,
                     policy_digest=policy_digest(self.config),
                 )
+                governor.register_execution_membership(str(task["task_id"]))
                 architecture_binding, bindings = (
                     governor.candidate_membership_bindings(
                         product_id=product_id,
@@ -1276,11 +1277,51 @@ class PipelineReconciler:
                     "created_at": now,
                     "status": "FROZEN",
                 }
-                path = self.artifacts.write(
-                    "candidate-snapshot.schema.json",
-                    payload,
-                    filename=f"candidate-snapshot-{snapshot_id}.json",
-                )
+                filename = f"candidate-snapshot-{snapshot_id}.json"
+                try:
+                    path = self.artifacts.write(
+                        "candidate-snapshot.schema.json",
+                        payload,
+                        filename=filename,
+                    )
+                except ArtifactConflictError as conflict:
+                    path = self.artifacts.root / filename
+                    if not path.is_file() or path.is_symlink():
+                        raise
+                    try:
+                        existing = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, TypeError, json.JSONDecodeError) as error:
+                        raise conflict from error
+                    if not isinstance(existing, dict):
+                        raise
+                    immutable_fields = (
+                        "schema_version",
+                        "snapshot_id",
+                        "product_id",
+                        "plan_id",
+                        "repository_commit",
+                        "tree_digest",
+                        "architecture_binding_id",
+                        "result_binding_ids",
+                        "snapshot_digest",
+                        "status",
+                    )
+                    existing_created_at = existing.get("created_at")
+                    if (
+                        self.artifacts.validate(
+                            "candidate-snapshot.schema.json", existing
+                        )
+                        or not isinstance(existing_created_at, str)
+                        or not existing_created_at
+                        or any(existing.get(field) != payload.get(field)
+                               for field in immutable_fields)
+                    ):
+                        raise
+                    self.state._connection.execute(
+                        """UPDATE candidate_snapshots SET created_at=?
+                            WHERE snapshot_id=?""",
+                        (existing_created_at, snapshot_id),
+                    )
                 attempt_id = f"attempt-path-{sha256_text(snapshot_id)[:20]}"
                 self.state._connection.execute(
                     """INSERT OR IGNORE INTO attempts
