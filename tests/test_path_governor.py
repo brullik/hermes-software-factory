@@ -875,6 +875,58 @@ def test_LOOP_P0_009_circuit_breaker_uses_exact_problem_budget(tmp_path: Path) -
         state.close()
 
 
+def test_failed_safe_reopens_only_through_unused_controller_correction(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    try:
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        signature = "e" * 64
+        progress = _progress(5)
+        with state._connection:
+            assert governor.consume_budget(
+                product_id="product-path-governor",
+                root_problem_signature=signature,
+                action_kind="arbiter",
+                progress=progress,
+                evidence_digest="1" * 64,
+            ) == "CONTINUE"
+            assert governor.consume_budget(
+                product_id="product-path-governor",
+                root_problem_signature=signature,
+                action_kind="arbiter",
+                progress=progress,
+                evidence_digest="2" * 64,
+            ) == "FAIL_SAFE"
+            assert governor.apply_controller_correction(
+                product_id="product-path-governor",
+                root_problem_signature=signature,
+                progress=progress,
+                evidence_digest="3" * 64,
+            ) == "CONTINUE"
+            assert governor.apply_controller_correction(
+                product_id="product-path-governor",
+                root_problem_signature=signature,
+                progress=progress,
+                evidence_digest="4" * 64,
+            ) == "FAIL_SAFE"
+            assert governor.reserve_execution_slots(
+                product_id="product-path-governor",
+                root_problem_signature=signature,
+                count=2,
+                progress=progress,
+            ) == "CONTINUE"
+        budget = state._connection.execute(
+            """SELECT deterministic_actions_used, arbiter_calls_used,
+                      execution_attempts_used, status
+                 FROM problem_budgets WHERE root_problem_signature=?""",
+            (signature,),
+        ).fetchone()
+        assert tuple(budget) == (1, 1, 2, "ACTIVE")
+    finally:
+        state.close()
+
+
 def test_LOOP_P0_010_path_arbiter_is_read_only_and_one_shot() -> None:
     signature = "a" * 64
     sandbox = PathArbiterSandbox(

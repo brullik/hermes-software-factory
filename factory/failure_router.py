@@ -1417,9 +1417,12 @@ class FailureRouter:
                     objective = (
                         "Evaluate the controller-supplied immutable Path Snapshot once. "
                         "Return one read-only path decision proposal bound to the exact "
-                        "root problem signature. Recommend REPLAN_DELTA only when a "
-                        "bounded semantic delta can produce fresh evidence; otherwise "
-                        "return no_safe_path and FAIL_SAFE."
+                        "root problem signature. Recommend REPLAN_DELTA when a bounded "
+                        "semantic delta can produce fresh evidence, including a Builder "
+                        "slice that truthfully discovers and attests missing inventory. "
+                        "The future evidence need not already exist in the snapshot. "
+                        "Never invent evidence or weaken a mandatory gate. Return "
+                        "no_safe_path only when no bounded role can produce it."
                     )
             else:
                 role = str(failed.get("role") or "builder")

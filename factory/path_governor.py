@@ -990,6 +990,60 @@ class PathGovernor:
         )
         return "CONTINUE"
 
+    def apply_controller_correction(
+        self,
+        *,
+        product_id: str,
+        root_problem_signature: str,
+        progress: ProgressVector,
+        evidence_digest: str,
+    ) -> str:
+        """Reopen one failed-safe path through its unused deterministic slot.
+
+        This is deliberately narrower than ``consume_budget``.  It applies only
+        to an existing exhausted row, requires fresh immutable controller
+        evidence, and preserves every already-consumed arbiter/execution slot.
+        The caller owns the transaction and must create only controller-governed
+        recovery work carrying the same root signature.
+        """
+
+        if not _SHA256.fullmatch(root_problem_signature):
+            raise ValueError("root problem signature must be a lowercase SHA-256")
+        if not _SHA256.fullmatch(evidence_digest):
+            raise ValueError("controller correction evidence must be a lowercase SHA-256")
+        row = self.connection.execute(
+            """SELECT deterministic_actions_used, arbiter_calls_used,
+                      execution_attempts_used, last_evidence_digest, status
+                 FROM problem_budgets
+                WHERE product_id=? AND root_problem_signature=?""",
+            (product_id, root_problem_signature),
+        ).fetchone()
+        if row is None:
+            raise KeyError(root_problem_signature)
+        now = utc_now()
+        if (
+            str(row["status"]) != "EXHAUSTED"
+            or int(row["deterministic_actions_used"]) >= 1
+            or int(row["execution_attempts_used"]) >= 2
+            or str(row["last_evidence_digest"] or "") == evidence_digest
+        ):
+            return "FAIL_SAFE"
+        self.connection.execute(
+            """UPDATE problem_budgets
+                  SET deterministic_actions_used=deterministic_actions_used+1,
+                      last_progress_vector_json=?, last_evidence_digest=?,
+                      status='ACTIVE', updated_at=?
+                WHERE product_id=? AND root_problem_signature=?""",
+            (
+                stable_json(progress.as_dict()),
+                evidence_digest,
+                now,
+                product_id,
+                root_problem_signature,
+            ),
+        )
+        return "CONTINUE"
+
     def progress_vector(self, product_id: str) -> ProgressVector:
         """Build the durable, payload-free trajectory vector for one product."""
 

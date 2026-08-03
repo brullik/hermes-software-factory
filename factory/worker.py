@@ -1366,6 +1366,13 @@ class AgentWorker:
                 "task or plan IDs, claim PASS evidence, run SQL, use credentials, or "
                 "perform repository/GitHub actions."
             )
+            decisions.append(
+                "Missing repository evidence is a valid bounded REPLAN_DELTA when a "
+                "Builder can inspect the repository, produce a truthful subject-bound "
+                "inventory or explicit zero-result attestation, and rerun the unchanged "
+                "mandatory gate. The future evidence need not already be present in the "
+                "Path Snapshot. Never invent dependencies or weaken the verifier."
+            )
         if prompt_role in {"task-specifier", "replanner"}:
             decisions.append(
                 "Return semantic implementation slices only. Do not emit task IDs, plan IDs, "

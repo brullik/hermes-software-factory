@@ -13,7 +13,9 @@ from .artifacts import ArtifactStore
 from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json, utc_now
 from .config import FactoryConfig
+from .path_governor import PathGovernor
 from .plan_semantics import validate_compiled_plan
+from .policy import policy_digest
 from .state import StateStore
 
 TERMINAL_PRODUCTS = {"CANCELLED", "COMPLETED", "FAILED_SAFE"}
@@ -112,6 +114,23 @@ def product_state_fingerprint(state: StateStore, product_id: str) -> str:
             """SELECT incident_id, task_id, reason_code, status
                  FROM controller_incidents WHERE product_id=?
                 ORDER BY incident_id""",
+            (product_id,),
+        ),
+        "problem_budgets": _rows(
+            state,
+            """SELECT root_problem_signature, deterministic_actions_used,
+                      arbiter_calls_used, execution_attempts_used,
+                      last_evidence_digest, status
+                 FROM problem_budgets WHERE product_id=?
+                ORDER BY root_problem_signature""",
+            (product_id,),
+        ),
+        "path_decisions": _rows(
+            state,
+            """SELECT decision_id, root_problem_signature, action,
+                      path_snapshot_digest, evidence_digest, status
+                 FROM path_decisions WHERE product_id=?
+                ORDER BY decision_id""",
             (product_id,),
         ),
     }
@@ -268,6 +287,48 @@ def build_recovery_plan(
             if tasks
             else f"T-ROOT-{sha256_text(product_id)[:12].upper()}"
         )
+        root_problem_signature: str | None = None
+        expected_problem_budget: dict[str, Any] | None = None
+        if (
+            failed_safe_selected
+            and str(product.get("terminal_reason") or "")
+            == "path_governor_problem_budget_exhausted"
+        ):
+            source_task = next(
+                (
+                    task
+                    for task in tasks
+                    if str(task.get("task_id") or "") == latest_source
+                ),
+                None,
+            )
+            source_signature = str(
+                source_task.get("root_problem_signature") or ""
+                if source_task is not None
+                else ""
+            )
+            if len(source_signature) != 64:
+                raise ValueError(
+                    "Path Governor recovery source has no stable problem signature"
+                )
+            budget_rows = _rows(
+                state,
+                """SELECT root_problem_signature, deterministic_actions_used,
+                          arbiter_calls_used, execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, source_signature),
+            )
+            if not budget_rows:
+                raise ValueError("Path Governor recovery requires a durable problem budget")
+            budget = budget_rows[0]
+            root_problem_signature = str(budget["root_problem_signature"])
+            expected_problem_budget = {
+                "deterministic_actions_used": int(budget["deterministic_actions_used"]),
+                "arbiter_calls_used": int(budget["arbiter_calls_used"]),
+                "execution_attempts_used": int(budget["execution_attempts_used"]),
+                "status": str(budget["status"]),
+            }
         resume_status = (
             "IMPLEMENTING"
             if product_id.startswith("build-and-release-a-complete-private-runtime")
@@ -290,6 +351,8 @@ def build_recovery_plan(
                 ),
                 "source_task_id": latest_source,
                 "source_failure_id": source_failure_id,
+                "root_problem_signature": root_problem_signature,
+                "expected_problem_budget": expected_problem_budget,
                 "resume_status": resume_status,
                 "action": "compile_semantic_lifecycle_revision",
             }
@@ -331,6 +394,15 @@ def validate_recovery_plan(plan: Mapping[str, Any]) -> None:
             raise ValueError(
                 "recovery action expected_product_fingerprint is invalid"
             )
+        root_problem_signature = action.get("root_problem_signature")
+        if root_problem_signature is not None and (
+            len(str(root_problem_signature)) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in str(root_problem_signature)
+            )
+        ):
+            raise ValueError("recovery root problem signature is invalid")
 
 
 def verify_recovery_preconditions(
@@ -421,6 +493,57 @@ def _recovery_contract(
     )
     task_id = "T-RECOVERY-" + sha256_text(f"{plan_digest}:{product_id}")[:16].upper()
     task_seed = f"{plan_digest}:{product_id}:{task_id}"
+    root_problem_signature = str(action.get("root_problem_signature") or "")
+    failed_gate_ids: list[str] = []
+    source_failure_id = str(action.get("source_failure_id") or "")
+    if source_failure_id:
+        failure_rows = _rows(
+            state,
+            """SELECT failure_id, parent_failure_id, failed_gate_ids_json
+                 FROM failures WHERE product_id=?""",
+            (product_id,),
+        )
+        failure_by_id = {str(item["failure_id"]): item for item in failure_rows}
+        current_failure_id = source_failure_id
+        visited: set[str] = set()
+        while current_failure_id and current_failure_id not in visited:
+            visited.add(current_failure_id)
+            current_failure = failure_by_id.get(current_failure_id)
+            if current_failure is None:
+                break
+            try:
+                raw_gate_ids = json.loads(
+                    str(current_failure.get("failed_gate_ids_json") or "[]")
+                )
+            except json.JSONDecodeError:
+                raw_gate_ids = []
+            if isinstance(raw_gate_ids, list):
+                coordinates = sorted(
+                    {str(value) for value in raw_gate_ids if str(value).strip()}
+                )
+                if coordinates:
+                    failed_gate_ids = coordinates
+                if any(value.startswith("target-") for value in coordinates):
+                    break
+            current_failure_id = str(
+                current_failure.get("parent_failure_id") or ""
+            )
+    objective = (
+        "Return a semantic replan delta that preserves valid implementation "
+        "evidence and changes the failed hypothesis before PlanCompiler creates "
+        "the next controller-owned lifecycle revision."
+    )
+    if root_problem_signature:
+        gate_coordinate = ", ".join(failed_gate_ids) or "the inherited mandatory gate"
+        objective = (
+            "Apply the digest-bound deterministic controller correction for the "
+            f"unchanged root problem signature. Create one bounded evidence-gathering "
+            f"semantic delta for {gate_coordinate}. Missing inventory or attestation is "
+            "executable Builder work: inspect the repository, produce a truthful "
+            "subject-bound inventory (including an explicit zero-dependency result when "
+            "proved), and rerun the unchanged mandatory gate. Do not invent dependencies, "
+            "weaken the verifier, or claim PASS. Preserve every accepted unaffected node."
+        )
     return {
         "schema_version": "2.0",
         "artifact_id": f"task-contract-{sha256_text(task_seed)[:20]}",
@@ -440,11 +563,7 @@ def _recovery_contract(
         "hypothesis_id": None,
         "supersedes_task_id": None,
         "title": "Recompile product into the semantic lifecycle",
-        "objective": (
-            "Return a semantic replan delta that preserves valid implementation "
-            "evidence and changes the failed hypothesis before PlanCompiler creates "
-            "the next controller-owned lifecycle revision."
-        ),
+        "objective": objective,
         "role": "replanner",
         "output_schema": "plan-proposal-v1.schema.json",
         "dependencies": (
@@ -531,6 +650,39 @@ def apply_recovery_plan(
                     action["expected_active_plan_revision"]
                 ):
                     raise ValueError(f"recovery product changed before apply: {product_id}")
+                root_problem_signature = str(
+                    action.get("root_problem_signature") or ""
+                )
+                if root_problem_signature:
+                    governor = PathGovernor(
+                        state._connection,
+                        policy_digest=policy_digest(config),
+                    )
+                    progress = governor.progress_vector(product_id)
+                    if governor.apply_controller_correction(
+                        product_id=product_id,
+                        root_problem_signature=root_problem_signature,
+                        progress=progress,
+                        evidence_digest=digest,
+                    ) != "CONTINUE":
+                        raise ValueError(
+                            "Path Governor deterministic correction budget is exhausted"
+                        )
+                    governor.record_decision(
+                        product_id=product_id,
+                        root_problem_signature=root_problem_signature,
+                        action="CONTROLLER_RECOVERY",
+                        path_snapshot_digest=governor.path_snapshot_digest(
+                            product_id=product_id,
+                            root_problem_signature=root_problem_signature,
+                            progress=progress,
+                            evidence_digest=digest,
+                        ),
+                        progress_before=progress,
+                        expected_progress_after=progress,
+                        evidence_digest=digest,
+                        status="APPLIED",
+                    )
                 supersede_ids = [str(value) for value in action["supersede_task_ids"]]
                 if supersede_ids:
                     placeholders = ",".join("?" for _ in supersede_ids)
@@ -570,13 +722,13 @@ def apply_recovery_plan(
                         plan_id, plan_node_id, task_revision, root_context_ref,
                         active_context_ref, capability_profile, idempotency_key,
                         graph_status, required_capabilities_json, mandatory, failure_id,
-                        critical_path_rank)
+                        critical_path_rank, root_problem_signature)
                        VALUES (?, ?, ?, 'replanner',
                                'plan-proposal-v1.schema.json', ?, 1000,
                         'PENDING', ?, ?, ?, ?,
                                'semantic-lifecycle-recovery', 0, ?, ?, ?, ?,
                                ?, ?, ?, ?, 'planning_readonly', ?, 'READY',
-                               ?, 1, ?, 0)""",
+                               ?, 1, ?, 0, ?)""",
                     (
                         str(contract["task_id"]),
                         product_id,
@@ -597,6 +749,7 @@ def apply_recovery_plan(
                         str(contract["idempotency_key"]),
                         stable_json(contract["required_capabilities"]),
                         contract.get("failure_id"),
+                        root_problem_signature or None,
                     ),
                 )
                 for dependency_id in contract["dependencies"]:
