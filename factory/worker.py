@@ -88,6 +88,7 @@ _ALIAS_BY_TIER = {
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.:/-]+$")
 _MAX_USAGE_BYTES = 256 * 1024
 _MAX_ATTEMPT_EVIDENCE_BYTES = 512 * 1024
+_MAX_TASK_CONTRACT_BYTES = 256 * 1024
 _MAX_DEPENDENCY_RESULT_CHARS = 12_000
 _MAX_REPAIR_BRIEF_CHARS = 12_000
 _MAX_REVIEW_RESULT_CHARS = 12_000
@@ -756,6 +757,17 @@ class SubprocessHermesRunner:
             "PYTHONUNBUFFERED",
         }
         environment = {key: value for key, value in os.environ.items() if key in allowed}
+        existing_path = environment.get("PATH", "")
+        interpreter_directory = str(Path(sys.executable).resolve().parent)
+        path_entries = existing_path.split(os.pathsep) if existing_path else []
+        if os.path.normcase(interpreter_directory) not in {
+            os.path.normcase(entry) for entry in path_entries if entry
+        }:
+            environment["PATH"] = (
+                interpreter_directory
+                if not existing_path
+                else interpreter_directory + os.pathsep + existing_path
+            )
         if cwd is not None:
             venv = cwd.parent / "venv"
             binary_directory = venv / ("Scripts" if os.name == "nt" else "bin")
@@ -1216,18 +1228,64 @@ class AgentWorker:
 
     def default_spec(self, task: Mapping[str, Any]) -> TaskExecutionSpec:
         task_id = str(task["task_id"])
-        contract_path = self.config.evidence_dir / f"task-{task_id}.json"
-        if not contract_path.is_file():
-            raise ExternalBlocker(f"Task Contract is missing for {task_id}")
-        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract_ref = str(task.get("contract_ref") or "")
+        if not contract_ref:
+            contract_ref = f"evidence/task-{task_id}.json"
+        contract_name = Path(contract_ref).name
+        accepted_references = {
+            f"evidence/{contract_name}",
+            str(self.config.evidence_dir / contract_name),
+        }
+        unresolved_contract_path = self.config.evidence_dir / contract_name
+        contract_path = unresolved_contract_path.resolve()
+        if (
+            contract_ref not in accepted_references
+            or contract_path.parent != self.config.evidence_dir.resolve()
+            or unresolved_contract_path.is_symlink()
+            or not contract_path.is_file()
+        ):
+            raise ExternalBlocker(
+                f"Task Contract reference is invalid for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
+        if contract_path.stat().st_size > _MAX_TASK_CONTRACT_BYTES:
+            raise ExternalBlocker(
+                f"Task Contract exceeds the safe size limit for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
+        try:
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ExternalBlocker(
+                f"Task Contract is unreadable for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            ) from error
         if not isinstance(contract, dict):
-            raise ExternalBlocker(f"Task Contract is not an object for {task_id}")
+            raise ExternalBlocker(
+                f"Task Contract is not an object for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
         contract_schema = (
             "task-contract-v2.schema.json"
             if str(contract.get("schema_version")) == "2.0"
             else "task-contract.schema.json"
         )
         self.schemas.validate(contract_schema, contract)
+        if (
+            str(contract.get("task_id") or "") != task_id
+            or str(contract.get("product_id") or "") != str(task["product_id"])
+        ):
+            raise ExternalBlocker(
+                f"Task Contract identity does not match durable task {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
+        if str(contract.get("schema_version")) == "2.0" and int(
+            contract.get("task_revision") or 0
+        ) != int(task.get("task_revision") or 1):
+            raise ExternalBlocker(
+                f"Task Contract revision does not match durable task {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
         failure_id = str(task.get("failure_id") or "")
         if str(task.get("stage_key") or "") == "repair" and failure_id:
             failure = next(

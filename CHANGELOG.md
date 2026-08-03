@@ -53,6 +53,14 @@
   already-repaired historical task whose stale reviewer contract reports
   `CONTAINER-SCAN-EVIDENCE-MISSING`; it reuses subject-bound accepted Builder
   scan evidence and preserves the exhausted `1:1:2` problem budget.
+- Resolve every durable task's exact immutable `contract_ref` at execution
+  time, with bounded path, identity, and revision validation. Explicit revised
+  contracts can no longer be shadowed by a stale canonical task filename, and
+  invalid references fail closed instead of silently changing task semantics.
+- Expose the controller's current Python virtual-environment binaries to the
+  provider subprocess while preserving the restricted environment boundary,
+  so read-only reviewers can invoke the approved `pytest` and `pip` toolchain
+  even when the candidate repository has no sibling virtual environment.
 
 ## 2.3.10 - 2026-08-03
 

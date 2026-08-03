@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -13,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
+import pytest
 import yaml
 
 from factory.artifacts import ArtifactStore, artifact_metadata
@@ -25,7 +28,7 @@ from factory.intake import IntakeService
 from factory.path_governor import ResultLineageIdentityError
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
-from factory.providers import ModelSelection
+from factory.providers import ExternalBlocker, ModelSelection
 from factory.quality import QualityGateRun
 from factory.reconciler import PipelineReconciler
 from factory.state import StateStore
@@ -139,6 +142,137 @@ def test_default_spec_falls_back_when_optional_subject_manifest_is_inaccessible(
 
         local_file.assert_called_once_with(str(repository_root / "SHA256SUMS"))
         assert spec.subject_sha == sha256_text(stable_json(spec.task_contract))
+        state.close()
+
+
+def test_default_spec_uses_exact_revised_contract_ref_instead_of_stale_canonical() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-REVISED-CONTRACT"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Execute the exact revised security review contract",
+            idempotency_key="revised-contract-ref",
+        )
+        task_id = "T-REVISED-CONTRACT"
+        canonical = replanner_task_contract(config, product_id, task_id)
+        canonical["quality_gates"] = ["target-sast"]
+        canonical_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json",
+            canonical,
+            filename=f"task-{task_id}.json",
+        )
+        state.add_task(
+            task_id=task_id,
+            product_id=product_id,
+            title=str(canonical["title"]),
+            role="replanner",
+            output_schema="backlog-plan-v2.schema.json",
+            contract_ref=f"evidence/{canonical_path.name}",
+            stage_key="replanner",
+            conflict_keys=[f"{product_id}:planning"],
+            capability_profile="planning_readonly",
+            required_capabilities=list(canonical["required_capabilities"]),
+        )
+        revised = {
+            **canonical,
+            "task_revision": 2,
+            "quality_gates": ["target-sast", "target-container-image-scan"],
+        }
+        revised_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json",
+            revised,
+            filename=f"task-{task_id}-container-gate.json",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET contract_ref=?, task_revision=? WHERE task_id=?",
+                (
+                    f"evidence/{revised_path.name}",
+                    revised["task_revision"],
+                    task_id,
+                ),
+            )
+        durable = state.get_task(task_id)
+        assert durable is not None
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            health_probe=lambda _: True,
+            repository_root=ROOT,
+        )
+
+        spec = worker.default_spec(durable)
+
+        assert spec.task_contract["quality_gates"] == [
+            "target-sast",
+            "target-container-image-scan",
+        ]
+        state.close()
+
+
+def test_default_spec_rejects_contract_ref_with_stale_revision() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-STALE-CONTRACT"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Reject stale immutable task contract revisions",
+            idempotency_key="stale-contract-ref",
+        )
+        task_id = "T-STALE-CONTRACT"
+        contract = replanner_task_contract(config, product_id, task_id)
+        contract_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json",
+            contract,
+            filename=f"task-{task_id}.json",
+        )
+        state.add_task(
+            task_id=task_id,
+            product_id=product_id,
+            title=str(contract["title"]),
+            role="replanner",
+            output_schema="backlog-plan-v2.schema.json",
+            contract_ref=f"evidence/{contract_path.name}",
+            stage_key="replanner",
+            conflict_keys=[f"{product_id}:planning"],
+            capability_profile="planning_readonly",
+            required_capabilities=list(contract["required_capabilities"]),
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET task_revision=task_revision+1 WHERE task_id=?",
+                (task_id,),
+            )
+        durable = state.get_task(task_id)
+        assert durable is not None
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            health_probe=lambda _: True,
+            repository_root=ROOT,
+        )
+
+        with pytest.raises(ExternalBlocker) as error:
+            worker.default_spec(durable)
+
+        assert error.value.reason_code == "invalid_task_contract_reference"
         state.close()
 
 
@@ -3780,6 +3914,21 @@ class WorkerTests(unittest.TestCase):
 
         self.assertEqual(environment["XDG_RUNTIME_DIR"], "/run/hermes-factory")
         self.assertNotIn("UNTRUSTED_SECRET", environment)
+
+    def test_subprocess_runner_exposes_controller_python_toolchain(self) -> None:
+        runner = SubprocessHermesRunner()
+
+        with patch.dict(
+            "factory.worker.os.environ",
+            {"PATH": "/usr/local/bin:/usr/bin"},
+            clear=True,
+        ):
+            environment = runner._environment(Path("/workspace/product"))
+
+        self.assertEqual(
+            environment["PATH"].split(os.pathsep)[0],
+            str(Path(sys.executable).resolve().parent),
+        )
 
     def test_AUT_P0_035_success_stdout_json_excludes_stderr_diagnostics(self) -> None:
         selection = ModelSelection(
