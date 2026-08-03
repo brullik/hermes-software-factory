@@ -1287,10 +1287,12 @@ class AgentWorker:
         prompt_role = role.replace("_", "-")
         subject_sha = os.environ.get("FACTORY_SUBJECT_SHA", "")
         if not re.fullmatch(r"[a-f0-9]{7,64}", subject_sha):
-            subject_file = self.repository_root / "SHA256SUMS"
+            subject_file = _local_file_reference(
+                str(self.repository_root / "SHA256SUMS")
+            )
             subject_sha = (
                 sha256_file(subject_file)
-                if subject_file.is_file()
+                if subject_file is not None
                 else sha256_text(stable_json(contract))
             )
         product = self.state.get_product(str(task["product_id"])) or {}

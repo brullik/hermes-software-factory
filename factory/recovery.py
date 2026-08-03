@@ -1966,6 +1966,270 @@ def resume_reviewer_builder_route_failure(
     }
 
 
+def resume_opaque_subject_reference_failure(
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Resume one Builder after an optional subject-file probe crashed.
+
+    This is a controller-only correction.  It restores the same repair task to
+    its parent semantic finding and preserves every Path Governor counter so an
+    interrupted immutable attempt can be resumed instead of spending a new
+    execution slot.
+    """
+
+    if not state.maintenance_active():
+        raise ValueError("opaque subject-reference recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_opaque_subject_reference_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.failure_class, failure.reason_code,
+                  failure.safe_message, failure.exception_type,
+                  failure.stack_fingerprint, failure.actual_json,
+                  failure.status AS failure_status,
+                  failure.parent_failure_id,
+                  parent.failure_class AS parent_failure_class,
+                  parent.status AS parent_failure_status,
+                  task.task_id, task.role, task.capability_profile,
+                  task.stage_key, task.graph_status,
+                  task.status AS task_status, task.repair_context_ref,
+                  task.root_problem_signature,
+                  product.status AS product_status
+             FROM failures AS failure
+             JOIN failures AS parent
+               ON parent.failure_id=failure.parent_failure_id
+              AND parent.product_id=failure.product_id
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product
+               ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("opaque subject-reference failure coordinate is missing")
+    row = rows[0]
+    try:
+        diagnostic = json.loads(str(row["actual_json"] or "{}"))
+    except json.JSONDecodeError as error:
+        raise ValueError("controller failure diagnostic is invalid") from error
+    traceback_excerpt = (
+        str(diagnostic.get("traceback_excerpt") or "")
+        if isinstance(diagnostic, dict)
+        else ""
+    )
+    root_problem_signature = str(row["root_problem_signature"] or "")
+    parent_failure_id = str(row["parent_failure_id"] or "")
+    if (
+        str(row["failure_class"]) != "controller"
+        or str(row["reason_code"]) != "controller_exception_permission_error"
+        or str(row["failure_status"]) != "OPEN"
+        or str(row["exception_type"]) != "PermissionError"
+        or not str(row["stack_fingerprint"] or "")
+        or not str(row["safe_message"] or "").endswith("/SHA256SUMS'")
+        or "default_spec" not in traceback_excerpt
+        or "subject_file.is_file()" not in traceback_excerpt
+        or str(row["parent_failure_class"]) not in {"semantic", "policy"}
+        or str(row["parent_failure_status"]) != "ROUTED"
+        or not parent_failure_id
+        or str(row["role"]) != "builder"
+        or str(row["capability_profile"] or "") != "builder_workspace"
+        or str(row["stage_key"] or "") != "repair"
+        or str(row["graph_status"]) != "FAILED_SEMANTIC"
+        or str(row["task_status"]) != "FAILED_SAFE"
+        or not str(row["repair_context_ref"] or "")
+        or str(row["product_status"]) != "IMPLEMENTING"
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+    ):
+        raise ValueError("failure is not the bounded subject-reference defect")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise ValueError("product problem budget changed before subject recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("subject-reference recovery requires a drained controller")
+
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status, task.graph_status, task.status,
+                          task.failure_id, product.status
+                     FROM failures AS failure
+                     JOIN tasks AS task ON task.task_id=failure.task_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "FAILED_SEMANTIC",
+                "FAILED_SAFE",
+                failure_id,
+                "IMPLEMENTING",
+            ):
+                raise ValueError("subject-reference state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 2, "ACTIVE"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                """UPDATE failures SET status='RESOLVED', last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='OPEN'""",
+                (now, failure_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING', graph_status='READY',
+                          failure_id=?, lease_owner=NULL, lease_until=NULL,
+                          lease_token=NULL, heartbeat_at=NULL,
+                          available_at=NULL, terminal_reason=NULL,
+                          terminal_detail=NULL, result_ref=NULL,
+                          result_digest=NULL, failure_kind=NULL,
+                          blocked_reason=NULL, blocked_ref=NULL, updated_at=?
+                    WHERE task_id=? AND product_id=?
+                      AND graph_status='FAILED_SEMANTIC'
+                      AND status='FAILED_SAFE'""",
+                (parent_failure_id, now, str(row["task_id"]), product_id),
+            )
+            incident_id = "incident-" + sha256_text(
+                f"{failure_id}:opaque-subject-reference"
+            )[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at, resolved_at)
+                   VALUES (?, ?, ?, 'controller_opaque_subject_reference_invariant',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    str(row["task_id"]),
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest, product_id, recovery_task_id,
+                    status, applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (
+                    correction_digest,
+                    product_id,
+                    str(row["task_id"]),
+                    now,
+                ),
+            )
+            state._record_event(
+                product_id,
+                str(row["task_id"]),
+                "controller_opaque_subject_reference_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "parent_failure_id": parent_failure_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "correction_evidence_digest": correction_evidence_digest,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": str(row["task_id"]),
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "parent_failure_id": parent_failure_id,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
 def verify_active_graphs(
     config: FactoryConfig,
     state: StateStore,

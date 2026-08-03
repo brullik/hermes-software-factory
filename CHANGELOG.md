@@ -14,6 +14,11 @@
 - Keep controller-owned `internal://task/...` outcome and failure-evidence
   references out of local filesystem probing so a worker step cannot crash
   during durable result persistence on Linux.
+- Treat an inaccessible optional `SHA256SUMS` in an inherited worker cwd as an
+  opaque local reference and fall back to the stable task-contract digest; add
+  an idempotent, maintenance-fenced recovery that resumes the same immutable
+  Builder attempt under its parent semantic finding without changing any Path
+  Governor counter.
 
 ## 2.3.10 - 2026-08-03
 

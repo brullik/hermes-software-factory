@@ -29,7 +29,10 @@ from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
 from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
-from factory.recovery import resume_reviewer_builder_route_failure
+from factory.recovery import (
+    resume_opaque_subject_reference_failure,
+    resume_reviewer_builder_route_failure,
+)
 from factory.recovery_directive import build_scope_recovery_directive
 from factory.repository import RepositoryBootstrapper
 from factory.state import StateStore
@@ -1253,6 +1256,123 @@ def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
                   AND role='builder' AND stage_key='repair'""",
             (failure_id,),
         ).fetchone()[0] == 1
+    finally:
+        state.close()
+
+
+def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_reset(
+    tmp_path: Path,
+) -> None:
+    _config, state, _, parent_failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="mandatory_gate_failed",
+    )
+    product_id = "product-autonomy"
+    task_id = "T-FAILNODEA"
+    failure_id = "failure-opaque-subject-reference"
+    signature = "c" * 64
+    now = "2026-08-03T11:00:00Z"
+    try:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE failures SET status='ROUTED' WHERE failure_id=?",
+                (parent_failure_id,),
+            )
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id, product_id, task_id, parent_failure_id,
+                    failure_class, reason_code, fingerprint, safe_message,
+                    exception_type, stack_fingerprint, evidence_ref, status,
+                    retryable, owner_action_eligible, expected_json, actual_json,
+                    failed_gate_ids_json, first_seen_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, 'controller',
+                           'controller_exception_permission_error', ?, ?,
+                           'PermissionError', ?, 'evidence/failure-envelope.json',
+                           'OPEN', 0, 0, '{}', ?, '[]', ?, ?)""",
+                (
+                    failure_id,
+                    product_id,
+                    task_id,
+                    parent_failure_id,
+                    sha256_text(failure_id),
+                    "[Errno 13] Permission denied: '/home/hermesadmin/SHA256SUMS'",
+                    "d" * 64,
+                    stable_json(
+                        {
+                            "traceback_excerpt": (
+                                "Traceback: default_spec called "
+                                "subject_file.is_file() before workspace acquisition"
+                            ),
+                            "redactions": [],
+                        }
+                    ),
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET role='builder', capability_profile='builder_workspace',
+                          stage_key='repair', status='FAILED_SAFE',
+                          graph_status='FAILED_SEMANTIC', failure_id=?,
+                          repair_context_ref='evidence/repair-brief.json',
+                          root_problem_signature=?,
+                          terminal_reason='controller_exception_permission_error'
+                    WHERE task_id=?""",
+                (failure_id, signature, task_id),
+            )
+            state._connection.execute(
+                """INSERT INTO problem_budgets
+                   (product_id, root_problem_signature,
+                    deterministic_actions_used, arbiter_calls_used,
+                    execution_attempts_used, last_progress_vector_json,
+                    status, created_at, updated_at)
+                   VALUES (?, ?, 1, 1, 2, '{}', 'ACTIVE', ?, ?)""",
+                (product_id, signature, now, now),
+            )
+            state._connection.execute(
+                """UPDATE products SET status='IMPLEMENTING', terminal_reason=NULL
+                    WHERE product_id=?""",
+                (product_id,),
+            )
+
+        state.enter_maintenance("opaque-subject-reference-recovery")
+        applied = resume_opaque_subject_reference_failure(
+            state,
+            product_id=product_id,
+            failure_id=failure_id,
+            correction_evidence_digest="e" * 64,
+        )
+
+        assert applied["application_status"] == "APPLIED"
+        assert applied["recovery_task_id"] == task_id
+        recovered = state.get_task(task_id)
+        assert recovered is not None
+        assert recovered["status"] == "PENDING"
+        assert recovered["graph_status"] == "READY"
+        assert recovered["failure_id"] == parent_failure_id
+        assert recovered["repair_context_ref"] == "evidence/repair-brief.json"
+        assert state._connection.execute(
+            "SELECT status FROM failures WHERE failure_id=?",
+            (failure_id,),
+        ).fetchone()[0] == "RESOLVED"
+        budget = state._connection.execute(
+            """SELECT deterministic_actions_used,arbiter_calls_used,
+                      execution_attempts_used,status
+                 FROM problem_budgets
+                WHERE product_id=? AND root_problem_signature=?""",
+            (product_id, signature),
+        ).fetchone()
+        assert tuple(budget) == (1, 1, 2, "ACTIVE")
+
+        replay = resume_opaque_subject_reference_failure(
+            state,
+            product_id=product_id,
+            failure_id=failure_id,
+            correction_evidence_digest="e" * 64,
+        )
+        assert replay["application_status"] == "REPLAYED"
+        assert replay["recovery_task_id"] == task_id
     finally:
         state.close()
 

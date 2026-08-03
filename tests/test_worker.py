@@ -105,6 +105,43 @@ def test_failure_envelope_preserves_internal_evidence_uri() -> None:
         state.close()
 
 
+def test_default_spec_falls_back_when_optional_subject_manifest_is_inaccessible() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-OPAQUE-SUBJECT-FALLBACK"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Compile a task without relying on inherited cwd access",
+            idempotency_key="opaque-subject-fallback",
+        )
+        PipelineCoordinator(config, state).seed_initial(product_id)
+        task = state.list_tasks(product_id)[0]
+        repository_root = root / "inaccessible-cwd"
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=repository_root,
+        )
+
+        with patch(
+            "factory.worker._local_file_reference",
+            return_value=None,
+        ) as local_file:
+            spec = worker.default_spec(task)
+
+        local_file.assert_called_once_with(str(repository_root / "SHA256SUMS"))
+        assert spec.subject_sha == sha256_text(stable_json(spec.task_contract))
+        state.close()
+
+
 def test_current_replan_frontier_excludes_only_historical_superseded_nodes() -> None:
     digest = "a" * 64
     affected = {
