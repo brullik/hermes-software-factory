@@ -1305,6 +1305,366 @@ def resume_controller_compilation_failure(
     }
 
 
+def resume_zero_dependency_audit_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Requeue one reviewer stopped by the historical empty-inventory defect.
+
+    The failed gate was controller-owned: an explicit, truthful zero-dependency
+    project could never pass.  This operation changes that failure's ownership,
+    preserves all product path counters, and reuses the same lifecycle task with
+    a fresh repair brief so attempt prompt uniqueness remains intact.
+    """
+
+    if not state.maintenance_active():
+        raise ValueError("zero-dependency audit recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_zero_dependency_audit_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.failure_class, failure.reason_code,
+                  failure.safe_message, failure.evidence_ref,
+                  failure.failed_gate_ids_json,
+                  failure.status AS failure_status,
+                  failure.owner_action_eligible,
+                  task.*, product.status AS product_status,
+                  product.terminal_reason AS product_terminal_reason
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("zero-dependency audit failure coordinate is missing")
+    row = rows[0]
+    try:
+        failed_gate_ids = json.loads(str(row["failed_gate_ids_json"] or "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("zero-dependency failure gates are invalid") from error
+    safe_message = str(row["safe_message"] or "")
+    root_problem_signature = str(row["root_problem_signature"] or "")
+    if (
+        str(row["failure_class"]) != "semantic"
+        or str(row["reason_code"]) != "mandatory_gate_failed"
+        or str(row["failure_status"]) != "ROUTED"
+        or int(row["owner_action_eligible"] or 0) != 0
+        or str(row["role"]) != "security-reviewer"
+        or str(row["capability_profile"] or "") != "reviewer_readonly"
+        or str(row["graph_status"]) != "FAILED_SEMANTIC"
+        or str(row["status"]) != "FAILED_SAFE"
+        or str(row["product_status"]) != "FAILED_SAFE"
+        or str(row["product_terminal_reason"] or "")
+        != "path_governor_problem_budget_exhausted"
+        or "runtime dependency inventory is empty" not in safe_message
+        or failed_gate_ids != ["target-dependency-audit"]
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+    ):
+        raise ValueError("failure is not the bounded zero-dependency audit defect")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 1, "EXHAUSTED"):
+        raise ValueError("product problem budget changed before audit recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("zero-dependency audit recovery requires a drained controller")
+
+    contract_name = Path(str(row.get("contract_ref") or "")).name
+    contract_path = config.evidence_dir / contract_name
+    if not contract_name or not contract_path.is_file():
+        raise ValueError("failed reviewer contract is unavailable")
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    acceptance = contract.get("acceptance") if isinstance(contract, dict) else None
+    allowed_paths = contract.get("allowed_paths") if isinstance(contract, dict) else None
+    if not isinstance(acceptance, list) or not acceptance:
+        raise ValueError("failed reviewer acceptance is unavailable")
+    if not isinstance(allowed_paths, list) or not allowed_paths:
+        raise ValueError("failed reviewer scope is unavailable")
+
+    hypothesis_rows = _rows(
+        state,
+        """SELECT * FROM hypotheses
+            WHERE product_id=? AND status='ACTIVE'
+              AND (hypothesis_id=? OR failure_id=?)
+            ORDER BY CASE WHEN hypothesis_id=? THEN 0 ELSE 1 END,
+                     created_at DESC LIMIT 1""",
+        (
+            product_id,
+            str(row.get("hypothesis_id") or ""),
+            failure_id,
+            str(row.get("hypothesis_id") or ""),
+        ),
+    )
+    hypothesis = hypothesis_rows[0] if hypothesis_rows else None
+    hypothesis_id = (
+        str(hypothesis["hypothesis_id"])
+        if hypothesis is not None
+        else "hypothesis-" + sha256_text(f"{correction_digest}:reverify")[:20]
+    )
+    parent_hypothesis_id = (
+        str(hypothesis["parent_hypothesis_id"])
+        if hypothesis is not None and hypothesis.get("parent_hypothesis_id")
+        else None
+    )
+    task_id = str(row["task_id"])
+    repair_brief = {
+        "schema_version": "2.0",
+        "artifact_id": "repair-brief-" + sha256_text(correction_digest)[:20],
+        "product_id": product_id,
+        "task_id": task_id,
+        "root_task_id": str(row["root_task_id"]),
+        "failed_task_id": task_id,
+        "failure_id": failure_id,
+        "hypothesis_id": hypothesis_id,
+        "parent_hypothesis_id": parent_hypothesis_id,
+        "plan_id": str(row["plan_id"]),
+        "plan_node_id": str(row["plan_node_id"]),
+        "inherited_goal_ref": str(row["root_context_ref"]),
+        "inherited_acceptance": [dict(item) for item in acceptance if isinstance(item, dict)],
+        "failed_gate_ids": ["target-dependency-audit"],
+        "required_fixes": [
+            "Re-run target-dependency-audit with explicit zero-dependency attestation support.",
+            "Require project.dependencies=[] and reject undeclared third-party runtime imports.",
+            safe_message,
+        ],
+        "evidence_refs": [
+            str(row["evidence_ref"]),
+            f"internal://release/{correction_evidence_digest}",
+        ],
+        "allowed_paths": [str(value) for value in allowed_paths],
+        "capability_gaps": [],
+        "supersedes_task_id": (
+            str(row["supersedes_task_id"])
+            if row.get("supersedes_task_id")
+            else None
+        ),
+        "definition_of_done": [
+            str(item["verification"])
+            for item in acceptance
+            if isinstance(item, dict) and item.get("verification")
+        ],
+    }
+    repair_path = ArtifactStore(config).write(
+        "repair-brief-v2.schema.json",
+        repair_brief,
+        filename=f"repair-brief-{task_id}-{correction_digest[:12]}.json",
+    )
+    repair_ref = f"evidence/{repair_path.name}"
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status, failure.failure_class,
+                          failure.reason_code, task.graph_status, task.status,
+                          product.status, product.terminal_reason
+                     FROM failures AS failure
+                     JOIN tasks AS task ON task.task_id=failure.task_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "ROUTED",
+                "semantic",
+                "mandatory_gate_failed",
+                "FAILED_SEMANTIC",
+                "FAILED_SAFE",
+                "FAILED_SAFE",
+                "path_governor_problem_budget_exhausted",
+            ):
+                raise ValueError("zero-dependency audit state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 1, "EXHAUSTED"):
+                raise ValueError("product problem budget changed before apply")
+            if hypothesis is None:
+                state._connection.execute(
+                    """INSERT INTO hypotheses
+                       (hypothesis_id, product_id, failure_id, signature,
+                        statement, required_evidence_json, status,
+                        semantic_budget, attempts_used, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', 1, 0, ?)""",
+                    (
+                        hypothesis_id,
+                        product_id,
+                        failure_id,
+                        sha256_text(f"{correction_digest}:zero-dependency-reverify"),
+                        "Reverify the reviewer after the controller audit adapter correction.",
+                        stable_json([repair_ref]),
+                        now,
+                    ),
+                )
+            state._connection.execute(
+                """UPDATE failures
+                      SET failure_class='controller',
+                          reason_code='controller_zero_dependency_audit_invariant',
+                          status='RESOLVED', last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='ROUTED'""",
+                (now, failure_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE problem_budgets SET status='ACTIVE', updated_at=?
+                    WHERE product_id=? AND root_problem_signature=?
+                      AND deterministic_actions_used=1
+                      AND arbiter_calls_used=1
+                      AND execution_attempts_used=1
+                      AND status='EXHAUSTED'""",
+                (now, product_id, root_problem_signature),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING', graph_status='READY',
+                          lease_owner=NULL, lease_until=NULL,
+                          lease_token=NULL, heartbeat_at=NULL,
+                          available_at=NULL, next_tier='terra',
+                          next_attempt_kind='repair', repair_context_ref=?,
+                          terminal_reason=NULL, terminal_detail=NULL,
+                          result_ref=NULL, result_digest=NULL,
+                          failure_kind=NULL, blocked_reason=NULL,
+                          blocked_ref=NULL, hypothesis_id=?, updated_at=?
+                    WHERE task_id=? AND product_id=?
+                      AND graph_status='FAILED_SEMANTIC'
+                      AND status='FAILED_SAFE'""",
+                (repair_ref, hypothesis_id, now, task_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE products
+                      SET status='IMPLEMENTING', terminal_reason=NULL, updated_at=?
+                    WHERE product_id=? AND status='FAILED_SAFE'""",
+                (now, product_id),
+            )
+            incident_id = "incident-" + sha256_text(f"{failure_id}:zero-dependency")[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at, resolved_at)
+                   VALUES (?, ?, ?, 'controller_zero_dependency_audit_invariant',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    task_id,
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest, product_id, recovery_task_id,
+                    status, applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, task_id, now),
+            )
+            state._record_event(
+                product_id,
+                task_id,
+                "controller_zero_dependency_audit_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "correction_evidence_digest": correction_evidence_digest,
+                    "repair_context_ref": repair_ref,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": task_id,
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "repair_context_ref": repair_ref,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 1,
+            "status": "ACTIVE",
+        },
+    }
+
+
 def verify_active_graphs(
     config: FactoryConfig,
     state: StateStore,

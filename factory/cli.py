@@ -27,6 +27,7 @@ from .recovery import (
     build_recovery_plan,
     finalize_recovery_application,
     resume_controller_compilation_failure,
+    resume_zero_dependency_audit_failure,
     state_audit,
     verify_active_graphs,
     verify_recovery_preconditions,
@@ -371,6 +372,27 @@ def controller_compilation_recovery_command(args: argparse.Namespace) -> int:
     )
     try:
         result = resume_controller_compilation_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def zero_dependency_audit_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_zero_dependency_audit_failure(
             config,
             state,
             product_id=str(args.product_id),
@@ -849,6 +871,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     controller_compilation_recovery.set_defaults(
         function=controller_compilation_recovery_command
+    )
+    zero_dependency_audit_recovery = subparsers.add_parser(
+        "zero-dependency-audit-recovery"
+    )
+    zero_dependency_audit_recovery.add_argument("--config", type=Path)
+    zero_dependency_audit_recovery.add_argument("--product-id", required=True)
+    zero_dependency_audit_recovery.add_argument("--failure-id", required=True)
+    zero_dependency_audit_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    zero_dependency_audit_recovery.set_defaults(
+        function=zero_dependency_audit_recovery_command
     )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)

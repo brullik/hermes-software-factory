@@ -408,6 +408,66 @@ class QualityGateTests(unittest.TestCase):
         self.assertIn("database is stale", result["summary"])
         scanner_runner.assert_not_called()
 
+    def test_target_dependency_audit_attests_explicit_zero_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scanner = root / "osv-scanner"
+            scanner.write_bytes(b"verified-scanner")
+            gate = self._offline_dependency_gate(root, scanner)
+            (root / "pyproject.toml").write_text(
+                "[project]\nname='candidate'\nversion='1.0'\ndependencies=[]\n",
+                encoding="utf-8",
+            )
+            source = root / "src" / "candidate" / "__init__.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("import json\nfrom pathlib import Path\n", encoding="utf-8")
+            with (
+                patch("scripts.quality_gate._target_site_packages", return_value=root),
+                patch("scripts.quality_gate.subprocess.run") as scanner_runner,
+            ):
+                result = run_gate(
+                    gate,
+                    root,
+                    "3" * 64,
+                    python_executable="target-python",
+                )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIn("audited_runtime_packages=0", result["summary"])
+        self.assertIn("zero_dependency_attestation_sha256=", result["summary"])
+        self.assertIn("scanner_mode=not_applicable", result["summary"])
+        scanner_runner.assert_not_called()
+
+    def test_zero_dependency_attestation_rejects_undeclared_runtime_import(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scanner = root / "osv-scanner"
+            scanner.write_bytes(b"verified-scanner")
+            gate = self._offline_dependency_gate(root, scanner)
+            (root / "pyproject.toml").write_text(
+                "[project]\nname='candidate'\nversion='1.0'\ndependencies=[]\n",
+                encoding="utf-8",
+            )
+            source = root / "src" / "candidate" / "__init__.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("import requests\n", encoding="utf-8")
+            with (
+                patch("scripts.quality_gate._target_site_packages", return_value=root),
+                patch("scripts.quality_gate.subprocess.run") as scanner_runner,
+            ):
+                result = run_gate(
+                    gate,
+                    root,
+                    "4" * 64,
+                    python_executable="target-python",
+                )
+
+        self.assertEqual(result["status"], "ERROR")
+        self.assertIsNone(result["exit_code"])
+        self.assertIn("undeclared third-party runtime imports: requests", result["summary"])
+        scanner_runner.assert_not_called()
+
     def test_target_license_check_fails_closed_on_policy_denied_runtime_license(self) -> None:
         gate = {
             "id": "target-license-check",

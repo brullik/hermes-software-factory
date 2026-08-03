@@ -481,6 +481,40 @@ class FailureRouter:
         )
 
     @staticmethod
+    def _reviewer_gate_repair_paths(failed_gate_ids: list[str]) -> list[str]:
+        """Give a post-arbitration Builder the smallest useful repository scope."""
+
+        paths = ["pyproject.toml", "src/**", "tests/**"]
+        if any("dependency" in gate_id or "license" in gate_id for gate_id in failed_gate_ids):
+            paths.insert(1, "requirements*.txt")
+        return paths
+
+    @staticmethod
+    def _reviewer_gate_repair_acceptance(
+        failed_gate_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        gates = ", ".join(failed_gate_ids) or "the failed mandatory gate"
+        return [
+            {
+                "criterion_id": "AC-REVIEWER-GATE-ROOT-CAUSE",
+                "verification": (
+                    "The implementation identifies and repairs the repository-level "
+                    "cause of the reviewer failure without weakening or bypassing "
+                    f"{gates}."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-REVIEWER-GATE-FRESH-EVIDENCE",
+                "verification": (
+                    "Every failed mandatory gate is rerun and produces fresh, "
+                    "subject-bound controller evidence that passes."
+                ),
+                "mandatory": True,
+            },
+        ]
+
+    @staticmethod
     def _controller_incident_acceptance() -> list[dict[str, Any]]:
         """Keep controller recovery separate from product-semantic acceptance."""
 
@@ -1288,10 +1322,25 @@ class FailureRouter:
                 or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
                 or str(failed.get("role") or "") == "path-arbiter"
             )
+            budget_row = self.state._connection.execute(
+                """SELECT arbiter_calls_used, execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (failed["product_id"], root_problem_signature),
+            ).fetchone()
+            bounded_reviewer_gate_repair = (
+                needs_replan
+                and reason == "mandatory_gate_failed"
+                and str(failed.get("capability_profile") or "") == "reviewer_readonly"
+                and budget_row is not None
+                and int(budget_row["arbiter_calls_used"] or 0) >= 1
+                and int(budget_row["execution_attempts_used"] or 0) < 2
+                and str(budget_row["status"] or "") == "ACTIVE"
+            )
             if controller_fault or invalid_plan_output_schema or legacy_replanner_scope_contract:
                 budget_action_kind = "deterministic"
                 path_action = "CONTROLLER_RECOVERY"
-            elif needs_replan:
+            elif needs_replan and not bounded_reviewer_gate_repair:
                 budget_action_kind = "arbiter"
                 path_action = "REPLAN_DELTA"
             else:
@@ -1333,6 +1382,17 @@ class FailureRouter:
                 objective = (
                     "Repair the controller invariant using the exact safe failure "
                     "evidence; do not consume a product semantic budget."
+                )
+            elif bounded_reviewer_gate_repair:
+                role = "builder"
+                output_schema = "implementation-result.schema.json"
+                capability_profile = "builder_workspace"
+                suffix = "repair"
+                objective = (
+                    "Use the remaining bounded execution slot to repair the exact "
+                    "repository-level cause of the reviewer mandatory-gate failure. "
+                    "Preserve the root problem signature, do not weaken a gate, and "
+                    "produce fresh subject-bound evidence for every failed gate."
                 )
             elif needs_replan:
                 if legacy_replanner_scope_contract:
@@ -1449,7 +1509,11 @@ class FailureRouter:
             # contract that still permits only ``src/**``.  The model then cannot
             # propose the controller-requested scope expansion and the router
             # creates an unbounded chain of semantically identical replans.
-            if role in {"replanner", "path-arbiter"}:
+            if bounded_reviewer_gate_repair:
+                allowed_paths = self._reviewer_gate_repair_paths(
+                    self._failure_gate_ids(failure)
+                )
+            elif role in {"replanner", "path-arbiter"}:
                 allowed_paths = ["artifacts/**"]
             else:
                 allowed_paths = [
@@ -1471,6 +1535,10 @@ class FailureRouter:
                     self._controller_replan_acceptance()
                     if controller_recovery_depth > 0
                     else self._product_replan_acceptance()
+                )
+            elif bounded_reviewer_gate_repair:
+                contract_acceptance = self._reviewer_gate_repair_acceptance(
+                    self._failure_gate_ids(failure)
                 )
             else:
                 contract_acceptance = None

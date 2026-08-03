@@ -27,6 +27,7 @@ from factory.recovery import (
     build_recovery_plan,
     finalize_recovery_application,
     resume_controller_compilation_failure,
+    resume_zero_dependency_audit_failure,
     state_audit,
     verify_active_graphs,
     verify_recovery_preconditions,
@@ -1676,6 +1677,184 @@ def test_LOOP_P0_014_controller_compiler_recovery_preserves_product_budget(
         "SELECT COUNT(*) FROM tasks WHERE product_id=? AND role='replanner'",
         (product_id,),
     ).fetchone()[0] == 2
+    state.close()
+
+
+def test_LOOP_P0_015_zero_dependency_recovery_requeues_same_reviewer(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-zero-dependency-audit-recovery"
+    task_id = "T-ZERO-DEPENDENCY-SECURITY"
+    failure_id = "failure-zero-dependency-inventory"
+    hypothesis_id = "hypothesis-zero-dependency"
+    signature = sha256_text("zero-dependency-root-problem")
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Release a Python product with no external runtime dependencies",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="zero-dependency-audit-recovery",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    contract_ref = f"evidence/task-{task_id}.json"
+    config.evidence_dir.mkdir(parents=True, exist_ok=True)
+    (config.evidence_dir / Path(contract_ref).name).write_text(
+        json.dumps(
+            {
+                "acceptance": [
+                    {
+                        "criterion_id": "AC-SECURITY-DEPENDENCY-AUDIT",
+                        "verification": (
+                            "The target dependency audit passes with subject-bound evidence."
+                        ),
+                        "mandatory": True,
+                    }
+                ],
+                "allowed_paths": ["artifacts/**"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state.add_task(
+        task_id=task_id,
+        product_id=product_id,
+        title="Verify target dependency evidence",
+        role="security-reviewer",
+        output_schema="security-review-result.schema.json",
+        contract_ref=contract_ref,
+        stage_key="security-review",
+        root_task_id="T-ZERO-ROOT",
+        plan_id="PLAN-ZERO-DEPENDENCY",
+        plan_node_id="security-review",
+        root_context_ref=f"evidence/intake-{product_id}.json",
+        capability_profile="reviewer_readonly",
+        graph_status="FAILED_SEMANTIC",
+        root_problem_signature=signature,
+    )
+    now = "2026-08-03T00:00:00Z"
+    with state._lock, state._connection:
+        state._connection.execute(
+            """UPDATE tasks SET status='FAILED_SAFE', failure_id=?,
+                      hypothesis_id=?, attempts=1
+                 WHERE task_id=?""",
+            (failure_id, hypothesis_id, task_id),
+        )
+        state._connection.execute(
+            """INSERT INTO failures
+               (failure_id, product_id, task_id, failure_class, reason_code,
+                fingerprint, safe_message, evidence_ref, status, retryable,
+                owner_action_eligible, expected_json, actual_json,
+                failed_gate_ids_json, first_seen_at, last_seen_at)
+               VALUES (?, ?, ?, 'semantic', 'mandatory_gate_failed', ?,
+                       'failed mandatory gates: target-dependency-audit. Safe controller diagnostics: target-dependency-audit: target dependency audit failed closed: runtime dependency inventory is empty',
+                       'internal://zero-dependency-gate', 'ROUTED', 0, 0,
+                       '{}', '{}', '["target-dependency-audit"]', ?, ?)""",
+            (
+                failure_id,
+                product_id,
+                task_id,
+                sha256_text("zero-dependency-gate-failure"),
+                now,
+                now,
+            ),
+        )
+        state._connection.execute(
+            """INSERT INTO hypotheses
+               (hypothesis_id, product_id, failure_id, signature, statement,
+                required_evidence_json, status, semantic_budget,
+                attempts_used, created_at)
+               VALUES (?, ?, ?, ?, 'Reverify dependency evidence.', ?,
+                       'ACTIVE', 3, 1, ?)""",
+            (
+                hypothesis_id,
+                product_id,
+                failure_id,
+                sha256_text("zero-dependency-hypothesis"),
+                stable_json(["internal://zero-dependency-gate"]),
+                now,
+            ),
+        )
+        state._connection.execute(
+            """INSERT INTO problem_budgets
+               (product_id, root_problem_signature, deterministic_actions_used,
+                arbiter_calls_used, execution_attempts_used,
+                last_progress_vector_json, last_evidence_digest, status,
+                created_at, updated_at)
+               VALUES (?, ?, 1, 1, 1, ?, ?, 'EXHAUSTED', ?, ?)""",
+            (product_id, signature, stable_json({}), "a" * 64, now, now),
+        )
+        state._connection.execute(
+            """UPDATE products SET status='FAILED_SAFE',
+                      terminal_reason='path_governor_problem_budget_exhausted'
+                 WHERE product_id=?""",
+            (product_id,),
+        )
+
+    state.enter_maintenance("zero-dependency-audit-recovery")
+    applied = resume_zero_dependency_audit_failure(
+        config,
+        state,
+        product_id=product_id,
+        failure_id=failure_id,
+        correction_evidence_digest="c" * 64,
+    )
+    assert applied["application_status"] == "APPLIED"
+    assert applied["recovery_task_id"] == task_id
+    recovered = state.get_task(task_id)
+    assert recovered is not None
+    assert (recovered["status"], recovered["graph_status"]) == ("PENDING", "READY")
+    assert recovered["next_tier"] == "terra"
+    assert recovered["next_attempt_kind"] == "repair"
+    assert recovered["repair_context_ref"]
+    assert recovered["attempts"] == 1
+    assert recovered["hypothesis_id"] == hypothesis_id
+    assert state.get_product(product_id)["status"] == "IMPLEMENTING"
+    failure = state._connection.execute(
+        "SELECT failure_class,reason_code,status FROM failures WHERE failure_id=?",
+        (failure_id,),
+    ).fetchone()
+    assert tuple(failure) == (
+        "controller",
+        "controller_zero_dependency_audit_invariant",
+        "RESOLVED",
+    )
+    budget = state._connection.execute(
+        """SELECT deterministic_actions_used,arbiter_calls_used,
+                  execution_attempts_used,status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, signature),
+    ).fetchone()
+    assert tuple(budget) == (1, 1, 1, "ACTIVE")
+    repair_brief = json.loads(
+        (
+            config.evidence_dir
+            / Path(str(recovered["repair_context_ref"])).name
+        ).read_text(encoding="utf-8")
+    )
+    assert repair_brief["failed_gate_ids"] == ["target-dependency-audit"]
+    assert repair_brief["task_id"] == task_id
+    replay = resume_zero_dependency_audit_failure(
+        config,
+        state,
+        product_id=product_id,
+        failure_id=failure_id,
+        correction_evidence_digest="c" * 64,
+    )
+    assert replay["application_status"] == "REPLAYED"
+    assert state._connection.execute(
+        "SELECT COUNT(*) FROM tasks WHERE product_id=?",
+        (product_id,),
+    ).fetchone()[0] == 1
     state.close()
 
 
