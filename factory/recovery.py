@@ -969,6 +969,342 @@ def finalize_recovery_application(
     }
 
 
+def resume_controller_compilation_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Resume one Replanner stopped by a proven controller compiler defect.
+
+    This operation does not reset or consume the product problem budget.  It
+    corrects historical ownership, preserves every counter, and creates one
+    deterministic Replanner retry under the original root signature.  The
+    exact historical defect and release evidence are fail-closed coordinates.
+    """
+
+    if not state.maintenance_active():
+        raise ValueError("controller compilation recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_plan_compilation_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.failure_class, failure.reason_code,
+                  failure.safe_message, failure.status AS failure_status,
+                  failure.owner_action_eligible,
+                  task.task_id, task.role, task.stage_key,
+                  task.graph_status, task.status AS task_status,
+                  task.root_problem_signature,
+                  product.status AS product_status, product.terminal_reason
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("controller compilation failure coordinate is missing")
+    row = rows[0]
+    safe_message = str(row["safe_message"] or "")
+    root_problem_signature = str(row["root_problem_signature"] or "")
+    if (
+        str(row["failure_class"]) != "semantic"
+        or str(row["reason_code"]) != "schema_validation"
+        or str(row["failure_status"]) != "OPEN"
+        or int(row["owner_action_eligible"] or 0) != 0
+        or str(row["role"]) != "replanner"
+        or str(row["stage_key"]) != "semantic-lifecycle-recovery"
+        or str(row["graph_status"]) != "FAILED_SEMANTIC"
+        or str(row["task_status"]) != "FAILED_SAFE"
+        or str(row["product_status"]) != "FAILED_SAFE"
+        or str(row["terminal_reason"] or "")
+        != "path_governor_problem_budget_exhausted"
+        or not safe_message.startswith("Invalid task-contract-v2.schema.json:")
+        or "less than the minimum of 0" not in safe_message
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+    ):
+        raise ValueError("failure is not the bounded controller compilation defect")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 0, "EXHAUSTED"):
+        raise ValueError("product problem budget changed before controller recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("controller compilation recovery requires a drained controller")
+
+    action = {
+        "product_id": product_id,
+        "source_task_id": str(row["task_id"]),
+        "source_failure_id": failure_id,
+        "root_problem_signature": root_problem_signature,
+        "architecture_source_task_id": None,
+    }
+    contract = _recovery_contract(
+        config,
+        state,
+        correction_digest,
+        action,
+    )
+    ArtifactStore(config).write(
+        "task-contract-v2.schema.json",
+        contract,
+        filename=f"task-{contract['task_id']}.json",
+    )
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status, failure.failure_class,
+                          failure.reason_code, task.graph_status,
+                          task.status, product.status, product.terminal_reason
+                     FROM failures AS failure
+                     JOIN tasks AS task ON task.task_id=failure.task_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "semantic",
+                "schema_validation",
+                "FAILED_SEMANTIC",
+                "FAILED_SAFE",
+                "FAILED_SAFE",
+                "path_governor_problem_budget_exhausted",
+            ):
+                raise ValueError("controller compilation state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 0, "EXHAUSTED"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                """UPDATE failures
+                      SET failure_class='controller',
+                          reason_code='controller_plan_compilation_invariant',
+                          status='RESOLVED', last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='OPEN'""",
+                (now, failure_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE hypotheses SET status='RESOLVED',
+                          closed_at=COALESCE(closed_at, ?)
+                    WHERE failure_id=? AND status='ACTIVE'""",
+                (now, failure_id),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET graph_status='SUPERSEDED', status='DONE',
+                          lease_owner=NULL, lease_until=NULL,
+                          lease_token=NULL, heartbeat_at=NULL,
+                          available_at=NULL,
+                          blocked_reason='controller_plan_compilation_invariant',
+                          blocked_ref=?, updated_at=?
+                    WHERE task_id=? AND product_id=?
+                      AND graph_status='FAILED_SEMANTIC'
+                      AND status='FAILED_SAFE'""",
+                (
+                    correction_evidence_digest,
+                    now,
+                    str(row["task_id"]),
+                    product_id,
+                ),
+            )
+            state._connection.execute(
+                """UPDATE problem_budgets SET status='ACTIVE', updated_at=?
+                    WHERE product_id=? AND root_problem_signature=?
+                      AND deterministic_actions_used=1
+                      AND arbiter_calls_used=1
+                      AND execution_attempts_used=0
+                      AND status='EXHAUSTED'""",
+                (now, product_id, root_problem_signature),
+            )
+            state._connection.execute(
+                """INSERT INTO tasks
+                   (task_id, product_id, title, role, output_schema,
+                    contract_ref, priority, status, dependencies_json,
+                    conflict_keys_json, created_at, updated_at, stage_key,
+                    cycle, root_task_id, parent_task_id, source_task_id,
+                    plan_id, plan_node_id, task_revision, root_context_ref,
+                    active_context_ref, capability_profile, idempotency_key,
+                    graph_status, required_capabilities_json, mandatory,
+                    failure_id, critical_path_rank, root_problem_signature)
+                   VALUES (?, ?, ?, 'replanner',
+                           'plan-proposal-v1.schema.json', ?, 1000,
+                           'PENDING', ?, ?, ?, ?,
+                           'semantic-lifecycle-recovery', 0, ?, ?, ?, ?,
+                           ?, ?, ?, ?, 'planning_readonly', ?, 'READY',
+                           ?, 1, ?, 0, ?)""",
+                (
+                    str(contract["task_id"]),
+                    product_id,
+                    str(contract["title"]),
+                    str(contract["active_context_ref"]),
+                    stable_json(contract["dependencies"]),
+                    stable_json(contract["conflict_keys"]),
+                    now,
+                    now,
+                    str(contract["root_task_id"]),
+                    str(contract["parent_task_id"]),
+                    str(contract["source_task_id"]),
+                    str(contract["plan_id"]),
+                    str(contract["plan_node_id"]),
+                    int(contract["task_revision"]),
+                    str(contract["root_context_ref"]),
+                    str(contract["active_context_ref"]),
+                    str(contract["idempotency_key"]),
+                    stable_json(contract["required_capabilities"]),
+                    failure_id,
+                    root_problem_signature,
+                ),
+            )
+            for dependency_id in contract["dependencies"]:
+                state._connection.execute(
+                    """INSERT INTO task_edges
+                       (plan_id, from_task_id, to_task_id, edge_type,
+                        required, created_at)
+                       VALUES (?, ?, ?, 'depends_on', 1, ?)""",
+                    (
+                        str(contract["plan_id"]),
+                        str(dependency_id),
+                        str(contract["task_id"]),
+                        now,
+                    ),
+                )
+            state._connection.execute(
+                """UPDATE products
+                      SET status='IMPLEMENTING', terminal_reason=NULL, updated_at=?
+                    WHERE product_id=? AND status='FAILED_SAFE'""",
+                (now, product_id),
+            )
+            incident_id = (
+                "incident-" + sha256_text(f"{failure_id}:plan-compilation")[:20]
+            )
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at, resolved_at)
+                   VALUES (?, ?, ?, 'controller_plan_compilation_invariant',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    str(row["task_id"]),
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest, product_id, recovery_task_id,
+                    status, applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, str(contract["task_id"]), now),
+            )
+            state._record_event(
+                product_id,
+                str(contract["task_id"]),
+                "controller_plan_compilation_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "correction_evidence_digest": correction_evidence_digest,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": str(contract["task_id"]),
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 0,
+            "status": "ACTIVE",
+        },
+    }
+
+
 def verify_active_graphs(
     config: FactoryConfig,
     state: StateStore,

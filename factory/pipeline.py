@@ -30,6 +30,10 @@ from .state import StateStore
 from .workflow import WorkflowEngine
 
 
+class PlanCompilationInvariantError(RuntimeError):
+    """Controller-generated executable plan violated its own contract."""
+
+
 @dataclass(frozen=True)
 class StageDefinition:
     key: str
@@ -1103,12 +1107,18 @@ class PipelineCoordinator:
             accepted_nodes=accepted_nodes,
             inherited_nodes=inherited_nodes,
         )
-        for node in compiled["nodes"]:
-            contract = dict(node["task_contract"])
-            node["task_contract_digest"] = self.artifacts.digest(contract)
-            self.schemas.validate("task-contract-v2.schema.json", contract)
-        self.schemas.validate("backlog-plan-v2.schema.json", compiled)
-        self.state.validate_plan_candidate(compiled)
+        try:
+            for node in compiled["nodes"]:
+                contract = dict(node["task_contract"])
+                node["task_contract_digest"] = self.artifacts.digest(contract)
+                self.schemas.validate("task-contract-v2.schema.json", contract)
+            self.schemas.validate("backlog-plan-v2.schema.json", compiled)
+            self.state.validate_plan_candidate(compiled)
+        except (TypeError, ValueError) as error:
+            # The provider proposal has already passed the semantic compiler.
+            # Any invalid executable coordinate after that boundary is owned by
+            # controller code, not by the Replanner or its product budget.
+            raise PlanCompilationInvariantError(str(error)) from error
         for node in compiled["nodes"]:
             contract = dict(node["task_contract"])
             self.artifacts.write(

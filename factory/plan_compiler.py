@@ -486,7 +486,12 @@ class PlanCompiler:
                     stable_json([plan_id, node_id, context.revision, "task"])
                 ),
                 "status": "DRAFT",
-                "priority": 100 - len(nodes),
+                # Large replan deltas may carry hundreds of already accepted
+                # semantic nodes forward.  Priority is only a scheduling hint;
+                # critical_path_rank remains the deterministic total order.
+                # Never let inherited plan width turn this controller-owned
+                # coordinate negative and invalidate an otherwise valid plan.
+                "priority": max(0, 100 - len(nodes)),
                 "critical_path_rank": len(nodes),
                 "quality_gates": self._quality_gates(stage_key, context.external_repository),
                 "lifecycle_stage": stage_key,
