@@ -1429,6 +1429,63 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(tasks[0]["status"], "DONE")
             state.close()
 
+    def test_direct_candidate_snapshot_evidence_skips_recursive_ancestry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+            )
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                repository_root=ROOT,
+            )
+            task = {
+                "task_id": "T-PRODUCTION-TEST",
+                "product_id": "P-PRODUCTION-CANARY",
+                "plan_id": "PLAN-PRODUCTION-158",
+                "candidate_snapshot_id": "CS-PRODUCTION-158",
+            }
+            snapshot = {
+                "snapshot_id": "CS-PRODUCTION-158",
+                "product_id": "P-PRODUCTION-CANARY",
+                "plan_id": "PLAN-PRODUCTION-158",
+                "status": "FROZEN",
+                "result_binding_ids": [f"RB-{index:03d}" for index in range(79)],
+            }
+
+            with (
+                patch.object(
+                    state,
+                    "dependency_ancestors",
+                    side_effect=AssertionError("historical graph must not be traversed"),
+                ) as ancestors,
+                patch(
+                    "factory.worker.PathGovernor.candidate_snapshot",
+                    return_value=snapshot,
+                ),
+            ):
+                evidence = worker._typed_dependency_evidence(
+                    task,
+                    required_types=["candidate_snapshot"],
+                )
+
+            ancestors.assert_not_called()
+            self.assertEqual(len(evidence), 1)
+            self.assertEqual(evidence[0]["type"], "typed-candidate_snapshot")
+            self.assertEqual(
+                evidence[0]["artifact_ref"],
+                "internal://candidate-snapshot/CS-PRODUCTION-158",
+            )
+            self.assertIn("CS-PRODUCTION-158", evidence[0]["summary"])
+            state.close()
+
     def test_schema_valid_repair_is_requeued_with_targeted_brief(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.2 - 2026-08-03
+
+- Treat Candidate Snapshot as a hard dependency-ancestry cut so Test and later
+  lifecycle stages cannot re-expand superseded implementation history.
+- Resolve a task-bound Candidate Snapshot directly before recursive evidence
+  lookup, preserving worker heartbeat progress on production-sized graphs.
+- Deduplicate recursive ancestor rows and validate snapshot product/plan
+  identity before admitting the aggregate into a Context Pack.
+- Add production-derived regressions for 79-way snapshot fan-in and direct
+  snapshot evidence resolution without historical graph traversal.
+
 ## 2.3.1 - 2026-08-02
 
 - Build Candidate Snapshots from authoritative active `BOUND` Plan Delta

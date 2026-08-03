@@ -324,6 +324,64 @@ def test_LOOP_P0_005_reviews_share_one_candidate_snapshot(tmp_path: Path) -> Non
         state.close()
 
 
+def test_candidate_snapshot_is_dependency_ancestry_cut(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    try:
+        plan_id = str(state.get_task("T-ROOT0001")["plan_id"])
+        implementation_ids = ["T-ROOT0001"]
+        with state._connection:
+            for index in range(1, 79):
+                task_id = f"T-CUT{index:04d}"
+                _clone_task(
+                    state,
+                    "T-ROOT0001",
+                    task_id,
+                    supersedes_task_id=None,
+                    semantic_key=f"cut-{index:03d}",
+                )
+                implementation_ids.append(task_id)
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-SNAPSHOT-CUT",
+                supersedes_task_id=None,
+                semantic_key="candidate-snapshot-cut",
+                lifecycle_stage="candidate-snapshot",
+            )
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-TEST-CUT",
+                supersedes_task_id=None,
+                semantic_key="test-cut",
+                lifecycle_stage="test",
+                graph_status="READY",
+            )
+            for implementation_id in implementation_ids:
+                state._connection.execute(
+                    """INSERT INTO task_edges
+                       (plan_id, from_task_id, to_task_id, edge_type,
+                        required, created_at)
+                       VALUES (?, ?, 'T-SNAPSHOT-CUT', 'evidence_from', 1,
+                               '2026-08-03T00:00:00Z')""",
+                    (plan_id, implementation_id),
+                )
+            state._connection.execute(
+                """INSERT INTO task_edges
+                   (plan_id, from_task_id, to_task_id, edge_type,
+                    required, created_at)
+                   VALUES (?, 'T-SNAPSHOT-CUT', 'T-TEST-CUT',
+                           'depends_on', 1, '2026-08-03T00:00:00Z')""",
+                (plan_id,),
+            )
+
+        ancestors = state.dependency_ancestors("T-TEST-CUT")
+
+        assert [row["task_id"] for row in ancestors] == ["T-SNAPSHOT-CUT"]
+    finally:
+        state.close()
+
+
 def test_candidate_memberships_ignore_historical_task_binding_fields(
     tmp_path: Path,
 ) -> None:
