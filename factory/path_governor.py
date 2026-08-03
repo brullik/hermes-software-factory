@@ -606,6 +606,26 @@ class PathGovernor:
             if not base_key.endswith(scope_suffix):
                 task["semantic_node_key"] = f"{base_key}{scope_suffix}"
                 identity_rescoped = True
+        elif str(task.get("role") or "") == "replanner":
+            if not plan_id:
+                raise ResultLineageIdentityError(
+                    f"replanner task is missing a plan identity for {task_id}"
+                )
+            base_key = str(
+                task.get("semantic_node_key")
+                or task.get("plan_node_id")
+                or task.get("stage_key")
+                or task_id
+            )
+            scope_marker = "@plan:"
+            scope_suffix = f"{scope_marker}{plan_id}"
+            if scope_marker in base_key and not base_key.endswith(scope_suffix):
+                raise ResultLineageIdentityError(
+                    f"replanner identity conflicts with its plan for {task_id}"
+                )
+            if not base_key.endswith(scope_suffix):
+                task["semantic_node_key"] = f"{base_key}{scope_suffix}"
+                identity_rescoped = True
         elif (
             str(task.get("lifecycle_stage") or "") in _CANDIDATE_CONSUMER_STAGES
             and str(task.get("candidate_snapshot_id") or "")

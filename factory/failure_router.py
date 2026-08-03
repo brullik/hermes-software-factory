@@ -516,6 +516,11 @@ class FailureRouter:
             )[:16].upper()
         )
         contract_ref = f"evidence/task-{task_id}.json"
+        plan_id = str(failed["plan_id"])
+        plan_node_id = f"{failed['plan_node_id']}:{node_suffix}"
+        semantic_node_key = (
+            f"{plan_node_id}@plan:{plan_id}" if role == "replanner" else None
+        )
         contract = {
             "schema_version": "2.0",
             "artifact_id": f"task-contract-{task_id}",
@@ -524,8 +529,9 @@ class FailureRouter:
             "root_task_id": str(failed["root_task_id"]),
             "parent_task_id": str(failed["task_id"]),
             "source_task_id": str(failed["task_id"]),
-            "plan_id": str(failed["plan_id"]),
-            "plan_node_id": f"{failed['plan_node_id']}:{node_suffix}",
+            "plan_id": plan_id,
+            "plan_node_id": plan_node_id,
+            "semantic_node_key": semantic_node_key,
             "task_revision": task_revision,
             "root_context_ref": str(failed["root_context_ref"]),
             "active_context_ref": contract_ref,
@@ -774,6 +780,11 @@ class FailureRouter:
                 source_task_id=str(contract["source_task_id"]),
                 plan_id=active_plan_id,
                 plan_node_id=str(contract["plan_node_id"]),
+                semantic_node_key=(
+                    str(contract["semantic_node_key"])
+                    if contract.get("semantic_node_key")
+                    else None
+                ),
                 task_revision=int(contract["task_revision"]),
                 root_context_ref=str(contract["root_context_ref"]),
                 active_context_ref=str(contract["active_context_ref"]),
@@ -1231,6 +1242,11 @@ class FailureRouter:
                 source_task_id=str(contract["source_task_id"]),
                 plan_id=str(contract["plan_id"]),
                 plan_node_id=str(contract["plan_node_id"]),
+                semantic_node_key=(
+                    str(contract["semantic_node_key"])
+                    if contract.get("semantic_node_key")
+                    else None
+                ),
                 task_revision=int(contract["task_revision"]),
                 root_context_ref=str(contract["root_context_ref"]),
                 active_context_ref=str(contract["active_context_ref"]),

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.5 - 2026-08-03
+
+- Scope every controller-generated Replanner semantic identity to the active
+  plan it is revising, preventing a fresh PlanProposal from colliding with the
+  immutable accepted Replanner binding of an earlier plan.
+- Persist the scoped identity in both the task contract and durable task row,
+  and re-scope legacy Replanner execution memberships fail closed when they are
+  registered by Path Governor.
+- Add a production-derived regression proving two equivalent Replanners for
+  different plans retain independent immutable result bindings.
+
 ## 2.3.4 - 2026-08-03
 
 - Scope Test, Security Review, and Release Readiness semantic identities to the
