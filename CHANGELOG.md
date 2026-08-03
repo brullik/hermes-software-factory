@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.9 - 2026-08-03
+
+- Keep controller-owned task priorities nonnegative when a bounded `PlanDelta`
+  carries hundreds of accepted semantic nodes into the next revision; stable
+  critical-path ranks remain the deterministic total execution order.
+- Classify post-compiler executable-plan validation failures as controller
+  invariants instead of consuming Replanner/product semantic recovery budget.
+- Add an idempotent, maintenance-fenced controller compilation recovery that
+  corrects historical failure ownership, preserves all Path Governor counters,
+  and creates exactly one retry under the unchanged product root signature.
+
 ## 2.3.8 - 2026-08-03
 
 - Clear stale terminal metadata when an explicit Path Governor recovery returns

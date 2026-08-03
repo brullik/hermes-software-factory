@@ -17,7 +17,7 @@ from factory.autonomy import TaskOutcome
 from factory.capabilities import CapabilityBroker, CapabilityCheck
 from factory.common import sha256_text, stable_json
 from factory.intake import IntakeRejected, IntakeService
-from factory.pipeline import PipelineCoordinator
+from factory.pipeline import PipelineCoordinator, PlanCompilationInvariantError
 from factory.plan_compiler import CompileContext, PlanCompiler
 from factory.plan_semantics import PlanContractViolation, validate_compiled_plan
 from factory.policy import policy_digest
@@ -26,6 +26,7 @@ from factory.recovery import (
     apply_recovery_plan,
     build_recovery_plan,
     finalize_recovery_application,
+    resume_controller_compilation_failure,
     state_audit,
     verify_active_graphs,
     verify_recovery_preconditions,
@@ -263,6 +264,152 @@ def test_replan_compiler_merges_and_reuses_accepted_lineage_nodes(
     assert architecture["supersedes_task_id"] == "T-ACCEPTED-ARCH-REVIEW"
     assert architecture["dependencies"] == ["T-ARCHITECTURE-SOURCE"]
     assert compiled["proposal_digest"] == sha256_text(stable_json(semantic))
+
+
+def test_LOOP_P0_012_large_inherited_delta_has_nonnegative_scheduler_coordinates(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    semantic = proposal(config)
+    semantic.update(
+        {
+            "artifact_id": "plan-proposal-large-inherited-replan",
+            "producer": {
+                "role": "replanner",
+                "tier": "terra",
+                "provider": "fake",
+                "model": "fake",
+            },
+            "proposal_kind": "replan_delta",
+            "parent_plan_id": "PLAN-PARENT-LARGE",
+            "source_failure_id": "failure-large-inherited-plan",
+            "nodes": [
+                {
+                    "node_key": "dependency-inventory-recovery",
+                    "stage_kind": "implementation_slice",
+                    "title": "Record the dependency inventory",
+                    "objective": "Produce fresh immutable dependency inventory evidence",
+                    "depends_on": [],
+                    "scope": ["pyproject.toml", "requirements*.txt", "tests/**"],
+                    "acceptance_intents": [
+                        "Dependency inventory or a zero-dependency attestation is proven."
+                    ],
+                    "goal_ids": ["root-goal"],
+                }
+            ],
+        }
+    )
+    inherited = [
+        {
+            "node_key": f"accepted-slice-{index:03d}",
+            "stage_kind": "implementation_slice",
+            "title": f"Preserve accepted slice {index:03d}",
+            "objective": f"Preserve immutable accepted implementation evidence {index:03d}",
+            "depends_on": [],
+            "scope": [f"src/slice_{index:03d}.py", f"tests/test_slice_{index:03d}.py"],
+            "acceptance_intents": [
+                f"Accepted implementation evidence {index:03d} remains immutable."
+            ],
+            "goal_ids": ["root-goal"],
+        }
+        for index in range(95)
+    ]
+    compiled = PlanCompiler(policy_digest=policy_digest(config)).compile(
+        semantic,
+        CompileContext(
+            product_id="product-semantic",
+            revision=168,
+            parent_plan_id="PLAN-PARENT-LARGE",
+            source_failure_id="failure-large-inherited-plan",
+            created_by_task_id="T-RECOVERY-LARGE",
+            root_task_id="T-ROOTSEMANTIC001",
+            root_context_ref="evidence/intake-product-semantic.json",
+            external_repository=True,
+            proposal_artifact_ref="evidence/plan-proposal-large-inherited-replan.json",
+            architecture_source_task_id="T-ARCHITECTURE-SOURCE",
+        ),
+        inherited_nodes=inherited,
+        accepted_nodes={
+            **{
+                f"semantic:accepted-slice-{index:03d}": f"T-ACCEPTED-{index:03d}"
+                for index in range(95)
+            },
+            "lifecycle:architecture-review": "T-ACCEPTED-ARCHITECTURE-REVIEW",
+        },
+    )
+
+    contracts = [dict(node["task_contract"]) for node in compiled["nodes"]]
+    assert len(contracts) == 105
+    assert min(int(contract["priority"]) for contract in contracts) == 0
+    assert [int(contract["critical_path_rank"]) for contract in contracts] == list(
+        range(len(contracts))
+    )
+    store = ArtifactStore(config)
+    assert not store.validate("backlog-plan-v2.schema.json", compiled)
+    assert all(
+        not store.validate("task-contract-v2.schema.json", contract)
+        for contract in contracts
+    )
+
+
+def test_LOOP_P0_013_compiled_plan_validation_failure_is_controller_owned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-semantic"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Deliver the complete observable product behavior",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="semantic-product",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    creator_id = "T-TASKSPECIFIER-CONTROLLER-BOUNDARY"
+    state.add_task(
+        task_id=creator_id,
+        product_id=product_id,
+        title="Propose semantic product work",
+        role="task-specifier",
+        output_schema="plan-proposal-v1.schema.json",
+        contract_ref=f"evidence/task-{creator_id}.json",
+        stage_key="task-specifier",
+        graph_status="ACCEPTED",
+    )
+    semantic = proposal(config)
+    semantic_path = ArtifactStore(config).write(
+        "plan-proposal-v1.schema.json",
+        semantic,
+        filename="plan-proposal-controller-boundary.json",
+    )
+    creator = state.get_task(creator_id)
+    assert creator is not None
+    pipeline = PipelineCoordinator(config, state)
+    original_validate = pipeline.schemas.validate
+
+    def reject_compiled_contract(schema_name: str, artifact: dict[str, Any]) -> None:
+        if schema_name == "task-contract-v2.schema.json":
+            raise ValueError("Invalid task-contract-v2.schema.json: controller coordinate")
+        original_validate(schema_name, artifact)
+
+    monkeypatch.setattr(pipeline.schemas, "validate", reject_compiled_contract)
+    with pytest.raises(
+        PlanCompilationInvariantError,
+        match="controller coordinate",
+    ):
+        pipeline.prepare_after(creator, semantic, semantic_path)
+    assert len(state.list_tasks(product_id)) == 1
+    assert state.get_product(product_id)["active_plan_revision"] == 0
+    state.close()
 
 
 def test_replan_compiler_requires_fresh_mandatory_gate_coverage(
@@ -1389,6 +1536,146 @@ def test_path_governor_failed_safe_recovery_consumes_controller_slot(
         "SELECT deterministic_actions_used FROM problem_budgets WHERE product_id=?",
         (product_id,),
     ).fetchone()[0] == 1
+    state.close()
+
+
+def test_LOOP_P0_014_controller_compiler_recovery_preserves_product_budget(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-controller-compilation-recovery"
+    failure_id = "failure-controller-compiled-priority"
+    failed_task_id = "T-RECOVERY-COMPILED-PRIORITY"
+    signature = sha256_text("unchanged-product-root-problem")
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Deliver the complete observable product behavior",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="controller-compilation-recovery",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    state.add_task(
+        task_id=failed_task_id,
+        product_id=product_id,
+        title="Compile the bounded recovery delta",
+        role="replanner",
+        output_schema="plan-proposal-v1.schema.json",
+        stage_key="semantic-lifecycle-recovery",
+        graph_status="FAILED_SEMANTIC",
+        root_problem_signature=signature,
+    )
+    now = "2026-08-03T00:00:00Z"
+    with state._lock, state._connection:
+        state._connection.execute(
+            "UPDATE tasks SET status='FAILED_SAFE', failure_id=? WHERE task_id=?",
+            (failure_id, failed_task_id),
+        )
+        state._connection.execute(
+            """INSERT INTO failures
+               (failure_id, product_id, task_id, failure_class, reason_code,
+                fingerprint, safe_message, evidence_ref, status, retryable,
+                owner_action_eligible, expected_json, actual_json,
+                failed_gate_ids_json, first_seen_at, last_seen_at)
+               VALUES (?, ?, ?, 'semantic', 'schema_validation', ?,
+                       'Invalid task-contract-v2.schema.json: -1 is less than the minimum of 0',
+                       'internal://compiled-plan', 'OPEN', 0, 0,
+                       '{}', '{}', '["BACKLOG_PLAN_SEMANTIC_VALIDATION"]', ?, ?)""",
+            (
+                failure_id,
+                product_id,
+                failed_task_id,
+                sha256_text("compiled-priority-failure"),
+                now,
+                now,
+            ),
+        )
+        state._connection.execute(
+            """INSERT INTO problem_budgets
+               (product_id, root_problem_signature, deterministic_actions_used,
+                arbiter_calls_used, execution_attempts_used,
+                last_progress_vector_json, last_evidence_digest, status,
+                created_at, updated_at)
+               VALUES (?, ?, 1, 1, 0, ?, ?, 'EXHAUSTED', ?, ?)""",
+            (product_id, signature, stable_json({}), "a" * 64, now, now),
+        )
+        state._connection.execute(
+            """UPDATE products SET status='FAILED_SAFE',
+                      terminal_reason='path_governor_problem_budget_exhausted'
+                 WHERE product_id=?""",
+            (product_id,),
+        )
+
+    state.enter_maintenance("controller-plan-compilation-recovery")
+    applied = resume_controller_compilation_failure(
+        config,
+        state,
+        product_id=product_id,
+        failure_id=failure_id,
+        correction_evidence_digest="b" * 64,
+    )
+    assert applied["status"] == "PASS"
+    assert applied["application_status"] == "APPLIED"
+    assert state.get_product(product_id)["status"] == "IMPLEMENTING"
+    assert state.get_product(product_id)["terminal_reason"] is None
+    failure = state._connection.execute(
+        "SELECT failure_class,reason_code,status FROM failures WHERE failure_id=?",
+        (failure_id,),
+    ).fetchone()
+    assert tuple(failure) == (
+        "controller",
+        "controller_plan_compilation_invariant",
+        "RESOLVED",
+    )
+    failed_task = state.get_task(failed_task_id)
+    assert failed_task is not None
+    assert (failed_task["graph_status"], failed_task["status"]) == (
+        "SUPERSEDED",
+        "DONE",
+    )
+    retry = state.get_task(str(applied["recovery_task_id"]))
+    assert retry is not None
+    assert retry["role"] == "replanner"
+    assert retry["stage_key"] == "semantic-lifecycle-recovery"
+    assert retry["root_problem_signature"] == signature
+    assert (retry["graph_status"], retry["status"]) == ("READY", "PENDING")
+    budget = state._connection.execute(
+        """SELECT deterministic_actions_used,arbiter_calls_used,
+                  execution_attempts_used,status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, signature),
+    ).fetchone()
+    assert tuple(budget) == (1, 1, 0, "ACTIVE")
+    incident = state._connection.execute(
+        """SELECT reason_code,status FROM controller_incidents
+            WHERE product_id=?""",
+        (product_id,),
+    ).fetchone()
+    assert tuple(incident) == (
+        "controller_plan_compilation_invariant",
+        "RESOLVED",
+    )
+    replay = resume_controller_compilation_failure(
+        config,
+        state,
+        product_id=product_id,
+        failure_id=failure_id,
+        correction_evidence_digest="b" * 64,
+    )
+    assert replay["application_status"] == "REPLAYED"
+    assert state._connection.execute(
+        "SELECT COUNT(*) FROM tasks WHERE product_id=? AND role='replanner'",
+        (product_id,),
+    ).fetchone()[0] == 2
     state.close()
 
 

@@ -26,6 +26,7 @@ from .recovery import (
     apply_recovery_plan,
     build_recovery_plan,
     finalize_recovery_application,
+    resume_controller_compilation_failure,
     state_audit,
     verify_active_graphs,
     verify_recovery_preconditions,
@@ -354,6 +355,27 @@ def recovery_finalize_command(args: argparse.Namespace) -> int:
             state,
             product_id=str(args.product_id),
             recovery_plan_digest=str(args.recovery_plan_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def controller_compilation_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_controller_compilation_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0
@@ -815,6 +837,19 @@ def build_parser() -> argparse.ArgumentParser:
     recovery_finalize.add_argument("--product-id", required=True)
     recovery_finalize.add_argument("--recovery-plan-digest", required=True)
     recovery_finalize.set_defaults(function=recovery_finalize_command)
+    controller_compilation_recovery = subparsers.add_parser(
+        "controller-compilation-recovery"
+    )
+    controller_compilation_recovery.add_argument("--config", type=Path)
+    controller_compilation_recovery.add_argument("--product-id", required=True)
+    controller_compilation_recovery.add_argument("--failure-id", required=True)
+    controller_compilation_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    controller_compilation_recovery.set_defaults(
+        function=controller_compilation_recovery_command
+    )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)
     graph_verify.add_argument("--all-active", action="store_true")
