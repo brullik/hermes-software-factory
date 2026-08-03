@@ -1102,11 +1102,14 @@ class StateStore:
                     SELECT from_task_id, 1
                       FROM task_edges
                      WHERE to_task_id=? AND required=1
-                    UNION ALL
+                    UNION
                     SELECT edge.from_task_id, upstream.depth + 1
                       FROM task_edges AS edge
                       JOIN upstream ON edge.to_task_id=upstream.task_id
+                      JOIN tasks AS frontier
+                        ON frontier.task_id=upstream.task_id
                      WHERE edge.required=1 AND upstream.depth < 100
+                       AND COALESCE(frontier.lifecycle_stage, '')!='candidate-snapshot'
                 )
                 SELECT tasks.*, MIN(upstream.depth) AS dependency_depth
                   FROM upstream

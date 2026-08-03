@@ -18,7 +18,9 @@ perform GitHub actions.
 - A Candidate Snapshot freezes one repository commit and tree digest over one
   architecture binding and all accepted implementation bindings. Test,
   Security Review, and Release Readiness consume the snapshot instead of a
-  growing list of Builder tasks.
+  growing list of Builder tasks. It is also a hard dependency-ancestry cut:
+  worker context resolution never traverses from the snapshot back into
+  historical implementation or supersession paths.
 
 ## Legacy migration and exact cycle handling
 
@@ -56,7 +58,7 @@ task count and plan revision are never considered progress.
 4. Validate binding count, literal cycle count, maximum legacy depth, Candidate
    Snapshot count, superseded Test IDs, fresh Test status, and unchanged active
    plan revision.
-5. Deploy the exact merged 2.3.1 commit and wheel digest.
+5. Deploy the exact merged 2.3.2 commit and package digest.
 6. Run the same dry run against production, apply once, and audit again.
 7. Resume only the selected product and observe it through `COMPLETED`.
 8. Restore the trusted production observation policy, run final backup and
