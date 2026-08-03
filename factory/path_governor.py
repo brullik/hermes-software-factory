@@ -581,8 +581,36 @@ class PathGovernor:
         if task_row is None:
             raise KeyError(task_id)
         task = dict(task_row)
-        contract = str(task.get("contract_digest") or task_contract_digest(task))
-        node_id = str(task.get("semantic_node_id") or semantic_node_id(task, contract))
+        plan_id = str(task.get("plan_id") or "")
+        identity_rescoped = False
+        if (
+            str(task.get("role") or "") == "path-governor"
+            and str(task.get("lifecycle_stage") or "") == "candidate-snapshot"
+        ):
+            if not plan_id:
+                raise ResultLineageIdentityError(
+                    f"candidate snapshot task is missing a plan identity for {task_id}"
+                )
+            base_key = str(
+                task.get("semantic_node_key")
+                or task.get("plan_node_id")
+                or task.get("stage_key")
+                or task_id
+            )
+            scope_suffix = f"@plan:{plan_id}"
+            if not base_key.endswith(scope_suffix):
+                task["semantic_node_key"] = f"{base_key}{scope_suffix}"
+                identity_rescoped = True
+        contract = str(
+            task_contract_digest(task)
+            if identity_rescoped
+            else task.get("contract_digest") or task_contract_digest(task)
+        )
+        node_id = str(
+            semantic_node_id(task, contract)
+            if identity_rescoped
+            else task.get("semantic_node_id") or semantic_node_id(task, contract)
+        )
         now = utc_now()
         self.connection.execute(
             """INSERT OR IGNORE INTO semantic_nodes
@@ -603,9 +631,21 @@ class PathGovernor:
             ),
         )
         self.connection.execute(
-            """UPDATE tasks SET semantic_node_id=?, contract_digest=?, updated_at=?
-                WHERE task_id=?""",
-            (node_id, contract, now, task_id),
+            """UPDATE tasks SET semantic_node_key=?, semantic_node_id=?,
+                      contract_digest=?, updated_at=? WHERE task_id=?""",
+            (
+                task.get("semantic_node_key"),
+                node_id,
+                contract,
+                now,
+                task_id,
+            ),
+        )
+        self.connection.execute(
+            """DELETE FROM plan_memberships
+                WHERE plan_id=? AND execution_task_id=?
+                  AND membership_state='EXECUTION'""",
+            (plan_id, task_id),
         )
         self.connection.execute(
             """INSERT OR REPLACE INTO plan_memberships
@@ -613,7 +653,7 @@ class PathGovernor:
                 membership_state, mandatory, created_at)
                VALUES (?, ?, NULL, ?, 'EXECUTION', ?, ?)""",
             (
-                str(task.get("plan_id") or ""),
+                plan_id,
                 node_id,
                 task_id,
                 int(task.get("mandatory") or 0),

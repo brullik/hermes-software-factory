@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.3.3 - 2026-08-03
+
+- Scope controller-owned Candidate Snapshot semantic identity to its plan
+  revision so a repaired candidate can coexist with the immutable snapshot
+  binding from the preceding revision.
+- Re-register existing ready snapshot tasks transactionally, allowing the
+  production recovery path to correct pre-fix execution memberships in place.
+- Recover an equivalent schema-valid orphan Candidate Snapshot artifact after
+  a post-write transaction rollback while rejecting any immutable-field
+  mismatch fail closed.
+- Add production-derived regressions for cross-revision snapshot identity and
+  idempotent replay after a post-artifact lineage failure.
+
 ## 2.3.2 - 2026-08-03
 
 - Treat Candidate Snapshot as a hard dependency-ancestry cut so Test and later

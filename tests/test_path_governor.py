@@ -15,6 +15,7 @@ from factory.path_governor import (
     PathGovernor,
     ProgressVector,
     ResultLineageCycleError,
+    ResultLineageIdentityError,
     failure_owner,
     stable_root_problem_signature,
 )
@@ -448,6 +449,69 @@ def test_candidate_memberships_ignore_historical_task_binding_fields(
         state.close()
 
 
+def test_candidate_snapshot_execution_identity_is_scoped_to_plan_revision(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    try:
+        with state._connection:
+            for task_id, plan_id in (
+                ("T-SNAPSHOT-REV1", "PLAN-SNAPSHOT-REV1"),
+                ("T-SNAPSHOT-REV2", "PLAN-SNAPSHOT-REV2"),
+            ):
+                _clone_task(
+                    state,
+                    "T-ROOT0001",
+                    task_id,
+                    supersedes_task_id=None,
+                    semantic_key="candidate-snapshot",
+                    lifecycle_stage="candidate-snapshot",
+                    graph_status="READY",
+                )
+                state._connection.execute(
+                    """UPDATE tasks SET role='path-governor', plan_id=?,
+                              output_schema='candidate-snapshot.schema.json'
+                        WHERE task_id=?""",
+                    (plan_id, task_id),
+                )
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        with state._connection:
+            governor.apply_plan_delta(
+                plan_id="PLAN-SNAPSHOT-REV1",
+                preserve_binding_ids=(),
+                execution_task_ids=("T-SNAPSHOT-REV1",),
+            )
+            governor.apply_plan_delta(
+                plan_id="PLAN-SNAPSHOT-REV2",
+                preserve_binding_ids=(),
+                execution_task_ids=("T-SNAPSHOT-REV2",),
+            )
+
+        first = state.get_task("T-SNAPSHOT-REV1")
+        second = state.get_task("T-SNAPSHOT-REV2")
+        assert first is not None and second is not None
+        assert first["semantic_node_key"] == (
+            "candidate-snapshot@plan:PLAN-SNAPSHOT-REV1"
+        )
+        assert second["semantic_node_key"] == (
+            "candidate-snapshot@plan:PLAN-SNAPSHOT-REV2"
+        )
+        assert first["semantic_node_id"] != second["semantic_node_id"]
+        assert first["contract_digest"] != second["contract_digest"]
+        for task_id, plan_id in (
+            ("T-SNAPSHOT-REV1", "PLAN-SNAPSHOT-REV1"),
+            ("T-SNAPSHOT-REV2", "PLAN-SNAPSHOT-REV2"),
+        ):
+            assert state._connection.execute(
+                """SELECT COUNT(*) FROM plan_memberships
+                    WHERE plan_id=? AND execution_task_id=?
+                      AND membership_state='EXECUTION'""",
+                (plan_id, task_id),
+            ).fetchone()[0] == 1
+    finally:
+        state.close()
+
+
 def test_candidate_materializer_uses_plan_delta_memberships(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -549,6 +613,33 @@ def test_candidate_materializer_uses_plan_delta_memberships(
                 "sha256:" + "3" * 64,
             ),
         )
+
+        original_bind_result = PathGovernor.bind_result
+        injected_failure = False
+
+        def fail_after_artifact_once(
+            governor: PathGovernor, **kwargs: Any
+        ) -> Any:
+            nonlocal injected_failure
+            if kwargs.get("task_id") == "T-SNAPSHOT2" and not injected_failure:
+                injected_failure = True
+                raise ResultLineageIdentityError("injected post-artifact rollback")
+            return original_bind_result(governor, **kwargs)
+
+        monkeypatch.setattr(PathGovernor, "bind_result", fail_after_artifact_once)
+
+        with pytest.raises(
+            ResultLineageIdentityError, match="injected post-artifact rollback"
+        ):
+            PipelineReconciler(
+                config,
+                state,
+                ArtifactStore(config),
+            )._materialize_candidate_snapshot("product-path-governor")
+        assert state._connection.execute(
+            "SELECT COUNT(*) FROM candidate_snapshots"
+        ).fetchone()[0] == 0
+        assert len(list(config.evidence_dir.glob("candidate-snapshot-*.json"))) == 1
 
         materialized = PipelineReconciler(
             config,
