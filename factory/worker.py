@@ -877,18 +877,24 @@ class WorkerResult:
     failure_data: FailureData | None = None
 
 
+def _local_file_reference(reference: str) -> Path | None:
+    """Return a readable local file while treating URI references as opaque."""
+
+    if "://" in reference:
+        return None
+    path = Path(reference)
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
 def _worker_result_digest(artifact_ref: str, fallback: Mapping[str, Any]) -> str:
     """Digest a local result artifact without dereferencing controller URIs."""
 
-    if "://" not in artifact_ref:
-        artifact_path = Path(artifact_ref)
-        try:
-            if artifact_path.is_file():
-                return sha256_file(artifact_path)
-        except OSError:
-            # A malformed or inaccessible reference must remain fail-closed and
-            # deterministic; it must not crash terminal outcome persistence.
-            pass
+    artifact_path = _local_file_reference(artifact_ref)
+    if artifact_path is not None:
+        return sha256_file(artifact_path)
     return sha256_text(stable_json(fallback))
 
 
@@ -3369,9 +3375,9 @@ class AgentWorker:
         fingerprint = sanitized.normalized_fingerprint(str(task["task_id"]))
         failure_id = f"failure-{fingerprint[:20]}"
         source_ref = sanitized.evidence_ref
-        source_path = Path(source_ref)
+        source_path = _local_file_reference(source_ref)
         if (
-            source_path.is_file()
+            source_path is not None
             and source_path.parent.resolve() == self.config.evidence_dir.resolve()
         ):
             source_ref = f"evidence/{source_path.name}"

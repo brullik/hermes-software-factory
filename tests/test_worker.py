@@ -17,7 +17,7 @@ import yaml
 
 from factory.artifacts import ArtifactStore, artifact_metadata
 from factory.attempts import IdenticalAttemptError
-from factory.autonomy import CAPABILITY_PROFILES
+from factory.autonomy import CAPABILITY_PROFILES, FailureData
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
 from factory.hermes_stdin import _invoke_hermes, read_stdin_prompt
@@ -37,6 +37,7 @@ from factory.worker import (
     TaskExecutionSpec,
     WorkerResult,
     _current_replan_frontier,
+    _local_file_reference,
     _mandatory_gate_failure_data,
     _normalized_output_status,
     _replanner_failure_inventory,
@@ -66,6 +67,42 @@ def test_worker_result_digest_never_dereferences_internal_uri() -> None:
 
     is_file.assert_not_called()
     assert digest == sha256_text(stable_json(fallback))
+
+
+def test_failure_envelope_preserves_internal_evidence_uri() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=ROOT,
+        )
+        internal_ref = "internal://task/T-INTERNAL-FAILURE"
+
+        assert _local_file_reference(internal_ref) is None
+        sanitized, path = worker._failure_envelope(
+            {
+                "product_id": "P-INTERNAL-FAILURE",
+                "task_id": "T-INTERNAL-FAILURE",
+            },
+            FailureData(
+                failure_class="controller",
+                reason_code="controller_exception_permission_error",
+                safe_message="Controller result persistence failed safely.",
+                evidence_ref=internal_ref,
+            ),
+        )
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["evidence_refs"] == [internal_ref]
+        assert sanitized.evidence_ref == f"evidence/{path.name}"
+        state.close()
 
 
 def test_current_replan_frontier_excludes_only_historical_superseded_nodes() -> None:

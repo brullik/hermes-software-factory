@@ -11,9 +11,9 @@
 - Add an idempotent, maintenance-fenced production recovery that preserves the
   product-semantic security finding, reopens only its incorrect controller
   route decision, and consumes exactly the second Builder slot.
-- Keep controller-owned `internal://task/...` outcome references out of local
-  filesystem probing so a completed worker step cannot crash during durable
-  result persistence on Linux.
+- Keep controller-owned `internal://task/...` outcome and failure-evidence
+  references out of local filesystem probing so a worker step cannot crash
+  during durable result persistence on Linux.
 
 ## 2.3.10 - 2026-08-03
 
