@@ -743,6 +743,7 @@ class StateStore:
         source_task_id: str | None = None,
         plan_id: str | None = None,
         plan_node_id: str | None = None,
+        semantic_node_key: str | None = None,
         task_revision: int = 1,
         root_context_ref: str | None = None,
         active_context_ref: str | None = None,
@@ -876,19 +877,29 @@ class StateStore:
             selected_source = source_task_id or (
                 str(dependency_values[0]) if dependency_values else task_id
             )
+            selected_plan_node_id = plan_node_id or stage_key or task_id
+            selected_semantic_node_key = semantic_node_key
+            if role == "replanner":
+                scope_marker = "@plan:"
+                scope_suffix = f"{scope_marker}{selected_plan_id}"
+                base_key = selected_semantic_node_key or selected_plan_node_id
+                if scope_marker in base_key and not base_key.endswith(scope_suffix):
+                    raise ValueError("replanner semantic identity conflicts with its plan")
+                if not base_key.endswith(scope_suffix):
+                    selected_semantic_node_key = f"{base_key}{scope_suffix}"
             self._connection.execute(
                 """INSERT INTO tasks
                 (task_id, product_id, title, role, output_schema, contract_ref, stage_key, cycle,
                  priority, status, available_at, dependencies_json, conflict_keys_json,
                  created_at, updated_at, root_task_id, parent_task_id, source_task_id,
-                 plan_id, plan_node_id, task_revision, root_context_ref,
+                 plan_id, plan_node_id, semantic_node_key, task_revision, root_context_ref,
                  active_context_ref, failure_id, hypothesis_id, capability_profile,
                  idempotency_key, supersedes_task_id, graph_status,
                  required_capabilities_json, mandatory, critical_path_rank)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task_id,
                     product_id,
@@ -909,7 +920,8 @@ class StateStore:
                     selected_parent,
                     selected_source,
                     selected_plan_id,
-                    plan_node_id or stage_key or task_id,
+                    selected_plan_node_id,
+                    selected_semantic_node_key,
                     task_revision,
                     root_context_ref
                     or str(product["root_goal_ref"] or f"evidence/intake-{product_id}.json"),

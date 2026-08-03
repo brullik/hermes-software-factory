@@ -702,6 +702,85 @@ def test_candidate_materializer_uses_plan_delta_memberships(
         state.close()
 
 
+def test_replanner_result_identity_is_scoped_to_active_plan(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    try:
+        plan_one = "PLAN-REPLANNER-ONE"
+        plan_two = "PLAN-REPLANNER-TWO"
+        with state._connection:
+            for revision, plan_id in enumerate((plan_one, plan_two), start=1):
+                state._connection.execute(
+                    """INSERT INTO plans
+                       (plan_id, product_id, revision, status, plan_artifact_ref,
+                        plan_digest, goals_json, completion_criteria_json,
+                        created_by_task_id, created_at, activated_at)
+                       VALUES (?, 'product-path-governor', ?, 'ACTIVE', ?, ?,
+                               '[]', '[]', 'T-ROOT0001',
+                               '2026-08-03T00:00:00Z',
+                               '2026-08-03T00:00:00Z')""",
+                    (
+                        plan_id,
+                        revision,
+                        f"internal://plan/{plan_id}",
+                        sha256_text(plan_id),
+                    ),
+                )
+        for task_id, plan_id in (
+            ("T-REPLANNER-ONE", plan_one),
+            ("T-REPLANNER-TWO", plan_two),
+        ):
+            state.add_task(
+                task_id=task_id,
+                product_id="product-path-governor",
+                title="Replan controller recovery",
+                role="replanner",
+                output_schema="plan-proposal-v1.schema.json",
+                contract_ref=f"evidence/task-{task_id}.json",
+                stage_key="replan",
+                plan_id=plan_id,
+                plan_node_id="test:controller-incident:replan",
+                graph_status="READY",
+            )
+            _accept_source(state, task_id, f"attempt-{task_id.lower()}")
+
+        first = state.get_task("T-REPLANNER-ONE")
+        second = state.get_task("T-REPLANNER-TWO")
+        assert first is not None and second is not None
+        assert first["semantic_node_key"] == (
+            f"test:controller-incident:replan@plan:{plan_one}"
+        )
+        assert second["semantic_node_key"] == (
+            f"test:controller-incident:replan@plan:{plan_two}"
+        )
+
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        bindings = []
+        with state._connection:
+            for index, (task_id, attempt_id) in enumerate(
+                (
+                    ("T-REPLANNER-ONE", "attempt-t-replanner-one"),
+                    ("T-REPLANNER-TWO", "attempt-t-replanner-two"),
+                ),
+                start=1,
+            ):
+                bindings.append(
+                    governor.bind_result(
+                        task_id=task_id,
+                        source_task_id=task_id,
+                        source_attempt_id=attempt_id,
+                        result_ref=f"evidence/output-{task_id}.json",
+                        result_digest=f"{index + 20:064x}",
+                        output_schema="plan-proposal-v1.schema.json",
+                    )
+                )
+        assert bindings[0].semantic_node_id != bindings[1].semantic_node_id
+        assert bindings[0].binding_id != bindings[1].binding_id
+        assert governor.direct_binding("T-REPLANNER-ONE") == bindings[0]
+        assert governor.direct_binding("T-REPLANNER-TWO") == bindings[1]
+    finally:
+        state.close()
+
+
 def test_LOOP_P0_006_failure_owner_is_decided_before_role_selection() -> None:
     assert failure_owner(
         failure_class="semantic", reason_code="controller_result_lineage_cycle"
