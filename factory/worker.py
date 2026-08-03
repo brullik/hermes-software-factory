@@ -877,6 +877,21 @@ class WorkerResult:
     failure_data: FailureData | None = None
 
 
+def _worker_result_digest(artifact_ref: str, fallback: Mapping[str, Any]) -> str:
+    """Digest a local result artifact without dereferencing controller URIs."""
+
+    if "://" not in artifact_ref:
+        artifact_path = Path(artifact_ref)
+        try:
+            if artifact_path.is_file():
+                return sha256_file(artifact_path)
+        except OSError:
+            # A malformed or inaccessible reference must remain fail-closed and
+            # deterministic; it must not crash terminal outcome persistence.
+            pass
+    return sha256_text(stable_json(fallback))
+
+
 def _normalized_output_status(
     role: str,
     reported_status: str,
@@ -5223,20 +5238,14 @@ class AgentWorker:
                 detail="bounded retry metadata is incomplete",
             )
         artifact_ref = result.artifact_ref or f"internal://task/{task_id}"
-        artifact_path = Path(artifact_ref)
-        result_digest = (
-            sha256_file(artifact_path)
-            if artifact_path.is_file()
-            else sha256_text(
-                stable_json(
-                    {
-                        "task_id": task_id,
-                        "status": result.status,
-                        "reason_code": result.reason_code,
-                        "detail": result.detail,
-                    }
-                )
-            )
+        result_digest = _worker_result_digest(
+            artifact_ref,
+            {
+                "task_id": task_id,
+                "status": result.status,
+                "reason_code": result.reason_code,
+                "detail": result.detail,
+            },
         )
         task_row = self.state.get_task(task_id)
         if task_row is None:

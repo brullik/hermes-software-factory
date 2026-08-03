@@ -42,11 +42,30 @@ from factory.worker import (
     _replanner_failure_inventory,
     _replanner_hypothesis_inventory,
     _replanner_scope_policy,
+    _worker_result_digest,
     _workspace_snapshot,
     public_github_repository_url,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_worker_result_digest_never_dereferences_internal_uri() -> None:
+    fallback = {
+        "task_id": "T-INTERNAL-RESULT",
+        "status": "completed",
+        "reason_code": None,
+        "detail": None,
+    }
+
+    with patch("factory.worker.Path.is_file") as is_file:
+        digest = _worker_result_digest(
+            "internal://task/T-INTERNAL-RESULT",
+            fallback,
+        )
+
+    is_file.assert_not_called()
+    assert digest == sha256_text(stable_json(fallback))
 
 
 def test_current_replan_frontier_excludes_only_historical_superseded_nodes() -> None:
