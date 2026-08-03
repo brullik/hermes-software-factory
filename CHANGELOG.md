@@ -28,6 +28,11 @@
   finding belongs to the reviewer task, and define `subject_sha` explicitly as
   a workspace-snapshot digest rather than a Git commit. Add a bounded recovery
   for the historical lost repair-context binding without resetting its budget.
+- Treat an accepted cross-role Builder repair as new evidence that must be
+  revalidated by the original read-only reviewer, never as reviewer acceptance.
+  Preserve the downstream reviewer dependency and add an idempotent,
+  maintenance-fenced recovery for the historical replacement-lineage defect
+  without changing the Path Governor problem budget.
 
 ## 2.3.10 - 2026-08-03
 

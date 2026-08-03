@@ -31,6 +31,7 @@ from .recovery import (
     resume_opaque_subject_reference_failure,
     resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
+    resume_reviewer_revalidation_lineage_failure,
     resume_zero_dependency_audit_failure,
     state_audit,
     verify_active_graphs,
@@ -481,6 +482,26 @@ def repair_context_binding_recovery_command(args: argparse.Namespace) -> int:
     try:
         result = resume_repair_context_binding_failure(
             config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def reviewer_revalidation_lineage_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_reviewer_revalidation_lineage_failure(
             state,
             product_id=str(args.product_id),
             failure_id=str(args.failure_id),
@@ -1023,6 +1044,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repair_context_binding_recovery.set_defaults(
         function=repair_context_binding_recovery_command
+    )
+    reviewer_revalidation_lineage_recovery = subparsers.add_parser(
+        "reviewer-revalidation-lineage-recovery"
+    )
+    reviewer_revalidation_lineage_recovery.add_argument("--config", type=Path)
+    reviewer_revalidation_lineage_recovery.add_argument("--product-id", required=True)
+    reviewer_revalidation_lineage_recovery.add_argument("--failure-id", required=True)
+    reviewer_revalidation_lineage_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    reviewer_revalidation_lineage_recovery.set_defaults(
+        function=reviewer_revalidation_lineage_recovery_command
     )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)

@@ -2020,6 +2020,23 @@ class AutonomyStore:
                         )
                     supersedes_task_id = str(task["supersedes_task_id"] or "")
                     if supersedes_task_id:
+                        superseded_task = self.connection.execute(
+                            """SELECT role,capability_profile FROM tasks
+                                WHERE task_id=? AND product_id=?""",
+                            (
+                                supersedes_task_id,
+                                str(task["product_id"]),
+                            ),
+                        ).fetchone()
+                        reviewer_revalidation = bool(
+                            superseded_task is not None
+                            and str(task["role"] or "") == "builder"
+                            and str(task["stage_key"] or "") == "repair"
+                            and str(superseded_task["role"] or "")
+                            in {"security-reviewer", "independent-reviewer"}
+                            and str(superseded_task["capability_profile"] or "")
+                            == "reviewer_readonly"
+                        )
                         sibling_failure_ids = [
                             str(row[0])
                             for row in self.connection.execute(
@@ -2087,30 +2104,76 @@ class AutonomyStore:
                                     *redundant_repair_ids,
                                 ),
                             )
-                        self.connection.execute(
-                            """UPDATE tasks
-                               SET graph_status='SUPERSEDED', status='DONE',
-                                   updated_at=?
-                               WHERE task_id=? AND product_id=?
-                                 AND graph_status NOT IN ('ACCEPTED','CANCELLED')""",
-                            (
-                                now,
-                                supersedes_task_id,
+                        if reviewer_revalidation:
+                            self.connection.execute(
+                                """UPDATE tasks
+                                   SET graph_status='READY', status='PENDING',
+                                       failure_id=NULL, hypothesis_id=NULL,
+                                       result_ref=NULL, result_digest=NULL,
+                                       result_binding_id=NULL,
+                                       lease_owner=NULL, lease_until=NULL,
+                                       heartbeat_at=NULL, lease_token=NULL,
+                                       available_at=NULL, next_tier='terra',
+                                       next_attempt_kind='initial',
+                                       repair_context_ref=NULL,
+                                       terminal_reason=NULL, terminal_detail=NULL,
+                                       failure_kind=NULL, blocked_reason=NULL,
+                                       blocked_ref=NULL, updated_at=?
+                                   WHERE task_id=? AND product_id=?
+                                     AND graph_status NOT IN ('ACCEPTED','CANCELLED')""",
+                                (
+                                    now,
+                                    supersedes_task_id,
+                                    str(task["product_id"]),
+                                ),
+                            )
+                            self.connection.execute(
+                                """INSERT OR IGNORE INTO task_edges
+                                   (plan_id, from_task_id, to_task_id, edge_type,
+                                    required, created_at)
+                                   VALUES (?, ?, ?, 'revalidates', 1, ?)""",
+                                (
+                                    str(task["plan_id"]),
+                                    outcome.task_id,
+                                    supersedes_task_id,
+                                    now,
+                                ),
+                            )
+                            self.state._record_event(
                                 str(task["product_id"]),
-                            ),
-                        )
-                        self.connection.execute(
-                            """INSERT OR IGNORE INTO task_edges
-                               (plan_id, from_task_id, to_task_id, edge_type,
-                                required, created_at)
-                               VALUES (?, ?, ?, 'supersedes', 0, ?)""",
-                            (
-                                str(task["plan_id"]),
                                 supersedes_task_id,
-                                outcome.task_id,
-                                now,
-                            ),
-                        )
+                                "reviewer_revalidation_scheduled",
+                                {
+                                    "accepted_repair_task_id": outcome.task_id,
+                                    "reviewer_task_id": supersedes_task_id,
+                                    "fresh_reviewer_acceptance_required": True,
+                                },
+                            )
+                        else:
+                            self.connection.execute(
+                                """UPDATE tasks
+                                   SET graph_status='SUPERSEDED', status='DONE',
+                                       updated_at=?
+                                   WHERE task_id=? AND product_id=?
+                                     AND graph_status NOT IN ('ACCEPTED','CANCELLED')""",
+                                (
+                                    now,
+                                    supersedes_task_id,
+                                    str(task["product_id"]),
+                                ),
+                            )
+                            self.connection.execute(
+                                """INSERT OR IGNORE INTO task_edges
+                                   (plan_id, from_task_id, to_task_id, edge_type,
+                                    required, created_at)
+                                   VALUES (?, ?, ?, 'supersedes', 0, ?)""",
+                                (
+                                    str(task["plan_id"]),
+                                    supersedes_task_id,
+                                    outcome.task_id,
+                                    now,
+                                ),
+                            )
                         if resolved_sibling_ids or redundant_repair_ids:
                             self.state._record_event(
                                 str(task["product_id"]),

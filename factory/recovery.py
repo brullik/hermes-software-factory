@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -2826,6 +2827,308 @@ def resume_repair_context_binding_failure(
         "correction_digest": correction_digest,
         "parent_failure_id": parent_failure_id,
         "repair_context_ref": repair_ref,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
+def resume_reviewer_revalidation_lineage_failure(
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Require fresh reviewer acceptance after a cross-role Builder repair."""
+
+    if not state.maintenance_active():
+        raise ValueError("reviewer revalidation recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_reviewer_revalidation_lineage_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+    rows = _rows(
+        state,
+        """SELECT failure.failure_class, failure.reason_code,
+                  failure.safe_message, failure.status AS failure_status,
+                  task.task_id, task.role, task.capability_profile,
+                  task.stage_key, task.graph_status,
+                  task.status AS task_status, task.root_problem_signature,
+                  product.status AS product_status
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product
+               ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("reviewer revalidation failure coordinate is missing")
+    row = rows[0]
+    safe_message = str(row["safe_message"] or "")
+    match = re.fullmatch(
+        r"accepted task replacement identity conflicts for (T-[A-Z0-9_-]{4,})",
+        safe_message,
+    )
+    reviewer_task_id = match.group(1) if match else ""
+    reviewer_rows = _rows(
+        state,
+        """SELECT task_id,role,capability_profile,graph_status,status,plan_id
+             FROM tasks WHERE task_id=? AND product_id=?""",
+        (reviewer_task_id, product_id),
+    )
+    repair_rows = _rows(
+        state,
+        """SELECT task_id,role,stage_key,graph_status,status,plan_id
+             FROM tasks
+            WHERE product_id=? AND supersedes_task_id=?
+              AND role='builder' AND stage_key='repair'
+              AND graph_status='ACCEPTED' AND status='DONE'
+            ORDER BY created_at,task_id""",
+        (product_id, reviewer_task_id),
+    )
+    root_problem_signature = str(row["root_problem_signature"] or "")
+    if (
+        str(row["failure_class"]) != "semantic"
+        or str(row["reason_code"]) != "internal_blocker"
+        or str(row["failure_status"]) != "OPEN"
+        or str(row["role"]) != "independent-reviewer"
+        or str(row["capability_profile"] or "") != "reviewer_readonly"
+        or str(row["stage_key"] or "") != "release-readiness-review"
+        or str(row["graph_status"]) != "FAILED_SEMANTIC"
+        or str(row["task_status"]) != "FAILED_SAFE"
+        or str(row["product_status"]) != "IMPLEMENTING"
+        or len(reviewer_rows) != 1
+        or str(reviewer_rows[0]["role"]) != "security-reviewer"
+        or str(reviewer_rows[0]["capability_profile"] or "") != "reviewer_readonly"
+        or str(reviewer_rows[0]["graph_status"]) != "SUPERSEDED"
+        or str(reviewer_rows[0]["status"]) != "DONE"
+        or len(repair_rows) != 1
+        or str(repair_rows[0]["plan_id"]) != str(reviewer_rows[0]["plan_id"])
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+    ):
+        raise ValueError("failure is not the bounded reviewer revalidation defect")
+    independent_task_id = str(row["task_id"])
+    repair_task_id = str(repair_rows[0]["task_id"])
+    edge_rows = _rows(
+        state,
+        """SELECT required FROM task_edges
+            WHERE plan_id=? AND from_task_id=? AND to_task_id=?
+              AND edge_type='depends_on'""",
+        (
+            str(reviewer_rows[0]["plan_id"]),
+            reviewer_task_id,
+            independent_task_id,
+        ),
+    )
+    if len(edge_rows) != 1 or int(edge_rows[0]["required"]) != 1:
+        raise ValueError("reviewer downstream dependency is missing")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise ValueError("product problem budget changed before revalidation recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("reviewer revalidation recovery requires a drained controller")
+
+    now = utc_now()
+    plan_id = str(reviewer_rows[0]["plan_id"])
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status, reviewer.graph_status,
+                          reviewer.status, independent.graph_status,
+                          independent.status, independent.failure_id,
+                          product.status
+                     FROM failures AS failure
+                     JOIN tasks AS independent
+                       ON independent.task_id=failure.task_id
+                     JOIN tasks AS reviewer
+                       ON reviewer.task_id=?
+                      AND reviewer.product_id=failure.product_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (reviewer_task_id, failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "SUPERSEDED",
+                "DONE",
+                "FAILED_SEMANTIC",
+                "FAILED_SAFE",
+                failure_id,
+                "IMPLEMENTING",
+            ):
+                raise ValueError("reviewer revalidation state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 2, "ACTIVE"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                """UPDATE failures
+                      SET failure_class='controller',
+                          reason_code='controller_reviewer_revalidation_lineage_invariant',
+                          status='RESOLVED', last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='OPEN'""",
+                (now, failure_id, product_id),
+            )
+            for task_id, graph_status in (
+                (reviewer_task_id, "READY"),
+                (independent_task_id, "BLOCKED_DEPENDENCY"),
+            ):
+                state._connection.execute(
+                    """UPDATE tasks
+                          SET status='PENDING', graph_status=?, failure_id=NULL,
+                              hypothesis_id=NULL, result_ref=NULL,
+                              result_digest=NULL, result_binding_id=NULL,
+                              lease_owner=NULL, lease_until=NULL,
+                              lease_token=NULL, heartbeat_at=NULL,
+                              available_at=NULL, next_tier='terra',
+                              next_attempt_kind='initial', repair_context_ref=NULL,
+                              terminal_reason=NULL, terminal_detail=NULL,
+                              failure_kind=NULL, blocked_reason=NULL,
+                              blocked_ref=NULL, updated_at=?
+                        WHERE task_id=? AND product_id=?""",
+                    (graph_status, now, task_id, product_id),
+                )
+            state._connection.execute(
+                """DELETE FROM task_edges
+                    WHERE plan_id=? AND from_task_id=? AND to_task_id=?
+                      AND edge_type='supersedes' AND required=0""",
+                (plan_id, reviewer_task_id, repair_task_id),
+            )
+            state._connection.execute(
+                """INSERT OR IGNORE INTO task_edges
+                   (plan_id, from_task_id, to_task_id, edge_type,
+                    required, created_at)
+                   VALUES (?, ?, ?, 'revalidates', 1, ?)""",
+                (plan_id, repair_task_id, reviewer_task_id, now),
+            )
+            incident_id = "incident-" + sha256_text(
+                f"{failure_id}:reviewer-revalidation"
+            )[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at, resolved_at)
+                   VALUES (?, ?, ?,
+                           'controller_reviewer_revalidation_lineage_invariant',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    reviewer_task_id,
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest, product_id, recovery_task_id,
+                    status, applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, reviewer_task_id, now),
+            )
+            state._record_event(
+                product_id,
+                reviewer_task_id,
+                "controller_reviewer_revalidation_lineage_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "accepted_repair_task_id": repair_task_id,
+                    "reviewer_task_id": reviewer_task_id,
+                    "independent_reviewer_task_id": independent_task_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "fresh_reviewer_acceptance_required": True,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": reviewer_task_id,
+        "accepted_repair_task_id": repair_task_id,
+        "independent_reviewer_task_id": independent_task_id,
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
         "product_budget_counters": {
             "deterministic_actions_used": 1,
             "arbiter_calls_used": 1,

@@ -34,6 +34,7 @@ from factory.recovery import (
     resume_opaque_subject_reference_failure,
     resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
+    resume_reviewer_revalidation_lineage_failure,
 )
 from factory.recovery_directive import build_scope_recovery_directive
 from factory.repository import RepositoryBootstrapper
@@ -2450,6 +2451,315 @@ def test_AUT_P0_006_failed_dependency_routes_and_unblocks_after_repair(
             event["event_type"] == "redundant_repair_work_suppressed"
             for event in state.events("product-autonomy")
         )
+    finally:
+        state.close()
+
+
+def test_accepted_builder_repair_requires_fresh_readonly_reviewer_acceptance(
+    tmp_path: Path,
+) -> None:
+    config, state, _artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "security-reviewer",
+                "output_schema": "security-review-result.schema.json",
+                "capability_profile": "reviewer_readonly",
+                "required_capabilities": list(
+                    CAPABILITY_PROFILES["reviewer_readonly"]
+                ),
+                "lifecycle_stage": "security-review",
+                "quality_gates": ["target-tests", "target-lint"],
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                      SET role='security-reviewer',
+                          output_schema='security-review-result.schema.json',
+                          capability_profile='reviewer_readonly',
+                          required_capabilities_json=?,
+                          lifecycle_stage='security-review'
+                    WHERE task_id='T-FAILNODEA'""",
+                (stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),),
+            )
+
+        repair_id = "T-REVIEWER-BUILDER-REPAIR"
+        state.add_task(
+            task_id=repair_id,
+            product_id="product-autonomy",
+            title="Repair the security review finding",
+            role="builder",
+            output_schema="attempt-result.schema.json",
+            contract_ref=f"evidence/task-{repair_id}.json",
+            stage_key="repair",
+            priority=100,
+            root_task_id=str(failed["root_task_id"]),
+            parent_task_id="T-FAILNODEA",
+            source_task_id="T-FAILNODEA",
+            plan_id=str(failed["plan_id"]),
+            plan_node_id="A:reviewer-builder-repair",
+            root_context_ref=str(failed["root_context_ref"]),
+            active_context_ref=f"evidence/task-{repair_id}.json",
+            failure_id=failure_id,
+            hypothesis_id=str(failed["hypothesis_id"]),
+            capability_profile="builder_workspace",
+            supersedes_task_id="T-FAILNODEA",
+            graph_status="READY",
+        )
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        assert repair["role"] == "builder"
+        assert repair["stage_key"] == "repair"
+        assert repair["supersedes_task_id"] == "T-FAILNODEA"
+        claimed = state.claim_task(worker_id="reviewer-repair-worker")
+        assert claimed is not None and claimed["task_id"] == repair_id
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=repair_id,
+                worker_id="reviewer-repair-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("accepted-reviewer-builder-repair"),
+                result_ref="internal://accepted-reviewer-builder-repair",
+                result_digest=sha256_text("accepted-reviewer-builder-repair"),
+                status="ACCEPTED",
+            )
+        )
+
+        reviewer = state.get_task("T-FAILNODEA")
+        downstream = state.get_task("T-FAILNODEB")
+        assert reviewer is not None and downstream is not None
+        assert (reviewer["status"], reviewer["graph_status"]) == (
+            "PENDING",
+            "READY",
+        )
+        assert reviewer["failure_id"] is None
+        assert reviewer["result_ref"] is None
+        assert (downstream["status"], downstream["graph_status"]) == (
+            "PENDING",
+            "BLOCKED_DEPENDENCY",
+        )
+        assert any(
+            edge["from_task_id"] == repair_id
+            and edge["to_task_id"] == "T-FAILNODEA"
+            and edge["edge_type"] == "revalidates"
+            and int(edge["required"]) == 1
+            for edge in state.list_edges(str(repair["plan_id"]))
+        )
+        assert any(
+            event["event_type"] == "reviewer_revalidation_scheduled"
+            for event in state.events("product-autonomy")
+        )
+    finally:
+        state.close()
+
+
+def test_reviewer_revalidation_lineage_recovery_repairs_existing_shadow_state(
+    tmp_path: Path,
+) -> None:
+    _config, state, _artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    signature = "7" * 64
+    defect_failure_id = "failure-reviewer-revalidation-lineage"
+    now = "2026-08-03T15:00:00Z"
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                      SET role='security-reviewer',
+                          output_schema='security-review-result.schema.json',
+                          capability_profile='reviewer_readonly',
+                          required_capabilities_json=?,
+                          lifecycle_stage='security-review'
+                    WHERE task_id='T-FAILNODEA'""",
+                (stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),),
+            )
+        repair_id = "T-LEGACY-REVIEWER-BUILDER-REPAIR"
+        state.add_task(
+            task_id=repair_id,
+            product_id="product-autonomy",
+            title="Repair the legacy security review finding",
+            role="builder",
+            output_schema="attempt-result.schema.json",
+            contract_ref=f"evidence/task-{repair_id}.json",
+            stage_key="repair",
+            priority=100,
+            root_task_id=str(failed["root_task_id"]),
+            parent_task_id="T-FAILNODEA",
+            source_task_id="T-FAILNODEA",
+            plan_id=str(failed["plan_id"]),
+            plan_node_id="A:legacy-reviewer-builder-repair",
+            root_context_ref=str(failed["root_context_ref"]),
+            active_context_ref=f"evidence/task-{repair_id}.json",
+            failure_id=failure_id,
+            hypothesis_id=str(failed["hypothesis_id"]),
+            capability_profile="builder_workspace",
+            supersedes_task_id="T-FAILNODEA",
+            graph_status="READY",
+        )
+        claimed = state.claim_task(worker_id="legacy-reviewer-repair-worker")
+        assert claimed is not None and claimed["task_id"] == repair_id
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id=repair_id,
+                worker_id="legacy-reviewer-repair-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key=sha256_text("legacy-accepted-reviewer-repair"),
+                result_ref="internal://legacy-accepted-reviewer-repair",
+                result_digest=sha256_text("legacy-accepted-reviewer-repair"),
+                status="ACCEPTED",
+            )
+        )
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        plan_id = str(repair["plan_id"])
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='DONE', graph_status='SUPERSEDED',
+                          failure_id=NULL, root_problem_signature=?
+                    WHERE task_id='T-FAILNODEA'""",
+                (signature,),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET role='independent-reviewer',
+                          output_schema='independent-review-result.schema.json',
+                          capability_profile='reviewer_readonly',
+                          required_capabilities_json=?,
+                          stage_key='release-readiness-review',
+                          lifecycle_stage='release-readiness-review',
+                          status='FAILED_SAFE', graph_status='FAILED_SEMANTIC',
+                          failure_id=?, root_problem_signature=?,
+                          terminal_reason='internal_blocker'
+                    WHERE task_id='T-FAILNODEB'""",
+                (
+                    stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),
+                    defect_failure_id,
+                    signature,
+                ),
+            )
+            state._connection.execute(
+                """DELETE FROM task_edges
+                    WHERE plan_id=? AND from_task_id=? AND to_task_id=?
+                      AND edge_type='revalidates'""",
+                (plan_id, repair_id, "T-FAILNODEA"),
+            )
+            state._connection.execute(
+                """INSERT OR IGNORE INTO task_edges
+                   (plan_id,from_task_id,to_task_id,edge_type,required,created_at)
+                   VALUES (?, 'T-FAILNODEA', ?, 'supersedes', 0, ?)""",
+                (plan_id, repair_id, now),
+            )
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id,product_id,task_id,parent_failure_id,
+                    failure_class,reason_code,fingerprint,safe_message,
+                    evidence_ref,status,retryable,owner_action_eligible,
+                    expected_json,actual_json,failed_gate_ids_json,
+                    first_seen_at,last_seen_at)
+                   VALUES (?, 'product-autonomy', 'T-FAILNODEB', ?,
+                           'semantic', 'internal_blocker', ?, ?,
+                           'internal://reviewer-lineage-defect', 'OPEN', 0, 0,
+                           '{}', '{}', '[]', ?, ?)""",
+                (
+                    defect_failure_id,
+                    failure_id,
+                    sha256_text(defect_failure_id),
+                    "accepted task replacement identity conflicts for T-FAILNODEA",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO problem_budgets
+                   (product_id,root_problem_signature,
+                    deterministic_actions_used,arbiter_calls_used,
+                    execution_attempts_used,last_progress_vector_json,
+                    status,created_at,updated_at)
+                   VALUES ('product-autonomy', ?, 1, 1, 2, '{}',
+                           'ACTIVE', ?, ?)""",
+                (signature, now, now),
+            )
+            state._connection.execute(
+                """UPDATE products SET status='IMPLEMENTING', terminal_reason=NULL
+                    WHERE product_id='product-autonomy'"""
+            )
+
+        state.enter_maintenance("reviewer-revalidation-lineage-recovery")
+        applied = resume_reviewer_revalidation_lineage_failure(
+            state,
+            product_id="product-autonomy",
+            failure_id=defect_failure_id,
+            correction_evidence_digest="8" * 64,
+        )
+        assert applied["application_status"] == "APPLIED"
+        assert applied["recovery_task_id"] == "T-FAILNODEA"
+        assert applied["accepted_repair_task_id"] == repair_id
+        reviewer = state.get_task("T-FAILNODEA")
+        independent = state.get_task("T-FAILNODEB")
+        assert reviewer is not None and independent is not None
+        assert (reviewer["status"], reviewer["graph_status"]) == (
+            "PENDING",
+            "READY",
+        )
+        assert (independent["status"], independent["graph_status"]) == (
+            "PENDING",
+            "BLOCKED_DEPENDENCY",
+        )
+        corrected = state._connection.execute(
+            "SELECT failure_class,reason_code,status FROM failures WHERE failure_id=?",
+            (defect_failure_id,),
+        ).fetchone()
+        assert tuple(corrected) == (
+            "controller",
+            "controller_reviewer_revalidation_lineage_invariant",
+            "RESOLVED",
+        )
+        assert any(
+            edge["from_task_id"] == repair_id
+            and edge["to_task_id"] == "T-FAILNODEA"
+            and edge["edge_type"] == "revalidates"
+            and int(edge["required"]) == 1
+            for edge in state.list_edges(plan_id)
+        )
+        assert not any(
+            edge["from_task_id"] == "T-FAILNODEA"
+            and edge["to_task_id"] == repair_id
+            and edge["edge_type"] == "supersedes"
+            for edge in state.list_edges(plan_id)
+        )
+        budget = state._connection.execute(
+            """SELECT deterministic_actions_used,arbiter_calls_used,
+                      execution_attempts_used,status
+                 FROM problem_budgets
+                WHERE product_id='product-autonomy'
+                  AND root_problem_signature=?""",
+            (signature,),
+        ).fetchone()
+        assert tuple(budget) == (1, 1, 2, "ACTIVE")
+
+        replay = resume_reviewer_revalidation_lineage_failure(
+            state,
+            product_id="product-autonomy",
+            failure_id=defect_failure_id,
+            correction_evidence_digest="8" * 64,
+        )
+        assert replay["application_status"] == "REPLAYED"
+        assert replay["recovery_task_id"] == "T-FAILNODEA"
     finally:
         state.close()
 
