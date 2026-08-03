@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.1 - 2026-08-02
+
+- Build Candidate Snapshots from authoritative active `BOUND` Plan Delta
+  memberships instead of historical task-edge rows, whose audit-only task
+  records intentionally may not carry a direct binding in a later revision.
+- Fail closed with an isolated controller incident when a ready snapshot lacks
+  exactly one architecture binding or has no implementation binding, instead
+  of leaving an unclaimable controller-only task silently `READY`.
+- Add production-derived regressions proving snapshot materialization when
+  legacy task binding fields are empty but semantic memberships remain valid.
+
 ## 2.3.0 - 2026-08-02
 
 - Add the deterministic Path Governor as the sole owner of trajectory,
