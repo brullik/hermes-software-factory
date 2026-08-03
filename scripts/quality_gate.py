@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib.metadata
 import json
@@ -46,6 +47,23 @@ _DENIED_LICENSE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_NON_RUNTIME_SOURCE_DIRECTORIES = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "docs",
+    "examples",
+    "test",
+    "tests",
+    "venv",
+}
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -61,6 +79,104 @@ def digest_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _runtime_python_sources(cwd: Path) -> list[Path]:
+    """Return package/runtime Python sources, excluding tests and build trees."""
+
+    roots: list[Path] = []
+    src = cwd / "src"
+    if src.is_dir():
+        roots.append(src)
+    roots.extend(
+        path
+        for path in cwd.iterdir()
+        if path.is_dir()
+        and not path.name.startswith(".")
+        and path.name not in _NON_RUNTIME_SOURCE_DIRECTORIES
+        and any(path.rglob("*.py"))
+    )
+    paths = [
+        path
+        for path in cwd.glob("*.py")
+        if not path.name.startswith("test_") and path.name != "setup.py"
+    ]
+    for root in roots:
+        paths.extend(
+            path
+            for path in root.rglob("*.py")
+            if not any(
+                part in _NON_RUNTIME_SOURCE_DIRECTORIES
+                for part in path.relative_to(cwd).parts[:-1]
+            )
+        )
+    return sorted(set(paths), key=lambda path: path.relative_to(cwd).as_posix())
+
+
+def _explicit_zero_dependency_attestation(cwd: Path, subject_sha: str) -> str:
+    """Prove that an explicit empty dependency contract matches runtime imports."""
+
+    pyproject_path = cwd / "pyproject.toml"
+    if not pyproject_path.is_file():
+        raise RuntimeError("pyproject.toml is required for zero-dependency attestation")
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    project = pyproject.get("project")
+    if not isinstance(project, dict) or "dependencies" not in project:
+        raise RuntimeError("project.dependencies must explicitly attest an empty list")
+    if project.get("dependencies") != []:
+        raise RuntimeError("empty inventory does not match project.dependencies")
+
+    sources = _runtime_python_sources(cwd)
+    local_roots = {path.stem for path in cwd.glob("*.py")}
+    local_roots.update(
+        path.name
+        for path in cwd.iterdir()
+        if path.is_dir()
+        and not path.name.startswith(".")
+        and path.name not in _NON_RUNTIME_SOURCE_DIRECTORIES
+        and any(path.rglob("*.py"))
+    )
+    src = cwd / "src"
+    if src.is_dir():
+        local_roots.update(path.stem for path in src.glob("*.py"))
+        local_roots.update(
+            path.name
+            for path in src.iterdir()
+            if path.is_dir() and any(path.rglob("*.py"))
+        )
+
+    imported_roots: set[str] = set()
+    source_records: list[dict[str, str]] = []
+    for path in sources:
+        relative = path.relative_to(cwd).as_posix()
+        source_records.append({"path": relative, "sha256": digest_file(path)})
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        except (OSError, SyntaxError, UnicodeError) as error:
+            raise RuntimeError(f"cannot analyze runtime source {relative}: {error}") from error
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported_roots.add(node.module.split(".", 1)[0])
+
+    undeclared = sorted(
+        name
+        for name in imported_roots
+        if name not in sys.stdlib_module_names and name not in local_roots
+    )
+    if undeclared:
+        raise RuntimeError(
+            "undeclared third-party runtime imports: " + ", ".join(undeclared)
+        )
+    attestation = {
+        "schema_version": "1.0",
+        "subject_sha": subject_sha,
+        "project_dependencies": [],
+        "runtime_import_roots": sorted(imported_roots),
+        "source_files": source_records,
+    }
+    return digest_text(json.dumps(attestation, sort_keys=True, separators=(",", ":")))
 
 
 def load_catalog(path: Path) -> dict[str, Any]:
@@ -404,7 +520,23 @@ def _dependency_audit(
         site_packages = _target_site_packages(python_executable, cwd)
         records, reachable = _runtime_dependency_records(cwd, site_packages)
         if not records:
-            raise RuntimeError("runtime dependency inventory is empty")
+            attestation_digest = _explicit_zero_dependency_attestation(cwd, subject_sha)
+            inventory_digest = digest_text("")
+            return _adapter_evidence(
+                gate,
+                subject_sha,
+                command=command,
+                started=started,
+                status="PASS",
+                output=(
+                    "audited_runtime_packages=0; "
+                    f"inventory_sha256={inventory_digest}; "
+                    f"zero_dependency_attestation_sha256={attestation_digest}; "
+                    "scanner_mode=not_applicable; network_mode=offline; "
+                    "known_vulnerabilities=none"
+                ),
+                exit_code=0,
+            )
 
         require_root_owned = bool(gate.get("require_root_owned", False))
         scanner, _ = _trusted_gate_file(

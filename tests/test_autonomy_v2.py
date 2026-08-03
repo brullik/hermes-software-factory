@@ -951,6 +951,128 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
         state.close()
 
 
+def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="mandatory_gate_failed",
+    )
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "security-reviewer",
+                "output_schema": "security-review-result.schema.json",
+                "capability_profile": "reviewer_readonly",
+                "required_capabilities": list(CAPABILITY_PROFILES["reviewer_readonly"]),
+                "allowed_paths": ["artifacts/**"],
+                "quality_gates": ["target-dependency-audit"],
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                   SET role='security-reviewer',
+                       output_schema='security-review-result.schema.json',
+                       capability_profile='reviewer_readonly',
+                       required_capabilities_json=?
+                   WHERE task_id='T-FAILNODEA'""",
+                (stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),),
+            )
+
+        router = FailureRouter(config, state, artifacts)
+        arbiter_id = router.route(failure_id)
+        arbiter = state.get_task(arbiter_id)
+        assert arbiter is not None and arbiter["role"] == "path-arbiter"
+        signature = str(arbiter["root_problem_signature"])
+        second_failure_id = "failure-reviewer-after-arbiter"
+        now = "2026-08-03T00:00:01Z"
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE failures SET status='RESOLVED' WHERE failure_id=?",
+                (failure_id,),
+            )
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id, product_id, task_id, failure_class, reason_code,
+                    fingerprint, safe_message, evidence_ref, status, retryable,
+                    owner_action_eligible, expected_json, actual_json,
+                    failed_gate_ids_json, parent_failure_id, first_seen_at, last_seen_at)
+                   VALUES (?, 'product-autonomy', 'T-FAILNODEA', 'semantic',
+                           'mandatory_gate_failed', ?,
+                           'target dependency audit requires a repository repair',
+                           'internal://reviewer-gate', 'OPEN', 0, 0, '{}', ?, ?, ?, ?, ?)""",
+                (
+                    second_failure_id,
+                    sha256_text(second_failure_id),
+                    stable_json(
+                        {
+                            "required_fixes": [
+                                "Make the runtime dependency declaration truthful."
+                            ]
+                        }
+                    ),
+                    stable_json(["target-dependency-audit"]),
+                    failure_id,
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                "UPDATE tasks SET failure_id=? WHERE task_id='T-FAILNODEA'",
+                (second_failure_id,),
+            )
+            state._connection.execute(
+                """UPDATE problem_budgets
+                      SET execution_attempts_used=1, status='ACTIVE'
+                    WHERE product_id='product-autonomy'
+                      AND root_problem_signature=?""",
+                (signature,),
+            )
+
+        repair_id = router.route(second_failure_id)
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        assert repair["role"] == "builder"
+        assert repair["output_schema"] == "implementation-result.schema.json"
+        assert repair["capability_profile"] == "builder_workspace"
+        assert repair["stage_key"] == "repair"
+        assert repair["repair_context_ref"]
+        repair_contract = json.loads(
+            (config.evidence_dir / Path(str(repair["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert repair_contract["allowed_paths"] == [
+            "pyproject.toml",
+            "requirements*.txt",
+            "src/**",
+            "tests/**",
+        ]
+        assert repair_contract["quality_gates"] == ["target-dependency-audit"]
+        assert repair_contract["acceptance"][0]["criterion_id"] == (
+            "AC-REVIEWER-GATE-ROOT-CAUSE"
+        )
+        budget = state._connection.execute(
+            """SELECT arbiter_calls_used, execution_attempts_used, status
+                 FROM problem_budgets
+                WHERE product_id='product-autonomy'
+                  AND root_problem_signature=?""",
+            (signature,),
+        ).fetchone()
+        assert tuple(budget) == (1, 2, "ACTIVE")
+    finally:
+        state.close()
+
+
 def test_path_governor_live_router_enforces_one_arbiter_two_executions(
     tmp_path: Path,
 ) -> None:

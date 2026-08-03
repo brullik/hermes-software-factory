@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.3.10 - 2026-08-03
+
+- Accept an explicit zero-runtime-dependency Python project only after a
+  subject-bound source and import attestation proves that no undeclared
+  third-party runtime imports exist; malformed or incomplete declarations
+  remain fail-closed and the OSV scanner is not invoked for an empty inventory.
+- Route a reviewer mandatory-gate failure through the one remaining bounded
+  Builder execution after Path Arbiter has already been consumed, preserving
+  the root signature, failed gate IDs, and a minimal repository write scope.
+- Add an idempotent, maintenance-fenced production recovery for the historical
+  empty-inventory controller defect that requeues the same Security Reviewer
+  with fresh repair context while preserving all Path Governor counters.
+
 ## 2.3.9 - 2026-08-03
 
 - Keep controller-owned task priorities nonnegative when a bounded `PlanDelta`
