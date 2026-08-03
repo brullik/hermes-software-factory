@@ -25,6 +25,7 @@ from factory.reconciler import ReconcilerLoop
 from factory.recovery import (
     apply_recovery_plan,
     build_recovery_plan,
+    finalize_recovery_application,
     state_audit,
     verify_active_graphs,
     verify_recovery_preconditions,
@@ -1142,7 +1143,9 @@ def test_failed_safe_replanner_loop_requires_explicit_fingerprinted_recovery(
     applied = apply_recovery_plan(config, state, recovery)
     assert applied["applications"][0]["status"] == "APPLIED"
     product = state.get_product(product_id)
-    assert product is not None and product["status"] == "IMPLEMENTING"
+    assert product is not None
+    assert product["terminal_reason"] is None
+    assert product["status"] == "IMPLEMENTING"
     recovery_task = next(
         task
         for task in state.list_tasks(product_id)
@@ -1341,6 +1344,44 @@ def test_path_governor_failed_safe_recovery_consumes_controller_slot(
         (product_id,),
     ).fetchone()
     assert tuple(decision) == ("CONTROLLER_RECOVERY", "APPLIED")
+    with state._lock, state._connection:
+        state._connection.execute(
+            """UPDATE products
+                  SET terminal_reason='path_governor_problem_budget_exhausted'
+                WHERE product_id=?""",
+            (product_id,),
+        )
+        state._connection.execute(
+            """INSERT INTO failures
+               (failure_id, product_id, task_id, failure_class, reason_code,
+                fingerprint, safe_message, evidence_ref, status, retryable,
+                owner_action_eligible, expected_json, actual_json,
+                failed_gate_ids_json, first_seen_at, last_seen_at)
+               VALUES ('failure-stale-routed', ?, 'T-PATH-SECURITY', 'semantic',
+                       'model_requested_repair', ?,
+                       'Historical routed failure on a superseded task.',
+                       'internal://stale-routed', 'ROUTED', 0, 0,
+                       '{}', '{}', '["target-dependency-audit"]', ?, ?)""",
+            (product_id, sha256_text("failure-stale-routed"), now, now),
+        )
+    finalized = finalize_recovery_application(
+        state,
+        product_id=product_id,
+        recovery_plan_digest=recovery["plan_digest"],
+    )
+    assert finalized["status"] == "PASS"
+    assert finalized["application_status"] == "APPLIED"
+    assert finalized["resolved_historical_failure_count"] == 1
+    assert finalized["terminal_reason_cleared"]
+    assert finalize_recovery_application(
+        state,
+        product_id=product_id,
+        recovery_plan_digest=recovery["plan_digest"],
+    )["application_status"] == "REPLAYED"
+    assert state.get_product(product_id)["terminal_reason"] is None
+    assert state._connection.execute(
+        "SELECT status FROM failures WHERE failure_id='failure-stale-routed'"
+    ).fetchone()[0] == "RESOLVED"
     assert apply_recovery_plan(config, state, recovery)["applications"][0][
         "status"
     ] == "REPLAYED"
