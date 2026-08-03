@@ -47,6 +47,12 @@
 - Classify exclusively `CONTROLLER_*` provider findings as controller-runtime
   incidents rather than product-semantic repairs. The failed product node stays
   unaccepted and is rerun with fresh evidence after deterministic host recovery.
+- Revise persisted Security Reviewer contracts during the bounded container
+  repair recovery so revalidation itself requires `target-container-image-scan`
+  and its container/scanner capabilities. Add an idempotent recovery for an
+  already-repaired historical task whose stale reviewer contract reports
+  `CONTAINER-SCAN-EVIDENCE-MISSING`; it reuses subject-bound accepted Builder
+  scan evidence and preserves the exhausted `1:1:2` problem budget.
 
 ## 2.3.10 - 2026-08-03
 

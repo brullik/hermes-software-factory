@@ -31,6 +31,7 @@ from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
 from factory.recovery import (
     resume_canonical_builder_schema_failure,
+    resume_missing_security_container_gate_failure,
     resume_opaque_subject_reference_failure,
     resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
@@ -2892,6 +2893,16 @@ def test_reviewer_revalidation_lineage_recovery_repairs_existing_shadow_state(
             "PENDING",
             "BLOCKED_DEPENDENCY",
         )
+        reviewer_contract = json.loads(
+            (
+                config.evidence_dir
+                / Path(str(reviewer["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert "target-container-image-scan" in reviewer_contract["quality_gates"]
+        assert "toolchain.container_builder" in reviewer_contract["required_capabilities"]
+        assert "toolchain.scanners" in reviewer_contract["required_capabilities"]
+        assert int(reviewer_contract["task_revision"]) == int(reviewer["task_revision"])
         assert tuple(
             state._connection.execute(
                 """SELECT deterministic_actions_used,arbiter_calls_used,
@@ -2911,6 +2922,211 @@ def test_reviewer_revalidation_lineage_recovery_repairs_existing_shadow_state(
         )
         assert container_replay["application_status"] == "REPLAYED"
         assert container_replay["recovery_task_id"] == corrected_repair["task_id"]
+    finally:
+        state.close()
+
+
+def test_missing_security_container_gate_recovery_reuses_verified_builder(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    signature = "6" * 64
+    reviewer_id = "T-FAILNODEA"
+    builder_id = "T-VERIFIED-CONTAINER-BUILDER"
+    subject_sha = "5" * 64
+    now = "2026-08-03T16:00:00Z"
+    try:
+        reviewer = state.get_task(reviewer_id)
+        assert reviewer is not None
+        contract_path = config.evidence_dir / Path(str(reviewer["contract_ref"])).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "security-reviewer",
+                "output_schema": "security-review-result.schema.json",
+                "capability_profile": "reviewer_readonly",
+                "required_capabilities": list(CAPABILITY_PROFILES["reviewer_readonly"]),
+                "quality_gates": [
+                    "target-sast",
+                    "target-dependency-audit",
+                    "target-license-check",
+                    "target-secret-scan",
+                ],
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        gate_path = artifacts.write(
+            "gate-evidence.schema.json",
+            {
+                "schema_version": "1.0",
+                "gate_id": "target-container-image-scan",
+                "status": "PASS",
+                "subject_sha": subject_sha,
+                "command_digest": "a" * 64,
+                "started_at": now,
+                "finished_at": now,
+                "exit_code": 0,
+                "artifact_digest": "b" * 64,
+                "summary": "immutable image scan passed",
+                "mandatory": True,
+            },
+            filename="gate-verified-container-builder.json",
+        )
+        attempt_path = artifacts.write(
+            "attempt-result.schema.json",
+            {
+                "schema_version": "1.0",
+                "artifact_id": "attempt-result-verified-container-builder",
+                "product_id": "product-autonomy",
+                "created_at": now,
+                "producer": {"role": "builder", "tier": "terra"},
+                "policy_digest": policy_digest(config),
+                "task_id": builder_id,
+                "attempt_id": "attempt-verified-container-builder",
+                "tier": "terra",
+                "attempt_kind": "repair",
+                "prompt_digest": "c" * 64,
+                "subject_sha_before": subject_sha,
+                "status": "completed",
+                "summary": "Builder passed the subject-bound image scan.",
+                "changed_files": [
+                    {"path": "container/Containerfile", "change": "verified candidate"}
+                ],
+                "commands": [
+                    {
+                        "command_id": "hermes-oneshot",
+                        "result": "pass",
+                        "artifact_ref": "internal://verified-container-builder",
+                    }
+                ],
+                "test_results": [
+                    {
+                        "gate_id": "target-container-image-scan",
+                        "status": "PASS",
+                        "evidence_ref": f"evidence/{gate_path.name}",
+                    }
+                ],
+                "assumptions": [],
+                "findings": [],
+                "evidence_refs": [f"evidence/{gate_path.name}"],
+            },
+            filename="attempt-verified-container-builder.json",
+        )
+        state.add_task(
+            task_id=builder_id,
+            product_id="product-autonomy",
+            title="Verified container repair",
+            role="builder",
+            output_schema="attempt-result.schema.json",
+            contract_ref=f"evidence/task-{builder_id}.json",
+            stage_key="repair",
+            root_task_id=str(reviewer["root_task_id"]),
+            parent_task_id=reviewer_id,
+            source_task_id=reviewer_id,
+            plan_id=str(reviewer["plan_id"]),
+            plan_node_id="A:verified-container-builder",
+            root_context_ref=str(reviewer["root_context_ref"]),
+            active_context_ref=f"evidence/task-{builder_id}.json",
+            capability_profile="builder_workspace",
+            supersedes_task_id=reviewer_id,
+            root_problem_signature=signature,
+            graph_status="ACCEPTED",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='DONE',result_ref=?,result_digest=?
+                    WHERE task_id=?""",
+                (str(attempt_path), sha256_file(attempt_path), builder_id),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET role='security-reviewer',
+                          output_schema='security-review-result.schema.json',
+                          capability_profile='reviewer_readonly',
+                          required_capabilities_json=?,stage_key='security-review',
+                          lifecycle_stage='security-review',
+                          status='FAILED_SAFE',graph_status='FAILED_SEMANTIC',
+                          failure_id=?,root_problem_signature=?,
+                          terminal_reason='model_requested_repair'
+                    WHERE task_id=?""",
+                (
+                    stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),
+                    failure_id,
+                    signature,
+                    reviewer_id,
+                ),
+            )
+            state._connection.execute(
+                """UPDATE failures
+                      SET failure_class='semantic',reason_code='model_requested_repair',
+                          safe_message=?,failed_gate_ids_json=?,status='OPEN'
+                    WHERE failure_id=?""",
+                (
+                    "CONTAINER-SCAN-EVIDENCE-MISSING requires fresh subject-bound evidence.",
+                    stable_json(["CONTAINER-SCAN-EVIDENCE-MISSING"]),
+                    failure_id,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO problem_budgets
+                   (product_id,root_problem_signature,
+                    deterministic_actions_used,arbiter_calls_used,
+                    execution_attempts_used,last_progress_vector_json,
+                    status,created_at,updated_at)
+                   VALUES ('product-autonomy', ?, 1, 1, 2, '{}',
+                           'ACTIVE', ?, ?)""",
+                (signature, now, now),
+            )
+            state._connection.execute(
+                """UPDATE products SET status='IMPLEMENTING',terminal_reason=NULL
+                    WHERE product_id='product-autonomy'"""
+            )
+
+        state.enter_maintenance("security-container-gate-recovery")
+        applied = resume_missing_security_container_gate_failure(
+            config,
+            state,
+            product_id="product-autonomy",
+            failure_id=failure_id,
+            correction_evidence_digest="d" * 64,
+        )
+
+        assert applied["application_status"] == "APPLIED"
+        assert applied["verified_builder_task_id"] == builder_id
+        recovered = state.get_task(reviewer_id)
+        assert recovered is not None
+        assert (recovered["status"], recovered["graph_status"]) == (
+            "PENDING",
+            "READY",
+        )
+        recovered_contract = json.loads(
+            (
+                config.evidence_dir / Path(str(recovered["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert "target-container-image-scan" in recovered_contract["quality_gates"]
+        assert tuple(
+            state._connection.execute(
+                """SELECT deterministic_actions_used,arbiter_calls_used,
+                          execution_attempts_used,status
+                     FROM problem_budgets
+                    WHERE product_id='product-autonomy'
+                      AND root_problem_signature=?""",
+                (signature,),
+            ).fetchone()
+        ) == (1, 1, 2, "ACTIVE")
+        replay = resume_missing_security_container_gate_failure(
+            config,
+            state,
+            product_id="product-autonomy",
+            failure_id=failure_id,
+            correction_evidence_digest="d" * 64,
+        )
+        assert replay["application_status"] == "REPLAYED"
     finally:
         state.close()
 

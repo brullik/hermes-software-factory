@@ -3138,6 +3138,83 @@ def resume_reviewer_revalidation_lineage_failure(
     }
 
 
+def _write_container_gated_security_contract(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    reviewer: Mapping[str, Any],
+    correction_digest: str,
+) -> tuple[dict[str, Any], Path]:
+    """Write one immutable revision of a persisted Security Reviewer contract."""
+
+    from .failure_router import FailureRouter
+
+    if (
+        str(reviewer.get("role") or "") != "security-reviewer"
+        or str(reviewer.get("capability_profile") or "") != "reviewer_readonly"
+    ):
+        raise ValueError("container-gate correction target is not Security Reviewer")
+    router = FailureRouter(config, state, ArtifactStore(config))
+    original = router._contract(dict(reviewer))
+    quality_gates = list(
+        dict.fromkeys(
+            [
+                *router._quality_gates(original),
+                "target-container-image-scan",
+            ]
+        )
+    )
+    required_capabilities = list(
+        dict.fromkeys(
+            [
+                *[
+                    str(value)
+                    for value in original.get("required_capabilities", [])
+                    if isinstance(value, str) and value
+                ],
+                "toolchain.container_builder",
+                "toolchain.scanners",
+            ]
+        )
+    )
+    revision = int(reviewer.get("task_revision") or 1) + 1
+    task_id = str(reviewer["task_id"])
+    corrected = {
+        **original,
+        "artifact_id": f"task-contract-{task_id}-container-gate-{correction_digest[:12]}",
+        "task_revision": revision,
+        "quality_gates": quality_gates,
+        "required_capabilities": required_capabilities,
+        "idempotency_key": sha256_text(
+            stable_json(
+                [
+                    str(original.get("idempotency_key") or task_id),
+                    "target-container-image-scan",
+                    correction_digest,
+                ]
+            )
+        ),
+    }
+    schema_name = (
+        "task-contract-v2.schema.json"
+        if str(corrected.get("schema_version") or "") == "2.0"
+        else "task-contract.schema.json"
+    )
+    artifacts = ArtifactStore(config)
+    errors = artifacts.validate(schema_name, corrected)
+    if errors:
+        raise ValueError(
+            "corrected Security Reviewer contract is invalid: "
+            + "; ".join(errors)
+        )
+    path = artifacts.write(
+        schema_name,
+        corrected,
+        filename=f"task-{task_id}-container-gate-{correction_digest[:12]}.json",
+    )
+    return corrected, path
+
+
 def resume_unverified_container_repair_failure(
     config: FactoryConfig,
     state: StateStore,
@@ -3322,6 +3399,14 @@ def resume_unverified_container_repair_failure(
     allowed_paths = router._reviewer_gate_repair_paths(list(expected_gates))
     acceptance = router._reviewer_gate_repair_acceptance(list(expected_gates))
     original = router._contract(failed)
+    corrected_reviewer_contract, corrected_reviewer_path = (
+        _write_container_gated_security_contract(
+            config,
+            state,
+            reviewer=failed,
+            correction_digest=correction_digest,
+        )
+    )
     quality_gates = list(
         dict.fromkeys(
             [*router._quality_gates(original), "target-container-image-scan"]
@@ -3469,6 +3554,8 @@ def resume_unverified_container_repair_failure(
             state._connection.execute(
                 """UPDATE tasks
                       SET status='PENDING',graph_status='BLOCKED_DEPENDENCY',
+                          contract_ref=?,task_revision=?,
+                          required_capabilities_json=?,
                           result_ref=NULL,result_digest=NULL,result_binding_id=NULL,
                           lease_owner=NULL,lease_until=NULL,lease_token=NULL,
                           heartbeat_at=NULL,available_at=NULL,
@@ -3476,7 +3563,14 @@ def resume_unverified_container_repair_failure(
                           failure_kind=NULL,blocked_reason=NULL,blocked_ref=NULL,
                           updated_at=?
                     WHERE task_id=? AND product_id=?""",
-                (now, reviewer_task_id, product_id),
+                (
+                    f"evidence/{corrected_reviewer_path.name}",
+                    int(corrected_reviewer_contract["task_revision"]),
+                    stable_json(corrected_reviewer_contract["required_capabilities"]),
+                    now,
+                    reviewer_task_id,
+                    product_id,
+                ),
             )
             state._connection.execute(
                 """INSERT INTO task_edges
@@ -3528,6 +3622,7 @@ def resume_unverified_container_repair_failure(
                     "root_problem_signature": root_problem_signature,
                     "correction_digest": correction_digest,
                     "required_gate": "target-container-image-scan",
+                    "reviewer_contract_ref": f"evidence/{corrected_reviewer_path.name}",
                     "product_budget_counters_preserved": True,
                 },
             )
@@ -3541,8 +3636,317 @@ def resume_unverified_container_repair_failure(
         "product_id": product_id,
         "recovery_task_id": str(contract["task_id"]),
         "reviewer_task_id": reviewer_task_id,
+        "reviewer_contract_ref": f"evidence/{corrected_reviewer_path.name}",
         "invalid_accepted_repair_task_id": str(accepted_repair["task_id"]),
         "repair_context_ref": repair_ref,
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
+def resume_missing_security_container_gate_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Correct one persisted reviewer contract that predates the image gate."""
+
+    if not state.maintenance_active():
+        raise ValueError("security container-gate recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_security_container_gate_contract_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.*,task.role,task.capability_profile,task.stage_key,
+                  task.graph_status,task.status AS task_status,
+                  task.root_problem_signature,task.contract_ref,
+                  task.task_revision,product.status AS product_status
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("security container-gate failure coordinate is missing")
+    failure = rows[0]
+    try:
+        failed_gate_ids = json.loads(str(failure.get("failed_gate_ids_json") or "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("security container-gate finding IDs are invalid") from error
+    root_problem_signature = str(failure.get("root_problem_signature") or "")
+    if (
+        str(failure.get("failure_class") or "") != "semantic"
+        or str(failure.get("reason_code") or "") != "model_requested_repair"
+        or str(failure.get("status") or "") != "OPEN"
+        or str(failure.get("role") or "") != "security-reviewer"
+        or str(failure.get("capability_profile") or "") != "reviewer_readonly"
+        or str(failure.get("stage_key") or "") != "security-review"
+        or str(failure.get("graph_status") or "") != "FAILED_SEMANTIC"
+        or str(failure.get("task_status") or "") != "FAILED_SAFE"
+        or str(failure.get("product_status") or "") != "IMPLEMENTING"
+        or failed_gate_ids != ["CONTAINER-SCAN-EVIDENCE-MISSING"]
+        or "CONTAINER-SCAN-EVIDENCE-MISSING"
+        not in str(failure.get("safe_message") or "")
+        or not re.fullmatch(r"[a-f0-9]{64}", root_problem_signature)
+    ):
+        raise ValueError("failure is not the bounded missing reviewer image-gate defect")
+    reviewer_task_id = str(failure["task_id"])
+    reviewer = state.get_task(reviewer_task_id)
+    if reviewer is None:
+        raise ValueError("Security Reviewer task disappeared")
+
+    from .failure_router import FailureRouter
+
+    original = FailureRouter(config, state, ArtifactStore(config))._contract(reviewer)
+    if "target-container-image-scan" in original.get("quality_gates", []):
+        raise ValueError("Security Reviewer contract already contains the image gate")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used,arbiter_calls_used,
+                  execution_attempts_used,status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise ValueError("product problem budget changed before reviewer contract recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("security container-gate recovery requires a drained controller")
+
+    accepted_builders = _rows(
+        state,
+        """SELECT task_id,result_ref,result_digest
+             FROM tasks
+            WHERE product_id=? AND role='builder'
+              AND graph_status='ACCEPTED' AND status='DONE'
+              AND root_problem_signature=?
+            ORDER BY created_at,task_id""",
+        (product_id, root_problem_signature),
+    )
+    evidence_root = config.evidence_dir.resolve()
+    verified_builder_task_ids: list[str] = []
+    for builder in accepted_builders:
+        result_path = Path(str(builder.get("result_ref") or ""))
+        if not result_path.is_absolute():
+            result_path = config.evidence_dir / result_path.name
+        try:
+            result_path = result_path.resolve(strict=True)
+            result_path.relative_to(evidence_root)
+        except (OSError, ValueError):
+            continue
+        if (
+            result_path.is_symlink()
+            or result_path.parent != evidence_root
+            or sha256_file(result_path) != str(builder.get("result_digest") or "")
+        ):
+            continue
+        try:
+            attempt_payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if ArtifactStore(config).validate("attempt-result.schema.json", attempt_payload):
+            continue
+        image_result = next(
+            (
+                item
+                for item in attempt_payload.get("test_results", [])
+                if isinstance(item, Mapping)
+                and str(item.get("gate_id") or "") == "target-container-image-scan"
+                and str(item.get("status") or "") == "PASS"
+            ),
+            None,
+        )
+        if image_result is None:
+            continue
+        evidence_ref = str(image_result.get("evidence_ref") or "")
+        gate_path = (config.evidence_dir / Path(evidence_ref).name).resolve()
+        if (
+            evidence_ref != f"evidence/{gate_path.name}"
+            and evidence_ref != str(gate_path)
+        ):
+            continue
+        if gate_path.parent != evidence_root or not gate_path.is_file() or gate_path.is_symlink():
+            continue
+        try:
+            gate_payload = json.loads(gate_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if ArtifactStore(config).validate("gate-evidence.schema.json", gate_payload):
+            continue
+        if (
+            str(gate_payload.get("gate_id") or "") == "target-container-image-scan"
+            and str(gate_payload.get("status") or "") == "PASS"
+            and str(gate_payload.get("subject_sha") or "")
+            == str(attempt_payload.get("subject_sha_before") or "")
+        ):
+            verified_builder_task_ids.append(str(builder["task_id"]))
+    if len(verified_builder_task_ids) != 1:
+        raise ValueError("subject-bound accepted Builder image evidence is ambiguous")
+
+    corrected_contract, corrected_path = _write_container_gated_security_contract(
+        config,
+        state,
+        reviewer=reviewer,
+        correction_digest=correction_digest,
+    )
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = state._connection.execute(
+                """SELECT failure.status,reviewer.status,reviewer.graph_status,
+                          reviewer.failure_id,reviewer.contract_ref,product.status
+                     FROM failures AS failure
+                     JOIN tasks AS reviewer ON reviewer.task_id=failure.task_id
+                     JOIN products AS product ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "FAILED_SAFE",
+                "FAILED_SEMANTIC",
+                failure_id,
+                str(failure["contract_ref"]),
+                "IMPLEMENTING",
+            ):
+                raise ValueError("security container-gate state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used,arbiter_calls_used,
+                          execution_attempts_used,status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 2, "ACTIVE"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                "UPDATE failures SET status='RESOLVED',last_seen_at=? WHERE failure_id=?",
+                (now, failure_id),
+            )
+            updated = state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING',graph_status='READY',failure_id=NULL,
+                          contract_ref=?,task_revision=?,
+                          required_capabilities_json=?,
+                          result_ref=NULL,result_digest=NULL,result_binding_id=NULL,
+                          lease_owner=NULL,lease_until=NULL,lease_token=NULL,
+                          heartbeat_at=NULL,available_at=NULL,
+                          terminal_reason=NULL,terminal_detail=NULL,
+                          failure_kind=NULL,blocked_reason=NULL,blocked_ref=NULL,
+                          updated_at=?
+                    WHERE task_id=? AND status='FAILED_SAFE'
+                      AND graph_status='FAILED_SEMANTIC'""",
+                (
+                    f"evidence/{corrected_path.name}",
+                    int(corrected_contract["task_revision"]),
+                    stable_json(corrected_contract["required_capabilities"]),
+                    now,
+                    reviewer_task_id,
+                ),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("Security Reviewer contract recovery was not singular")
+            incident_id = "incident-" + sha256_text(
+                f"{failure_id}:missing-security-container-gate"
+            )[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id,product_id,task_id,reason_code,evidence_ref,
+                    status,created_at,resolved_at)
+                   VALUES (?, ?, ?,
+                           'controller_security_container_gate_contract_missing',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    reviewer_task_id,
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest,product_id,recovery_task_id,status,applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, reviewer_task_id, now),
+            )
+            state._record_event(
+                product_id,
+                reviewer_task_id,
+                "controller_security_container_gate_contract_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "verified_builder_task_id": verified_builder_task_ids[0],
+                    "reviewer_contract_ref": f"evidence/{corrected_path.name}",
+                    "required_gate": "target-container-image-scan",
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": reviewer_task_id,
+        "verified_builder_task_id": verified_builder_task_ids[0],
+        "reviewer_contract_ref": f"evidence/{corrected_path.name}",
         "root_problem_signature": root_problem_signature,
         "correction_digest": correction_digest,
         "product_budget_counters": {

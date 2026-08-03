@@ -28,6 +28,7 @@ from .recovery import (
     finalize_recovery_application,
     resume_canonical_builder_schema_failure,
     resume_controller_compilation_failure,
+    resume_missing_security_container_gate_failure,
     resume_opaque_subject_reference_failure,
     resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
@@ -523,6 +524,27 @@ def unverified_container_repair_recovery_command(args: argparse.Namespace) -> in
     )
     try:
         result = resume_unverified_container_repair_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def security_container_gate_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_missing_security_container_gate_failure(
             config,
             state,
             product_id=str(args.product_id),
@@ -1092,6 +1114,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     unverified_container_repair_recovery.set_defaults(
         function=unverified_container_repair_recovery_command
+    )
+    security_container_gate_recovery = subparsers.add_parser(
+        "security-container-gate-recovery"
+    )
+    security_container_gate_recovery.add_argument("--config", type=Path)
+    security_container_gate_recovery.add_argument("--product-id", required=True)
+    security_container_gate_recovery.add_argument("--failure-id", required=True)
+    security_container_gate_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    security_container_gate_recovery.set_defaults(
+        function=security_container_gate_recovery_command
     )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)
