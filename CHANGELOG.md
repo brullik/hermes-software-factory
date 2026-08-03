@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.8 - 2026-08-03
+
+- Clear stale terminal metadata when an explicit Path Governor recovery returns
+  a product to `IMPLEMENTING`, and resolve only non-owner `ROUTED` failures
+  whose execution tasks are already `SUPERSEDED`.
+- Add an idempotent, maintenance-fenced `recovery-finalize` command for a
+  digest-bound recovery application that committed before these postconditions;
+  it validates the recovery task, unchanged signature, budget, and correction
+  decision and creates no new work or acceptance evidence.
+
 ## 2.3.7 - 2026-08-03
 
 - Bind explicit `FAILED_SAFE` recovery to the unchanged Path Governor root

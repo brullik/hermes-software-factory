@@ -25,6 +25,7 @@ from .policy import policy_digest
 from .recovery import (
     apply_recovery_plan,
     build_recovery_plan,
+    finalize_recovery_application,
     state_audit,
     verify_active_graphs,
     verify_recovery_preconditions,
@@ -335,6 +336,25 @@ def recovery_apply_command(args: argparse.Namespace) -> int:
     )
     try:
         result = apply_recovery_plan(config, state, loaded)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def recovery_finalize_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = finalize_recovery_application(
+            state,
+            product_id=str(args.product_id),
+            recovery_plan_digest=str(args.recovery_plan_digest),
+        )
         print(json.dumps(result, ensure_ascii=False))
         return 0
     finally:
@@ -790,6 +810,11 @@ def build_parser() -> argparse.ArgumentParser:
     recovery_apply.add_argument("--config", type=Path)
     recovery_apply.add_argument("--plan", type=Path, required=True)
     recovery_apply.set_defaults(function=recovery_apply_command)
+    recovery_finalize = subparsers.add_parser("recovery-finalize")
+    recovery_finalize.add_argument("--config", type=Path)
+    recovery_finalize.add_argument("--product-id", required=True)
+    recovery_finalize.add_argument("--recovery-plan-digest", required=True)
+    recovery_finalize.set_defaults(function=recovery_finalize_command)
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)
     graph_verify.add_argument("--all-active", action="store_true")

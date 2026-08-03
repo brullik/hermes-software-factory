@@ -600,6 +600,38 @@ def _recovery_contract(
     }
 
 
+def _resolve_historical_routed_failures(
+    state: StateStore,
+    *,
+    product_id: str,
+    resolved_at: str,
+) -> int:
+    """Close only non-owner failures whose execution task is already superseded."""
+
+    rows = state._connection.execute(
+        """SELECT failure.failure_id
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+            WHERE failure.product_id=?
+              AND failure.status='ROUTED'
+              AND failure.owner_action_eligible=0
+              AND task.graph_status='SUPERSEDED'
+            ORDER BY failure.failure_id""",
+        (product_id,),
+    ).fetchall()
+    failure_ids = [str(row[0]) for row in rows]
+    if failure_ids:
+        state._connection.executemany(
+            """UPDATE failures SET status='RESOLVED', last_seen_at=?
+                 WHERE failure_id=? AND product_id=? AND status='ROUTED'""",
+            [
+                (resolved_at, failure_id, product_id)
+                for failure_id in failure_ids
+            ],
+        )
+    return len(failure_ids)
+
+
 def apply_recovery_plan(
     config: FactoryConfig,
     state: StateStore,
@@ -765,10 +797,17 @@ def apply_recovery_plan(
                             now,
                         ),
                     )
+                _resolve_historical_routed_failures(
+                    state,
+                    product_id=product_id,
+                    resolved_at=now,
+                )
                 resume_status = action.get("resume_status")
                 if resume_status:
                     state._connection.execute(
-                        "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
+                        """UPDATE products
+                              SET status=?, terminal_reason=NULL, updated_at=?
+                            WHERE product_id=?""",
                         (str(resume_status), now, product_id),
                     )
                 state._connection.execute(
@@ -803,6 +842,130 @@ def apply_recovery_plan(
         "status": "PASS",
         "plan_digest": digest,
         "applications": applied,
+    }
+
+
+def finalize_recovery_application(
+    state: StateStore,
+    *,
+    product_id: str,
+    recovery_plan_digest: str,
+) -> dict[str, Any]:
+    """Finish postconditions for one already-applied Path Governor recovery.
+
+    The operation creates no work and accepts no evidence.  It exists for a
+    release that committed the budget-bound recovery task but retained legacy
+    terminal metadata.  Every causal coordinate is revalidated under
+    maintenance before the exact historical rows are closed.
+    """
+
+    if len(recovery_plan_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in recovery_plan_digest
+    ):
+        raise ValueError("recovery plan digest is invalid")
+    if not state.maintenance_active():
+        raise ValueError("recovery finalize requires maintenance mode")
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = state._connection.execute(
+                """SELECT application.recovery_task_id, application.status,
+                          product.status AS product_status,
+                          product.terminal_reason,
+                          task.role, task.stage_key, task.graph_status,
+                          task.root_problem_signature
+                     FROM recovery_applications AS application
+                     JOIN products AS product
+                       ON product.product_id=application.product_id
+                     JOIN tasks AS task
+                       ON task.task_id=application.recovery_task_id
+                    WHERE application.recovery_plan_digest=?
+                      AND application.product_id=?""",
+                (recovery_plan_digest, product_id),
+            ).fetchone()
+            if row is None or str(row["status"]) != "APPLIED":
+                raise ValueError("applied recovery application is missing")
+            root_problem_signature = str(row["root_problem_signature"] or "")
+            if (
+                str(row["product_status"]) != "IMPLEMENTING"
+                or str(row["terminal_reason"] or "")
+                not in {"", "path_governor_problem_budget_exhausted"}
+                or str(row["role"]) != "replanner"
+                or str(row["stage_key"]) != "semantic-lifecycle-recovery"
+                or str(row["graph_status"]) != "READY"
+                or len(root_problem_signature) != 64
+            ):
+                raise ValueError("recovery application state is not finalizable")
+            active_claims = int(
+                state._connection.execute(
+                    """SELECT COUNT(*) FROM tasks
+                        WHERE status='CLAIMED'
+                          AND (lease_until IS NULL OR lease_until >= ?)""",
+                    (now,),
+                ).fetchone()[0]
+            )
+            if active_claims:
+                raise ValueError("recovery finalize requires a drained controller")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 0, "ACTIVE"):
+                raise ValueError("recovery finalize budget coordinate changed")
+            correction = state._connection.execute(
+                """SELECT COUNT(*) FROM path_decisions
+                    WHERE product_id=? AND root_problem_signature=?
+                      AND action='CONTROLLER_RECOVERY' AND status='APPLIED'
+                      AND evidence_digest=?""",
+                (product_id, root_problem_signature, recovery_plan_digest),
+            ).fetchone()
+            if correction is None or int(correction[0]) != 1:
+                raise ValueError("recovery correction decision is missing")
+            resolved_count = _resolve_historical_routed_failures(
+                state,
+                product_id=product_id,
+                resolved_at=now,
+            )
+            terminal_cleared = bool(row["terminal_reason"])
+            if terminal_cleared:
+                state._connection.execute(
+                    """UPDATE products SET terminal_reason=NULL, updated_at=?
+                        WHERE product_id=? AND status='IMPLEMENTING'
+                          AND terminal_reason='path_governor_problem_budget_exhausted'""",
+                    (now, product_id),
+                )
+            application_status = (
+                "APPLIED" if resolved_count or terminal_cleared else "REPLAYED"
+            )
+            if application_status == "APPLIED":
+                state._record_event(
+                    product_id,
+                    str(row["recovery_task_id"]),
+                    "path_governor_recovery_finalized",
+                    {
+                        "recovery_plan_digest": recovery_plan_digest,
+                        "root_problem_signature": root_problem_signature,
+                        "resolved_historical_failure_count": resolved_count,
+                        "terminal_reason_cleared": terminal_cleared,
+                    },
+                )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": application_status,
+        "product_id": product_id,
+        "recovery_task_id": str(row["recovery_task_id"]),
+        "root_problem_signature": root_problem_signature,
+        "resolved_historical_failure_count": resolved_count,
+        "terminal_reason_cleared": terminal_cleared,
     }
 
 
