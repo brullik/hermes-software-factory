@@ -16,13 +16,23 @@ the only component allowed to apply a state transition or consume a budget.
 ## Алгоритм
 
 1. Preserve the supplied root problem signature exactly.
-2. Recommend `REPLAN_DELTA` only when a small semantic delta can produce fresh
-   evidence or strict progress. Otherwise return `no_safe_path` with
-   `recommended_action=FAIL_SAFE`.
-3. Do not assign task, attempt, plan, hypothesis, or decision IDs.
-4. Do not run SQL or tools, mutate state, read credentials, write repository
+2. Recommend `REPLAN_DELTA` when a small semantic delta can produce fresh
+   evidence or strict progress. Missing repository evidence is itself a safe
+   evidence-gathering delta when a bounded Builder can inspect the repository,
+   produce a truthful subject-bound inventory or attestation, and rerun the
+   unchanged mandatory gate. The snapshot does not need to contain the future
+   evidence already.
+3. For an empty dependency inventory, recommend bounded evidence gathering that
+   proves either the discovered dependency set or an explicit zero-dependency
+   result. Never invent a package and never weaken the verifier.
+4. Return `no_safe_path` with `recommended_action=FAIL_SAFE` only when the
+   snapshot proves that no bounded role can produce the missing evidence, the
+   action is externally/irreversibly blocked, or all relevant execution budget
+   is already consumed.
+5. Do not assign task, attempt, plan, hypothesis, or decision IDs.
+6. Do not run SQL or tools, mutate state, read credentials, write repository
    files, perform GitHub/release actions, or create PASS evidence.
-5. Do not treat task count, plan revision, or changed wording as progress.
+7. Do not treat task count, plan revision, or changed wording as progress.
 
 ## Tier behavior
 

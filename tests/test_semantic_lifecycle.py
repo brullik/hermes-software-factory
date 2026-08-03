@@ -1197,6 +1197,160 @@ def test_failed_safe_replanner_loop_requires_explicit_fingerprinted_recovery(
     state.close()
 
 
+def test_path_governor_failed_safe_recovery_consumes_controller_slot(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "build-and-release-a-complete-private-runtime-path-recovery"
+    signature = "d" * 64
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Recover missing dependency evidence without resetting the path budget",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="path-recovery",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    state.add_task(
+        task_id="T-PATH-SECURITY",
+        product_id=product_id,
+        title="Verify dependency evidence",
+        role="security-reviewer",
+        output_schema="security-review-result.schema.json",
+        graph_status="FAILED_SEMANTIC",
+        root_problem_signature=signature,
+    )
+    state.add_task(
+        task_id="T-PATH-ARBITER-FAILED",
+        product_id=product_id,
+        title="One-shot path arbitration",
+        role="path-arbiter",
+        output_schema="path-decision-proposal.schema.json",
+        stage_key="path-arbiter",
+        source_task_id="T-PATH-SECURITY",
+        parent_task_id="T-PATH-SECURITY",
+        graph_status="FAILED_SEMANTIC",
+        root_problem_signature=signature,
+    )
+    now = "2026-08-03T00:00:00Z"
+    with state._lock, state._connection:
+        state._connection.execute(
+            """INSERT INTO failures
+               (failure_id, product_id, task_id, failure_class, reason_code,
+                fingerprint, safe_message, evidence_ref, status, retryable,
+                owner_action_eligible, expected_json, actual_json,
+                failed_gate_ids_json, first_seen_at, last_seen_at)
+               VALUES ('failure-path-security', ?, 'T-PATH-SECURITY', 'semantic',
+                       'mandatory_gate_failed', ?,
+                       'Dependency inventory evidence is missing.',
+                       'internal://dependency-gate', 'ROUTED', 0, 0,
+                       '{}', '{}', '["target-dependency-audit"]', ?, ?)""",
+            (product_id, sha256_text("failure-path-security"), now, now),
+        )
+        state._connection.execute(
+            """INSERT INTO failures
+               (failure_id, product_id, task_id, failure_class, reason_code,
+                fingerprint, safe_message, evidence_ref, status, retryable,
+                owner_action_eligible, expected_json, actual_json,
+                failed_gate_ids_json, parent_failure_id, first_seen_at, last_seen_at)
+               VALUES ('failure-path-arbiter', ?, 'T-PATH-ARBITER-FAILED', 'semantic',
+                       'needs_replan', ?, 'No safe path was proposed.',
+                       'internal://path-arbiter', 'ROUTED', 0, 0,
+                       '{}', '{}', '["needs_replan"]', 'failure-path-security', ?, ?)""",
+            (product_id, sha256_text("failure-path-arbiter"), now, now),
+        )
+        state._connection.execute(
+            "UPDATE tasks SET failure_id='failure-path-security' WHERE task_id='T-PATH-SECURITY'"
+        )
+        state._connection.execute(
+            "UPDATE tasks SET failure_id='failure-path-arbiter' WHERE task_id='T-PATH-ARBITER-FAILED'"
+        )
+        state._connection.execute(
+            """INSERT INTO problem_budgets
+               (product_id, root_problem_signature, deterministic_actions_used,
+                arbiter_calls_used, execution_attempts_used,
+                last_progress_vector_json, last_evidence_digest, status,
+                created_at, updated_at)
+               VALUES (?, ?, 0, 1, 0, ?, ?, 'EXHAUSTED', ?, ?)""",
+            (product_id, signature, stable_json({}), "a" * 64, now, now),
+        )
+        state._connection.execute(
+            """UPDATE products SET status='FAILED_SAFE',
+                      terminal_reason='path_governor_problem_budget_exhausted'
+                 WHERE product_id=?""",
+            (product_id,),
+        )
+        state._connection.execute(
+            """INSERT INTO controller_incidents
+               (incident_id, product_id, task_id, reason_code,
+                evidence_ref, status, created_at)
+               VALUES ('incident-path-budget', ?, 'T-PATH-ARBITER-FAILED',
+                       'path_governor_problem_budget_exhausted',
+                       'internal://path-arbiter', 'OPEN', ?)""",
+            (product_id, now),
+        )
+
+    recovery = build_recovery_plan(
+        state,
+        include_failed_safe=True,
+        product_ids=(product_id,),
+    )
+    action = recovery["actions"][0]
+    assert action["root_problem_signature"] == signature
+    assert action["expected_problem_budget"] == {
+        "deterministic_actions_used": 0,
+        "arbiter_calls_used": 1,
+        "execution_attempts_used": 0,
+        "status": "EXHAUSTED",
+    }
+    state.enter_maintenance("corrected-path-arbiter-policy")
+    applied = apply_recovery_plan(config, state, recovery)
+    assert applied["applications"][0]["status"] == "APPLIED"
+    recovery_task = next(
+        task
+        for task in state.list_tasks(product_id)
+        if task.get("stage_key") == "semantic-lifecycle-recovery"
+    )
+    assert recovery_task["root_problem_signature"] == signature
+    contract = json.loads(
+        (
+            config.evidence_dir
+            / Path(str(recovery_task["contract_ref"])).name
+        ).read_text(encoding="utf-8")
+    )
+    assert "target-dependency-audit" in contract["objective"]
+    assert "explicit zero-dependency result" in contract["objective"]
+    budget = state._connection.execute(
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets WHERE product_id=?""",
+        (product_id,),
+    ).fetchone()
+    assert tuple(budget) == (1, 1, 0, "ACTIVE")
+    decision = state._connection.execute(
+        """SELECT action,status FROM path_decisions
+             WHERE product_id=? ORDER BY created_at DESC LIMIT 1""",
+        (product_id,),
+    ).fetchone()
+    assert tuple(decision) == ("CONTROLLER_RECOVERY", "APPLIED")
+    assert apply_recovery_plan(config, state, recovery)["applications"][0][
+        "status"
+    ] == "REPLAYED"
+    assert state._connection.execute(
+        "SELECT deterministic_actions_used FROM problem_budgets WHERE product_id=?",
+        (product_id,),
+    ).fetchone()[0] == 1
+    state.close()
+
+
 def test_deploy_maintenance_auto_resumes_after_expiry_and_drain(
     tmp_path: Path,
 ) -> None:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.3.7 - 2026-08-03
+
+- Bind explicit `FAILED_SAFE` recovery to the unchanged Path Governor root
+  signature and its one unused deterministic controller-correction slot;
+  recovery-plan replay cannot reset or consume the budget twice.
+- Reactivate only the remaining evidence-execution budget after fresh immutable
+  controller correction evidence, propagate the signature into the recovery
+  Replanner, and record the correction as a durable Path Decision.
+- Treat missing dependency inventory as bounded evidence-gathering work for a
+  Builder, including a truthful zero-dependency attestation when proved, rather
+  than requiring future evidence to exist in the read-only Path Snapshot.
+
 ## 2.3.6 - 2026-08-03
 
 - Connect the durable Path Governor problem budget to the live Failure Router,
