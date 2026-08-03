@@ -33,6 +33,7 @@ from .recovery import (
     resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
     resume_reviewer_revalidation_lineage_failure,
+    resume_stale_reviewer_execution_failure,
     resume_unverified_container_repair_failure,
     resume_zero_dependency_audit_failure,
     state_audit,
@@ -545,6 +546,27 @@ def security_container_gate_recovery_command(args: argparse.Namespace) -> int:
     )
     try:
         result = resume_missing_security_container_gate_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def stale_reviewer_execution_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_stale_reviewer_execution_failure(
             config,
             state,
             product_id=str(args.product_id),
@@ -1127,6 +1149,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     security_container_gate_recovery.set_defaults(
         function=security_container_gate_recovery_command
+    )
+    stale_reviewer_execution_recovery = subparsers.add_parser(
+        "stale-reviewer-execution-recovery"
+    )
+    stale_reviewer_execution_recovery.add_argument("--config", type=Path)
+    stale_reviewer_execution_recovery.add_argument("--product-id", required=True)
+    stale_reviewer_execution_recovery.add_argument("--failure-id", required=True)
+    stale_reviewer_execution_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    stale_reviewer_execution_recovery.set_defaults(
+        function=stale_reviewer_execution_recovery_command
     )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)

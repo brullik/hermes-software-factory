@@ -36,6 +36,7 @@ from factory.recovery import (
     resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
     resume_reviewer_revalidation_lineage_failure,
+    resume_stale_reviewer_execution_failure,
     resume_unverified_container_repair_failure,
 )
 from factory.recovery_directive import build_scope_recovery_directive
@@ -3127,6 +3128,152 @@ def test_missing_security_container_gate_recovery_reuses_verified_builder(
             correction_evidence_digest="d" * 64,
         )
         assert replay["application_status"] == "REPLAYED"
+    finally:
+        state.close()
+
+
+def test_stale_reviewer_execution_recovery_requeues_exact_revised_contract(
+    tmp_path: Path,
+) -> None:
+    config, state, _, failure_id, _ = failed_two_node_graph(tmp_path)
+    reviewer_id = "T-FAILNODEA"
+    signature = "7" * 64
+    now = "2026-08-03T18:00:00Z"
+    try:
+        reviewer = state.get_task(reviewer_id)
+        assert reviewer is not None
+        contract_ref = str(reviewer["contract_ref"])
+        contract_path = config.evidence_dir / Path(contract_ref).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        required_capabilities = list(
+            dict.fromkeys(
+                [
+                    *CAPABILITY_PROFILES["reviewer_readonly"],
+                    "toolchain.container_builder",
+                    "toolchain.scanners",
+                ]
+            )
+        )
+        contract.update(
+            {
+                "role": "security-reviewer",
+                "output_schema": "security-review-result.schema.json",
+                "capability_profile": "reviewer_readonly",
+                "required_capabilities": required_capabilities,
+                "quality_gates": [
+                    "target-sast",
+                    "target-dependency-audit",
+                    "target-license-check",
+                    "target-secret-scan",
+                    "target-container-image-scan",
+                ],
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        failed_gate_ids = [
+            "CONTAINER-SCAN-EVIDENCE-NOT-RUN",
+            "TEST-RUNNER-UNAVAILABLE",
+        ]
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                      SET role='security-reviewer',
+                          output_schema='security-review-result.schema.json',
+                          capability_profile='reviewer_readonly',
+                          required_capabilities_json=?,stage_key='security-review',
+                          lifecycle_stage='security-review',
+                          status='FAILED_SAFE',graph_status='FAILED_SEMANTIC',
+                          failure_id=?,root_problem_signature=?,
+                          terminal_reason='model_requested_repair'
+                    WHERE task_id=?""",
+                (
+                    stable_json(required_capabilities),
+                    failure_id,
+                    signature,
+                    reviewer_id,
+                ),
+            )
+            state._connection.execute(
+                """UPDATE failures
+                      SET failure_class='semantic',reason_code='model_requested_repair',
+                          safe_message=?,failed_gate_ids_json=?,status='OPEN'
+                    WHERE failure_id=?""",
+                (
+                    (
+                        "CONTAINER-SCAN-EVIDENCE-NOT-RUN and "
+                        "TEST-RUNNER-UNAVAILABLE were caused by stale controller execution."
+                    ),
+                    stable_json(failed_gate_ids),
+                    failure_id,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO problem_budgets
+                   (product_id,root_problem_signature,
+                    deterministic_actions_used,arbiter_calls_used,
+                    execution_attempts_used,last_progress_vector_json,
+                    status,created_at,updated_at)
+                   VALUES ('product-autonomy', ?, 1, 1, 2, '{}',
+                           'ACTIVE', ?, ?)""",
+                (signature, now, now),
+            )
+            state._connection.execute(
+                """UPDATE products SET status='IMPLEMENTING',terminal_reason=NULL
+                    WHERE product_id='product-autonomy'"""
+            )
+
+        state.enter_maintenance("stale-reviewer-execution-recovery")
+        applied = resume_stale_reviewer_execution_failure(
+            config,
+            state,
+            product_id="product-autonomy",
+            failure_id=failure_id,
+            correction_evidence_digest="e" * 64,
+        )
+
+        assert applied["application_status"] == "APPLIED"
+        recovered = state.get_task(reviewer_id)
+        assert recovered is not None
+        assert (recovered["status"], recovered["graph_status"]) == (
+            "PENDING",
+            "READY",
+        )
+        assert recovered["contract_ref"] == contract_ref
+        assert recovered["task_revision"] == reviewer["task_revision"]
+        assert state.list_failures("product-autonomy")[0]["status"] == "RESOLVED"
+        assert tuple(
+            state._connection.execute(
+                """SELECT deterministic_actions_used,arbiter_calls_used,
+                          execution_attempts_used,status
+                     FROM problem_budgets
+                    WHERE product_id='product-autonomy'
+                      AND root_problem_signature=?""",
+                (signature,),
+            ).fetchone()
+        ) == (1, 1, 2, "ACTIVE")
+        incident = state._connection.execute(
+            """SELECT reason_code,status FROM controller_incidents
+                WHERE product_id='product-autonomy' AND task_id=?
+                ORDER BY created_at DESC LIMIT 1""",
+            (reviewer_id,),
+        ).fetchone()
+        assert tuple(incident) == (
+            "controller_stale_reviewer_contract_and_toolchain",
+            "RESOLVED",
+        )
+
+        replay = resume_stale_reviewer_execution_failure(
+            config,
+            state,
+            product_id="product-autonomy",
+            failure_id=failure_id,
+            correction_evidence_digest="e" * 64,
+        )
+        assert replay["application_status"] == "REPLAYED"
+        assert replay["recovery_task_id"] == reviewer_id
     finally:
         state.close()
 

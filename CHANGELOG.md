@@ -61,6 +61,11 @@
   provider subprocess while preserving the restricted environment boundary,
   so read-only reviewers can invoke the approved `pytest` and `pip` toolchain
   even when the candidate repository has no sibling virtual environment.
+- Add an idempotent, maintenance-fenced recovery for the historical Security
+  Reviewer attempt that ignored an already revised image-gated contract and
+  lacked the controller Python toolchain. It requeues the same contract and
+  revision, records the controller incident, and preserves the exhausted
+  `1:1:2` Path Governor budget without creating product-semantic work.
 
 ## 2.3.10 - 2026-08-03
 

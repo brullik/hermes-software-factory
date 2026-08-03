@@ -3958,6 +3958,280 @@ def resume_missing_security_container_gate_failure(
     }
 
 
+def resume_stale_reviewer_execution_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Re-execute one reviewer whose revised contract and toolchain were ignored."""
+
+    if not state.maintenance_active():
+        raise ValueError("stale reviewer execution recovery requires maintenance mode")
+    if not re.fullmatch(r"[a-f0-9]{64}", correction_evidence_digest):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_stale_reviewer_execution_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.*,task.role,task.capability_profile,task.stage_key,
+                  task.graph_status,task.status AS task_status,
+                  task.root_problem_signature,task.contract_ref,
+                  task.task_revision,product.status AS product_status
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("stale reviewer execution failure coordinate is missing")
+    failure = rows[0]
+    try:
+        failed_gate_ids = json.loads(str(failure.get("failed_gate_ids_json") or "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("stale reviewer execution finding IDs are invalid") from error
+    required_failure_ids = {
+        "CONTAINER-SCAN-EVIDENCE-NOT-RUN",
+        "TEST-RUNNER-UNAVAILABLE",
+    }
+    root_problem_signature = str(failure.get("root_problem_signature") or "")
+    if (
+        str(failure.get("failure_class") or "") != "semantic"
+        or str(failure.get("reason_code") or "") != "model_requested_repair"
+        or str(failure.get("status") or "") != "OPEN"
+        or str(failure.get("role") or "") != "security-reviewer"
+        or str(failure.get("capability_profile") or "") != "reviewer_readonly"
+        or str(failure.get("stage_key") or "") != "security-review"
+        or str(failure.get("graph_status") or "") != "FAILED_SEMANTIC"
+        or str(failure.get("task_status") or "") != "FAILED_SAFE"
+        or str(failure.get("product_status") or "") != "IMPLEMENTING"
+        or not isinstance(failed_gate_ids, list)
+        or set(failed_gate_ids) != required_failure_ids
+        or len(failed_gate_ids) != len(required_failure_ids)
+        or any(
+            failure_id not in str(failure.get("safe_message") or "")
+            for failure_id in required_failure_ids
+        )
+        or not re.fullmatch(r"[a-f0-9]{64}", root_problem_signature)
+    ):
+        raise ValueError("failure is not the bounded stale reviewer execution defect")
+
+    reviewer_task_id = str(failure["task_id"])
+    contract_ref = str(failure.get("contract_ref") or "")
+    contract_name = Path(contract_ref).name
+    unresolved_contract_path = config.evidence_dir / contract_name
+    contract_path = unresolved_contract_path.resolve()
+    if (
+        contract_ref
+        not in {f"evidence/{contract_name}", str(unresolved_contract_path)}
+        or contract_path.parent != config.evidence_dir.resolve()
+        or unresolved_contract_path.is_symlink()
+        or not contract_path.is_file()
+    ):
+        raise ValueError("stale reviewer execution contract reference is invalid")
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("stale reviewer execution contract is unreadable") from error
+    if not isinstance(contract, dict):
+        raise TypeError("stale reviewer execution contract is invalid")
+    schema_name = (
+        "task-contract-v2.schema.json"
+        if str(contract.get("schema_version") or "") == "2.0"
+        else "task-contract.schema.json"
+    )
+    if ArtifactStore(config).validate(
+        schema_name,
+        contract,
+    ):
+        raise ValueError("stale reviewer execution contract is invalid")
+    required_capabilities = {
+        str(value)
+        for value in contract.get("required_capabilities", [])
+        if isinstance(value, str)
+    }
+    if (
+        str(contract.get("task_id") or "") != reviewer_task_id
+        or str(contract.get("product_id") or "") != product_id
+        or int(contract.get("task_revision") or 0)
+        != int(failure.get("task_revision") or 0)
+        or "target-container-image-scan" not in contract.get("quality_gates", [])
+        or not {"toolchain.container_builder", "toolchain.scanners"}.issubset(
+            required_capabilities
+        )
+    ):
+        raise ValueError("reviewer contract does not prove the corrected execution intent")
+
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used,arbiter_calls_used,
+                  execution_attempts_used,status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise ValueError("product problem budget changed before reviewer execution recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("stale reviewer execution recovery requires a drained controller")
+
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = state._connection.execute(
+                """SELECT failure.status,reviewer.status,reviewer.graph_status,
+                          reviewer.failure_id,reviewer.contract_ref,
+                          reviewer.task_revision,product.status
+                     FROM failures AS failure
+                     JOIN tasks AS reviewer ON reviewer.task_id=failure.task_id
+                     JOIN products AS product ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "FAILED_SAFE",
+                "FAILED_SEMANTIC",
+                failure_id,
+                contract_ref,
+                int(failure["task_revision"]),
+                "IMPLEMENTING",
+            ):
+                raise ValueError("stale reviewer execution state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used,arbiter_calls_used,
+                          execution_attempts_used,status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 2, "ACTIVE"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                "UPDATE failures SET status='RESOLVED',last_seen_at=? WHERE failure_id=?",
+                (now, failure_id),
+            )
+            updated = state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING',graph_status='READY',failure_id=NULL,
+                          result_ref=NULL,result_digest=NULL,result_binding_id=NULL,
+                          lease_owner=NULL,lease_until=NULL,lease_token=NULL,
+                          heartbeat_at=NULL,available_at=NULL,
+                          terminal_reason=NULL,terminal_detail=NULL,
+                          failure_kind=NULL,blocked_reason=NULL,blocked_ref=NULL,
+                          updated_at=?
+                    WHERE task_id=? AND status='FAILED_SAFE'
+                      AND graph_status='FAILED_SEMANTIC'
+                      AND contract_ref=? AND task_revision=?""",
+                (
+                    now,
+                    reviewer_task_id,
+                    contract_ref,
+                    int(failure["task_revision"]),
+                ),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("stale reviewer execution recovery was not singular")
+            incident_id = "incident-" + sha256_text(
+                f"{failure_id}:stale-reviewer-execution"
+            )[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id,product_id,task_id,reason_code,evidence_ref,
+                    status,created_at,resolved_at)
+                   VALUES (?, ?, ?,
+                           'controller_stale_reviewer_contract_and_toolchain',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    reviewer_task_id,
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest,product_id,recovery_task_id,status,applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, reviewer_task_id, now),
+            )
+            state._record_event(
+                product_id,
+                reviewer_task_id,
+                "controller_stale_reviewer_execution_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "reviewer_contract_ref": contract_ref,
+                    "task_revision": int(failure["task_revision"]),
+                    "required_gate": "target-container-image-scan",
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": reviewer_task_id,
+        "reviewer_contract_ref": contract_ref,
+        "task_revision": int(failure["task_revision"]),
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
 def verify_active_graphs(
     config: FactoryConfig,
     state: StateStore,
