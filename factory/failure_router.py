@@ -485,8 +485,19 @@ class FailureRouter:
         """Give a post-arbitration Builder the smallest useful repository scope."""
 
         paths = ["pyproject.toml", "src/**", "tests/**"]
-        if any("dependency" in gate_id or "license" in gate_id for gate_id in failed_gate_ids):
+        normalized = [gate_id.lower() for gate_id in failed_gate_ids]
+        if any("dependency" in gate_id or "license" in gate_id for gate_id in normalized):
             paths.insert(1, "requirements*.txt")
+        if any("container" in gate_id or "image" in gate_id for gate_id in normalized):
+            paths.extend(
+                [
+                    "Dockerfile",
+                    "docker/**",
+                    "compose*.yaml",
+                    "compose*.yml",
+                    "scripts/**",
+                ]
+            )
         return paths
 
     @staticmethod
@@ -1330,8 +1341,8 @@ class FailureRouter:
             ).fetchone()
             bounded_reviewer_gate_repair = (
                 needs_replan
-                and reason == "mandatory_gate_failed"
                 and str(failed.get("capability_profile") or "") == "reviewer_readonly"
+                and str(failure.get("failure_class") or "") in {"semantic", "policy"}
                 and budget_row is not None
                 and int(budget_row["arbiter_calls_used"] or 0) >= 1
                 and int(budget_row["execution_attempts_used"] or 0) < 2

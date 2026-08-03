@@ -1665,6 +1665,307 @@ def resume_zero_dependency_audit_failure(
     }
 
 
+def resume_reviewer_builder_route_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Recover a reviewer finding misrouted to an already-used Path Arbiter.
+
+    The reviewer finding remains product-semantic.  Only the controller routing
+    decision is corrected: the existing budget is reopened without changing its
+    counters, then the normal Failure Router consumes the second Builder slot.
+    """
+
+    if not state.maintenance_active():
+        raise ValueError("reviewer Builder-route recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_reviewer_builder_route_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+
+    rows = _rows(
+        state,
+        """SELECT failure.failure_class, failure.reason_code,
+                  failure.safe_message, failure.failed_gate_ids_json,
+                  failure.status AS failure_status,
+                  failure.owner_action_eligible,
+                  task.task_id, task.role, task.capability_profile,
+                  task.graph_status, task.status AS task_status,
+                  task.root_problem_signature,
+                  product.status AS product_status, product.terminal_reason
+             FROM failures AS failure
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("reviewer route failure coordinate is missing")
+    row = rows[0]
+    try:
+        failed_gate_ids = json.loads(str(row["failed_gate_ids_json"] or "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("reviewer route failure gates are invalid") from error
+    safe_message = str(row["safe_message"] or "")
+    root_problem_signature = str(row["root_problem_signature"] or "")
+    if (
+        str(row["failure_class"]) not in {"semantic", "policy"}
+        or str(row["reason_code"]) != "model_requested_repair"
+        or str(row["failure_status"]) != "ROUTED"
+        or int(row["owner_action_eligible"] or 0) != 0
+        or str(row["role"]) != "security-reviewer"
+        or str(row["capability_profile"] or "") != "reviewer_readonly"
+        or str(row["graph_status"]) != "FAILED_SEMANTIC"
+        or str(row["task_status"]) != "FAILED_SAFE"
+        or str(row["product_status"]) != "FAILED_SAFE"
+        or str(row["terminal_reason"] or "")
+        != "path_governor_problem_budget_exhausted"
+        or failed_gate_ids != ["SECURITY-CONTAINER-SCAN-NOT-RUN"]
+        or "SECURITY-CONTAINER-SCAN-NOT-RUN" not in safe_message
+        or "immutable image" not in safe_message.lower()
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+    ):
+        raise ValueError("failure is not the bounded reviewer route defect")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 1, "EXHAUSTED"):
+        raise ValueError("product problem budget changed before route recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("reviewer Builder-route recovery requires a drained controller")
+
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status, failure.failure_class,
+                          failure.reason_code, task.graph_status, task.status,
+                          product.status, product.terminal_reason
+                     FROM failures AS failure
+                     JOIN tasks AS task ON task.task_id=failure.task_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "ROUTED",
+                str(row["failure_class"]),
+                "model_requested_repair",
+                "FAILED_SEMANTIC",
+                "FAILED_SAFE",
+                "FAILED_SAFE",
+                "path_governor_problem_budget_exhausted",
+            ):
+                raise ValueError("reviewer route state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 1, "EXHAUSTED"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                """UPDATE failures SET status='OPEN', last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='ROUTED'""",
+                (now, failure_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE problem_budgets SET status='ACTIVE', updated_at=?
+                    WHERE product_id=? AND root_problem_signature=?
+                      AND deterministic_actions_used=1
+                      AND arbiter_calls_used=1
+                      AND execution_attempts_used=1
+                      AND status='EXHAUSTED'""",
+                (now, product_id, root_problem_signature),
+            )
+            state._connection.execute(
+                """UPDATE products
+                      SET status='IMPLEMENTING', terminal_reason=NULL, updated_at=?
+                    WHERE product_id=? AND status='FAILED_SAFE'""",
+                (now, product_id),
+            )
+            state._record_event(
+                product_id,
+                str(row["task_id"]),
+                "controller_reviewer_builder_route_reopened",
+                {
+                    "failure_id": failure_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+
+    from .failure_router import FailureRouter
+
+    routed_task_id = FailureRouter(config, state, ArtifactStore(config)).route(failure_id)
+    routed = state.get_task(routed_task_id)
+    if (
+        routed is None
+        or str(routed.get("role") or "") != "builder"
+        or str(routed.get("output_schema") or "") != "implementation-result.schema.json"
+        or str(routed.get("capability_profile") or "") != "builder_workspace"
+        or str(routed.get("stage_key") or "") != "repair"
+        or str(routed.get("root_problem_signature") or "") != root_problem_signature
+        or not routed.get("repair_context_ref")
+    ):
+        raise RuntimeError("reviewer route recovery did not create a bounded Builder")
+    post_budget = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(post_budget) != 1 or (
+        int(post_budget[0]["deterministic_actions_used"]),
+        int(post_budget[0]["arbiter_calls_used"]),
+        int(post_budget[0]["execution_attempts_used"]),
+        str(post_budget[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise RuntimeError("reviewer route recovery did not consume the remaining slot")
+
+    now = utc_now()
+    with state._lock, state._connection:
+        failure_status = state._connection.execute(
+            "SELECT status FROM failures WHERE failure_id=? AND product_id=?",
+            (failure_id, product_id),
+        ).fetchone()
+        product_status = state._connection.execute(
+            "SELECT status,terminal_reason FROM products WHERE product_id=?",
+            (product_id,),
+        ).fetchone()
+        if (
+            failure_status is None
+            or str(failure_status[0]) != "ROUTED"
+            or product_status is None
+            or tuple(product_status) != ("IMPLEMENTING", None)
+        ):
+            raise RuntimeError("reviewer route recovery postcondition failed")
+        incident_id = "incident-" + sha256_text(f"{failure_id}:reviewer-route")[:20]
+        state._connection.execute(
+            """INSERT OR IGNORE INTO controller_incidents
+               (incident_id, product_id, task_id, reason_code,
+                evidence_ref, status, created_at, resolved_at)
+               VALUES (?, ?, ?, 'controller_reviewer_builder_route_invariant',
+                       ?, 'RESOLVED', ?, ?)""",
+            (
+                incident_id,
+                product_id,
+                str(row["task_id"]),
+                f"internal://release/{correction_evidence_digest}",
+                now,
+                now,
+            ),
+        )
+        state._connection.execute(
+            """INSERT INTO recovery_applications
+               (recovery_plan_digest, product_id, recovery_task_id,
+                status, applied_at)
+               VALUES (?, ?, ?, 'APPLIED', ?)""",
+            (correction_digest, product_id, routed_task_id, now),
+        )
+        state._record_event(
+            product_id,
+            routed_task_id,
+            "controller_reviewer_builder_route_recovery_applied",
+            {
+                "failure_id": failure_id,
+                "root_problem_signature": root_problem_signature,
+                "correction_digest": correction_digest,
+                "correction_evidence_digest": correction_evidence_digest,
+                "product_budget_counters_preserved_before_route": True,
+            },
+        )
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": routed_task_id,
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
 def verify_active_graphs(
     config: FactoryConfig,
     state: StateStore,

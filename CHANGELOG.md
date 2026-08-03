@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.3.11 - 2026-08-03
+
+- Route any semantic or policy finding from a read-only reviewer through the
+  remaining bounded Builder execution after the one-shot Path Arbiter has
+  already been consumed, including `model_requested_repair` outcomes.
+- Give container/image findings an explicit Docker, Compose, and scanner-script
+  repair scope while preserving inherited container-builder and scanner
+  capabilities; reviewer pseudo-gate IDs are never added to the quality catalog.
+- Add an idempotent, maintenance-fenced production recovery that preserves the
+  product-semantic security finding, reopens only its incorrect controller
+  route decision, and consumes exactly the second Builder slot.
+
 ## 2.3.10 - 2026-08-03
 
 - Accept an explicit zero-runtime-dependency Python project only after a

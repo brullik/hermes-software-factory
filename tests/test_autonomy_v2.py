@@ -29,6 +29,7 @@ from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
 from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
+from factory.recovery import resume_reviewer_builder_route_failure
 from factory.recovery_directive import build_scope_recovery_directive
 from factory.repository import RepositoryBootstrapper
 from factory.state import StateStore
@@ -951,8 +952,17 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
         state.close()
 
 
+@pytest.mark.parametrize(
+    ("second_reason", "failed_gate_id"),
+    [
+        ("mandatory_gate_failed", "target-dependency-audit"),
+        ("model_requested_repair", "SECURITY-CONTAINER-SCAN-NOT-RUN"),
+    ],
+)
 def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
     tmp_path: Path,
+    second_reason: str,
+    failed_gate_id: str,
 ) -> None:
     config, state, artifacts, failure_id, _ = failed_two_node_graph(
         tmp_path,
@@ -993,7 +1003,12 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         arbiter = state.get_task(arbiter_id)
         assert arbiter is not None and arbiter["role"] == "path-arbiter"
         signature = str(arbiter["root_problem_signature"])
-        second_failure_id = "failure-reviewer-after-arbiter"
+        second_failure_id = f"failure-reviewer-after-arbiter-{second_reason}"
+        safe_message = (
+            "Build and scan the exact immutable image before security acceptance."
+            if "CONTAINER" in failed_gate_id
+            else "Target dependency audit requires a repository repair."
+        )
         now = "2026-08-03T00:00:01Z"
         with state._lock, state._connection:
             state._connection.execute(
@@ -1005,22 +1020,23 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                    (failure_id, product_id, task_id, failure_class, reason_code,
                     fingerprint, safe_message, evidence_ref, status, retryable,
                     owner_action_eligible, expected_json, actual_json,
-                    failed_gate_ids_json, parent_failure_id, first_seen_at, last_seen_at)
+                   failed_gate_ids_json, parent_failure_id, first_seen_at, last_seen_at)
                    VALUES (?, 'product-autonomy', 'T-FAILNODEA', 'semantic',
-                           'mandatory_gate_failed', ?,
-                           'target dependency audit requires a repository repair',
+                           ?, ?, ?,
                            'internal://reviewer-gate', 'OPEN', 0, 0, '{}', ?, ?, ?, ?, ?)""",
                 (
                     second_failure_id,
+                    second_reason,
                     sha256_text(second_failure_id),
+                    safe_message,
                     stable_json(
                         {
                             "required_fixes": [
-                                "Make the runtime dependency declaration truthful."
+                                "Produce fresh subject-bound evidence for the reviewer."
                             ]
                         }
                     ),
-                    stable_json(["target-dependency-audit"]),
+                    stable_json([failed_gate_id]),
                     failure_id,
                     now,
                     now,
@@ -1051,12 +1067,20 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                 encoding="utf-8"
             )
         )
-        assert repair_contract["allowed_paths"] == [
-            "pyproject.toml",
-            "requirements*.txt",
-            "src/**",
-            "tests/**",
-        ]
+        expected_paths = ["pyproject.toml", "src/**", "tests/**"]
+        if "dependency" in failed_gate_id:
+            expected_paths.insert(1, "requirements*.txt")
+        if "CONTAINER" in failed_gate_id:
+            expected_paths.extend(
+                [
+                    "Dockerfile",
+                    "docker/**",
+                    "compose*.yaml",
+                    "compose*.yml",
+                    "scripts/**",
+                ]
+            )
+        assert repair_contract["allowed_paths"] == expected_paths
         assert repair_contract["quality_gates"] == ["target-dependency-audit"]
         assert repair_contract["acceptance"][0]["criterion_id"] == (
             "AC-REVIEWER-GATE-ROOT-CAUSE"
@@ -1069,6 +1093,166 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
             (signature,),
         ).fetchone()
         assert tuple(budget) == (1, 2, "ACTIVE")
+    finally:
+        state.close()
+
+
+def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, first_failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="mandatory_gate_failed",
+    )
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "security-reviewer",
+                "output_schema": "security-review-result.schema.json",
+                "capability_profile": "reviewer_readonly",
+                "required_capabilities": [
+                    *CAPABILITY_PROFILES["reviewer_readonly"],
+                    "toolchain.container_builder",
+                    "toolchain.scanners",
+                ],
+                "allowed_paths": ["artifacts/**"],
+                "quality_gates": ["target-tests", "target-sast"],
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                   SET role='security-reviewer',
+                       output_schema='security-review-result.schema.json',
+                       capability_profile='reviewer_readonly',
+                       required_capabilities_json=?
+                   WHERE task_id='T-FAILNODEA'""",
+                (stable_json(contract["required_capabilities"]),),
+            )
+
+        router = FailureRouter(config, state, artifacts)
+        arbiter_id = router.route(first_failure_id)
+        arbiter = state.get_task(arbiter_id)
+        assert arbiter is not None and arbiter["role"] == "path-arbiter"
+        signature = str(arbiter["root_problem_signature"])
+        failure_id = "failure-production-container-scan-route"
+        now = "2026-08-03T00:00:02Z"
+        safe_message = (
+            "blocking findings: SECURITY-CONTAINER-SCAN-NOT-RUN [high]: "
+            "No subject-bound immutable image scan exists; build and scan the "
+            "exact immutable image before security acceptance."
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE failures SET status='RESOLVED' WHERE failure_id=?",
+                (first_failure_id,),
+            )
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id, product_id, task_id, failure_class, reason_code,
+                    fingerprint, safe_message, evidence_ref, status, retryable,
+                    owner_action_eligible, expected_json, actual_json,
+                    failed_gate_ids_json, parent_failure_id, first_seen_at, last_seen_at)
+                   VALUES (?, 'product-autonomy', 'T-FAILNODEA', 'semantic',
+                           'model_requested_repair', ?, ?,
+                           'internal://container-scan-review', 'ROUTED', 0, 0,
+                           '{}', ?, ?, ?, ?, ?)""",
+                (
+                    failure_id,
+                    sha256_text(failure_id),
+                    safe_message,
+                    stable_json(
+                        {
+                            "required_fixes": [
+                                "Build and scan the immutable candidate image."
+                            ]
+                        }
+                    ),
+                    stable_json(["SECURITY-CONTAINER-SCAN-NOT-RUN"]),
+                    first_failure_id,
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                "UPDATE tasks SET failure_id=? WHERE task_id='T-FAILNODEA'",
+                (failure_id,),
+            )
+            state._connection.execute(
+                """UPDATE problem_budgets
+                      SET deterministic_actions_used=1,
+                          execution_attempts_used=1, status='EXHAUSTED'
+                    WHERE product_id='product-autonomy'
+                      AND root_problem_signature=?""",
+                (signature,),
+            )
+            state._connection.execute(
+                """UPDATE products SET status='FAILED_SAFE',
+                          terminal_reason='path_governor_problem_budget_exhausted'
+                    WHERE product_id='product-autonomy'"""
+            )
+
+        state.enter_maintenance("reviewer-builder-route-recovery")
+        applied = resume_reviewer_builder_route_failure(
+            config,
+            state,
+            product_id="product-autonomy",
+            failure_id=failure_id,
+            correction_evidence_digest="d" * 64,
+        )
+        assert applied["application_status"] == "APPLIED"
+        repair = state.get_task(str(applied["recovery_task_id"]))
+        assert repair is not None
+        assert repair["role"] == "builder"
+        assert repair["stage_key"] == "repair"
+        required = json.loads(str(repair["required_capabilities_json"]))
+        assert "toolchain.container_builder" in required
+        assert "toolchain.scanners" in required
+        repair_contract = json.loads(
+            (config.evidence_dir / Path(str(repair["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "Dockerfile" in repair_contract["allowed_paths"]
+        assert "docker/**" in repair_contract["allowed_paths"]
+        assert repair_contract["quality_gates"] == ["target-tests", "target-sast"]
+        finding = state._connection.execute(
+            "SELECT failure_class,reason_code,status FROM failures WHERE failure_id=?",
+            (failure_id,),
+        ).fetchone()
+        assert tuple(finding) == ("semantic", "model_requested_repair", "ROUTED")
+        budget = state._connection.execute(
+            """SELECT deterministic_actions_used,arbiter_calls_used,
+                      execution_attempts_used,status
+                 FROM problem_budgets
+                WHERE product_id='product-autonomy'
+                  AND root_problem_signature=?""",
+            (signature,),
+        ).fetchone()
+        assert tuple(budget) == (1, 1, 2, "ACTIVE")
+        assert state.get_product("product-autonomy")["status"] == "IMPLEMENTING"
+        replay = resume_reviewer_builder_route_failure(
+            config,
+            state,
+            product_id="product-autonomy",
+            failure_id=failure_id,
+            correction_evidence_digest="d" * 64,
+        )
+        assert replay["application_status"] == "REPLAYED"
+        assert state._connection.execute(
+            """SELECT COUNT(*) FROM tasks
+                WHERE product_id='product-autonomy' AND failure_id=?
+                  AND role='builder' AND stage_key='repair'""",
+            (failure_id,),
+        ).fetchone()[0] == 1
     finally:
         state.close()
 
