@@ -1315,7 +1315,7 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
                       SET role='builder', capability_profile='builder_workspace',
                           stage_key='repair', status='FAILED_SAFE',
                           graph_status='FAILED_SEMANTIC', failure_id=?,
-                          repair_context_ref='evidence/repair-brief.json',
+                          repair_context_ref=NULL,
                           root_problem_signature=?,
                           terminal_reason='controller_exception_permission_error'
                     WHERE task_id=?""",
@@ -1351,7 +1351,7 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
         assert recovered["status"] == "PENDING"
         assert recovered["graph_status"] == "READY"
         assert recovered["failure_id"] == parent_failure_id
-        assert recovered["repair_context_ref"] == "evidence/repair-brief.json"
+        assert recovered["repair_context_ref"] is None
         assert state._connection.execute(
             "SELECT status FROM failures WHERE failure_id=?",
             (failure_id,),

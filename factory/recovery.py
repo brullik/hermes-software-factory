@@ -2068,7 +2068,6 @@ def resume_opaque_subject_reference_failure(
         or str(row["stage_key"] or "") != "repair"
         or str(row["graph_status"]) != "FAILED_SEMANTIC"
         or str(row["task_status"]) != "FAILED_SAFE"
-        or not str(row["repair_context_ref"] or "")
         or str(row["product_status"]) != "IMPLEMENTING"
         or len(root_problem_signature) != 64
         or any(
