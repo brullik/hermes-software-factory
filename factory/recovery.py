@@ -2546,6 +2546,295 @@ def resume_canonical_builder_schema_failure(
     }
 
 
+def resume_repair_context_binding_failure(
+    config: FactoryConfig,
+    state: StateStore,
+    *,
+    product_id: str,
+    failure_id: str,
+    correction_evidence_digest: str,
+) -> dict[str, Any]:
+    """Restore the immutable repair brief lost by a controller failure."""
+
+    if not state.maintenance_active():
+        raise ValueError("repair-context binding recovery requires maintenance mode")
+    if len(correction_evidence_digest) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in correction_evidence_digest
+    ):
+        raise ValueError("controller correction evidence digest is invalid")
+    correction_digest = sha256_text(
+        stable_json(
+            {
+                "action": "controller_repair_context_binding_recovery",
+                "product_id": product_id,
+                "failure_id": failure_id,
+                "correction_evidence_digest": correction_evidence_digest,
+            }
+        )
+    )
+    prior = _rows(
+        state,
+        """SELECT recovery_task_id FROM recovery_applications
+            WHERE recovery_plan_digest=? AND product_id=?""",
+        (correction_digest, product_id),
+    )
+    if prior:
+        return {
+            "status": "PASS",
+            "application_status": "REPLAYED",
+            "product_id": product_id,
+            "recovery_task_id": str(prior[0]["recovery_task_id"]),
+            "correction_digest": correction_digest,
+        }
+    rows = _rows(
+        state,
+        """SELECT failure.failure_class, failure.reason_code,
+                  failure.safe_message, failure.failed_gate_ids_json,
+                  failure.status AS failure_status,
+                  failure.parent_failure_id,
+                  parent.failure_class AS parent_failure_class,
+                  parent.status AS parent_failure_status,
+                  task.task_id, task.role, task.output_schema,
+                  task.capability_profile, task.stage_key,
+                  task.graph_status, task.status AS task_status,
+                  task.repair_context_ref, task.root_problem_signature,
+                  product.status AS product_status
+             FROM failures AS failure
+             JOIN failures AS parent
+               ON parent.failure_id=failure.parent_failure_id
+              AND parent.product_id=failure.product_id
+             JOIN tasks AS task ON task.task_id=failure.task_id
+             JOIN products AS product
+               ON product.product_id=failure.product_id
+            WHERE failure.failure_id=? AND failure.product_id=?""",
+        (failure_id, product_id),
+    )
+    if len(rows) != 1:
+        raise ValueError("repair-context failure coordinate is missing")
+    row = rows[0]
+    try:
+        failed_gate_ids = json.loads(str(row["failed_gate_ids_json"] or "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("repair-context failure gates are invalid") from error
+    expected_findings = {
+        "REPAIR_BRIEF_MISSING",
+        "SUBJECT_SHA_WORKTREE_MISMATCH",
+        "WORKTREE_HAS_UNCOMMITTED_CONTENT",
+    }
+    safe_message = str(row["safe_message"] or "")
+    root_problem_signature = str(row["root_problem_signature"] or "")
+    parent_failure_id = str(row["parent_failure_id"] or "")
+    task_id = str(row["task_id"])
+    if (
+        str(row["failure_class"]) != "semantic"
+        or str(row["reason_code"]) != "needs_replan"
+        or str(row["failure_status"]) != "OPEN"
+        or not isinstance(failed_gate_ids, list)
+        or {str(value) for value in failed_gate_ids} != expected_findings
+        or any(finding not in safe_message for finding in expected_findings)
+        or str(row["parent_failure_class"]) not in {"semantic", "policy"}
+        or str(row["parent_failure_status"]) != "ROUTED"
+        or not parent_failure_id
+        or str(row["role"]) != "builder"
+        or str(row["output_schema"]) != "attempt-result.schema.json"
+        or str(row["capability_profile"] or "") != "builder_workspace"
+        or str(row["stage_key"] or "") != "repair"
+        or str(row["graph_status"]) != "FAILED_SEMANTIC"
+        or str(row["task_status"]) != "FAILED_SAFE"
+        or row["repair_context_ref"] is not None
+        or str(row["product_status"]) != "IMPLEMENTING"
+        or len(root_problem_signature) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in root_problem_signature
+        )
+    ):
+        raise ValueError("failure is not the bounded repair-context defect")
+    budget_rows = _rows(
+        state,
+        """SELECT deterministic_actions_used, arbiter_calls_used,
+                  execution_attempts_used, status
+             FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    )
+    if len(budget_rows) != 1 or (
+        int(budget_rows[0]["deterministic_actions_used"]),
+        int(budget_rows[0]["arbiter_calls_used"]),
+        int(budget_rows[0]["execution_attempts_used"]),
+        str(budget_rows[0]["status"]),
+    ) != (1, 1, 2, "ACTIVE"):
+        raise ValueError("product problem budget changed before context recovery")
+    active_claims = _rows(
+        state,
+        """SELECT COUNT(*) AS count FROM tasks
+            WHERE status='CLAIMED'
+              AND (lease_until IS NULL OR lease_until >= ?)""",
+        (utc_now(),),
+    )
+    if int(active_claims[0]["count"]):
+        raise ValueError("repair-context recovery requires a drained controller")
+
+    repair_ref = f"evidence/repair-brief-{task_id}.json"
+    repair_path = (config.evidence_dir / Path(repair_ref).name).resolve()
+    if (
+        repair_path.parent != config.evidence_dir.resolve()
+        or not repair_path.is_file()
+        or repair_path.is_symlink()
+    ):
+        raise ValueError("immutable repair brief is missing or unsafe")
+    try:
+        repair_brief = json.loads(repair_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("immutable repair brief is unreadable") from error
+    if not isinstance(repair_brief, dict):
+        raise TypeError("immutable repair brief is invalid")
+    validation_errors = ArtifactStore(config).validate(
+        "repair-brief-v2.schema.json",
+        repair_brief,
+    )
+    repair_gate_ids = repair_brief.get("failed_gate_ids", [])
+    allowed_paths = repair_brief.get("allowed_paths", [])
+    if (
+        validation_errors
+        or str(repair_brief.get("product_id") or "") != product_id
+        or str(repair_brief.get("task_id") or "") != task_id
+        or str(repair_brief.get("failure_id") or "") != parent_failure_id
+        or "SECURITY-CONTAINER-SCAN-NOT-RUN" not in repair_gate_ids
+        or "Dockerfile" not in allowed_paths
+        or "scripts/**" not in allowed_paths
+    ):
+        raise ValueError("immutable repair brief identity is invalid")
+
+    now = utc_now()
+    with state._lock:
+        state._connection.execute("BEGIN IMMEDIATE")
+        try:
+            prior_row = state._connection.execute(
+                """SELECT recovery_task_id FROM recovery_applications
+                    WHERE recovery_plan_digest=? AND product_id=?""",
+                (correction_digest, product_id),
+            ).fetchone()
+            if prior_row is not None:
+                state._connection.commit()
+                return {
+                    "status": "PASS",
+                    "application_status": "REPLAYED",
+                    "product_id": product_id,
+                    "recovery_task_id": str(prior_row[0]),
+                    "correction_digest": correction_digest,
+                }
+            current = state._connection.execute(
+                """SELECT failure.status, task.graph_status, task.status,
+                          task.failure_id, task.repair_context_ref, product.status
+                     FROM failures AS failure
+                     JOIN tasks AS task ON task.task_id=failure.task_id
+                     JOIN products AS product
+                       ON product.product_id=failure.product_id
+                    WHERE failure.failure_id=? AND failure.product_id=?""",
+                (failure_id, product_id),
+            ).fetchone()
+            if current is None or tuple(current) != (
+                "OPEN",
+                "FAILED_SEMANTIC",
+                "FAILED_SAFE",
+                failure_id,
+                None,
+                "IMPLEMENTING",
+            ):
+                raise ValueError("repair-context state changed before apply")
+            budget = state._connection.execute(
+                """SELECT deterministic_actions_used, arbiter_calls_used,
+                          execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            if budget is None or tuple(budget) != (1, 1, 2, "ACTIVE"):
+                raise ValueError("product problem budget changed before apply")
+            state._connection.execute(
+                """UPDATE failures
+                      SET failure_class='controller',
+                          reason_code='controller_repair_context_binding_invariant',
+                          status='RESOLVED', last_seen_at=?
+                    WHERE failure_id=? AND product_id=? AND status='OPEN'""",
+                (now, failure_id, product_id),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING', graph_status='READY', failure_id=?,
+                          next_tier='terra', next_attempt_kind='repair',
+                          repair_context_ref=?, lease_owner=NULL, lease_until=NULL,
+                          lease_token=NULL, heartbeat_at=NULL, available_at=NULL,
+                          terminal_reason=NULL, terminal_detail=NULL,
+                          result_ref=NULL, result_digest=NULL, failure_kind=NULL,
+                          blocked_reason=NULL, blocked_ref=NULL, updated_at=?
+                    WHERE task_id=? AND product_id=?
+                      AND graph_status='FAILED_SEMANTIC'
+                      AND status='FAILED_SAFE'""",
+                (parent_failure_id, repair_ref, now, task_id, product_id),
+            )
+            incident_id = "incident-" + sha256_text(
+                f"{failure_id}:repair-context-binding"
+            )[:20]
+            state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at, resolved_at)
+                   VALUES (?, ?, ?, 'controller_repair_context_binding_invariant',
+                           ?, 'RESOLVED', ?, ?)""",
+                (
+                    incident_id,
+                    product_id,
+                    task_id,
+                    f"internal://release/{correction_evidence_digest}",
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """INSERT INTO recovery_applications
+                   (recovery_plan_digest, product_id, recovery_task_id,
+                    status, applied_at)
+                   VALUES (?, ?, ?, 'APPLIED', ?)""",
+                (correction_digest, product_id, task_id, now),
+            )
+            state._record_event(
+                product_id,
+                task_id,
+                "controller_repair_context_binding_recovery_applied",
+                {
+                    "failure_id": failure_id,
+                    "parent_failure_id": parent_failure_id,
+                    "root_problem_signature": root_problem_signature,
+                    "correction_digest": correction_digest,
+                    "repair_context_ref": repair_ref,
+                    "product_budget_counters_preserved": True,
+                },
+            )
+            state._connection.commit()
+        except Exception:
+            state._connection.rollback()
+            raise
+    return {
+        "status": "PASS",
+        "application_status": "APPLIED",
+        "product_id": product_id,
+        "recovery_task_id": task_id,
+        "root_problem_signature": root_problem_signature,
+        "correction_digest": correction_digest,
+        "parent_failure_id": parent_failure_id,
+        "repair_context_ref": repair_ref,
+        "product_budget_counters": {
+            "deterministic_actions_used": 1,
+            "arbiter_calls_used": 1,
+            "execution_attempts_used": 2,
+            "status": "ACTIVE",
+        },
+    }
+
+
 def verify_active_graphs(
     config: FactoryConfig,
     state: StateStore,

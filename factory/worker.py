@@ -1348,6 +1348,13 @@ class AgentWorker:
                 "allowed_paths. When the repository's task-local acceptance command passes, "
                 "report that evidence and complete the implementation."
             )
+            decisions.append(
+                "Context Pack subject_sha is the controller's SHA-256 digest of the exact "
+                "leased workspace snapshot, not a Git commit ID. Do not compare it with "
+                "git rev-parse HEAD and do not reject tracked, modified, or untracked files "
+                "merely because they differ from HEAD: they are part of the bound candidate "
+                "unless controller gate evidence identifies an out-of-scope mutation."
+            )
         if prompt_role == "security-reviewer":
             decisions.append(
                 "Controller gate evidence preserves mandatory status. A failed mandatory gate "
@@ -3023,12 +3030,18 @@ class AgentWorker:
             None,
         )
         failures = self.state.list_failures(str(task["product_id"]))
+        task_failure_id = str(task_row.get("failure_id") or "")
         open_failure = next(
             (
                 failure
                 for failure in reversed(failures)
-                if str(failure.get("task_id")) == str(task["task_id"])
-                and str(failure.get("status")) in {"OPEN", "ROUTED", "OWNER_BLOCKED"}
+                if (
+                    str(failure.get("failure_id")) == task_failure_id
+                    if task_failure_id
+                    else str(failure.get("task_id")) == str(task["task_id"])
+                )
+                and str(failure.get("status"))
+                in {"OPEN", "ROUTED", "OWNER_BLOCKED"}
             ),
             None,
         )
@@ -5394,7 +5407,11 @@ class AgentWorker:
             available_at=result.retry_available_at,
             next_tier=result.next_tier.value if result.next_tier else None,
             next_attempt_kind=result.next_attempt_kind,
-            repair_context_ref=result.repair_context_ref,
+            repair_context_ref=(
+                result.repair_context_ref
+                or str(task_row.get("repair_context_ref") or "")
+                or None
+            ),
             product_status=prepared.product_status,
             successors=prepared.successors,
             edges=prepared.edges,

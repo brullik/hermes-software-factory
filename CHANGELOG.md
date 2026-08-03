@@ -23,6 +23,11 @@
   `attempt-result.schema.json` contract. Add an idempotent recovery that writes
   a new immutable corrected task contract and resumes the same Builder while
   preserving the parent finding and all Path Governor counters.
+- Preserve an existing repair brief across controller and terminal outcomes,
+  bind a routed repair Context Pack to `task.failure_id` even when the source
+  finding belongs to the reviewer task, and define `subject_sha` explicitly as
+  a workspace-snapshot digest rather than a Git commit. Add a bounded recovery
+  for the historical lost repair-context binding without resetting its budget.
 
 ## 2.3.10 - 2026-08-03
 

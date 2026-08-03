@@ -29,6 +29,7 @@ from .recovery import (
     resume_canonical_builder_schema_failure,
     resume_controller_compilation_failure,
     resume_opaque_subject_reference_failure,
+    resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
     resume_zero_dependency_audit_failure,
     state_audit,
@@ -458,6 +459,27 @@ def canonical_builder_schema_recovery_command(args: argparse.Namespace) -> int:
     )
     try:
         result = resume_canonical_builder_schema_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def repair_context_binding_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_repair_context_binding_failure(
             config,
             state,
             product_id=str(args.product_id),
@@ -988,6 +1010,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     canonical_builder_schema_recovery.set_defaults(
         function=canonical_builder_schema_recovery_command
+    )
+    repair_context_binding_recovery = subparsers.add_parser(
+        "repair-context-binding-recovery"
+    )
+    repair_context_binding_recovery.add_argument("--config", type=Path)
+    repair_context_binding_recovery.add_argument("--product-id", required=True)
+    repair_context_binding_recovery.add_argument("--failure-id", required=True)
+    repair_context_binding_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    repair_context_binding_recovery.set_defaults(
+        function=repair_context_binding_recovery_command
     )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)

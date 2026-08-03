@@ -32,6 +32,7 @@ from factory.reconciler import PipelineReconciler
 from factory.recovery import (
     resume_canonical_builder_schema_failure,
     resume_opaque_subject_reference_failure,
+    resume_repair_context_binding_failure,
     resume_reviewer_builder_route_failure,
 )
 from factory.recovery_directive import build_scope_recovery_directive
@@ -1067,6 +1068,24 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         assert repair["capability_profile"] == "builder_workspace"
         assert repair["stage_key"] == "repair"
         assert repair["repair_context_ref"]
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=tmp_path,
+        )
+        spec = worker.default_spec(repair)
+        assert any(
+            "subject_sha is the controller's SHA-256 digest" in decision
+            and "not a Git commit ID" in decision
+            for decision in spec.decisions
+        )
+        _, _, context_path = worker._context_and_prompt(
+            spec,
+            repository_root=tmp_path,
+        )
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        assert context["open_failure"]["failure_id"] == second_failure_id
         repair_contract = json.loads(
             (config.evidence_dir / Path(str(repair["contract_ref"])).name).read_text(
                 encoding="utf-8"
@@ -1492,6 +1511,112 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
             correction_evidence_digest="f" * 64,
         )
         assert schema_replay["application_status"] == "REPLAYED"
+
+        repair_ref = f"evidence/repair-brief-{task_id}.json"
+        repair_brief = {
+            "schema_version": "2.0",
+            "artifact_id": "repair-brief-context-binding-test",
+            "product_id": product_id,
+            "task_id": task_id,
+            "root_task_id": "T-ROOTFAILURE",
+            "failed_task_id": "T-FAILNODEA",
+            "failure_id": parent_failure_id,
+            "hypothesis_id": "hypothesis-context-binding",
+            "parent_hypothesis_id": None,
+            "plan_id": str(schema_recovered["plan_id"]),
+            "plan_node_id": str(schema_recovered["plan_node_id"]),
+            "inherited_goal_ref": "evidence/root-goal.json",
+            "inherited_acceptance": [
+                {
+                    "criterion_id": "AC-CONTEXT-BINDING",
+                    "verification": "Produce a subject-bound immutable image scan.",
+                    "mandatory": True,
+                }
+            ],
+            "failed_gate_ids": ["SECURITY-CONTAINER-SCAN-NOT-RUN"],
+            "required_fixes": ["Build and scan the exact immutable image."],
+            "evidence_refs": ["evidence/security-review.json"],
+            "allowed_paths": ["Dockerfile", "scripts/**"],
+            "capability_gaps": [],
+            "supersedes_task_id": "T-FAILNODEA",
+            "definition_of_done": ["The exact immutable image scan passes."],
+        }
+        artifacts.write(
+            "repair-brief-v2.schema.json",
+            repair_brief,
+            filename=Path(repair_ref).name,
+        )
+        context_failure_id = "failure-repair-context-binding"
+        context_findings = [
+            "REPAIR_BRIEF_MISSING",
+            "SUBJECT_SHA_WORKTREE_MISMATCH",
+            "WORKTREE_HAS_UNCOMMITTED_CONTENT",
+        ]
+        with state._lock, state._connection:
+            state._connection.execute(
+                """INSERT INTO failures
+                   (failure_id, product_id, task_id, parent_failure_id,
+                    failure_class, reason_code, fingerprint, safe_message,
+                    evidence_ref, status, retryable, owner_action_eligible,
+                    expected_json, actual_json, failed_gate_ids_json,
+                    first_seen_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, 'semantic', 'needs_replan', ?, ?,
+                           'evidence/attempt-context-binding.json', 'OPEN',
+                           0, 0, '{}', '{}', ?, ?, ?)""",
+                (
+                    context_failure_id,
+                    product_id,
+                    task_id,
+                    parent_failure_id,
+                    sha256_text(context_failure_id),
+                    " | ".join(context_findings),
+                    stable_json(context_findings),
+                    now,
+                    now,
+                ),
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='FAILED_SAFE', graph_status='FAILED_SEMANTIC',
+                          failure_id=?, repair_context_ref=NULL,
+                          terminal_reason='needs_replan'
+                    WHERE task_id=?""",
+                (context_failure_id, task_id),
+            )
+
+        context_applied = resume_repair_context_binding_failure(
+            config,
+            state,
+            product_id=product_id,
+            failure_id=context_failure_id,
+            correction_evidence_digest="a" * 64,
+        )
+        assert context_applied["application_status"] == "APPLIED"
+        context_recovered = state.get_task(task_id)
+        assert context_recovered is not None
+        assert context_recovered["status"] == "PENDING"
+        assert context_recovered["graph_status"] == "READY"
+        assert context_recovered["failure_id"] == parent_failure_id
+        assert context_recovered["repair_context_ref"] == repair_ref
+        assert context_recovered["next_attempt_kind"] == "repair"
+        corrected_failure = state._connection.execute(
+            """SELECT failure_class,reason_code,status FROM failures
+                WHERE failure_id=?""",
+            (context_failure_id,),
+        ).fetchone()
+        assert tuple(corrected_failure) == (
+            "controller",
+            "controller_repair_context_binding_invariant",
+            "RESOLVED",
+        )
+        context_replay = resume_repair_context_binding_failure(
+            config,
+            state,
+            product_id=product_id,
+            failure_id=context_failure_id,
+            correction_evidence_digest="a" * 64,
+        )
+        assert context_replay["application_status"] == "REPLAYED"
     finally:
         state.close()
 

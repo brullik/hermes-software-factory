@@ -1738,6 +1738,10 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(durable)
             assert durable is not None
             self.assertEqual(durable["status"], "FAILED_SAFE")
+            self.assertEqual(
+                durable["repair_context_ref"],
+                f"evidence/{brief_path.name}",
+            )
             failure = state.list_failures(intake_result.product_id)[-1]
             self.assertEqual(failure["exception_type"], "ValueError")
             self.assertTrue(failure["stack_fingerprint"])
