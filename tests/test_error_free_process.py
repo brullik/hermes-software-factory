@@ -1348,6 +1348,29 @@ def test_qualification_run_error_exposes_only_a_machine_safe_coordinate() -> Non
     assert error.safe_coordinate == "reproducible-wheel-build-failed"
 
 
+def test_q1_static_tools_do_not_write_to_the_immutable_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        timeout: int,
+        environment: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
+        del cwd, timeout, environment
+        commands.append(command)
+        return 0, "transcript"
+
+    monkeypatch.setattr(qualification_runner, "_run", fake_run)
+    report = qualification_runner.run_q1(Path(__file__).parents[1], tmp_path)
+    assert report.status == "PASS"
+    assert "--no-cache" in commands[0]
+    assert "--cache-dir=/dev/null" in commands[1]
+
+
 def test_qualification_stage_crash_fails_release_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

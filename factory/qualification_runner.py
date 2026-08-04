@@ -324,8 +324,24 @@ def run_q1(repository_root: Path, evidence_root: Path) -> QualificationStageRepo
     repository_root = repository_root.resolve()
     command_digests: dict[str, str] = {}
     for name, command in {
-        "ruff": [sys.executable, "-m", "ruff", "check", "factory", "scripts", "tests"],
-        "mypy": [sys.executable, "-m", "mypy", "factory", "scripts"],
+        "ruff": [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--no-cache",
+            "factory",
+            "scripts",
+            "tests",
+        ],
+        "mypy": [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--cache-dir=/dev/null",
+            "factory",
+            "scripts",
+        ],
     }.items():
         code, transcript = _run(command, cwd=repository_root, timeout=300)
         command_digests[name] = transcript
