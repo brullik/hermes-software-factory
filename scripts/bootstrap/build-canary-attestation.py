@@ -22,6 +22,9 @@ def _run_as_user(
     runtime_dir: Path,
     argv: list[str],
 ) -> str:
+    scoped_argv = list(argv)
+    if scoped_argv and scoped_argv[0] == "podman":
+        scoped_argv[1:1] = ["--cgroup-manager=cgroupfs"]
     result = subprocess.run(
         [
             "runuser",
@@ -31,7 +34,7 @@ def _run_as_user(
             "env",
             f"HOME={state_dir}",
             f"XDG_RUNTIME_DIR={runtime_dir}",
-            *argv,
+            *scoped_argv,
         ],
         text=True,
         capture_output=True,
