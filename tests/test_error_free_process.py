@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from factory import model_check
+from factory import model_check, qualification_runner
 from factory.autonomy import CAPABILITY_PROFILES
 from factory.canary_qualification import (
     CanaryObservationError,
@@ -1273,6 +1273,29 @@ def test_candidate_snapshot_digest_uses_manifest_canonical_shape() -> None:
     assert all(character in "0123456789abcdef" for character in digest)
 
 
+def test_q0_git_trust_is_scoped_to_the_exact_candidate_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: list[object] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        observed.extend((command, kwargs.get("cwd")))
+        return SimpleNamespace(returncode=0, stdout="commit\n", stderr="")
+
+    monkeypatch.setattr(qualification_runner.subprocess, "run", fake_run)
+    assert qualification_runner._git(tmp_path, "rev-parse", "HEAD") == "commit"
+    assert observed == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={tmp_path.resolve()}",
+            "rev-parse",
+            "HEAD",
+        ],
+        tmp_path.resolve(),
+    ]
+
+
 def test_qualification_stage_crash_fails_release_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1373,7 +1396,10 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     )
     pip_check = bootstrap.index("-m pip check", lock_reassertion)
     assert hermes_install < lock_reassertion < pip_check
-    assert "if ! systemctl enable --now hermes-factory-qualification.service" in bootstrap
+    assert "systemctl enable hermes-factory-qualification.service" in bootstrap
+    assert (
+        "if ! systemctl start --wait hermes-factory-qualification.service" in bootstrap
+    )
     assert "orchestration-fail" in bootstrap
 
     optional_candidate_database = "-/var/lib/hermes-factory-candidate/controller.db"

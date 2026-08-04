@@ -74,9 +74,10 @@ def _run(
 
 
 def _git(repository_root: Path, *arguments: str) -> str:
+    trusted_root = repository_root.resolve()
     result = subprocess.run(
-        ["git", *arguments],
-        cwd=repository_root,
+        ["git", "-c", f"safe.directory={trusted_root}", *arguments],
+        cwd=trusted_root,
         text=True,
         capture_output=True,
         check=False,
@@ -212,9 +213,17 @@ def _reproducible_wheel(repository_root: Path) -> tuple[str, str]:
 
 
 def _immutable_release_tree_digest(repository_root: Path) -> str:
+    trusted_root = repository_root.resolve()
     result = subprocess.run(
-        ["git", "archive", "--format=tar", "HEAD"],
-        cwd=repository_root,
+        [
+            "git",
+            "-c",
+            f"safe.directory={trusted_root}",
+            "archive",
+            "--format=tar",
+            "HEAD",
+        ],
+        cwd=trusted_root,
         capture_output=True,
         check=False,
         timeout=60,
