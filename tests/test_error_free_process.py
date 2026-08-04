@@ -1513,6 +1513,79 @@ def test_qualification_orchestration_failure_is_terminal_and_idempotent(
         state.close()
 
 
+def test_shadow_pipeline_failure_is_terminal_sanitized_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).parents[1]
+    config = {
+        "governor_database": str((tmp_path / "verifier" / "governor.db").resolve()),
+        "candidate_repository_root": str(repository.resolve()),
+        "evidence_root": str((tmp_path / "evidence").resolve()),
+        "source_commit": "0" * 40,
+        "stable_release_digest": "1" * 64,
+        "controller_release_digest": "2" * 64,
+        "candidate_digest": "3" * 64,
+        "policy_digest": "4" * 64,
+        "toolchain_manifest_digest": "5" * 64,
+        "trusted_verifier_public_key_digest": _TEST_VERIFIER_KEY_DIGEST,
+    }
+    epoch_id = initialize_epoch(config)
+    state = StateStore(Path(str(config["governor_database"])))
+    try:
+        governor = ReleaseQualificationGovernor(
+            state._connection,
+            trusted_verifier_public_key_digest=_TEST_VERIFIER_KEY_DIGEST,
+        )
+        _qualify_to_clean_canary(governor, epoch_id, include_q7=False)
+        state._connection.commit()
+    finally:
+        state.close()
+
+    first = qualification_control.fail_shadow_pipeline(config, "evaluate")
+    second = qualification_control.fail_shadow_pipeline(config, "verify")
+    assert first == second
+    assert first[0] == epoch_id
+
+    evidence_files = list((tmp_path / "evidence").glob("shadow-pipeline-failure-*.json"))
+    assert len(evidence_files) == 1
+    evidence = json.loads(evidence_files[0].read_text(encoding="utf-8"))
+    assert evidence["reason_code"] == "shadow_pipeline_unit_failed"
+    assert evidence["failure_coordinate"] == "q7_shadow_pipeline-evaluate"
+    assert set(evidence) == {
+        "candidate_digest",
+        "created_at",
+        "epoch_id",
+        "failure_coordinate",
+        "reason_code",
+        "report_digest",
+        "schema_version",
+        "source_commit",
+        "stage",
+        "status",
+    }
+
+    state = StateStore(Path(str(config["governor_database"])))
+    try:
+        epoch = state._connection.execute(
+            "SELECT status,failure_reason,failure_evidence_ref "
+            "FROM controller_release_epochs WHERE epoch_id=?",
+            (epoch_id,),
+        ).fetchone()
+        q7 = state._connection.execute(
+            "SELECT status,evidence_ref FROM qualification_runs "
+            "WHERE epoch_id=? AND stage='Q7_SHADOW_DIFFERENTIAL'",
+            (epoch_id,),
+        ).fetchone()
+        assert tuple(epoch) == (
+            "QUALIFICATION_FAILED",
+            "qualification_failed:Q7_SHADOW_DIFFERENTIAL",
+            first[1],
+        )
+        assert tuple(q7) == ("FAIL", first[1])
+    finally:
+        state.close()
+
+
 def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     repository = Path(__file__).parents[1]
     bootstrap = (repository / "scripts/bootstrap/prepare-candidate-plane.sh").read_text(
@@ -1537,6 +1610,8 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "q6-capability-attestation.json" in bootstrap
     assert "--q6-capability-attestation-digest" in bootstrap
     assert "--add-subuids 1200000" not in bootstrap
+    assert 'sed "s/@SOURCE_COMMIT@/${SOURCE_COMMIT}/g"' in bootstrap
+    assert "hermes-factory-shadow-fail@.service" in bootstrap
     attestation_builder = (
         repository / "scripts/bootstrap/build-canary-attestation.py"
     ).read_text(encoding="utf-8")
@@ -1551,6 +1626,27 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     ):
         text = (repository / "config/systemd" / unit).read_text(encoding="utf-8")
         assert optional_candidate_database in text
+
+    evaluate = (
+        repository / "config/systemd/hermes-factory-shadow-evaluate.service"
+    ).read_text(encoding="utf-8")
+    epoch_output = (
+        "/var/lib/hermes-factory-candidate/shadow-output/@SOURCE_COMMIT@"
+    )
+    assert f"--output-root {epoch_output}" in evaluate
+    assert f"ReadWritePaths={epoch_output}" in evaluate
+    assert "OnFailure=hermes-factory-shadow-fail@evaluate.service" in evaluate
+
+    finalize = (
+        repository / "config/systemd/hermes-factory-shadow-finalize.service"
+    ).read_text(encoding="utf-8")
+    assert "ExecCondition=" in finalize
+    assert "shadow-ready" in finalize
+    clean_canaries = (
+        repository / "config/systemd/hermes-factory-clean-canaries.service"
+    ).read_text(encoding="utf-8")
+    assert "ExecCondition=" in clean_canaries
+    assert "canary-ready" in clean_canaries
 
 
 def test_live_shadow_feed_is_redacted_evaluated_and_verified_once(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ Type=oneshot
 User=root
 Group=root
 WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecCondition=/opt/hermes-factory-verifier/venv/bin/python -m scripts.qualification_control canary-ready
 ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-all-clean-canaries.sh
 TimeoutStartSec=0
 NoNewPrivileges=true

@@ -111,6 +111,7 @@ REQUIRED = [
     "config/systemd/hermes-factory-production-observation.timer",
     "config/systemd/hermes-factory-shadow-finalize.service",
     "config/systemd/hermes-factory-shadow-finalize.timer",
+    "config/systemd/hermes-factory-shadow-fail@.service",
     "qualification/canaries/catalog.yaml",
     "schemas/release-qualification-manifest.schema.json",
     "scripts/pilot_black_box.py",
