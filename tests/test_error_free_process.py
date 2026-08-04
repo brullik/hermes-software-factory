@@ -1615,6 +1615,11 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "hermes-factory-shadow-stop.service" in bootstrap
     assert "systemctl reset-failed" in bootstrap
     assert 'SHADOW_OUTPUT_ROOT="${SHADOW_OUTPUT_ROOT:-/var/lib/hermes-factory-shadow-output}"' in bootstrap
+    assert (
+        '--candidate-database "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}/candidate-shadow.db"'
+        in bootstrap
+    )
+    assert '--candidate-database "${CANDIDATE_STATE}/controller.db"' not in bootstrap
     attestation_builder = (
         repository / "scripts/bootstrap/build-canary-attestation.py"
     ).read_text(encoding="utf-8")

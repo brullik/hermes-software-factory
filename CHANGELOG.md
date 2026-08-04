@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.8 - 2026-08-04
+
+- Bind Q7 boundary observation to a commit-scoped shadow ledger path instead of
+  probing the intentionally inaccessible private Candidate controller database.
+- Preserve the proof that Candidate side effects remain absent while keeping
+  verifier access closed to Candidate runtime state.
+
 ## 2.4.7 - 2026-08-04
 
 - Move Candidate shadow evaluations into a dedicated commit-scoped shared root,
