@@ -101,6 +101,7 @@ class QualificationThresholds:
     minimum_clean_canaries: int = 10
     maximum_task_amplification_ratio: float = 1.2
     maximum_evidence_indirection: int = 1
+    maximum_shadow_heartbeat_gap_seconds: float = 300.0
 
 
 def _digest(name: str, value: str) -> str:
@@ -586,6 +587,26 @@ class ReleaseQualificationGovernor:
                 _zero_metric(metrics, key)
             _positive_metric(metrics, "shadow_event_count")
             _positive_metric(metrics, "shadow_batch_count")
+            _positive_metric(metrics, "shadow_heartbeat_count")
+            _digest(
+                "shadow_heartbeat_head_digest",
+                str(metrics.get("shadow_heartbeat_head_digest") or ""),
+            )
+            for key in (
+                "shadow_max_heartbeat_gap_seconds",
+                "shadow_last_heartbeat_age_seconds",
+            ):
+                value = metrics.get(key)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or float(value) < 0
+                    or float(value)
+                    > self.thresholds.maximum_shadow_heartbeat_gap_seconds
+                ):
+                    raise QualificationError(
+                        f"Q7 requires bounded {key}"
+                    )
             historical_total = _positive_metric(metrics, "historical_products_total")
             historical_replayed = _positive_metric(
                 metrics, "historical_products_replayed"

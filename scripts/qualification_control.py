@@ -46,7 +46,11 @@ from factory.release_qualification import (
 )
 from factory.shadow_feed import feed_paths, load_candidate_evaluation, load_feed_batch
 from factory.shadow_projection import stable_observed_decision
-from factory.shadow_qualification import ShadowEvidenceJournal, ShadowJournalError
+from factory.shadow_qualification import (
+    ShadowEvidenceJournal,
+    ShadowHeartbeatJournal,
+    ShadowJournalError,
+)
 from factory.state import StateStore
 from factory.two_plane import PlaneBoundary, ShadowDifferentialLab, TwoPlaneLayout
 
@@ -500,13 +504,8 @@ def finalize_shadow(
             first_batch["stable_event_high_watermark"]
         ):
             raise QualificationControlError("Q7 historical high-watermark is incomplete")
-        summary = journal.summarize()
-        evidence_ref = (
-            "artifact://qualification/shadow/" + summary.journal_head_digest
-        )
         run_id = journal.finalize_q7(
             governor,
-            evidence_ref=evidence_ref,
             historical_products_total=historical_total,
             historical_products_replayed=historical_total,
         )
@@ -793,6 +792,23 @@ def verify_shadow_batches(config: Mapping[str, Any]) -> tuple[str, int, int]:
             # verifier actually replayed that input in this release epoch.
             journal.append(report)
             verified_events += report.event_count
+        if journal.entry_count():
+            decision_summary = journal.summarize()
+            decision_batch_count = decision_summary.batch_count
+            decision_event_count = decision_summary.event_count
+            decision_head_digest = decision_summary.journal_head_digest
+        else:
+            decision_batch_count = 0
+            decision_event_count = 0
+            decision_head_digest = "0" * 64
+        ShadowHeartbeatJournal(
+            journal.root / "heartbeats",
+            epoch_id=epoch_id,
+        ).append(
+            decision_batch_count=decision_batch_count,
+            decision_event_count=decision_event_count,
+            decision_journal_head_digest=decision_head_digest,
+        )
         return epoch_id, len(feeds) - processed, verified_events
     finally:
         state.close()

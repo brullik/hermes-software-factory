@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.13 - 2026-08-04
+
+- Add a verifier-owned Q7 heartbeat hash chain bound to the current decision
+  journal and reject late, stale, discontinuous, or incomplete shadow evidence.
+- Require a fresh shadow verification cycle before every finalization attempt so
+  feed/finalizer races cannot produce stale qualification evidence.
+- Quiesce the Q7 timers after readiness succeeds and before finalization so no
+  new shadow batch or heartbeat can race the immutable Q7 decision.
+
 ## 2.4.12 - 2026-08-04
 
 - Timestamp Q7 journal entries at independent-verifier replay time instead of
