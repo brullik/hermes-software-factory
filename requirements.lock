@@ -3,12 +3,15 @@ attrs==26.1.0
 boolean.py==5.0
 CacheControl==0.14.4
 certifi==2026.7.22
+cffi==2.1.0
 charset-normalizer==3.4.9
 colorama==0.4.6
+cryptography==45.0.7
 cyclonedx-python-lib==11.11.0
 defusedxml==0.7.1
 filelock==3.32.0
 idna==3.18
+hypothesis==6.165.0
 iniconfig==2.3.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
@@ -30,6 +33,7 @@ pluggy==1.6.0
 py-serializable==2.1.0
 Pygments==2.20.0
 pyparsing==3.3.2
+pycparser==3.0
 pytest==8.4.2
 PyYAML==6.0.3
 referencing==0.37.0

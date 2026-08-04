@@ -21,6 +21,7 @@ from factory.pipeline import PipelineCoordinator, PlanCompilationInvariantError
 from factory.plan_compiler import CompileContext, PlanCompiler
 from factory.plan_semantics import PlanContractViolation, validate_compiled_plan
 from factory.policy import policy_digest
+from factory.proof_obligations import RecoveryCertificateService
 from factory.reconciler import ReconcilerLoop
 from factory.recovery import (
     apply_recovery_plan,
@@ -45,6 +46,28 @@ def configured(tmp_path: Path):
         tmp_path,
         selected_registry(tmp_path / "registry.yaml", selected="gpt-5.6-luna"),
     )
+
+
+def issue_test_recovery_certificate(
+    config: Any,
+    state: StateStore,
+    *,
+    product_id: str,
+    label: str,
+) -> str:
+    with state._lock, state._connection:
+        return RecoveryCertificateService(state._connection).issue(
+            product_id=product_id,
+            previous_epoch_key=sha256_text(f"previous:{label}"),
+            new_epoch_key=sha256_text(f"new:{label}"),
+            root_cause_key=sha256_text(f"cause:{label}"),
+            controller_release_digest=state.controller_release_digest,
+            policy_schema_digest=policy_digest(config),
+            fixed_invariant_id=f"FIX-{label}",
+            regression_evidence_ref=f"evidence://regression/{label}",
+            migration_dry_run_digest=sha256_text(f"migration:{label}"),
+            backup_restore_proof_ref=f"evidence://backup-restore/{label}",
+        )
 
 
 def proposal(config, *, product_id: str = "product-semantic") -> dict[str, Any]:
@@ -1255,12 +1278,11 @@ def test_failed_safe_replanner_loop_requires_explicit_fingerprinted_recovery(
             "UPDATE tasks SET failure_id=? WHERE task_id='T-FAILED-REPLANNER'",
             (failure_id,),
         )
-        state._connection.execute(
-            """UPDATE products
-                  SET status='FAILED_SAFE',
-                      terminal_reason='replanner_problem_budget_exhausted'
-                WHERE product_id=?""",
-            (product_id,),
+        state.transition_product(
+            product_id,
+            "FAILED_SAFE",
+            terminal_reason="replanner_problem_budget_exhausted",
+            terminal_evidence_ref="internal://failed-safe-replanner",
         )
         state._connection.execute(
             """
@@ -1288,6 +1310,12 @@ def test_failed_safe_replanner_loop_requires_explicit_fingerprinted_recovery(
     assert verify_recovery_preconditions(state, recovery)["status"] == "PASS"
 
     state.enter_maintenance("corrected-controller-release")
+    issue_test_recovery_certificate(
+        config,
+        state,
+        product_id=product_id,
+        label="failed-safe-replanner-loop",
+    )
     applied = apply_recovery_plan(config, state, recovery)
     assert applied["applications"][0]["status"] == "APPLIED"
     product = state.get_product(product_id)
@@ -1433,11 +1461,11 @@ def test_path_governor_failed_safe_recovery_consumes_controller_slot(
                VALUES (?, ?, 0, 1, 0, ?, ?, 'EXHAUSTED', ?, ?)""",
             (product_id, signature, stable_json({}), "a" * 64, now, now),
         )
-        state._connection.execute(
-            """UPDATE products SET status='FAILED_SAFE',
-                      terminal_reason='path_governor_problem_budget_exhausted'
-                 WHERE product_id=?""",
-            (product_id,),
+        state.transition_product(
+            product_id,
+            "FAILED_SAFE",
+            terminal_reason="path_governor_problem_budget_exhausted",
+            terminal_evidence_ref="internal://path-governor-budget",
         )
         state._connection.execute(
             """INSERT INTO controller_incidents
@@ -1463,6 +1491,12 @@ def test_path_governor_failed_safe_recovery_consumes_controller_slot(
         "status": "EXHAUSTED",
     }
     state.enter_maintenance("corrected-path-arbiter-policy")
+    issue_test_recovery_certificate(
+        config,
+        state,
+        product_id=product_id,
+        label="path-governor-failed-safe",
+    )
     applied = apply_recovery_plan(config, state, recovery)
     assert applied["applications"][0]["status"] == "APPLIED"
     recovery_task = next(
@@ -1491,14 +1525,15 @@ def test_path_governor_failed_safe_recovery_consumes_controller_slot(
              WHERE product_id=? ORDER BY created_at DESC LIMIT 1""",
         (product_id,),
     ).fetchone()
-    assert tuple(decision) == ("CONTROLLER_RECOVERY", "APPLIED")
-    with state._lock, state._connection:
+    assert tuple(decision) == ("CONTROLLER_QUARANTINE", "APPLIED")
+    with pytest.raises(sqlite3.IntegrityError), state._lock, state._connection:
         state._connection.execute(
             """UPDATE products
                   SET terminal_reason='path_governor_problem_budget_exhausted'
                 WHERE product_id=?""",
             (product_id,),
         )
+    with state._lock, state._connection:
         state._connection.execute(
             """INSERT INTO failures
                (failure_id, product_id, task_id, failure_class, reason_code,
@@ -1520,7 +1555,7 @@ def test_path_governor_failed_safe_recovery_consumes_controller_slot(
     assert finalized["status"] == "PASS"
     assert finalized["application_status"] == "APPLIED"
     assert finalized["resolved_historical_failure_count"] == 1
-    assert finalized["terminal_reason_cleared"]
+    assert not finalized["terminal_reason_cleared"]
     assert finalize_recovery_application(
         state,
         product_id=product_id,
@@ -1608,14 +1643,20 @@ def test_LOOP_P0_014_controller_compiler_recovery_preserves_product_budget(
                VALUES (?, ?, 1, 1, 0, ?, ?, 'EXHAUSTED', ?, ?)""",
             (product_id, signature, stable_json({}), "a" * 64, now, now),
         )
-        state._connection.execute(
-            """UPDATE products SET status='FAILED_SAFE',
-                      terminal_reason='path_governor_problem_budget_exhausted'
-                 WHERE product_id=?""",
-            (product_id,),
+        state.transition_product(
+            product_id,
+            "FAILED_SAFE",
+            terminal_reason="path_governor_problem_budget_exhausted",
+            terminal_evidence_ref="internal://compiler-recovery-budget",
         )
 
     state.enter_maintenance("controller-plan-compilation-recovery")
+    issue_test_recovery_certificate(
+        config,
+        state,
+        product_id=product_id,
+        label="controller-plan-compilation",
+    )
     applied = resume_controller_compilation_failure(
         config,
         state,
@@ -1792,14 +1833,20 @@ def test_LOOP_P0_015_zero_dependency_recovery_requeues_same_reviewer(
                VALUES (?, ?, 1, 1, 1, ?, ?, 'EXHAUSTED', ?, ?)""",
             (product_id, signature, stable_json({}), "a" * 64, now, now),
         )
-        state._connection.execute(
-            """UPDATE products SET status='FAILED_SAFE',
-                      terminal_reason='path_governor_problem_budget_exhausted'
-                 WHERE product_id=?""",
-            (product_id,),
+        state.transition_product(
+            product_id,
+            "FAILED_SAFE",
+            terminal_reason="path_governor_problem_budget_exhausted",
+            terminal_evidence_ref="internal://reviewer-recovery-budget",
         )
 
     state.enter_maintenance("zero-dependency-audit-recovery")
+    issue_test_recovery_certificate(
+        config,
+        state,
+        product_id=product_id,
+        label="zero-dependency-audit",
+    )
     applied = resume_zero_dependency_audit_failure(
         config,
         state,

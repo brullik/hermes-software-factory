@@ -1,0 +1,13 @@
+schema_version: "1.0"
+scenario_id: controller-exception-runtime-2.2.x
+source_release: 2.2.x
+source_incident_count: 710
+initial_state: {schema_version: 16, product_status: IMPLEMENTING, task_count: 10536, accepted_result_count: 2516, sanitized: true}
+events:
+  - {event_id: failure-1, type: failure_received, reason_code: controller_exception_runtime_error}
+injected_faults: [controller-runtime-exception]
+expected_decisions:
+  - {event_id: failure-1, owner: controller, action: CONTROLLER_QUARANTINE, registered: true}
+forbidden_decisions:
+  - {event_id: failure-1, owner: product, action: REPAIR_NODE_VERSION, registered: true}
+expected_terminal: FAILED_SAFE

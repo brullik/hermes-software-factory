@@ -24,6 +24,23 @@
     "goal_evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
     "node_evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
     "release_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-    "observation_ref": {"type": "string", "minLength": 1}
+    "observation_ref": {"type": "string", "minLength": 1},
+    "delivery_profile": {
+      "enum": [
+        "DEPLOYED_SERVICE",
+        "TELEGRAM_BOT",
+        "WEB_APPLICATION",
+        "CLI_PACKAGE",
+        "LIBRARY_PACKAGE",
+        "GITHUB_AUTOMATION",
+        "OFFLINE_BATCH",
+        "STAGING_ONLY_PROTOTYPE"
+      ]
+    },
+    "delivery_profile_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "delivery_evidence": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    }
   }
 }

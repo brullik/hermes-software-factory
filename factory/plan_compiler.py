@@ -9,6 +9,7 @@ from typing import Any
 
 from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
+from .delivery_profiles import delivery_profile
 from .lifecycle import (
     LIFECYCLE_VERSION,
     PLAN_COMPILER_VERSION,
@@ -33,6 +34,7 @@ class CompileContext:
     mandatory_replan_gate_ids: tuple[str, ...] = ()
     blocked_replan_scope_paths: tuple[str, ...] = ()
     required_replan_scope_paths: tuple[str, ...] = ()
+    delivery_profile: str = "DEPLOYED_SERVICE"
 
 
 def _node_key(value: str) -> str:
@@ -349,6 +351,7 @@ class PlanCompiler:
             raise ValueError("PlanProposal node_key values must be unique")
         self._validate_semantic_proposal(proposal, slices, raw_keys)
 
+        selected_delivery_profile = delivery_profile(context.delivery_profile)
         proposal_digest = sha256_text(stable_json(proposal))
         accepted = dict(accepted_nodes or {})
         for reuse_key in tuple(accepted):
@@ -380,6 +383,7 @@ class PlanCompiler:
                 proposal_digest,
                 inheritance_digest,
                 PLAN_COMPILER_VERSION,
+                selected_delivery_profile.digest,
             ]
         )
         plan_id = _controller_id("PLAN", plan_seed)
@@ -592,36 +596,64 @@ class PlanCompiler:
             "Independently verify implementation, test, security, and release evidence.",
             ("The immutable candidate is independently accepted for staging.",),
         )
-        staging = add_node(
-            "staging",
-            "staging",
-            "Deploy immutable staging candidate",
-            "Create a private pull request and deploy the exact candidate to staging.",
-            ("Required checks, staging health, and rollback readiness are proven.",),
-            scope=("artifacts/**", "release-artifacts/**"),
-        )
-        acceptance = add_node(
-            "product-acceptance",
-            "product-acceptance",
-            "Run product acceptance in staging",
-            "Exercise every critical journey against the isolated staging release.",
-            ("Every mandatory product goal is proven in staging.",),
-        )
-        production = add_node(
-            "production",
-            "production",
-            "Promote the accepted candidate",
-            "Promote only the exact staging-accepted digest through the production adapter.",
-            ("Production health and rollback proof bind to the exact release digest.",),
-            scope=("artifacts/**", "release-artifacts/**"),
-        )
-        observation = add_node(
-            "observation",
-            "observation",
-            "Observe production release",
-            "Verify the production release remains healthy for the observation window.",
-            ("Observation passes and every completion obligation is reachable.",),
-        )
+        release_stage_ids: list[str] = []
+        release_titles = {
+            "staging": "Deploy immutable staging candidate",
+            "product-acceptance": "Run product acceptance",
+            "production": "Promote the accepted service candidate",
+            "observation": "Observe production release",
+            "telegram-contract-smoke": "Verify Telegram command contract",
+            "browser-acceptance": "Run browser acceptance",
+            "package-build": "Build immutable package",
+            "install-smoke": "Install package in a clean environment",
+            "signed-release": "Create signed distribution release",
+            "distribution-smoke": "Verify distributed artifact",
+            "observation-policy": "Apply package observation policy",
+            "compatibility-matrix": "Run compatibility matrix",
+            "publish-dry-run": "Dry-run package publication",
+            "signed-publish": "Publish signed package",
+            "consumer-smoke": "Verify a clean consumer installation",
+            "workflow-dry-run": "Dry-run GitHub automation",
+            "permission-contract": "Verify minimum GitHub permissions",
+            "repository-acceptance": "Run repository acceptance",
+            "fixture-replay": "Replay exact batch fixtures",
+            "schedule-dry-run": "Dry-run the batch schedule",
+            "policy-approved-delivery": "Approve staging-only delivery",
+        }
+        for stage_key in selected_delivery_profile.lifecycle:
+            if stage_key in {
+                "architecture-review",
+                "implementation-slice",
+                "candidate-snapshot",
+                "test",
+                "security-review",
+                "release-readiness-review",
+            }:
+                continue
+            release_stage_ids.append(
+                add_node(
+                    stage_key,
+                    stage_key,
+                    release_titles[stage_key],
+                    (
+                        "Execute the exact controller-owned delivery-profile stage "
+                        f"{stage_key} without substituting another lifecycle."
+                    ),
+                    (
+                        f"The immutable candidate satisfies {stage_key} proof obligations.",
+                    ),
+                    scope=(
+                        ("artifacts/**", "release-artifacts/**")
+                        if stage_contract(stage_key).capability_profile
+                        in {
+                            "release_staging",
+                            "release_production",
+                            "release_distribution",
+                        }
+                        else ("artifacts/**",)
+                    ),
+                )
+            )
 
         edges: list[dict[str, Any]] = []
 
@@ -654,11 +686,10 @@ class PlanCompiler:
         edge(test, security)
         edge(test, release_review, "evidence_from")
         edge(security, release_review)
-        edge(release_review, staging)
-        edge(staging, acceptance)
-        edge(acceptance, production)
-        edge(release_review, production, "evidence_from")
-        edge(production, observation)
+        previous_release_stage = release_review
+        for release_stage in release_stage_ids:
+            edge(previous_release_stage, release_stage)
+            previous_release_stage = release_stage
 
         goals = []
         acceptance_ids = [
@@ -709,12 +740,17 @@ class PlanCompiler:
             "edges": edges,
             "completion_criteria": [
                 "All controller-owned completion obligations are satisfied.",
-                "The exact staging digest is promoted and observed in production.",
+                (
+                    "The exact immutable candidate completes its controller-owned "
+                    f"{selected_delivery_profile.name.value} lifecycle."
+                ),
                 "No mandatory goal is closed by documentation-only evidence.",
             ],
             "summary": "Controller-compiled semantic lifecycle plan.",
             "compiler_version": PLAN_COMPILER_VERSION,
             "lifecycle_version": LIFECYCLE_VERSION,
+            "delivery_profile": selected_delivery_profile.name.value,
+            "delivery_profile_digest": selected_delivery_profile.digest,
             "proposal_artifact_ref": context.proposal_artifact_ref,
             "proposal_digest": proposal_digest,
         }

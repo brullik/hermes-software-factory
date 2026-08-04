@@ -1,0 +1,25 @@
+[Unit]
+Description=Run Hermes Q0-Q6 and activate the isolated 72-hour shadow gate
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/hermes-factory/qualification-control.yaml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-initial-qualification.sh
+TimeoutStartSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/hermes-factory-verifier /opt/hermes-factory-candidate /opt/hermes-factory/current /etc/hermes-factory/qualification-control.yaml
+ReadWritePaths=/var/lib/hermes-factory-verifier /etc/systemd/system /run/systemd
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /var/lib/hermes-factory-candidate/controller.db /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d /usr/local/sbin/hermes-factory-release-submit
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

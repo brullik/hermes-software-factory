@@ -1,0 +1,23 @@
+[Unit]
+Description=Export a redacted append-only Stable A event batch
+
+[Service]
+Type=oneshot
+User=hermesfactory
+Group=hermesfactory
+SupplementaryGroups=hermesshadow
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.shadow_feed export --database /var/lib/hermes-factory/controller.db --feed-root /var/lib/hermes-factory-shadow-feed --limit 1000
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/hermes-factory-verifier /var/lib/hermes-factory/controller.db
+ReadWritePaths=/var/lib/hermes-factory-shadow-feed
+InaccessiblePaths=/etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d /var/lib/hermes-factory-candidate /var/lib/hermes-factory-verifier /usr/local/sbin/hermes-factory-release-submit
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0027
+MemoryMax=512M
+TasksMax=128

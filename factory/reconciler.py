@@ -1148,7 +1148,6 @@ class PipelineReconciler:
             )
         )
         failure_id = f"failure-{fingerprint[:20]}"
-        incident_id = f"incident-{sha256_text(failure_id)[:20]}"
         now = utc_now()
         safe_message = (
             "Active plan has no runnable task while completion prerequisites "
@@ -1156,7 +1155,7 @@ class PipelineReconciler:
             "release, observation, and evidence nodes."
         )
         with self.state._lock, self.state._connection:
-            inserted = self.state._connection.execute(
+            self.state._connection.execute(
                 """
                 INSERT OR IGNORE INTO failures
                     (failure_id, product_id, task_id, attempt_id,
@@ -1194,28 +1193,7 @@ class PipelineReconciler:
                     now,
                     now,
                 ),
-            ).rowcount
-            self.state._connection.execute(
-                """
-                INSERT OR IGNORE INTO controller_incidents
-                    (incident_id, product_id, task_id, reason_code,
-                     evidence_ref, status, created_at)
-                VALUES (?, ?, ?, 'liveness_invariant_violation',
-                        'state://graph-frontier', 'OPEN', ?)
-                """,
-                (incident_id, product_id, causal_task_id, now),
             )
-            if inserted:
-                self.state._record_event(
-                    product_id,
-                    causal_task_id,
-                    "controller_incident",
-                    {
-                        "incident_id": incident_id,
-                        "failure_id": failure_id,
-                        "reason_code": "liveness_invariant_violation",
-                    },
-                )
         return self.failure_router.route(failure_id)
 
     def _materialize_candidate_snapshot(self, product_id: str) -> bool:
@@ -1432,8 +1410,6 @@ class PipelineReconciler:
                 }
                 if roles & {"replanner", "path-arbiter"}:
                     return "replanned"
-                if "incident-recovery" in roles:
-                    return "incident"
                 return "repaired"
             if self.state.has_bounded_progress_path(product_id):
                 return "active"
@@ -1443,12 +1419,12 @@ class PipelineReconciler:
             )
             if completion.completed:
                 return "completed"
-            self._route_liveness_violation(
+            routed_task_id = self._route_liveness_violation(
                 product,
                 plans,
                 completion.unmet_conditions,
             )
-            return "replanned"
+            return "replanned" if routed_task_id else "incident"
         if self.state.active_tasks(product_id):
             return "active"
 
@@ -1622,63 +1598,6 @@ class PipelineReconciler:
         }
         for product in self.state.list_products():
             status = str(product["status"])
-            if status == "FAILED_SAFE" and self._recover_controller_valid_builder(product):
-                counts["inspected"] += 1
-                counts["recovered_successors"] += 1
-                continue
-            if status == "FAILED_SAFE" and self._recover_builder_downstream_gate(product):
-                counts["inspected"] += 1
-                refreshed = self.state.get_product(str(product["product_id"]))
-                if refreshed is None:
-                    continue
-                action = self._reconcile_product_safely(refreshed)
-                if action == "successor":
-                    counts["recovered_successors"] += 1
-                elif action == "repaired":
-                    counts["repaired"] += 1
-                continue
-            if status == "FAILED_SAFE" and self._recover_interrupted_product(product):
-                counts["inspected"] += 1
-                counts["repaired"] += 1
-                continue
-            if status == "FAILED_SAFE" and self._recover_undiagnosed_secret_exposure(product):
-                counts["inspected"] += 1
-                counts["repaired"] += 1
-                continue
-            if status == "FAILED_SAFE" and self._recover_deferred_dependency_consumer(product):
-                counts["inspected"] += 1
-                counts["repaired"] += 1
-                continue
-            if status == "FAILED_SAFE" and self._recover_exhausted_builder_cycle(product):
-                counts["inspected"] += 1
-                refreshed = self.state.get_product(str(product["product_id"]))
-                if refreshed is None:
-                    continue
-                action = self._reconcile_product_safely(refreshed)
-                if action == "repaired":
-                    counts["repaired"] += 1
-                elif action == "exhausted":
-                    counts["exhausted"] += 1
-                continue
-            if status == "FAILED_SAFE" and self._recover_extended_repair_budget(product):
-                counts["inspected"] += 1
-                refreshed = self.state.get_product(str(product["product_id"]))
-                if refreshed is None:
-                    continue
-                action = self._reconcile_product_safely(refreshed)
-                if action == "repaired":
-                    counts["repaired"] += 1
-                elif action == "owner_action":
-                    counts["owner_actions"] += 1
-                elif action == "exhausted":
-                    counts["exhausted"] += 1
-                elif action == "successor":
-                    counts["recovered_successors"] += 1
-                continue
-            if status == "FAILED_SAFE" and self._recover_director_root_cause_budget(product):
-                counts["inspected"] += 1
-                counts["repaired"] += 1
-                continue
             if status in _TERMINAL_PRODUCTS | _NON_RUNNING_PRODUCTS:
                 continue
             counts["inspected"] += 1
@@ -1712,6 +1631,7 @@ class ReconcilerLoop:
         self.capability_reconciler = capability_reconciler
         self.interval_seconds = interval_seconds
         self._stop = threading.Event()
+        self._initial_pass_complete = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -1724,6 +1644,13 @@ class ReconcilerLoop:
         )
         self._thread.start()
 
+    def wait_until_ready(self, timeout: float) -> bool:
+        """Return only after one complete fail-closed reconciliation pass."""
+
+        if timeout <= 0:
+            raise ValueError("reconciler readiness timeout must be positive")
+        return self._initial_pass_complete.wait(timeout)
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
@@ -1734,6 +1661,7 @@ class ReconcilerLoop:
         while not self._stop.is_set():
             try:
                 if self.reconciler.state.maintenance_active():
+                    self._initial_pass_complete.set()
                     self._stop.wait(self.interval_seconds)
                     continue
                 capability_result = (
@@ -1761,6 +1689,7 @@ class ReconcilerLoop:
                     )
                 ):
                     LOGGER.info("pipeline reconcile result=%s", result)
+                self._initial_pass_complete.set()
                 busy_delay = 0.25
             except sqlite3.OperationalError as error:
                 if not is_sqlite_busy(error):

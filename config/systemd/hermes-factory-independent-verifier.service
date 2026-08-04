@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes Software Factory independent release verifier
+
+[Service]
+Type=oneshot
+User=hermesverifier
+Group=hermesverifier
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.release_qualify verify
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateNetwork=true
+ReadOnlyPaths=/opt/hermes-factory-verifier /etc/hermes-factory/verifier.yaml /var/lib/hermes-factory-verifier/verifier-ed25519.key /var/lib/hermes-factory-verifier/unsigned-manifest.json
+ReadWritePaths=/var/lib/hermes-factory-verifier
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /etc/hermes-factory/credentials.d /usr/local/sbin/hermes-factory-release-submit
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=1200M
+TasksMax=256

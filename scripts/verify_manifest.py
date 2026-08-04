@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "SHA256SUMS"
 IGNORED_DIRS = {
     ".git",
+    ".hypothesis",
     ".deployment",
     ".mypy_cache",
     ".pytest_cache",

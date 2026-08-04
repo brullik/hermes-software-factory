@@ -18,9 +18,10 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .autonomy import CAPABILITY_PROFILES, OWNER_ACTION_REASONS
-from .common import sha256_text, stable_json, utc_now
+from .common import sha256_file, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
 from .owner_actions import OwnerActionService
+from .proof_obligations import ToolchainManifest
 from .state import StateStore
 
 
@@ -73,6 +74,56 @@ class ConfiguredCapabilityProbe:
         self.command_runner = command_runner or self._run
         self._github_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
         self._production_cache: tuple[datetime, dict[str, bool]] | None = None
+        self._isolated_attestations = self._load_isolated_attestations()
+
+    def _load_isolated_attestations(self) -> dict[str, CapabilityCheck]:
+        qualification = self.config.raw.get("qualification")
+        if not isinstance(qualification, dict):
+            return {}
+        path = Path(str(qualification["capability_attestation_path"]))
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or sha256_file(path) != qualification["capability_attestation_digest"]
+        ):
+            raise ValueError("isolated capability attestation is unavailable")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version",
+            "plane",
+            "capabilities",
+        }:
+            raise ValueError("isolated capability attestation schema is invalid")
+        expected_plane = str(qualification.get("plane") or "")
+        if (
+            payload["schema_version"] != "1.0"
+            or payload["plane"] != expected_plane
+            or expected_plane not in {"ISOLATED_Q6", "CLEAN_CANARY"}
+        ):
+            raise ValueError("isolated capability attestation identity is invalid")
+        capabilities = payload["capabilities"]
+        if not isinstance(capabilities, dict):
+            raise TypeError("isolated capability attestations must be an object")
+        checks: dict[str, CapabilityCheck] = {}
+        allowed_prefixes = ("git.", "github.", "repository.")
+        for capability, raw in capabilities.items():
+            if (
+                not isinstance(capability, str)
+                or not capability.startswith(allowed_prefixes)
+                or not isinstance(raw, dict)
+                or set(raw) != {"status", "scope"}
+                or raw["status"] != "AVAILABLE"
+                or not isinstance(raw["scope"], dict)
+                or raw["scope"].get("allowed_operations") != [capability]
+            ):
+                raise ValueError("isolated capability attestation entry is invalid")
+            checks[capability] = CapabilityCheck(
+                capability,
+                "AVAILABLE",
+                "isolated-qualification-target",
+                scope=dict(raw["scope"]),
+            )
+        return checks
 
     @staticmethod
     def _run(argv: list[str]) -> ProbeCommandResult:
@@ -505,22 +556,32 @@ class ConfiguredCapabilityProbe:
         reason = "controller_toolchain_unavailable"
         if capability == "toolchain.python":
             interpreter = Path(sys.executable)
-            available = (
-                interpreter.is_file()
-                and self.command_runner(
-                    [
-                        str(interpreter),
-                        "-c",
-                        "import pip, pytest; print('python-test-runtime-ready')",
-                    ]
-                ).returncode
-                == 0
+            version = self.command_runner(
+                [
+                    str(interpreter),
+                    "-c",
+                    (
+                        "import importlib.metadata as m,platform;"
+                        "print(platform.python_version());"
+                        "print(m.version('pip'));print(m.version('pytest'))"
+                    ),
+                ]
             )
+            available = interpreter.is_file() and version.returncode == 0
             scope["runtime"] = str(interpreter)
             scope["includes"] = ["pip", "pytest"]
+            scope["exact_versions"] = version.stdout.strip().splitlines()
             reason = "controller_toolchain_python_missing"
         elif capability == "toolchain.make":
-            available = shutil.which("make") is not None
+            make = shutil.which("make")
+            version = self.command_runner([make, "--version"]) if make else None
+            available = bool(version is not None and version.returncode == 0)
+            scope["runtime"] = str(make or "")
+            scope["exact_version"] = (
+                version.stdout.strip().splitlines()[0]
+                if version is not None and version.stdout.strip()
+                else ""
+            )
             reason = "controller_toolchain_make_missing"
         elif capability == "toolchain.container_builder":
             selected = ""
@@ -584,6 +645,11 @@ class ConfiguredCapabilityProbe:
                         )
                         if created.returncode == 0 and removed.returncode == 0:
                             selected = "podman"
+                            version = self.command_runner(["podman", "--version"])
+                            if version.returncode != 0:
+                                selected = ""
+                            else:
+                                scope["exact_version"] = version.stdout.strip()
                         else:
                             reason = "controller_toolchain_container_network_unavailable"
             available = bool(selected)
@@ -593,16 +659,15 @@ class ConfiguredCapabilityProbe:
         elif capability == "toolchain.scanners":
             root = Path(__file__).resolve().parents[1]
             scanner = Path("/usr/local/bin/osv-scanner")
+            version = self.command_runner([str(scanner), "--version"])
             available = (
                 (root / "config" / "quality-gates.yaml").is_file()
                 and (root / "scripts" / "quality_gate.py").is_file()
                 and self._trusted_executable(scanner)
-                and self.command_runner(
-                    [str(scanner), "--version"]
-                ).returncode
-                == 0
+                and version.returncode == 0
             )
             scope["scanner"] = str(scanner)
+            scope["exact_version"] = version.stdout.strip()
             reason = "controller_toolchain_scanner_missing"
         return CapabilityCheck(
             capability,
@@ -618,6 +683,8 @@ class ConfiguredCapabilityProbe:
         *,
         product: dict[str, Any],
     ) -> CapabilityCheck:
+        if capability in self._isolated_attestations:
+            return self._isolated_attestations[capability]
         if capability.startswith("toolchain."):
             return self._toolchain_check(capability)
         if capability.startswith(("github.", "git.")) or capability in {
@@ -663,8 +730,9 @@ class ConfiguredCapabilityProbe:
             )
         return CapabilityCheck(
             capability,
-            "AVAILABLE",
+            "DENIED_POLICY",
             "configured-host",
+            "controller_capability_unknown",
             scope={"allowed_operations": [capability]},
         )
 
@@ -685,7 +753,18 @@ class CapabilityBroker:
 
     @staticmethod
     def required_for_product(product: dict[str, Any]) -> tuple[str, ...]:
-        profiles = ["repository_bootstrap", "release_staging", "release_production"]
+        from .delivery_profiles import delivery_profile
+        from .lifecycle import stage_contract
+
+        selected_profile = delivery_profile(
+            str(product.get("delivery_profile") or "DEPLOYED_SERVICE")
+        )
+        profiles = ["repository_bootstrap"]
+        profiles.extend(
+            stage_contract(stage).capability_profile
+            for stage in selected_profile.lifecycle
+            if stage_contract(stage).capability_profile.startswith("release_")
+        )
         capabilities = [
             capability
             for profile in profiles
@@ -1038,6 +1117,51 @@ class CapabilityBroker:
                 self._controller_incident(product_id, check)
         for checks in changed_external.values():
             self._open_external_blocks(product_id, checks)
+        available_toolchain = [
+            check
+            for check in results
+            if check.capability.startswith("toolchain.") and check.status == "AVAILABLE"
+        ]
+        if available_toolchain:
+            manifest = ToolchainManifest.build(
+                controller_release_digest=self.state.controller_release_digest,
+                components={
+                    "product_binding": sha256_text(product_id),
+                    **{
+                        check.capability: stable_json(check.scope or {})
+                        for check in available_toolchain
+                    },
+                },
+                capabilities=[check.capability for check in available_toolchain],
+            )
+            with self.state._lock, self.state._connection:
+                self.state._connection.execute(
+                    """UPDATE toolchain_manifests SET status='SUPERSEDED'
+                         WHERE product_id=? AND status='ACTIVE'
+                           AND manifest_digest!=?""",
+                    (product_id, manifest.manifest_digest),
+                )
+                self.state._connection.execute(
+                    """INSERT OR IGNORE INTO toolchain_manifests
+                       (manifest_id,product_id,controller_release_digest,manifest_json,
+                        manifest_digest,status,created_at)
+                       VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)""",
+                    (
+                        manifest.manifest_id,
+                        product_id,
+                        manifest.controller_release_digest,
+                        stable_json(
+                            {
+                                "product_id": product_id,
+                                "components": dict(manifest.components),
+                                "capabilities": list(manifest.capabilities),
+                            }
+                        ),
+                        manifest.manifest_digest,
+                        manifest.created_at,
+                    ),
+                )
+                self.state.toolchain_manifest_digest = manifest.manifest_digest
         return tuple(results)
 
     def preflight_all(self) -> dict[str, tuple[CapabilityCheck, ...]]:

@@ -163,6 +163,7 @@ def validate_config(config: FactoryConfig) -> list[str]:
     paths = config.raw.get("paths", {})
     models = config.raw.get("models", {})
     intake = config.raw.get("intake", {})
+    qualification = config.raw.get("qualification")
     if int(controller.get("max_active_products", 2)) < 1:
         errors.append("max_active_products must be positive")
     if int(controller.get("max_active_products", 2)) > 2:
@@ -224,6 +225,90 @@ def validate_config(config: FactoryConfig) -> list[str]:
     for name in ("policies", "schemas", "prompts", "state", "worktrees", "logs"):
         if name not in paths:
             errors.append(f"missing path configuration: {name}")
+    if qualification is not None:
+        if not isinstance(qualification, dict):
+            errors.append("qualification isolation config is invalid")
+        else:
+            plane = str(qualification.get("plane") or "")
+            q6_keys = {
+                "plane",
+                "capability_attestation_path",
+                "capability_attestation_digest",
+            }
+            canary_keys = {
+                *q6_keys,
+                "scenario_id",
+                "scenario_digest",
+                "controller_release_digest",
+                "candidate_digest",
+                "faults",
+                "fault_receipt_root",
+                "isolated_target_root",
+                "existing_repository_url",
+            }
+            expected_keys = canary_keys if plane == "CLEAN_CANARY" else q6_keys
+            if set(qualification) != expected_keys:
+                errors.append("qualification isolation config is invalid")
+            attestation_path = Path(
+                str(qualification.get("capability_attestation_path") or "")
+            )
+            attestation_digest = str(
+                qualification.get("capability_attestation_digest") or ""
+            )
+            deployment = config.raw.get("deployment", {})
+            backup = config.raw.get("backup", {})
+            target = deployment.get("production_target", {})
+            if plane not in {"ISOLATED_Q6", "CLEAN_CANARY"}:
+                errors.append("qualification plane is invalid")
+            if not attestation_path.is_absolute():
+                errors.append("qualification attestation path must be absolute")
+            if len(attestation_digest) != 64 or any(
+                character not in "0123456789abcdef" for character in attestation_digest
+            ):
+                errors.append("qualification attestation digest is invalid")
+            if deployment.get("production_helper"):
+                errors.append("isolated qualification cannot configure production helper")
+            if not isinstance(target, dict) or target.get("mode") != "isolated_candidate":
+                errors.append("isolated qualification requires isolated candidate target")
+            if backup.get("offsite_configured") is not False:
+                errors.append("isolated qualification cannot use offsite backup credentials")
+            if plane == "CLEAN_CANARY":
+                from .canary_qualification import load_canary_catalog
+
+                scenario_id = str(qualification.get("scenario_id") or "")
+                scenario_digest = str(qualification.get("scenario_digest") or "")
+                candidate_digest = str(qualification.get("candidate_digest") or "")
+                controller_digest = str(
+                    qualification.get("controller_release_digest") or ""
+                )
+                fault_root = Path(str(qualification.get("fault_receipt_root") or ""))
+                target_root = Path(str(qualification.get("isolated_target_root") or ""))
+                catalog_path = config.source.parent.parent / "qualification" / "canaries" / "catalog.yaml"
+                configured_catalog = config.raw.get("paths", {}).get("canary_catalog")
+                if configured_catalog:
+                    catalog_path = Path(str(configured_catalog))
+                try:
+                    scenario = load_canary_catalog(catalog_path)[scenario_id]
+                except (KeyError, OSError, RuntimeError, ValueError):
+                    errors.append("clean canary scenario contract is invalid")
+                else:
+                    if scenario.scenario_digest != scenario_digest:
+                        errors.append("clean canary scenario digest differs")
+                    if list(scenario.injected_faults) != qualification.get("faults"):
+                        errors.append("clean canary fault contract differs")
+                if any(
+                    len(value) != 64
+                    or any(character not in "0123456789abcdef" for character in value)
+                    for value in (scenario_digest, candidate_digest, controller_digest)
+                ):
+                    errors.append("clean canary release digest is invalid")
+                if not fault_root.is_absolute() or not target_root.is_absolute():
+                    errors.append("clean canary roots must be absolute")
+                if deployment.get("production_helper"):
+                    errors.append("clean canary cannot configure production helper")
+                existing_url = str(qualification.get("existing_repository_url") or "")
+                if existing_url and not existing_url.startswith("https://github.com/"):
+                    errors.append("clean canary existing repository URL is invalid")
     return errors
 
 

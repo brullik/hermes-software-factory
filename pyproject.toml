@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-software-factory-spec"
-version = "2.3.11"
+version = "2.4.0"
 description = "Reference policy, schema and validation utilities for Hermes Software Factory"
 requires-python = ">=3.12"
 dependencies = [
+  "cryptography>=45,<46",
   "jsonschema>=4.23,<5",
   "packaging>=24,<27",
   "pip-audit>=2.10,<3",
@@ -22,6 +23,7 @@ include = ["factory*", "scripts*"]
 
 [project.optional-dependencies]
 dev = [
+  "hypothesis>=6,<7",
   "pytest>=8,<9",
   "ruff>=0.12,<1",
   "mypy>=1.16,<2",

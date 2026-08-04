@@ -13,6 +13,7 @@
     "owner_id",
     "goal_text",
     "delivery_mode",
+    "delivery_profile",
     "repository_url",
     "repository_name",
     "repository_visibility",
@@ -33,6 +34,18 @@
     "goal_text": {"type": "string", "minLength": 3},
     "idea": {"type": "string", "minLength": 3, "description": "Deprecated compatibility alias for goal_text."},
     "delivery_mode": {"enum": ["new_repository", "existing_repository"]},
+    "delivery_profile": {
+      "enum": [
+        "DEPLOYED_SERVICE",
+        "TELEGRAM_BOT",
+        "WEB_APPLICATION",
+        "CLI_PACKAGE",
+        "LIBRARY_PACKAGE",
+        "GITHUB_AUTOMATION",
+        "OFFLINE_BATCH",
+        "STAGING_ONLY_PROTOTYPE"
+      ]
+    },
     "repository_url": {
       "type": ["string", "null"],
       "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?/?$"

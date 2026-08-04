@@ -1,0 +1,102 @@
+schema_version: "1.0"
+scenarios:
+  - scenario_id: zero-dependency-cli
+    delivery_profile: CLI_PACKAGE
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a deterministic zero-dependency Python CLI with install and invocation smoke tests.
+    events: [INTAKE, BUILD, PACKAGE, INSTALL_SMOKE, SIGNED_RELEASE, OBSERVE, COMPLETE]
+    injected_faults: []
+    expected_decisions: [CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, WAIT_EXTERNAL, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: small-python-service
+    delivery_profile: DEPLOYED_SERVICE
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a small Python HTTP service with health, test, staging, rollback, and observation proofs.
+    events: [INTAKE, BUILD, TEST, STAGING, ACCEPTANCE, PRODUCTION, OBSERVE, COMPLETE]
+    injected_faults: []
+    expected_decisions: [CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, WAIT_EXTERNAL, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: telegram-bot
+    delivery_profile: TELEGRAM_BOT
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a Telegram bot with an isolated API fixture and exact-once command response contract.
+    events: [INTAKE, BUILD, TEST, STAGING, TELEGRAM_SMOKE, ACCEPTANCE, OBSERVE, COMPLETE]
+    injected_faults: []
+    expected_decisions: [CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, WAIT_EXTERNAL, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: existing-repository-repair
+    delivery_profile: STAGING_ONLY_PROTOTYPE
+    delivery_mode: existing_repository
+    initial_state: EMPTY_DATABASE
+    idea: Repair one deterministic defect in the configured private shadow repository and prove the fix.
+    events: [INTAKE, CLONE, BUILD, TEST, REPAIR, STAGING, ACCEPTANCE, COMPLETE]
+    injected_faults: [KNOWN_PRODUCT_DEFECT]
+    expected_decisions: [CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, WAIT_EXTERNAL, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: high-fan-in
+    delivery_profile: OFFLINE_BATCH
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a deterministic offline batch package with many independent nodes joining at one integration gate.
+    events: [INTAKE, BUILD_PARALLEL, INTEGRATE, TEST, PACKAGE, FIXTURE_REPLAY, COMPLETE]
+    injected_faults: []
+    expected_decisions: [CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, WAIT_EXTERNAL, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: external-blocker-resume
+    delivery_profile: GITHUB_AUTOMATION
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a GitHub automation that waits for an isolated external fixture and resumes automatically.
+    events: [INTAKE, BUILD, EXTERNAL_BLOCK, AUTOMATIC_EXTERNAL_READY, RESUME, TEST, COMPLETE]
+    injected_faults: [BOUNDED_EXTERNAL_BLOCK]
+    expected_decisions: [CONTINUE, RETRY_TRANSIENT, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, OWNER_ACTION, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: provider-timeout-restart
+    delivery_profile: STAGING_ONLY_PROTOTYPE
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a prototype while one isolated provider request times out and succeeds after crash-safe restart.
+    events: [INTAKE, PROVIDER_TIMEOUT, PROCESS_RESTART, RETRY, BUILD, TEST, COMPLETE]
+    injected_faults: [ONE_PROVIDER_TIMEOUT, ONE_PROCESS_RESTART]
+    expected_decisions: [RETRY_TRANSIENT, CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, OWNER_ACTION, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: failed-product-test-one-repair
+    delivery_profile: LIBRARY_PACKAGE
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a Python library whose deterministic product test fails once and is repaired in one bounded revision.
+    events: [INTAKE, BUILD, TEST_FAIL, REPAIR, TEST_PASS, PACKAGE, CONSUMER_SMOKE, COMPLETE]
+    injected_faults: [ONE_PRODUCT_TEST_FAILURE]
+    expected_decisions: [REPAIR_NODE_VERSION, CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, OWNER_ACTION, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: package-only
+    delivery_profile: LIBRARY_PACKAGE
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build and sign a package-only Python library with compatibility and consumer smoke proofs.
+    events: [INTAKE, BUILD, TEST, PACKAGE, COMPATIBILITY, PUBLISH_DRY_RUN, SIGN, COMPLETE]
+    injected_faults: []
+    expected_decisions: [CONTINUE, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, WAIT_EXTERNAL, FAIL_SAFE]
+    expected_terminal: COMPLETED
+  - scenario_id: deploy-rollback
+    delivery_profile: DEPLOYED_SERVICE
+    delivery_mode: new_repository
+    initial_state: EMPTY_DATABASE
+    idea: Build a service, inject one isolated post-deploy health failure, roll back exactly once, repair, redeploy, and complete.
+    events: [INTAKE, BUILD, TEST, STAGING, DEPLOY, HEALTH_FAIL, ROLLBACK, REPAIR, REDEPLOY, OBSERVE, COMPLETE]
+    injected_faults: [ONE_POST_DEPLOY_HEALTH_FAILURE]
+    expected_decisions: [CONTINUE, ROLLBACK, REPAIR_NODE_VERSION, COMPLETE]
+    forbidden_decisions: [CONTROLLER_QUARANTINE, OWNER_ACTION, FAIL_SAFE]
+    expected_terminal: COMPLETED

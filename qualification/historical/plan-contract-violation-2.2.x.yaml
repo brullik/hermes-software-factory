@@ -1,0 +1,13 @@
+schema_version: "1.0"
+scenario_id: plan-contract-violation-2.2.x
+source_release: 2.2.x
+source_incident_count: 35
+initial_state: {schema_version: 16, product_status: ARCHITECTED, task_count: 232, accepted_result_count: 0, sanitized: true}
+events:
+  - {event_id: failure-1, type: failure_received, reason_code: plan_contract_violation}
+injected_faults: [invalid-plan-contract]
+expected_decisions:
+  - {event_id: failure-1, owner: product, action: RECOMPILE_AFFECTED_SUBGRAPH, registered: true}
+forbidden_decisions:
+  - {event_id: failure-1, owner: controller, action: CONTROLLER_QUARANTINE, registered: true}
+expected_terminal: REPAIRING

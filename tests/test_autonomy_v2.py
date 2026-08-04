@@ -27,6 +27,7 @@ from factory.path_governor import PathGovernor, task_contract_digest
 from factory.pipeline import PipelineCoordinator
 from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
+from factory.proof_obligations import RecoveryCertificateService
 from factory.providers import ExternalBlocker
 from factory.reconciler import PipelineReconciler
 from factory.recovery import (
@@ -53,6 +54,67 @@ def configured(tmp_path: Path):
     )
 
 
+def issue_test_recovery_certificate(
+    config: Any,
+    state: StateStore,
+    *,
+    product_id: str,
+    label: str,
+) -> str:
+    with state._lock, state._connection:
+        return RecoveryCertificateService(state._connection).issue(
+            product_id=product_id,
+            previous_epoch_key=sha256_text(f"previous:{label}"),
+            new_epoch_key=sha256_text(f"new:{label}"),
+            root_cause_key=sha256_text(f"cause:{label}"),
+            controller_release_digest=state.controller_release_digest,
+            policy_schema_digest=policy_digest(config),
+            fixed_invariant_id=f"FIX-{label}",
+            regression_evidence_ref=f"evidence://regression/{label}",
+            migration_dry_run_digest=sha256_text(f"migration:{label}"),
+            backup_restore_proof_ref=f"evidence://backup-restore/{label}",
+        )
+
+
+def write_test_repair_contract(
+    artifacts: ArtifactStore,
+    source: dict[str, Any],
+    *,
+    task_id: str,
+    source_task_id: str,
+    plan_node_id: str,
+    failure_id: str,
+) -> None:
+    contract = dict(source)
+    contract.update(
+        {
+            "artifact_id": f"task-contract-{task_id}",
+            "task_id": task_id,
+            "title": "Repair the exact reviewer finding",
+            "objective": "Repair the bounded finding and preserve the immutable review gate.",
+            "dependencies": [],
+            "role": "builder",
+            "output_schema": "attempt-result.schema.json",
+            "capability_profile": "builder_workspace",
+            "required_capabilities": list(CAPABILITY_PROFILES["builder_workspace"]),
+            "parent_task_id": source_task_id,
+            "source_task_id": source_task_id,
+            "plan_node_id": plan_node_id,
+            "active_context_ref": f"evidence/task-{task_id}.json",
+            "failure_id": failure_id,
+            "idempotency_key": sha256_text(f"contract:{task_id}"),
+            "supersedes_task_id": source_task_id,
+            "status": "DRAFT",
+        }
+    )
+    contract.pop("lifecycle_stage", None)
+    artifacts.write(
+        "task-contract-v2.schema.json",
+        contract,
+        filename=f"task-{task_id}.json",
+    )
+
+
 def accept_path_arbiter_and_prepare_replanner(
     config: Any,
     state: StateStore,
@@ -76,7 +138,7 @@ def accept_path_arbiter_and_prepare_replanner(
         "status": "proposed",
         "root_problem_signature": str(task["root_problem_signature"]),
         "root_cause_class": "product_semantic",
-        "recommended_action": "REPLAN_DELTA",
+        "recommended_action": "RECOMPILE_AFFECTED_SUBGRAPH",
         "affected_semantic_node_keys": [
             str(task.get("semantic_node_key") or task.get("plan_node_id") or "affected")
         ],
@@ -618,6 +680,19 @@ def test_AUT_P0_002_new_product_bootstrap_is_durable_and_idempotent(
         assert product["repository_visibility"] == "private"
         assert product["bootstrap_sha"] == "a" * 40
         assert product["repository_bootstrap_state"] == "READY"
+        intent = state._connection.execute(
+            "SELECT intent_id,status FROM side_effect_intents WHERE product_id=?",
+            ("product-autonomy",),
+        ).fetchone()
+        assert intent is not None
+        assert str(intent["status"]) == "VERIFIED"
+        assert (
+            state._connection.execute(
+                "SELECT COUNT(*) FROM side_effect_receipts WHERE intent_id=?",
+                (str(intent["intent_id"]),),
+            ).fetchone()[0]
+            == 1
+        )
     finally:
         state.close()
 
@@ -740,6 +815,8 @@ def failed_two_node_graph(
     state = StateStore(config.database_path)
     artifacts = ArtifactStore(config)
     create_v2_product(state)
+    for product_status in ("RISK_CLASSIFIED", "ARCHITECTED", "IMPLEMENTING"):
+        state.transition_product("product-autonomy", product_status)
     root_id = "T-ROOTFAILURE"
     state.add_task(
         task_id=root_id,
@@ -827,7 +904,7 @@ def test_AUT_P0_005_lineage_is_preserved_through_repair(tmp_path: Path) -> None:
         state.close()
 
 
-def test_repair_inherits_toolchain_capabilities_from_failed_node_lineage(
+def test_repair_does_not_inherit_toolchain_capabilities_from_failed_node_lineage(
     tmp_path: Path,
 ) -> None:
     config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
@@ -850,8 +927,7 @@ def test_repair_inherits_toolchain_capabilities_from_failed_node_lineage(
         repair = state.get_task(repair_id)
         assert repair is not None
         required = json.loads(str(repair["required_capabilities_json"]))
-        assert "toolchain.container_builder" in required
-        assert "toolchain.scanners" in required
+        assert required == sorted(CAPABILITY_PROFILES["builder_workspace"])
         contract = json.loads(
             (config.evidence_dir / Path(str(repair["contract_ref"])).name).read_text(
                 encoding="utf-8"
@@ -859,26 +935,6 @@ def test_repair_inherits_toolchain_capabilities_from_failed_node_lineage(
         )
         assert contract["required_capabilities"] == required
 
-        with state._lock, state._connection:
-            state._connection.execute(
-                "UPDATE tasks SET required_capabilities_json=? WHERE task_id=?",
-                (
-                    stable_json(list(CAPABILITY_PROFILES["builder_workspace"])),
-                    repair_id,
-                ),
-            )
-        stripped_repair = state.get_task(repair_id)
-        assert stripped_repair is not None
-        recovered = FailureRouter(
-            config,
-            state,
-            artifacts,
-        )._lineage_required_capabilities(
-            stripped_repair,
-            "builder_workspace",
-        )
-        assert "toolchain.container_builder" in recovered
-        assert "toolchain.scanners" in recovered
     finally:
         state.close()
 
@@ -956,7 +1012,7 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
             ("product-autonomy", routed["root_problem_signature"]),
         ).fetchone()
         assert decision is not None
-        assert tuple(decision) == ("REPLAN_DELTA", "APPLIED")
+        assert tuple(decision) == ("RECOMPILE_AFFECTED_SUBGRAPH", "APPLIED")
     finally:
         state.close()
 
@@ -1226,13 +1282,20 @@ def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
                       AND root_problem_signature=?""",
                 (signature,),
             )
-            state._connection.execute(
-                """UPDATE products SET status='FAILED_SAFE',
-                          terminal_reason='path_governor_problem_budget_exhausted'
-                    WHERE product_id='product-autonomy'"""
+            state.transition_product(
+                "product-autonomy",
+                "FAILED_SAFE",
+                terminal_reason="path_governor_problem_budget_exhausted",
+                terminal_evidence_ref="internal://container-scan-review",
             )
 
         state.enter_maintenance("reviewer-builder-route-recovery")
+        issue_test_recovery_certificate(
+            config,
+            state,
+            product_id="product-autonomy",
+            label="reviewer-builder-route",
+        )
         applied = resume_reviewer_builder_route_failure(
             config,
             state,
@@ -1248,8 +1311,9 @@ def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
         assert (config.schema_root() / str(repair["output_schema"])).is_file()
         assert repair["stage_key"] == "repair"
         required = json.loads(str(repair["required_capabilities_json"]))
-        assert "toolchain.container_builder" in required
-        assert "toolchain.scanners" in required
+        assert required == sorted(CAPABILITY_PROFILES["builder_workspace"])
+        assert "toolchain.container_builder" not in required
+        assert "toolchain.scanners" not in required
         repair_contract = json.loads(
             (config.evidence_dir / Path(str(repair["contract_ref"])).name).read_text(
                 encoding="utf-8"
@@ -1754,8 +1818,8 @@ def test_path_governor_live_router_enforces_one_arbiter_two_executions(
             ("product-autonomy", signature),
         ).fetchall()
         decision_pairs = [tuple(row) for row in decisions]
-        assert decision_pairs.count(("REPLAN_DELTA", "APPLIED")) == 1
-        assert decision_pairs.count(("REPAIR_NODE", "FAILED_SAFE")) == 1
+        assert decision_pairs.count(("RECOMPILE_AFFECTED_SUBGRAPH", "APPLIED")) == 1
+        assert decision_pairs.count(("REPAIR_NODE_VERSION", "FAILED_SAFE")) == 1
     finally:
         state.close()
 
@@ -1784,7 +1848,7 @@ def test_path_arbiter_worker_runs_readonly_and_creates_one_replanner(
                     "status": "proposed",
                     "root_problem_signature": signature,
                     "root_cause_class": "product_semantic",
-                    "recommended_action": "REPLAN_DELTA",
+                    "recommended_action": "RECOMPILE_AFFECTED_SUBGRAPH",
                     "affected_semantic_node_keys": ["a"],
                     "evidence_refs": ["internal://failure/evidence"],
                     "expected_progress_delta": {
@@ -1802,7 +1866,10 @@ def test_path_arbiter_worker_runs_readonly_and_creates_one_replanner(
             repository_root=Path(__file__).resolve().parents[1],
         ).run_once()
 
-        assert result is not None and result.status == "completed"
+        assert result is not None and result.status == "completed", (
+            result.reason_code if result is not None else None,
+            result.detail if result is not None else None,
+        )
         assert len(runner.calls) == 1
         durable_arbiter = state.get_task(arbiter_id)
         assert durable_arbiter is not None
@@ -2470,7 +2537,7 @@ def test_AUT_P0_006_failed_dependency_routes_and_unblocks_after_repair(
 def test_accepted_builder_repair_requires_fresh_readonly_reviewer_acceptance(
     tmp_path: Path,
 ) -> None:
-    config, state, _artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
     try:
         failed = state.get_task("T-FAILNODEA")
         assert failed is not None
@@ -2506,6 +2573,14 @@ def test_accepted_builder_repair_requires_fresh_readonly_reviewer_acceptance(
             )
 
         repair_id = "T-REVIEWER-BUILDER-REPAIR"
+        write_test_repair_contract(
+            artifacts,
+            contract,
+            task_id=repair_id,
+            source_task_id="T-FAILNODEA",
+            plan_node_id="A:reviewer-builder-repair",
+            failure_id=failure_id,
+        )
         state.add_task(
             task_id=repair_id,
             product_id="product-autonomy",
@@ -2600,6 +2675,16 @@ def test_reviewer_revalidation_lineage_recovery_repairs_existing_shadow_state(
                 (stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),),
             )
         repair_id = "T-LEGACY-REVIEWER-BUILDER-REPAIR"
+        source_contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
+        source_contract = json.loads(source_contract_path.read_text(encoding="utf-8"))
+        write_test_repair_contract(
+            artifacts,
+            source_contract,
+            task_id=repair_id,
+            source_task_id="T-FAILNODEA",
+            plan_node_id="A:legacy-reviewer-builder-repair",
+            failure_id=failure_id,
+        )
         state.add_task(
             task_id=repair_id,
             product_id="product-autonomy",
@@ -3477,7 +3562,7 @@ def test_AUT_P0_006_only_causal_leaf_failure_creates_recovery_work(
         state.close()
 
 
-def test_AUT_P0_006_missing_plan_output_schema_routes_replanner(
+def test_AUT_P0_006_missing_plan_output_schema_quarantines_controller_defect(
     tmp_path: Path,
 ) -> None:
     config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
@@ -3516,23 +3601,21 @@ def test_AUT_P0_006_missing_plan_output_schema_routes_replanner(
 
         routed_id = FailureRouter(config, state, artifacts).route(failure_id)
 
-        routed = state.get_task(routed_id)
-        assert routed is not None
-        assert routed["role"] == "replanner"
-        assert routed["output_schema"] == "plan-proposal-v1.schema.json"
-        assert routed["graph_status"] == "READY"
-        incident = state._connection.execute(
-            "SELECT status, resolved_at FROM controller_incidents WHERE product_id=?",
+        assert routed_id == ""
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        assert product["status"] == "FAILED_SAFE"
+        assert product["terminal_reason"] == "controller_exception_file_not_found_error"
+        assert state._connection.execute(
+            """SELECT COUNT(*) FROM controller_incidents
+                 WHERE product_id=? AND status='OPEN'""",
             ("product-autonomy",),
-        ).fetchone()
-        assert incident is not None
-        assert incident["status"] == "RESOLVED"
-        assert incident["resolved_at"]
+        ).fetchone()[0] >= 1
     finally:
         state.close()
 
 
-def test_AUT_P0_006_legacy_contract_ref_uses_canonical_evidence_coordinate(
+def test_AUT_P0_006_legacy_contract_ref_is_quarantined_without_reconstruction(
     tmp_path: Path,
 ) -> None:
     config, state, artifacts, failure_id, _ = failed_two_node_graph(
@@ -3546,14 +3629,10 @@ def test_AUT_P0_006_legacy_contract_ref_uses_canonical_evidence_coordinate(
                 ("artifacts/task-contracts/T-FAILNODEA.json",),
             )
 
-        arbiter_id = FailureRouter(config, state, artifacts).route(failure_id)
-        routed_id = accept_path_arbiter_and_prepare_replanner(
-            config, state, artifacts, arbiter_id
-        )
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
 
-        routed = state.get_task(routed_id)
-        assert routed is not None
-        assert routed["role"] == "replanner"
+        assert routed_id == ""
+        assert state.get_product("product-autonomy")["terminal_reason"] == "invalid_task_contract"
         reconstructed = [
             event
             for event in state.events("product-autonomy")
@@ -3564,7 +3643,7 @@ def test_AUT_P0_006_legacy_contract_ref_uses_canonical_evidence_coordinate(
         state.close()
 
 
-def test_AUT_P0_006_missing_contract_reconstructs_safe_replan_coordinate(
+def test_AUT_P0_006_missing_contract_is_quarantined_without_permissive_scope(
     tmp_path: Path,
 ) -> None:
     config, state, artifacts, failure_id, _ = failed_two_node_graph(
@@ -3579,38 +3658,22 @@ def test_AUT_P0_006_missing_contract_reconstructs_safe_replan_coordinate(
                 ("artifacts/task-contracts/missing.json",),
             )
 
-        arbiter_id = FailureRouter(config, state, artifacts).route(failure_id)
-        routed_id = accept_path_arbiter_and_prepare_replanner(
-            config, state, artifacts, arbiter_id
-        )
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
 
-        routed = state.get_task(routed_id)
-        assert routed is not None
-        assert routed["role"] == "replanner"
-        routed_contract = json.loads(
-            (config.evidence_dir / Path(str(routed["contract_ref"])).name).read_text(
-                encoding="utf-8"
-            )
-        )
-        assert routed_contract["allowed_paths"] == ["artifacts/**"]
-        assert {item["criterion_id"] for item in routed_contract["acceptance"]} == {
-            "AC-REPLAN-FAILURE-CHAIN",
-            "AC-REPLAN-EXECUTABLE-HANDOFF",
-            "AC-REPLAN-PRESERVE-ACCEPTED",
-            "AC-REPLAN-SEMANTIC-ONLY",
-        }
+        assert routed_id == ""
+        assert state.get_product("product-autonomy")["terminal_reason"] == "invalid_task_contract"
         incident = state._connection.execute(
             """
             SELECT reason_code, status, evidence_ref
               FROM controller_incidents
              WHERE product_id=?
-               AND reason_code='artifact_task_contract_reconstructed'
+               AND reason_code='invalid_task_contract'
             """,
             ("product-autonomy",),
         ).fetchone()
         assert incident is not None
-        assert incident["status"] == "RESOLVED"
-        assert str(incident["evidence_ref"]).startswith("state://task-contract/")
+        assert incident["status"] == "OPEN"
+        assert str(incident["evidence_ref"]).startswith("internal://contract-integrity/")
     finally:
         state.close()
 
@@ -4533,6 +4596,15 @@ def test_AUT_P0_016_observation_is_atomic_with_production_release(
     artifacts = ArtifactStore(config)
     try:
         create_v2_product(state)
+        for product_status in (
+            "RISK_CLASSIFIED",
+            "ARCHITECTED",
+            "IMPLEMENTING",
+            "INTEGRATING",
+            "STAGING_DEPLOYED",
+            "RELEASE_READY",
+        ):
+            state.transition_product("product-autonomy", product_status)
         root_id = "T-ROOTRELEASE"
         state.add_task(
             task_id=root_id,
@@ -5297,7 +5369,7 @@ def test_AUT_P0_019_causal_leaf_migration_supersedes_duplicate_recovery(
         restarted.close()
 
 
-def test_AUT_P0_019_invalid_output_schema_migration_reopens_replan(
+def test_AUT_P0_019_invalid_output_schema_migration_requires_new_release_epoch(
     tmp_path: Path,
 ) -> None:
     config, state, _, failure_id, root_id = failed_two_node_graph(tmp_path)
@@ -5382,9 +5454,11 @@ def test_AUT_P0_019_invalid_output_schema_migration_reopens_replan(
             restarted,
             ArtifactStore(config),
         ).route(failure_id)
-        routed = restarted.get_task(routed_id)
-        assert routed is not None
-        assert routed["role"] == "replanner"
+        assert routed_id == ""
+        product = restarted.get_product("product-autonomy")
+        assert product is not None
+        assert product["status"] == "FAILED_SAFE"
+        assert product["terminal_reason"] == "controller_exception_file_not_found_error"
     finally:
         restarted.close()
 
@@ -5679,7 +5753,7 @@ def test_AUT_P0_018_unregistered_quality_gate_is_rejected_before_plan_ingest(
         state.close()
 
 
-def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
+def test_AUT_P0_019_exhausted_graph_quarantines_controller_liveness_defect(
     tmp_path: Path,
 ) -> None:
     config = configured(tmp_path)
@@ -5739,58 +5813,18 @@ def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
         first = PipelineReconciler(config, state).reconcile_once()
         second = PipelineReconciler(config, state).reconcile_once()
 
-        assert first.replanned == 1
+        assert first.incidents == 1
         assert second.replanned == 0
         active = [
             task
             for task in state.list_tasks("product-autonomy")
             if task["graph_status"] in {"READY", "CLAIMED"}
         ]
-        assert len(active) == 1
-        assert active[0]["role"] == "path-arbiter"
-        assert active[0]["failure_id"]
-        replanner_id = accept_path_arbiter_and_prepare_replanner(
-            config,
-            state,
-            ArtifactStore(config),
-            str(active[0]["task_id"]),
-        )
-        active = [state.get_task(replanner_id)]
-        assert active[0] is not None and active[0]["role"] == "replanner"
-        current_product = state.get_product("product-autonomy")
-        assert current_product is not None
-        assert active[0]["plan_id"] == current_product["active_plan_id"]
-        claimed_replanner = state.claim_task(worker_id="liveness-replanner")
-        assert claimed_replanner is not None
-        assert claimed_replanner["task_id"] == active[0]["task_id"]
-
-        stale_plan_id = str(plan["parent_plan_id"])
-        with state._lock, state._connection:
-            state._connection.execute(
-                """
-                UPDATE tasks
-                   SET plan_id=?, status='PENDING', graph_status='READY',
-                       lease_owner=NULL, lease_until=NULL, lease_token=NULL,
-                       heartbeat_at=NULL
-                 WHERE task_id=?
-                """,
-                (stale_plan_id, active[0]["task_id"]),
-            )
-        assert not state.has_bounded_progress_path("product-autonomy")
-        third = PipelineReconciler(config, state).reconcile_once()
-        fourth = PipelineReconciler(config, state).reconcile_once()
-        assert third.replanned == 1
-        assert fourth.replanned == 0
+        assert active == []
         terminal_product = state.get_product("product-autonomy")
         assert terminal_product is not None
         assert terminal_product["status"] == "FAILED_SAFE"
-        assert terminal_product["terminal_reason"] == (
-            "path_governor_problem_budget_exhausted"
-        )
-        assert not any(
-            task["supersedes_task_id"] == active[0]["task_id"]
-            for task in state.list_tasks("product-autonomy")
-        )
+        assert terminal_product["terminal_reason"] == "liveness_invariant_violation"
         failures = state.list_failures("product-autonomy")
         assert len(failures) == 1
         assert failures[0]["reason_code"] == "liveness_invariant_violation"
@@ -5804,8 +5838,7 @@ def test_AUT_P0_019_exhausted_graph_routes_real_liveness_replan(
             ("product-autonomy",),
         ).fetchall()
         assert [tuple(row) for row in incidents] == [
-            ("liveness_invariant_violation", "RESOLVED"),
-            ("path_governor_problem_budget_exhausted", "OPEN"),
+            ("liveness_invariant_violation", "OPEN"),
         ]
     finally:
         state.close()
@@ -5975,7 +6008,7 @@ def test_AUT_P0_009_safe_internal_diagnostic_is_precise_and_redacted() -> None:
     assert len(str(diagnostic["stack_fingerprint"])) == 64
 
 
-def test_legacy_replanner_scope_contract_gets_one_bounded_correction_then_stops(
+def test_legacy_replanner_scope_contract_is_quarantined_without_correction_task(
     tmp_path: Path,
 ) -> None:
     """A historical Builder scope must not be inherited forever by Replanner."""
@@ -6054,72 +6087,22 @@ def test_legacy_replanner_scope_contract_gets_one_bounded_correction_then_stops(
         )
         legacy_failure_id = str(state.get_task(legacy_replanner_id)["failure_id"])
 
-        correction_id = router.route(legacy_failure_id)
-        correction = state.get_task(correction_id)
-        assert correction is not None
-        assert correction["role"] == "replanner"
-        assert correction["stage_key"] == "scope-contract-correction"
-        correction_contract = json.loads(
-            (
-                config.evidence_dir / Path(str(correction["contract_ref"])).name
-            ).read_text(encoding="utf-8")
-        )
-        assert correction_contract["allowed_paths"] == ["artifacts/**"]
-        assert correction_contract["model_floor"] == "sol"
-        assert "typed replan scope policy" in correction_contract["objective"]
-
-        # The initial Sol arbitration and one deterministic contract correction
-        # consume the complete non-execution budget for this structural cause.
-        # A repeated correction failure terminates without another LLM task.
-        claimed = state.claim_task(worker_id="scope-correction")
-        assert claimed is not None and claimed["task_id"] == correction_id
-        state.commit_task_outcome(
-            TaskOutcome(
-                task_id=correction_id,
-                worker_id="scope-correction",
-                lease_token=str(claimed["lease_token"]),
-                expected_task_revision=int(claimed["task_revision"]),
-                expected_plan_revision=1,
-                idempotency_key=sha256_text("scope-correction-failed"),
-                result_ref="internal://scope-correction-failed",
-                result_digest=sha256_text("scope-correction-failed"),
-                status="FAILED_SEMANTIC",
-                failure=FailureData(
-                    failure_class="semantic",
-                    reason_code="needs_replan",
-                    safe_message="The same required scope path remains unhandled.",
-                    evidence_ref="internal://scope-correction-failed",
-                    parent_failure_id=legacy_failure_id,
-                    failed_gate_ids=("needs_replan",),
-                ),
-            )
-        )
-        correction_failure_id = str(state.get_task(correction_id)["failure_id"])
         tasks_before = len(state.list_tasks("product-autonomy"))
+        correction_id = router.route(legacy_failure_id)
 
-        terminal_task_id = router.route(correction_failure_id)
-
-        assert terminal_task_id == correction_id
+        assert correction_id == ""
         assert len(state.list_tasks("product-autonomy")) == tasks_before
         product = state.get_product("product-autonomy")
         assert product is not None
         assert product["status"] == "FAILED_SAFE"
-        assert product["terminal_reason"] == "path_governor_problem_budget_exhausted"
-        budget = state._connection.execute(
-            """SELECT deterministic_actions_used, arbiter_calls_used,
-                      execution_attempts_used, status
-                 FROM problem_budgets WHERE product_id=?""",
-            ("product-autonomy",),
-        ).fetchone()
-        assert budget is not None
-        assert tuple(budget) == (1, 1, 0, "EXHAUSTED")
+        assert product["terminal_reason"] == "invalid_capability_contract"
         incident = state._connection.execute(
             """SELECT reason_code, status FROM controller_incidents
                WHERE product_id=? ORDER BY created_at DESC LIMIT 1""",
             ("product-autonomy",),
         ).fetchone()
         assert incident is not None
-        assert incident["reason_code"] == "path_governor_problem_budget_exhausted"
+        assert incident["reason_code"] == "invalid_capability_contract"
         assert incident["status"] == "OPEN"
     finally:
         state.close()

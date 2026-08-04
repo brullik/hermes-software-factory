@@ -56,6 +56,12 @@ def update(update_id: int, user_id: int, text: str) -> dict[str, Any]:
 
 
 class GatewayTests(unittest.TestCase):
+    def test_telegram_api_base_url_allows_only_official_or_loopback(self) -> None:
+        TelegramApi("fixture", api_base_url="https://api.telegram.org")
+        TelegramApi("fixture", api_base_url="http://127.0.0.1:8765")
+        with self.assertRaises(ValueError):
+            TelegramApi("fixture", api_base_url="https://example.com")
+
     def test_allowlist_intake_and_update_idempotency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = make_config(Path(directory))

@@ -28,6 +28,7 @@ from factory.intake import IntakeService
 from factory.path_governor import ResultLineageIdentityError
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
+from factory.proof_obligations import RecoveryCertificateService, SideEffectProtocol
 from factory.providers import ExternalBlocker, ModelSelection
 from factory.quality import QualityGateRun
 from factory.reconciler import PipelineReconciler
@@ -1582,7 +1583,11 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                result.status,
+                "completed",
+                msg=f"reason={result.reason_code}; detail={result.detail}",
+            )
             self.assertIsNone(result.reason_code)
             self.assertIsNotNone(result.artifact_ref)
             attempt = json.loads(Path(str(result.artifact_ref)).read_text(encoding="utf-8"))
@@ -1650,7 +1655,11 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                result.status,
+                "completed",
+                msg=f"{result.reason_code}: {result.detail}",
+            )
             self.assertGreaterEqual(heartbeat.call_count, 2)
             tasks = state.list_tasks("P-LEASE-HEARTBEAT")
             self.assertEqual(tasks[0]["status"], "DONE")
@@ -2636,7 +2645,14 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                result.status,
+                "completed",
+                msg=(
+                    f"reason={result.reason_code}; detail={result.detail}; "
+                    f"executor_calls={executor.calls}"
+                ),
+            )
             self.assertEqual(len(executor.calls), 1)
             self.assertEqual(executor.calls[0]["proposed"], proposed)
             output_paths = list(config.evidence_dir.glob("release-operation-result-*.json"))
@@ -2678,6 +2694,83 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result.status, "failed_safe")
             self.assertEqual(result.reason_code, "scope_violation")
             self.assertEqual(executor.calls, [])
+            state.close()
+
+    def test_release_worker_reconciles_executing_intent_after_crash_checkpoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            product_id, contract_path = staging_release_task(config, state, artifacts)
+            task_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            task = state.list_tasks(product_id)[0]
+            postcondition = {
+                "product_id": product_id,
+                "task_id": str(task["task_id"]),
+                "stage": "staging",
+                "expected_staging_digest": "not-applicable",
+            }
+            side_effect_key = sha256_text(
+                stable_json(
+                    [
+                        task_contract.get("idempotency_key"),
+                        postcondition,
+                        "release-adapter-v2",
+                    ]
+                )
+            )
+            with state._connection:
+                protocol = SideEffectProtocol(state._connection)
+                intent_id = protocol.prepare(
+                    product_id=product_id,
+                    operation="release:staging",
+                    adapter="configured-release-executor",
+                    idempotency_key=side_effect_key,
+                    expected_postcondition=postcondition,
+                )
+                protocol.mark_executing(intent_id)
+
+            authoritative = release_operation(
+                config,
+                product_id,
+                candidate_sha="c" * 40,
+                image_digest="sha256:" + "d" * 64,
+            )
+
+            class ReconcileOnlyExecutor:
+                def __init__(self) -> None:
+                    self.execute_calls = 0
+                    self.reconcile_calls = 0
+
+                def execute(self, **_: Any) -> Mapping[str, Any]:
+                    self.execute_calls += 1
+                    raise AssertionError("external effect must not be executed twice")
+
+                def reconcile(self, **_: Any) -> Mapping[str, Any]:
+                    self.reconcile_calls += 1
+                    return authoritative
+
+            executor = ReconcileOnlyExecutor()
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(authoritative)),
+                release_executor=executor,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            assert result is not None
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(executor.execute_calls, 0)
+            self.assertEqual(executor.reconcile_calls, 1)
+            self.assertEqual(SideEffectProtocol(state._connection).status(intent_id), "VERIFIED")
             state.close()
 
     def test_worker_runs_selected_provider_and_persists_contract_and_attempt(self) -> None:
@@ -3062,6 +3155,19 @@ class WorkerTests(unittest.TestCase):
                 failure_kind="semantic",
             )
             state.transition_product(product_id, "FAILED_SAFE")
+            with state._lock, state._connection:
+                RecoveryCertificateService(state._connection).issue(
+                    product_id=product_id,
+                    previous_epoch_key=sha256_text("worker-deferred-previous"),
+                    new_epoch_key=sha256_text("worker-deferred-new"),
+                    root_cause_key=sha256_text("worker-deferred-cause"),
+                    controller_release_digest=state.controller_release_digest,
+                    policy_schema_digest=policy_digest(config),
+                    fixed_invariant_id="FIX-WORKER-DEFERRED-BUILDER",
+                    regression_evidence_ref="evidence://regression/worker-deferred",
+                    migration_dry_run_digest=sha256_text("worker-deferred-migration"),
+                    backup_restore_proof_ref="evidence://backup/worker-deferred",
+                )
             self.assertTrue(
                 state.recover_deferred_builder_gate(
                     product_id=product_id,
@@ -3296,6 +3402,19 @@ class WorkerTests(unittest.TestCase):
                 failure_kind="semantic",
             )
             state.transition_product(adopted_product_id, "FAILED_SAFE")
+            with state._lock, state._connection:
+                RecoveryCertificateService(state._connection).issue(
+                    product_id=adopted_product_id,
+                    previous_epoch_key=sha256_text("worker-adopted-previous"),
+                    new_epoch_key=sha256_text("worker-adopted-new"),
+                    root_cause_key=sha256_text("worker-adopted-cause"),
+                    controller_release_digest=state.controller_release_digest,
+                    policy_schema_digest=policy_digest(config),
+                    fixed_invariant_id="FIX-WORKER-ADOPTED-BUILDER",
+                    regression_evidence_ref="evidence://regression/worker-adopted",
+                    migration_dry_run_digest=sha256_text("worker-adopted-migration"),
+                    backup_restore_proof_ref="evidence://backup/worker-adopted",
+                )
             self.assertTrue(
                 state.adopt_controller_valid_builder(
                     product_id=adopted_product_id,

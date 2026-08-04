@@ -7,9 +7,8 @@ from collections.abc import Iterable, Mapping
 from itertools import pairwise
 from typing import Any
 
+from .delivery_profiles import delivery_profile
 from .lifecycle import (
-    MANDATORY_STAGE_ORDER,
-    REQUIRED_COMPLETION_OBLIGATIONS,
     STAGES,
 )
 
@@ -51,6 +50,17 @@ def validate_compiled_plan(plan: Mapping[str, Any]) -> None:
     if not contracts:
         raise PlanContractViolation("compiled plan has no typed task contracts")
 
+    try:
+        selected_delivery_profile = delivery_profile(
+            str(plan.get("delivery_profile") or "DEPLOYED_SERVICE")
+        )
+    except ValueError as error:
+        raise PlanContractViolation(str(error)) from error
+    if plan.get("delivery_profile_digest") not in {
+        None,
+        selected_delivery_profile.digest,
+    }:
+        raise PlanContractViolation("delivery profile digest mismatch")
     stages: dict[str, list[str]] = defaultdict(list)
     for node_id, contract in contracts.items():
         stage_key = str(contract.get("lifecycle_stage") or "")
@@ -96,11 +106,22 @@ def validate_compiled_plan(plan: Mapping[str, Any]) -> None:
                 f"{node_id}.completion_obligation_ids conflicts with {stage_key}",
                 reason_code="evidence_profile_mismatch",
             )
-        if expected.production_side_effects and expected.capability_profile != "release_production":
-            raise PlanContractViolation("production side effects require the production adapter")
+        required_effect_profile = (
+            "release_production"
+            if expected.key == "production"
+            else "release_distribution"
+        )
+        if (
+            expected.production_side_effects
+            and expected.capability_profile != required_effect_profile
+        ):
+            raise PlanContractViolation(
+                f"production side effects require {required_effect_profile}"
+            )
         stages[stage_key].append(node_id)
 
-    for required in MANDATORY_STAGE_ORDER:
+    required_stages = selected_delivery_profile.lifecycle
+    for required in required_stages:
         if required == "implementation-slice":
             if not stages[required]:
                 raise PlanContractViolation("compiled plan needs an implementation slice")
@@ -109,6 +130,12 @@ def validate_compiled_plan(plan: Mapping[str, Any]) -> None:
                 f"compiled plan requires exactly one {required} stage",
                 reason_code="completion_unreachable",
             )
+    unexpected_stages = set(stages) - set(required_stages)
+    if unexpected_stages:
+        raise PlanContractViolation(
+            f"compiled plan contains stage outside delivery profile: {min(unexpected_stages)}",
+            reason_code="completion_unreachable",
+        )
 
     adjacency: dict[str, set[str]] = {node_id: set() for node_id in contracts}
     predecessors: dict[str, set[str]] = {node_id: set() for node_id in contracts}
@@ -165,16 +192,14 @@ def validate_compiled_plan(plan: Mapping[str, Any]) -> None:
             reason_code="missing_declared_predecessor",
         )
 
-    release_path = (
-        stages["staging"][0],
-        stages["product-acceptance"][0],
-        stages["production"][0],
-        stages["observation"][0],
-    )
+    release_stage_keys = required_stages[
+        required_stages.index("release-readiness-review") + 1 :
+    ]
+    release_path = tuple(stages[stage][0] for stage in release_stage_keys)
     for source, target in pairwise(release_path):
         if source not in ancestors(target):
             raise PlanContractViolation(
-                "release path must be staging -> product acceptance -> production -> observation",
+                "release path conflicts with the controller-owned delivery profile",
                 reason_code="completion_unreachable",
             )
 
@@ -184,7 +209,7 @@ def validate_compiled_plan(plan: Mapping[str, Any]) -> None:
         for value in contract.get("completion_obligation_ids", [])
     }
     missing_obligations = (
-        REQUIRED_COMPLETION_OBLIGATIONS - completion_obligations
+        set(selected_delivery_profile.completion_obligations) - completion_obligations
     )
     if missing_obligations:
         raise PlanContractViolation(

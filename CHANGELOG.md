@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.4.0 - 2026-08-03
+
+- Replace permissive runtime routing with one closed failure catalog and a
+  catalog-backed transition kernel; unknown reasons and events now quarantine
+  the Controller before any model or product repair can run.
+- Bind every repair to a stable root-cause key and a release-specific
+  occurrence epoch while eliminating causal-lineage capability inheritance,
+  wildcard contract reconstruction, and model-authored controller recovery.
+- Add exact product-bound capability proofs, toolchain manifests, grant epochs,
+  terminal database guards, recovery certificates, append-only/WORM-exported
+  decision history, and crash-safe side-effect intent/receipt protocols.
+- Compile eight controller-owned delivery profiles with profile-specific
+  lifecycle, evidence, capability, release, rollback, observation, and
+  completion semantics. Non-service distribution no longer receives service
+  production, backup, or rollback authority.
+- Add a release qualification governor whose first Controller defect fails the
+  immutable release epoch and whose clean canaries reject recovery, manual DB
+  mutation, routine owner action, release drift, and task amplification.
+- Add Stable A/Candidate B/verifier isolation, an independent Ed25519-signed
+  qualification manifest, root-owned manifest installation, and an exact
+  candidate-digest check at the production helper.
+- Add executable Q0-Q6 qualification stages, exhaustive bounded model checking,
+  Hypothesis properties, a 100% nine-mutant safety gate, 1,814 historical
+  incident replays, every-version crash/restart migrations, and the exact
+  production-shaped SQLite fixture.
+- Add an isolated real-process service harness for Controller, worker, Gateway,
+  Hermes stdin, SQLite, outbox, and transactional deployment. External
+  capabilities use a digest-bound local Q6 target; production credentials and
+  production helpers are inaccessible.
+- Make SQLite migrations crash-atomic without `executescript` implicit commits;
+  legacy completion rows without real manifests now fail safe instead of being
+  silently grandfathered as PASS.
+
+
 ## 2.3.11 - 2026-08-03
 
 - Route any semantic or policy finding from a read-only reviewer through the

@@ -704,7 +704,7 @@ def apply_recovery_plan(
                     governor.record_decision(
                         product_id=product_id,
                         root_problem_signature=root_problem_signature,
-                        action="CONTROLLER_RECOVERY",
+                        action="CONTROLLER_QUARANTINE",
                         path_snapshot_digest=governor.path_snapshot_digest(
                             product_id=product_id,
                             root_problem_signature=root_problem_signature,
@@ -805,11 +805,11 @@ def apply_recovery_plan(
                 )
                 resume_status = action.get("resume_status")
                 if resume_status:
-                    state._connection.execute(
-                        """UPDATE products
-                              SET status=?, terminal_reason=NULL, updated_at=?
-                            WHERE product_id=?""",
-                        (str(resume_status), now, product_id),
+                    from .proof_obligations import RecoveryCertificateService
+
+                    RecoveryCertificateService(state._connection).apply_ready(
+                        product_id=product_id,
+                        resume_status=str(resume_status),
                     )
                 state._connection.execute(
                     """INSERT INTO recovery_applications
@@ -921,7 +921,7 @@ def finalize_recovery_application(
             correction = state._connection.execute(
                 """SELECT COUNT(*) FROM path_decisions
                     WHERE product_id=? AND root_problem_signature=?
-                      AND action='CONTROLLER_RECOVERY' AND status='APPLIED'
+                      AND action='CONTROLLER_QUARANTINE' AND status='APPLIED'
                       AND evidence_digest=?""",
                 (product_id, root_problem_signature, recovery_plan_digest),
             ).fetchone()
@@ -1243,11 +1243,11 @@ def resume_controller_compilation_failure(
                         now,
                     ),
                 )
-            state._connection.execute(
-                """UPDATE products
-                      SET status='IMPLEMENTING', terminal_reason=NULL, updated_at=?
-                    WHERE product_id=? AND status='FAILED_SAFE'""",
-                (now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(state._connection).apply_ready(
+                product_id=product_id,
+                resume_status="IMPLEMENTING",
             )
             incident_id = (
                 "incident-" + sha256_text(f"{failure_id}:plan-compilation")[:20]
@@ -1603,11 +1603,11 @@ def resume_zero_dependency_audit_failure(
                       AND status='FAILED_SAFE'""",
                 (repair_ref, hypothesis_id, now, task_id, product_id),
             )
-            state._connection.execute(
-                """UPDATE products
-                      SET status='IMPLEMENTING', terminal_reason=NULL, updated_at=?
-                    WHERE product_id=? AND status='FAILED_SAFE'""",
-                (now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(state._connection).apply_ready(
+                product_id=product_id,
+                resume_status="IMPLEMENTING",
             )
             incident_id = "incident-" + sha256_text(f"{failure_id}:zero-dependency")[:20]
             state._connection.execute(
@@ -1847,11 +1847,11 @@ def resume_reviewer_builder_route_failure(
                       AND status='EXHAUSTED'""",
                 (now, product_id, root_problem_signature),
             )
-            state._connection.execute(
-                """UPDATE products
-                      SET status='IMPLEMENTING', terminal_reason=NULL, updated_at=?
-                    WHERE product_id=? AND status='FAILED_SAFE'""",
-                (now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(state._connection).apply_ready(
+                product_id=product_id,
+                resume_status="IMPLEMENTING",
             )
             state._record_event(
                 product_id,
@@ -3415,7 +3415,7 @@ def resume_unverified_container_repair_failure(
     required_capabilities = list(
         dict.fromkeys(
             [
-                *router._lineage_required_capabilities(failed, "builder_workspace"),
+                *sorted(CAPABILITY_PROFILES["builder_workspace"]),
                 "toolchain.container_builder",
                 "toolchain.scanners",
             ]

@@ -1,0 +1,24 @@
+[Unit]
+Description=Sign, admit, and root-promote the exact qualified Hermes release
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/hermes-factory/qualification-control.yaml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-manifest-and-promotion.sh
+TimeoutStartSec=3600
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/hermes-factory-verifier /opt/hermes-factory-candidate /etc/hermes-factory /var/lib/hermes-factory-candidate
+ReadWritePaths=/opt/hermes-factory /var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/systemd/system /run/systemd /var/tmp
+InaccessiblePaths=/etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=2000M
+TasksMax=512

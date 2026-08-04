@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import runpy
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,8 +18,10 @@ class DeployEntrypointTests(unittest.TestCase):
         cls.validate_health_url = loaded["validate_health_url"]
         cls.health_probe = loaded["health_probe"]
         cls.optional_services = loaded["OPTIONAL_SERVICES"]
+        cls.runtime_switch = loaded["RuntimeSwitch"]
         submit = runpy.run_path(str(RELEASE_SUBMIT))
         cls.install_root = submit["_install_root"]
+        cls.reconcile_root_receipt = submit["_reconcile_root_receipt"]
         cls.submit_error = submit["SubmitError"]
 
     def test_health_url_requires_loopback_http(self) -> None:
@@ -69,6 +73,41 @@ class DeployEntrypointTests(unittest.TestCase):
         with self.assertRaises(type(self).submit_error):
             type(self).install_root(config, "brullik/bybit-grid-research", "../escape")
 
+    def test_root_receipt_reconciles_exact_postcondition_without_effect(self) -> None:
+        from factory.release_executor import _release_digest
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "current"
+            current.mkdir()
+            (current / "artifact.txt").write_text("immutable\n", encoding="utf-8")
+            receipt_path = root / "receipt.json"
+            expected = {
+                "schema_version": "1.0",
+                "status": "PROMOTED",
+                "repository": "brullik/product",
+                "product_id": "product-1",
+                "release_id": "a" * 40,
+                "image_digest": _release_digest(current),
+            }
+
+            first = type(self).reconcile_root_receipt(
+                receipt_path=receipt_path,
+                install_root=root,
+                expected=expected,
+                require_factory_health=False,
+            )
+            second = type(self).reconcile_root_receipt(
+                receipt_path=receipt_path,
+                install_root=root,
+                expected=expected,
+                require_factory_health=False,
+            )
+
+            self.assertEqual(first, second)
+            self.assertEqual(first["reconciliation"], "verified_postcondition")
+            self.assertEqual(receipt_path.read_text(encoding="utf-8").count("PROMOTED"), 1)
+
     def test_second_worker_is_durable_and_restarted_when_installed(self) -> None:
         worker_one = (
             ROOT / "config" / "systemd" / "hermes-factory-worker.service"
@@ -92,6 +131,50 @@ class DeployEntrypointTests(unittest.TestCase):
             installer.count("hermes-factory-worker-2.service"),
             2,
         )
+
+    @unittest.skipIf(os.name == "nt", "Windows test process cannot create symlinks")
+    def test_runtime_switch_binds_code_and_python_then_restores_lts(self) -> None:
+        from factory.release_executor import _release_digest
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "install"
+            current = install / "current"
+            current.mkdir(parents=True)
+            (current / "VERSION").write_text("old\n", encoding="utf-8")
+            old_digest = _release_digest(current).removeprefix("sha256:")
+            old_runtime = install / "venv"
+            (old_runtime / "bin").mkdir(parents=True)
+            (old_runtime / "bin" / "python").write_text("old\n", encoding="utf-8")
+            release_id = "a" * 40
+            candidate_runtime_root = root / "candidate" / "venvs"
+            candidate_runtime = candidate_runtime_root / release_id
+            (candidate_runtime / "bin").mkdir(parents=True)
+            (candidate_runtime / "bin" / "python").write_text("new\n", encoding="utf-8")
+            runtime_link = root / "candidate" / "venv"
+            runtime_link.symlink_to(candidate_runtime, target_is_directory=True)
+            candidate_source = root / "candidate-source"
+            candidate_source.mkdir()
+            (candidate_source / "VERSION").write_text("new\n", encoding="utf-8")
+            candidate_digest = _release_digest(candidate_source).removeprefix("sha256:")
+            switch = type(self).runtime_switch(
+                install_root=install,
+                release_id=release_id,
+                old_release_digest=old_digest,
+                candidate_release_digest=candidate_digest,
+                candidate_runtime_link=runtime_link,
+                candidate_runtime_root=candidate_runtime_root,
+            )
+
+            switch.prepare()
+            self.assertTrue((install / "venv").is_symlink())
+            self.assertEqual((install / "venv").resolve().name, f"venv-lts-before-{release_id[:12]}")
+            (current / "VERSION").write_text("new\n", encoding="utf-8")
+            switch.select_for(current)
+            self.assertEqual((install / "venv").resolve(), candidate_runtime.resolve())
+            (current / "VERSION").write_text("old\n", encoding="utf-8")
+            switch.select_for(current)
+            self.assertEqual((install / "venv").resolve().name, f"venv-lts-before-{release_id[:12]}")
 
 
 if __name__ == "__main__":

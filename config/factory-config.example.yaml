@@ -52,6 +52,8 @@ deployment:
   current_vps_high_risk_production: false
   staging_root: /var/lib/hermes-factory/staging
   production_helper: /usr/local/sbin/hermes-factory-release-submit
+  qualification_manifest_root: /etc/hermes-factory/qualification-manifests
+  verifier_public_key_digest: ""
   rollback_helper: /opt/hermes-factory/bin/factory-rollback
   health_probe_url: http://127.0.0.1:8787/healthz
   production_target:

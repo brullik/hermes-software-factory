@@ -16,7 +16,14 @@ from scripts.prompt_compiler import (
 )
 
 from .common import redact_text, sha256_text, stable_json, utc_now
-from .path_governor import PathGovernor, semantic_node_id, task_contract_digest
+from .failure_catalog import failure_disposition
+from .path_governor import (
+    PathGovernor,
+    occurrence_epoch_key,
+    root_cause_key,
+    semantic_node_id,
+    task_contract_digest,
+)
 
 if TYPE_CHECKING:
     from .state import StateStore
@@ -162,6 +169,14 @@ CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
         "production.deploy_transactional",
         "rollback.execute",
     ),
+    "release_distribution": (
+        "git.commit_candidate",
+        "git.push_branch",
+        "github.pull_request.create",
+        "github.checks.read",
+        "github.pull_request.verify",
+        "github.pull_request.merge",
+    ),
     "controller_incident": (
         "artifact.read",
         "artifact.write",
@@ -233,6 +248,11 @@ def canonical_plan_identity_catalog() -> str:
             "release-operation-result.schema.json",
             "release_production",
         ),
+        (
+            "release-operator@release-distribution",
+            "release-operation-result.schema.json",
+            "release_distribution",
+        ),
     )
     catalog = "\n".join(
         (
@@ -287,6 +307,14 @@ def minimum_capability_profile(
     if normalized_role in _REVIEW_PROFILE_ROLES:
         return "reviewer_readonly"
     if normalized_role == "release-operator":
+        from .lifecycle import STAGES
+
+        lifecycle_definition = STAGES.get(normalized_stage)
+        if (
+            lifecycle_definition is not None
+            and lifecycle_definition.role == "release-operator"
+        ):
+            return lifecycle_definition.capability_profile
         if normalized_stage in {"release-production", "production"}:
             return "release_production"
         if normalized_stage in {"release-staging", "staging"}:
@@ -294,7 +322,11 @@ def minimum_capability_profile(
         # Legacy controller-created release tasks predate canonical stage keys.
         # Their persisted profile is accepted, but a canonical v2 plan must use
         # a release stage key and is checked separately below.
-        if requested_profile in {"release_staging", "release_production"}:
+        if requested_profile in {
+            "release_staging",
+            "release_production",
+            "release_distribution",
+        }:
             return str(requested_profile)
         raise ValueError("release-operator requires a canonical release stage")
     return "builder_workspace"
@@ -319,7 +351,15 @@ def validate_task_capability_contract(
         require_canonical_stage
         and normalized_role == "release-operator"
         and normalized_stage
-        not in {"release-staging", "staging", "release-production", "production"}
+        not in {
+            "release-staging",
+            "staging",
+            "release-production",
+            "production",
+            "signed-release",
+            "publish-dry-run",
+            "signed-publish",
+        }
     ):
         raise ValueError(
             f"{coordinate}.role release-operator requires release-staging "
@@ -348,6 +388,16 @@ def validate_task_capability_contract(
         raise ValueError(
             f"{coordinate}.required_capabilities omits canonical capability: "
             f"{omitted[0]}"
+        )
+    non_toolchain_expansion = sorted(
+        capability
+        for capability in declared - canonical
+        if not capability.startswith("toolchain.")
+    )
+    if non_toolchain_expansion:
+        raise ValueError(
+            f"{coordinate}.required_capabilities expands canonical profile: "
+            f"{non_toolchain_expansion[0]}"
         )
 
 
@@ -569,7 +619,13 @@ class AutonomyStore:
         owner_defaults_ref: str | None,
         idempotency_key: str,
         rate_limit: tuple[int, int] | None,
+        delivery_profile: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
+        from .delivery_profiles import (
+            DeliveryProfileName,
+            infer_delivery_profile,
+        )
+
         if delivery_mode not in {"new_repository", "existing_repository"}:
             raise ValueError("delivery_mode is invalid")
         if delivery_mode == "existing_repository" and not repository_url:
@@ -578,6 +634,11 @@ class AutonomyStore:
             raise ValueError("new_repository forbids repository_url")
         if repository_visibility not in {"private", "public"}:
             raise ValueError("repository_visibility is invalid")
+        selected_delivery_profile = (
+            DeliveryProfileName(delivery_profile)
+            if delivery_profile is not None
+            else infer_delivery_profile(goal_text, delivery_mode)
+        )
         now = utc_now()
         with self.lock:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -621,9 +682,9 @@ class AutonomyStore:
                         created_at, updated_at, goal_text, repository_url,
                         repository_name, delivery_mode, repository_visibility,
                         root_goal_ref, constraints_ref, owner_defaults_ref,
-                        repository_bootstrap_state)
+                        repository_bootstrap_state, delivery_profile)
                        VALUES (?, 'IDEA_RECEIVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?)""",
                     (
                         product_id,
                         owner_id,
@@ -641,6 +702,7 @@ class AutonomyStore:
                         constraints_ref,
                         owner_defaults_ref,
                         "PENDING",
+                        selected_delivery_profile.value,
                     ),
                 )
                 self.state._record_event(
@@ -651,6 +713,7 @@ class AutonomyStore:
                         "source": source,
                         "delivery_mode": delivery_mode,
                         "repository_visibility": repository_visibility,
+                        "delivery_profile": selected_delivery_profile.value,
                     },
                 )
                 row = self.connection.execute(
@@ -674,16 +737,18 @@ class AutonomyStore:
         status: str = "AVAILABLE",
         expires_at: str | None = None,
         grant_id: str | None = None,
+        grant_epoch_id: str | None = None,
     ) -> str:
         if status not in {"AVAILABLE", "MISSING_EXTERNAL", "DENIED_POLICY", "EXPIRED"}:
             raise ValueError("capability grant status is invalid")
-        identifier = grant_id or f"grant-{sha256_text(stable_json([product_id, task_id, capability, provider, scope]))[:20]}"
+        selected_epoch_id = grant_epoch_id or self.state.grant_epoch_id
+        identifier = grant_id or f"grant-{sha256_text(stable_json([product_id, task_id, capability, provider, scope, selected_epoch_id]))[:20]}"
         with self.lock, self.connection:
             self.connection.execute(
                 """INSERT OR REPLACE INTO capability_grants
                    (grant_id, product_id, task_id, capability, scope_json, provider,
-                    status, expires_at, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    status, expires_at, created_at, grant_epoch_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     identifier,
                     product_id,
@@ -694,6 +759,7 @@ class AutonomyStore:
                     status,
                     expires_at,
                     utc_now(),
+                    selected_epoch_id,
                 ),
             )
             if (
@@ -1644,6 +1710,66 @@ class AutonomyStore:
         failure: FailureData,
     ) -> str:
         fingerprint = failure.normalized_fingerprint(str(task["task_id"]))
+        try:
+            failed_gate_ids = list(failure.failed_gate_ids)
+        except TypeError:
+            failed_gate_ids = []
+        cause_key = root_cause_key(
+            {
+                "product_id": str(task["product_id"]),
+                "failure_class": failure.failure_class,
+                "reason_code": failure.reason_code,
+                "semantic_node_key": task["semantic_node_key"],
+                "lifecycle_stage": task["lifecycle_stage"],
+                "failed_gate_ids": failed_gate_ids,
+            }
+        )
+        contract_digest = str(task["contract_digest"] or "") or task_contract_digest(
+            dict(task)
+        )
+        candidate_digest_row = connection.execute(
+            """SELECT snapshot_digest FROM candidate_snapshots
+                 WHERE snapshot_id=?""",
+            (task["candidate_snapshot_id"],),
+        ).fetchone()
+        candidate_digest = (
+            str(candidate_digest_row[0])
+            if candidate_digest_row is not None
+            else sha256_text(f"no-candidate:{task['product_id']}")
+        )
+        epoch = connection.execute(
+            """SELECT epoch.controller_release_digest,epoch.policy_digest,
+                      epoch.toolchain_manifest_digest
+                 FROM products AS product
+                 LEFT JOIN controller_release_epochs AS epoch
+                   ON epoch.epoch_id=product.controller_release_epoch_id
+                WHERE product.product_id=?""",
+            (task["product_id"],),
+        ).fetchone()
+        controller_digest = (
+            str(epoch[0]) if epoch is not None and epoch[0] else self.state.controller_release_digest
+        )
+        policy_digest_value = (
+            str(epoch[1])
+            if epoch is not None and epoch[1]
+            else sha256_text(f"runtime-policy:{controller_digest}")
+        )
+        toolchain_digest = (
+            str(task["toolchain_manifest_digest"] or "")
+            or (str(epoch[2]) if epoch is not None and epoch[2] else "")
+            or self.state.toolchain_manifest_digest
+        )
+        epoch_key = occurrence_epoch_key(
+            {
+                "root_cause_key": cause_key,
+                "controller_release_digest": controller_digest,
+                "candidate_snapshot_digest": candidate_digest,
+                "policy_digest": policy_digest_value,
+                "contract_digest": contract_digest,
+                "toolchain_manifest_digest": toolchain_digest,
+            }
+        )
+        disposition = failure_disposition(failure.reason_code)
         existing = connection.execute(
             """SELECT failure_id FROM failures
                WHERE task_id=? AND fingerprint=? AND status IN ('OPEN','ROUTED')
@@ -1655,9 +1781,20 @@ class AutonomyStore:
             failure_id = str(existing[0])
             connection.execute(
                 """UPDATE failures SET occurrence_count=occurrence_count+1,
-                       last_seen_at=?, safe_message=?, evidence_ref=?
+                       last_seen_at=?, safe_message=?, evidence_ref=?,
+                       failure_domain=?,failure_action=?,root_cause_key=?,
+                       occurrence_epoch_key=?
                    WHERE failure_id=?""",
-                (now, failure.safe_message, failure.evidence_ref, failure_id),
+                (
+                    now,
+                    failure.safe_message,
+                    failure.evidence_ref,
+                    disposition.domain.value,
+                    disposition.action.value,
+                    cause_key,
+                    epoch_key,
+                    failure_id,
+                ),
             )
             return failure_id
         failure_id = f"failure-{fingerprint[:20]}"
@@ -1667,9 +1804,10 @@ class AutonomyStore:
                 failure_class, reason_code, fingerprint, safe_message,
                 exception_type, stack_fingerprint, evidence_ref, status,
                 retryable, owner_action_eligible, expected_json, actual_json,
-                failed_gate_ids_json, first_seen_at, last_seen_at)
+                failed_gate_ids_json, first_seen_at, last_seen_at,
+                failure_domain,failure_action,root_cause_key,occurrence_epoch_key)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?,
-                       ?, ?)""",
+                       ?, ?, ?, ?, ?, ?)""",
             (
                 failure_id,
                 str(task["product_id"]),
@@ -1690,7 +1828,17 @@ class AutonomyStore:
                 stable_json(failure.failed_gate_ids),
                 now,
                 now,
+                disposition.domain.value,
+                disposition.action.value,
+                cause_key,
+                epoch_key,
             ),
+        )
+        connection.execute(
+            """UPDATE tasks SET root_cause_key=?,occurrence_epoch_key=?,
+                      root_problem_signature=COALESCE(root_problem_signature,?)
+                WHERE task_id=?""",
+            (cause_key, epoch_key, cause_key, task["task_id"]),
         )
         return failure_id
 
@@ -2213,10 +2361,62 @@ class AutonomyStore:
                             "reason": "newer_owner_or_terminal_state",
                         }
                     else:
-                        self.connection.execute(
-                            "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                            (outcome.product_status, now, str(task["product_id"])),
-                        )
+                        terminal_reason = None
+                        terminal_evidence_ref = None
+                        if outcome.product_status == "FAILED_SAFE":
+                            if outcome.failure is None:
+                                raise ValueError(
+                                    "FAILED_SAFE product outcome requires failure evidence"
+                                )
+                            terminal_reason = outcome.failure.reason_code
+                            terminal_evidence_ref = outcome.failure.evidence_ref
+                        if current_product_status != outcome.product_status:
+                            from .transition_kernel import TransitionKernel
+
+                            transition_evidence = {
+                                "product_contract": outcome.result_ref,
+                                "risk_assessment": outcome.result_ref,
+                                "compiled_plan": str(
+                                    (outcome.plan or {}).get("plan_artifact_ref")
+                                    or outcome.result_ref
+                                ),
+                                "product_acceptance": outcome.result_ref,
+                                "side_effect_receipt": outcome.result_ref,
+                                "production_receipt": outcome.result_ref,
+                                "observation_schedule": (
+                                    str(outcome.downstream_bindings[0].get("available_at"))
+                                    if outcome.downstream_bindings
+                                    else outcome.result_ref
+                                ),
+                                "failure_envelope": (
+                                    outcome.failure.evidence_ref
+                                    if outcome.failure is not None
+                                    else outcome.result_ref
+                                ),
+                                "terminal_evidence": terminal_evidence_ref or outcome.result_ref,
+                            }
+                            preferred_event = {
+                                ("IDEA_RECEIVED", "RISK_CLASSIFIED"): (
+                                    "CONTRACT_AND_RISK_PROVEN"
+                                ),
+                                ("ARCHITECTED", "IMPLEMENTING"): "BACKLOG_COMPILED",
+                                ("STAGING_DEPLOYED", "RELEASE_READY"): (
+                                    "ACCEPTANCE_COMPLETE"
+                                ),
+                                ("RELEASE_READY", "OBSERVATION"): (
+                                    "PRODUCTION_OBSERVATION_SCHEDULED"
+                                ),
+                            }.get((current_product_status, outcome.product_status))
+                            if outcome.product_status == "FAILED_SAFE":
+                                preferred_event = "FAIL_SAFE"
+                            TransitionKernel(self.connection).apply_target(
+                                product_id=str(task["product_id"]),
+                                target=outcome.product_status,
+                                evidence=transition_evidence,
+                                terminal_reason=terminal_reason,
+                                terminal_evidence_ref=terminal_evidence_ref,
+                                preferred_event=preferred_event,
+                            )
                 logical_events: list[dict[str, Any]] = [
                     {
                         "event_type": "task_result_committed",
@@ -2363,6 +2563,12 @@ class AutonomyStore:
         *,
         artifacts: Any | None = None,
     ) -> CompletionDecision:
+        from .delivery_profiles import delivery_profile
+        from .proof_obligations import (
+            build_completion_manifest,
+            profile_not_applicable_proof,
+        )
+
         with self.lock:
             self.connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2464,6 +2670,12 @@ class AutonomyStore:
                         unmet.append(f"goal_without_pass_evidence:{goal_id}")
                     else:
                         goal_evidence_refs.append(str(evidence[0]))
+                selected_profile = delivery_profile(
+                    str(product["delivery_profile"] or "DEPLOYED_SERVICE")
+                )
+                required_delivery_evidence = set(
+                    selected_profile.completion_obligations
+                ) - {"goal_evidence", "completion"}
                 release_rows = {
                     str(row[0]): (
                         str(row[1]),
@@ -2475,23 +2687,12 @@ class AutonomyStore:
                         """SELECT evidence_type, artifact_digest, status,
                                   artifact_ref, created_at
                            FROM product_evidence WHERE product_id=?
-                             AND evidence_type IN
-                               ('independent_review','required_checks','staging',
-                                'product_acceptance','production','rollback',
-                                'observation')""",
+                             AND status='PASS'""",
                         (product_id,),
                     ).fetchall()
-                    if str(row[2]) == "PASS"
+                    if str(row[0]) in required_delivery_evidence
                 }
-                for required in (
-                    "independent_review",
-                    "required_checks",
-                    "staging",
-                    "product_acceptance",
-                    "production",
-                    "rollback",
-                    "observation",
-                ):
+                for required in sorted(required_delivery_evidence):
                     if required not in release_rows:
                         unmet.append(f"evidence_missing:{required}")
                 if (
@@ -2506,6 +2707,37 @@ class AutonomyStore:
                 completed_at = max(
                     [value[3] for value in release_rows.values()]
                     or [utc_now()]
+                )
+                tail_evidence_priority = (
+                    "production",
+                    "signed_publish",
+                    "signed_release",
+                    "policy_approved_delivery",
+                    "distribution_smoke",
+                    "consumer_smoke",
+                    "staging",
+                )
+                release_evidence_type = next(
+                    (
+                        evidence_type
+                        for evidence_type in tail_evidence_priority
+                        if evidence_type in release_rows
+                    ),
+                    max(release_rows),
+                )
+                observation_evidence_type = next(
+                    (
+                        evidence_type
+                        for evidence_type in (
+                            "observation",
+                            "consumer_smoke",
+                            "distribution_smoke",
+                            "product_acceptance",
+                            "policy_approved_delivery",
+                        )
+                        if evidence_type in release_rows
+                    ),
+                    release_evidence_type,
                 )
                 completion_artifact = {
                     "schema_version": "2.0",
@@ -2528,8 +2760,13 @@ class AutonomyStore:
                     "completed_at": completed_at,
                     "goal_evidence": sorted(goal_evidence_refs),
                     "node_evidence": sorted(node_evidence),
-                    "release_digest": release_rows["production"][0],
-                    "observation_ref": release_rows["observation"][2],
+                    "release_digest": release_rows[release_evidence_type][0],
+                    "observation_ref": release_rows[observation_evidence_type][2],
+                    "delivery_profile": selected_profile.name.value,
+                    "delivery_profile_digest": selected_profile.digest,
+                    "delivery_evidence": {
+                        key: value[2] for key, value in sorted(release_rows.items())
+                    },
                 }
                 digest = sha256_text(stable_json(completion_artifact))
                 completion_ref = (
@@ -2543,11 +2780,162 @@ class AutonomyStore:
                     )
                     completion_ref = f"evidence/{completion_path.name}"
                 now = utc_now()
+                graph_rows = self.connection.execute(
+                    """SELECT semantic_node_id,contract_digest,result_digest,
+                              result_binding_id,graph_status
+                         FROM tasks WHERE plan_id=? ORDER BY semantic_node_id,task_id""",
+                    (plan_id,),
+                ).fetchall()
+                semantic_graph_digest = sha256_text(
+                    stable_json([tuple(row) for row in graph_rows])
+                )
+                candidate = self.connection.execute(
+                    """SELECT snapshot_digest FROM candidate_snapshots
+                         WHERE product_id=? AND plan_id=?
+                         ORDER BY created_at DESC LIMIT 1""",
+                    (product_id, plan_id),
+                ).fetchone()
+                candidate_snapshot_digest = (
+                    str(candidate[0])
+                    if candidate is not None
+                    else sha256_text(stable_json(node_evidence))
+                )
+                product_contract = self.connection.execute(
+                    """SELECT result_digest FROM tasks
+                         WHERE product_id=? AND role='product-director'
+                           AND graph_status IN ('ACCEPTED','SUPERSEDED')
+                         ORDER BY created_at LIMIT 1""",
+                    (product_id,),
+                ).fetchone()
+                product_contract_digest = (
+                    str(product_contract[0])
+                    if product_contract is not None and product_contract[0]
+                    else sha256_text(
+                        stable_json(
+                            [product["goal_text"], product["root_goal_ref"]]
+                        )
+                    )
+                )
+                active_plan = self.connection.execute(
+                    "SELECT plan_digest FROM plans WHERE plan_id=?",
+                    (plan_id,),
+                ).fetchone()
+                active_plan_digest = (
+                    str(active_plan[0])
+                    if active_plan is not None
+                    else sha256_text(plan_id)
+                )
+                epoch = self.connection.execute(
+                    """SELECT controller_release_digest,policy_digest
+                         FROM controller_release_epochs WHERE epoch_id=?""",
+                    (product["controller_release_epoch_id"],),
+                ).fetchone()
+                controller_release_digest = (
+                    str(epoch[0])
+                    if epoch is not None
+                    else self.state.controller_release_digest
+                )
+                completion_policy_digest = (
+                    str(epoch[1])
+                    if epoch is not None
+                    else sha256_text(
+                        stable_json([active_plan_digest, selected_profile.digest])
+                    )
+                )
+
+                not_applicable_proofs: list[dict[str, Any]] = []
+
+                def evidence_ref(obligation: str, *names: str) -> str:
+                    for name in names:
+                        if name in release_rows:
+                            return release_rows[name][2]
+                    if any(name in required_delivery_evidence for name in names):
+                        raise RuntimeError(
+                            f"required delivery evidence cannot be not-applicable: {names[0]}"
+                        )
+                    proof = profile_not_applicable_proof(
+                        product_id=product_id,
+                        delivery_profile=selected_profile.name.value,
+                        delivery_profile_digest=selected_profile.digest,
+                        obligation=obligation,
+                        acceptable_substitutes=names,
+                    )
+                    not_applicable_proofs.append(proof)
+                    return str(proof["evidence_ref"])
+
+                proof_manifest = build_completion_manifest(
+                    product_id=product_id,
+                    delivery_profile=selected_profile.name.value,
+                    delivery_profile_digest=selected_profile.digest,
+                    product_contract_digest=product_contract_digest,
+                    semantic_graph_digest=semantic_graph_digest,
+                    candidate_snapshot_digest=candidate_snapshot_digest,
+                    pr_checks_ref=evidence_ref(
+                        "pr_checks_ref", "required_checks", "independent_review"
+                    ),
+                    staging_ref=evidence_ref(
+                        "staging_ref",
+                        "staging",
+                        "publish_dry_run",
+                        "package",
+                        "workflow_dry_run",
+                    ),
+                    acceptance_ref=evidence_ref(
+                        "acceptance_ref",
+                        "product_acceptance",
+                        "consumer_smoke",
+                        "distribution_smoke",
+                        "repository_acceptance",
+                    ),
+                    production_ref=evidence_ref(
+                        "production_ref",
+                        "production",
+                        "signed_publish",
+                        "signed_release",
+                        "policy_approved_delivery",
+                    ),
+                    rollback_restore_ref=evidence_ref("rollback_restore_ref", "rollback"),
+                    observation_ref=evidence_ref(
+                        "observation_ref",
+                        "observation",
+                        "consumer_smoke",
+                        "distribution_smoke",
+                        "policy_approved_delivery",
+                    ),
+                    controller_release_digest=controller_release_digest,
+                    policy_digest=completion_policy_digest,
+                    open_problem_count=0,
+                    open_controller_incident_count=0,
+                    not_applicable_proofs=not_applicable_proofs,
+                    created_at=now,
+                )
                 self.connection.execute(
-                    """UPDATE products SET status='COMPLETED',
-                           completion_evidence_ref=?, terminal_reason=NULL,
-                           updated_at=? WHERE product_id=?""",
-                    (completion_ref, now, product_id),
+                    """INSERT INTO completion_manifests
+                       (manifest_id,product_id,manifest_ref,manifest_json,
+                        manifest_digest,controller_release_digest,policy_digest,created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        proof_manifest.manifest_id,
+                        product_id,
+                        completion_ref,
+                        stable_json(asdict(proof_manifest)),
+                        proof_manifest.manifest_digest,
+                        controller_release_digest,
+                        completion_policy_digest,
+                        now,
+                    ),
+                )
+                from .transition_kernel import TransitionKernel
+
+                TransitionKernel(self.connection).apply_product(
+                    product_id=product_id,
+                    target="COMPLETED",
+                    event="COMPLETE",
+                    evidence={
+                        "completion_manifest": proof_manifest.manifest_digest,
+                        "delivery_profile_proof": selected_profile.digest,
+                    },
+                    completion_evidence_ref=completion_ref,
                 )
                 key = sha256_text(f"completion:{product_id}:{digest}")
                 self.connection.execute(

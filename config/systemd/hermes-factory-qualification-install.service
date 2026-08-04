@@ -1,0 +1,22 @@
+[Unit]
+Description=Install independently signed Hermes qualification manifest
+After=hermes-factory-qualification-admit.service
+Requires=hermes-factory-qualification-admit.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.release_qualify install
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/hermes-factory-verifier /var/lib/hermes-factory-verifier /etc/hermes-factory/verifier.yaml
+ReadWritePaths=/etc/hermes-factory/qualification-manifests
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /etc/hermes-factory/credentials.d /usr/local/sbin/hermes-factory-release-submit
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=256M
+TasksMax=64

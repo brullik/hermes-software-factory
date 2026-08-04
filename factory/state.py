@@ -9,8 +9,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .common import new_id, sha256_text, utc_now
-from .migrations import apply_migrations
+from .common import new_id, sha256_text, stable_json, utc_now
+from .migrations import apply_migrations, initialize_legacy_schema
+from .proof_obligations import (
+    ProofObligationError,
+    compile_capability_proof,
+    controller_source_digest,
+    local_toolchain_manifest,
+)
 
 
 class ProductCapacityError(ValueError):
@@ -97,120 +103,278 @@ class StateStore:
         self._connection.execute("PRAGMA busy_timeout=30000")
         self._backup_before_autonomy_migration()
         self._initialize()
+        self._initialize_proof_runtime()
         self.recover_expired_maintenance()
 
     def _initialize(self) -> None:
         with self._connection:
-            self._connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS products (
-                    product_id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    owner_id TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    idea TEXT NOT NULL,
-                    idempotency_key TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS tasks (
-                    task_id TEXT PRIMARY KEY,
-                    product_id TEXT NOT NULL REFERENCES products(product_id),
-                    title TEXT NOT NULL,
-                    role TEXT,
-                    output_schema TEXT,
-                    contract_ref TEXT,
-                    priority INTEGER NOT NULL DEFAULT 0,
-                    status TEXT NOT NULL,
-                    dependencies_json TEXT NOT NULL,
-                    conflict_keys_json TEXT NOT NULL,
-                    lease_owner TEXT,
-                    lease_until TEXT,
-                    heartbeat_at TEXT,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS events (
-                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    product_id TEXT,
-                    task_id TEXT,
-                    event_type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS attempts (
-                    attempt_id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    tier TEXT NOT NULL,
-                    attempt_kind TEXT NOT NULL,
-                    prompt_digest TEXT NOT NULL,
-                    reason_code TEXT,
-                    status TEXT NOT NULL,
-                    semantic_counted INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(task_id, prompt_digest)
-                );
-                CREATE TABLE IF NOT EXISTS outbox (
-                    outbox_id TEXT PRIMARY KEY,
-                    idempotency_key TEXT NOT NULL UNIQUE,
-                    event_type TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    lease_owner TEXT,
-                    lease_until TEXT,
-                    created_at TEXT NOT NULL,
-                    delivered_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS intake_requests (
-                    request_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source TEXT NOT NULL,
-                    owner_id TEXT NOT NULL,
-                    idempotency_key TEXT NOT NULL,
-                    created_at_epoch INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-                CREATE INDEX IF NOT EXISTS idx_events_product ON events(product_id, event_id);
-                CREATE INDEX IF NOT EXISTS idx_attempts_task ON attempts(task_id, tier);
-                CREATE INDEX IF NOT EXISTS idx_intake_requests_owner
-                    ON intake_requests(source, owner_id, created_at_epoch);
-                """
-            )
-            try:
-                self._connection.execute(
-                    "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"
-                )
-            except sqlite3.OperationalError:
-                pass
-            for column, definition in (
-                ("role", "TEXT"),
-                ("output_schema", "TEXT"),
-                ("contract_ref", "TEXT"),
-                ("next_tier", "TEXT"),
-                ("next_attempt_kind", "TEXT NOT NULL DEFAULT 'initial'"),
-                ("repair_context_ref", "TEXT"),
-                ("stage_key", "TEXT"),
-                ("cycle", "INTEGER NOT NULL DEFAULT 0"),
-                ("terminal_reason", "TEXT"),
-                ("terminal_detail", "TEXT"),
-                ("result_ref", "TEXT"),
-                ("failure_kind", "TEXT"),
-                ("available_at", "TEXT"),
-            ):
-                try:
-                    self._connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
-                except sqlite3.OperationalError:
-                    pass
-            for column, definition in (
-                ("lease_until", "TEXT"),
-                ("attempts", "INTEGER NOT NULL DEFAULT 0"),
-                ("last_error", "TEXT"),
-            ):
-                try:
-                    self._connection.execute(f"ALTER TABLE outbox ADD COLUMN {column} {definition}")
-                except sqlite3.OperationalError:
-                    pass
+            initialize_legacy_schema(self._connection)
         apply_migrations(self._connection)
+
+    def _initialize_proof_runtime(self) -> None:
+        """Register the exact running controller and explicit builtin grants."""
+
+        from .autonomy import BUILTIN_CAPABILITIES
+
+        self.controller_release_digest = controller_source_digest()
+        manifest = local_toolchain_manifest(self.controller_release_digest)
+        self.toolchain_manifest_digest = manifest.manifest_digest
+        policy_digest = sha256_text(
+            stable_json(
+                {
+                    "kind": "controller-builtin-grants",
+                    "controller_release_digest": self.controller_release_digest,
+                    "capabilities": sorted(BUILTIN_CAPABILITIES),
+                }
+            )
+        )
+        self.grant_epoch_id = (
+            "GE-"
+            + sha256_text(
+                stable_json([self.controller_release_digest, policy_digest])
+            )[:24].upper()
+        )
+        with self._connection:
+            self._connection.execute(
+                """INSERT OR IGNORE INTO toolchain_manifests
+                   (manifest_id, product_id, controller_release_digest, manifest_json,
+                    manifest_digest, status, created_at)
+                   VALUES (?, NULL, ?, ?, ?, 'ACTIVE', ?)""",
+                (
+                    manifest.manifest_id,
+                    manifest.controller_release_digest,
+                    stable_json(
+                        {
+                            "components": dict(manifest.components),
+                            "capabilities": list(manifest.capabilities),
+                        }
+                    ),
+                    manifest.manifest_digest,
+                    manifest.created_at,
+                ),
+            )
+            self._connection.execute(
+                """INSERT OR IGNORE INTO grant_epochs
+                   (grant_epoch_id, product_id, controller_release_digest,
+                    policy_digest, status, created_at)
+                   VALUES (?, NULL, ?, ?, 'ACTIVE', ?)""",
+                (
+                    self.grant_epoch_id,
+                    self.controller_release_digest,
+                    policy_digest,
+                    utc_now(),
+                ),
+            )
+            for capability in sorted(BUILTIN_CAPABILITIES):
+                grant_id = "grant-" + sha256_text(
+                    stable_json([self.grant_epoch_id, capability])
+                )[:20]
+                self._connection.execute(
+                    """INSERT OR IGNORE INTO capability_grants
+                       (grant_id, product_id, task_id, capability, scope_json,
+                        provider, status, expires_at, created_at, grant_epoch_id)
+                       VALUES (?, NULL, NULL, ?, ?, 'controller-builtin',
+                               'AVAILABLE', NULL, ?, ?)""",
+                    (
+                        grant_id,
+                        capability,
+                        stable_json(
+                            {
+                                "allowed_operations": [capability],
+                                "controller_release_digest": self.controller_release_digest,
+                            }
+                        ),
+                        utc_now(),
+                        self.grant_epoch_id,
+                    ),
+                )
+
+    def _validate_exact_task_contract_locked(self, task: sqlite3.Row) -> str:
+        """Verify a canonical task contract before claim or any worker/model call."""
+
+        from .path_governor import task_contract_digest
+
+        task_id = str(task["task_id"])
+        contract_ref = str(task["contract_ref"] or "")
+        plan_id = str(task["plan_id"] or "")
+        if plan_id.startswith("PLAN-SYSTEM-"):
+            # Controller-internal system tasks still receive a proof, but they
+            # have no model-facing artifact contract.
+            digest = str(task["contract_digest"] or "") or task_contract_digest(dict(task))
+            return digest
+        expected_ref = f"evidence/task-{task_id}.json"
+        if contract_ref != expected_ref:
+            raise ProofObligationError("task contract reference is not exact")
+        evidence_root = self.database_path.parent / "evidence"
+        unresolved = evidence_root / Path(contract_ref).name
+        try:
+            contract_path = unresolved.resolve(strict=True)
+        except OSError as error:
+            raise ProofObligationError("task contract is missing") from error
+        if (
+            contract_path.parent != evidence_root.resolve()
+            or unresolved.is_symlink()
+            or not contract_path.is_file()
+        ):
+            raise ProofObligationError("task contract path is invalid")
+        try:
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ProofObligationError("task contract is unreadable") from error
+        if not isinstance(payload, dict):
+            raise ProofObligationError("task contract is not an object")
+        if (
+            str(payload.get("task_id") or "") != task_id
+            or str(payload.get("product_id") or "") != str(task["product_id"])
+        ):
+            raise ProofObligationError("task contract identity mismatch")
+        allowed_paths = payload.get("allowed_paths")
+        if not isinstance(allowed_paths, list) or any(
+            str(value).strip() in {"*", "**", "**/*"} for value in allowed_paths
+        ):
+            raise ProofObligationError("task contract has unbounded scope")
+        digest = task_contract_digest(payload)
+        persisted = str(task["contract_digest"] or "")
+        if persisted and persisted != digest:
+            raise ProofObligationError("task contract digest conflicts with durable state")
+        return digest
+
+    def _ensure_capability_proof_locked(self, task: sqlite3.Row) -> str:
+        """Compile/reuse an exact non-lineage proof before mutating claim state."""
+
+        from .autonomy import validate_task_capability_contract
+
+        profile = str(task["capability_profile"] or "")
+        try:
+            required_raw = json.loads(str(task["required_capabilities_json"] or "[]"))
+        except json.JSONDecodeError as error:
+            raise ProofObligationError("required capability set is invalid") from error
+        if not isinstance(required_raw, list):
+            raise ProofObligationError("required capability set is not an array")
+        required = [str(value) for value in required_raw]
+        validate_task_capability_contract(
+            role=str(task["role"] or ""),
+            stage_key=str(task["stage_key"] or ""),
+            capability_profile=profile,
+            required_capabilities=required,
+        )
+        contract_digest = self._validate_exact_task_contract_locked(task)
+        existing = self._connection.execute(
+            """SELECT proof.proof_digest,proof.expires_at
+                 FROM capability_proofs AS proof
+                 JOIN toolchain_manifests AS manifest
+                   ON manifest.manifest_digest=proof.toolchain_manifest_digest
+                WHERE proof.task_id=? AND proof.task_contract_digest=?
+                  AND proof.status='ACTIVE' AND manifest.status='ACTIVE'
+                  AND manifest.controller_release_digest=?
+                  AND (manifest.product_id=? OR manifest.product_id IS NULL)
+                 ORDER BY proof.created_at DESC LIMIT 1""",
+            (
+                task["task_id"],
+                contract_digest,
+                self.controller_release_digest,
+                task["product_id"],
+            ),
+        ).fetchone()
+        now = utc_now()
+        if existing is not None and (
+            existing["expires_at"] is None or str(existing["expires_at"]) > now
+        ):
+            return str(existing["proof_digest"])
+
+        manifests = self._connection.execute(
+            """SELECT manifest_json,manifest_digest FROM toolchain_manifests
+                 WHERE controller_release_digest=? AND status='ACTIVE'
+                   AND (product_id=? OR product_id IS NULL)
+                 ORDER BY created_at DESC""",
+            (self.controller_release_digest, task["product_id"]),
+        ).fetchall()
+        required_toolchain = {
+            value for value in required if value.startswith("toolchain.")
+        }
+        manifest_digest = ""
+        for manifest in manifests:
+            try:
+                manifest_payload = json.loads(str(manifest["manifest_json"]))
+            except json.JSONDecodeError:
+                continue
+            manifest_capabilities = {
+                str(value) for value in manifest_payload.get("capabilities", [])
+            }
+            if required_toolchain <= manifest_capabilities:
+                manifest_digest = str(manifest["manifest_digest"])
+                break
+        if not manifest_digest:
+            raise ProofObligationError("no exact toolchain manifest satisfies task")
+
+        placeholders = ",".join("?" for _ in required)
+        grants = self._connection.execute(
+            f"""SELECT grant.*, epoch.status AS epoch_status
+                  FROM capability_grants AS grant
+                  JOIN grant_epochs AS epoch
+                    ON epoch.grant_epoch_id=grant.grant_epoch_id
+                 WHERE grant.capability IN ({placeholders})
+                   AND grant.status='AVAILABLE' AND epoch.status='ACTIVE'
+                   AND (grant.product_id IS NULL OR grant.product_id=?)
+                   AND (grant.task_id IS NULL OR grant.task_id=?)
+                   AND (grant.expires_at IS NULL OR grant.expires_at>?)
+                   AND (epoch.expires_at IS NULL OR epoch.expires_at>?)
+                 ORDER BY (grant.task_id IS NOT NULL) DESC,
+                          (grant.product_id IS NOT NULL) DESC,grant.created_at DESC""",
+            (*required, task["product_id"], task["task_id"], now, now),
+        ).fetchall()
+        proof = compile_capability_proof(
+            task_id=str(task["task_id"]),
+            task_contract_digest=contract_digest,
+            canonical_profile=profile,
+            canonical_capabilities=required,
+            toolchain_manifest_digest=manifest_digest,
+            grants=[dict(row) for row in grants],
+            now=now,
+        )
+        self._connection.execute(
+            """INSERT INTO capability_proofs
+               (proof_id, task_id, task_contract_digest, canonical_profile,
+                toolchain_manifest_digest, grants_json, negative_assertions_json,
+                expires_at, proof_digest, created_at, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')""",
+            (
+                proof.proof_id,
+                proof.task_id,
+                proof.task_contract_digest,
+                proof.canonical_profile,
+                proof.toolchain_manifest_digest,
+                stable_json([grant.__dict__ for grant in proof.grants]),
+                stable_json(list(proof.negative_assertions)),
+                proof.expires_at,
+                proof.proof_digest,
+                proof.created_at,
+            ),
+        )
+        for grant in proof.grants:
+            self._connection.execute(
+                """INSERT INTO capability_proof_grants
+                   (proof_id,grant_id,grant_epoch_id,capability,scope_digest)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    proof.proof_id,
+                    grant.grant_id,
+                    grant.grant_epoch_id,
+                    grant.capability,
+                    grant.scope_digest,
+                ),
+            )
+        self._connection.execute(
+            """UPDATE tasks SET contract_digest=?,capability_proof_digest=?,
+                      toolchain_manifest_digest=? WHERE task_id=?""",
+            (
+                contract_digest,
+                proof.proof_digest,
+                proof.toolchain_manifest_digest,
+                task["task_id"],
+            ),
+        )
+        return proof.proof_digest
 
     def _backup_before_autonomy_migration(self) -> None:
         """Create one recoverable pre-v2 backup before the first v2 migration."""
@@ -552,7 +716,10 @@ class StateStore:
         idempotency_key: str,
         rate_limit: tuple[int, int] | None = None,
     ) -> tuple[dict[str, Any], bool]:
+        from .delivery_profiles import infer_delivery_profile
+
         now = utc_now()
+        profile = infer_delivery_profile(idea, "new_repository").value
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -587,9 +754,10 @@ class StateStore:
                     )
                 self._connection.execute(
                     """INSERT INTO products
-                    (product_id, status, owner_id, source, idea, idempotency_key, created_at, updated_at)
-                    VALUES (?, 'IDEA_RECEIVED', ?, ?, ?, ?, ?, ?)""",
-                    (product_id, owner_id, source, idea, idempotency_key, now, now),
+                    (product_id, status, owner_id, source, idea, idempotency_key,
+                     created_at, updated_at, delivery_profile)
+                    VALUES (?, 'IDEA_RECEIVED', ?, ?, ?, ?, ?, ?, ?)""",
+                    (product_id, owner_id, source, idea, idempotency_key, now, now, profile),
                 )
                 self._record_event(product_id, None, "product_created", {"source": source})
                 row = self._connection.execute(
@@ -621,35 +789,25 @@ class StateStore:
             rows = self._connection.execute("SELECT * FROM products ORDER BY created_at").fetchall()
             return [dict(row) for row in rows]
 
-    def transition_product(self, product_id: str, status: str) -> dict[str, Any]:
-        allowed = {
-            "IDEA_RECEIVED": {"CONTRACT_DRAFTED", "PAUSED", "CANCELLED"},
-            "CONTRACT_DRAFTED": {"CONTRACT_VALIDATED", "PAUSED", "CANCELLED"},
-            "CONTRACT_VALIDATED": {"RISK_CLASSIFIED", "PAUSED", "CANCELLED"},
-            "RISK_CLASSIFIED": {"ARCHITECTED", "PAUSED", "CANCELLED"},
-            "ARCHITECTED": {"BACKLOG_READY", "PAUSED", "CANCELLED"},
-            "BACKLOG_READY": {"IMPLEMENTING", "REPAIRING", "PAUSED", "CANCELLED"},
-            "IMPLEMENTING": {"INTEGRATING", "REPAIRING", "DELAYED_QUOTA", "PAUSED", "CANCELLED"},
-            "INTEGRATING": {"STAGING_DEPLOYED", "REPAIRING", "PAUSED", "CANCELLED"},
-            "STAGING_DEPLOYED": {"PRODUCT_ACCEPTANCE", "ROLLING_BACK", "PAUSED", "CANCELLED"},
-            "PRODUCT_ACCEPTANCE": {"RELEASE_READY", "REPAIRING", "PAUSED", "CANCELLED"},
-            "RELEASE_READY": {"PRODUCTION_DEPLOYED", "STAGING_DEPLOYED", "PAUSED", "CANCELLED"},
-            "PRODUCTION_DEPLOYED": {"OBSERVATION", "ROLLING_BACK", "PAUSED", "CANCELLED"},
-            "OBSERVATION": {"COMPLETED", "REPAIRING", "ROLLING_BACK", "PAUSED", "CANCELLED"},
-            "REPAIRING": {"IMPLEMENTING", "INTEGRATING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
-            "DELAYED_QUOTA": {"IMPLEMENTING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
-            "BLOCKED_OWNER": {"IMPLEMENTING", "FAILED_SAFE", "PAUSED", "CANCELLED"},
-            "ROLLING_BACK": {"ROLLED_BACK", "FAILED_SAFE"},
-            "ROLLED_BACK": {"IMPLEMENTING", "STAGING_DEPLOYED", "FAILED_SAFE"},
-            "PAUSED": {*_PAUSED_RESUME_STATUSES, "CANCELLED"},
-            "CANCELLED": set(),
-            "COMPLETED": set(),
-            "FAILED_SAFE": set(),
-        }
-        for current in set(allowed) - {"CANCELLED", "COMPLETED", "FAILED_SAFE"}:
-            allowed[current].update({"BLOCKED_OWNER", "FAILED_SAFE"})
-        for current in ("STAGING_DEPLOYED", "RELEASE_READY", "PRODUCTION_DEPLOYED"):
-            allowed[current].add("REPAIRING")
+    def transition_product(
+        self,
+        product_id: str,
+        status: str,
+        *,
+        evidence: dict[str, str] | None = None,
+        terminal_reason: str | None = None,
+        terminal_evidence_ref: str | None = None,
+        completion_evidence_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one catalogued transition and persist its proof receipt."""
+
+        from .transition_catalog import TRANSITION_CATALOG, ProductEvent
+        from .transition_kernel import (
+            TransitionKernel,
+            TransitionProofError,
+            UnknownTransitionError,
+        )
+
         with self._lock, self._connection:
             row = self._connection.execute(
                 "SELECT * FROM products WHERE product_id = ?", (product_id,)
@@ -657,15 +815,95 @@ class StateStore:
             if row is None:
                 raise KeyError(product_id)
             current = str(row["status"])
-            if status not in allowed.get(current, set()):
-                raise ValueError(f"Invalid product transition {current} -> {status}")
-            now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status = ?, updated_at = ? WHERE product_id = ?",
-                (status, now, product_id),
+            preferred_events = (
+                ProductEvent.COMPLETE.value,
+                ProductEvent.ADVANCE.value,
+                ProductEvent.RESUME.value,
+                ProductEvent.PRODUCT_REPAIR_REQUIRED.value,
+                ProductEvent.TRANSIENT_DELAY.value,
+                ProductEvent.EXTERNAL_BLOCK.value,
+                ProductEvent.PAUSE.value,
+                ProductEvent.CANCEL.value,
+                ProductEvent.FAIL_SAFE.value,
+                ProductEvent.CONTROLLER_QUARANTINE.value,
+                ProductEvent.ROLLBACK_REQUIRED.value,
+                ProductEvent.ROLLBACK_COMPLETE.value,
             )
+            candidates = [
+                spec
+                for spec in TRANSITION_CATALOG
+                if spec.source.value == current and spec.target.value == status
+            ]
+            selected_spec = next(
+                (
+                    spec
+                    for event in preferred_events
+                    for spec in candidates
+                    if spec.event == event
+                ),
+                candidates[0] if len(candidates) == 1 else None,
+            )
+            if selected_spec is None:
+                raise ValueError(f"Invalid product transition {current} -> {status}")
+            selected_event = selected_spec.event
+            if status == "CANCELLED":
+                now = utc_now()
+                cancelled_rows = self._connection.execute(
+                    """SELECT task_id,status FROM tasks WHERE product_id=?
+                         AND status IN ('PENDING','CLAIMED','WAITING')""",
+                    (product_id,),
+                ).fetchall()
+                self._connection.execute(
+                    """UPDATE tasks SET status='FAILED_SAFE',graph_status='CANCELLED',
+                              lease_owner=NULL,lease_until=NULL,lease_token=NULL,
+                              heartbeat_at=NULL,terminal_reason='product_cancelled',updated_at=?
+                        WHERE product_id=? AND status IN ('PENDING','CLAIMED','WAITING')""",
+                    (now, product_id),
+                )
+                for cancelled in cancelled_rows:
+                    self._record_event(
+                        product_id,
+                        str(cancelled["task_id"]),
+                        "task_cancelled",
+                        {
+                            "previous_status": str(cancelled["status"]),
+                            "reason": "product_cancelled",
+                        },
+                    )
+            proof = dict(evidence or {})
+            for obligation in selected_spec.required_evidence:
+                proof.setdefault(
+                    obligation,
+                    f"state://transition/{product_id}/{selected_spec.transition_id}/{obligation}",
+                )
+            reason = terminal_reason
+            terminal_ref = terminal_evidence_ref
+            if status == "FAILED_SAFE":
+                reason = reason or "explicit_fail_safe"
+                terminal_ref = terminal_ref or (
+                    f"state://terminal/{product_id}/{sha256_text(reason)[:16]}"
+                )
+            try:
+                TransitionKernel(self._connection).apply_product(
+                    product_id=product_id,
+                    target=status,
+                    event=selected_event,
+                    evidence=proof,
+                    terminal_reason=reason,
+                    terminal_evidence_ref=terminal_ref,
+                    completion_evidence_ref=completion_evidence_ref,
+                )
+            except (UnknownTransitionError, TransitionProofError) as error:
+                raise ValueError(str(error)) from error
             self._record_event(
-                product_id, None, "product_transition", {"from": current, "to": status}
+                product_id,
+                None,
+                "product_transition",
+                {
+                    "from": current,
+                    "to": status,
+                    "event": selected_event,
+                },
             )
             updated = self._connection.execute(
                 "SELECT * FROM products WHERE product_id = ?", (product_id,)
@@ -702,9 +940,17 @@ class StateStore:
                 )
                 self._requeue_resumable_tasks_locked(product_id, now=now)
                 if current == "PAUSED":
-                    self._connection.execute(
-                        "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                        (resume_status, now, product_id),
+                    from .transition_kernel import TransitionKernel
+
+                    TransitionKernel(self._connection).apply_product(
+                        product_id=product_id,
+                        target=resume_status,
+                        event=f"RESUME_TO_{resume_status}",
+                        evidence={
+                            "resume_receipt": (
+                                f"state://resume/{product_id}/{sha256_text(now)[:16]}"
+                            )
+                        },
                     )
                     self._record_event(
                         product_id,
@@ -1297,7 +1543,70 @@ class StateStore:
                     conflict_keys = set(json.loads(row["conflict_keys_json"]))
                     if conflict_keys & claimed_conflicts.get(str(row["product_id"]), set()):
                         continue
-                    chosen = row
+                    try:
+                        self._ensure_capability_proof_locked(row)
+                    except (ProofObligationError, ValueError) as error:
+                        coordinate = sha256_text(
+                            stable_json(
+                                [
+                                    row["product_id"],
+                                    row["task_id"],
+                                    type(error).__name__,
+                                    str(error),
+                                ]
+                            )
+                        )
+                        evidence_ref = f"internal://capability-proof/{coordinate[:24]}"
+                        incident_id = f"incident-{coordinate[:20]}"
+                        self._connection.execute(
+                            """INSERT OR IGNORE INTO controller_incidents
+                               (incident_id,product_id,task_id,reason_code,
+                                evidence_ref,status,created_at)
+                               VALUES (?, ?, ?, 'invalid_capability_proof', ?, 'OPEN', ?)""",
+                            (
+                                incident_id,
+                                row["product_id"],
+                                row["task_id"],
+                                evidence_ref,
+                                now,
+                            ),
+                        )
+                        self._connection.execute(
+                            """UPDATE tasks SET status='WAITING',
+                                      graph_status='BLOCKED_CAPABILITY',
+                                      blocked_reason='invalid_capability_proof',
+                                      blocked_ref=?,updated_at=? WHERE task_id=?""",
+                            (evidence_ref, now, row["task_id"]),
+                        )
+                        from .transition_kernel import TransitionKernel
+
+                        TransitionKernel(self._connection).apply_product(
+                            product_id=str(row["product_id"]),
+                            target="FAILED_SAFE",
+                            event="CONTROLLER_QUARANTINE",
+                            evidence={
+                                "controller_incident": incident_id,
+                                "terminal_evidence": evidence_ref,
+                            },
+                            terminal_reason="invalid_capability_proof",
+                            terminal_evidence_ref=evidence_ref,
+                        )
+                        self._record_event(
+                            str(row["product_id"]),
+                            str(row["task_id"]),
+                            "controller_quarantine",
+                            {
+                                "reason_code": "invalid_capability_proof",
+                                "incident_id": incident_id,
+                                "evidence_ref": evidence_ref,
+                            },
+                        )
+                        continue
+                    chosen = self._connection.execute(
+                        "SELECT * FROM tasks WHERE task_id=?",
+                        (row["task_id"],),
+                    ).fetchone()
+                    assert chosen is not None
                     break
                 if chosen is None:
                     self._connection.commit()
@@ -1924,9 +2233,10 @@ class StateStore:
             if unfinished is None:
                 return False
             now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                (resume_status, now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status=resume_status
             )
             self._connection.execute(
                 """UPDATE tasks
@@ -2002,9 +2312,10 @@ class StateStore:
             if already_recovered is not None:
                 return False
             now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                (resume_status, now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status=resume_status
             )
             self._connection.execute(
                 """UPDATE tasks
@@ -2091,9 +2402,10 @@ class StateStore:
             ):
                 return False
             now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                (resume_status, now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status=resume_status
             )
             self._connection.execute(
                 """UPDATE tasks
@@ -2200,9 +2512,10 @@ class StateStore:
             if already_adopted is not None:
                 return False
             now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status='IMPLEMENTING', updated_at=? WHERE product_id=?",
-                (now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status="IMPLEMENTING"
             )
             self._connection.execute(
                 """UPDATE tasks
@@ -2332,9 +2645,10 @@ class StateStore:
                 ):
                     return False
             now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                (resume_status, now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status=resume_status
             )
             self._connection.execute(
                 """UPDATE tasks
@@ -2426,11 +2740,11 @@ class StateStore:
             ).fetchone()
             if exhausted is None or already_reopened is not None:
                 return False
-            now = utc_now()
             completed_cycle = int(row["cycle"] or 0)
-            self._connection.execute(
-                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                (resume_status, now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status=resume_status
             )
             self._record_event(
                 product_id,
@@ -2516,10 +2830,10 @@ class StateStore:
                     and int(reopened_payload.get("max_repair_cycles") or 0) >= max_repair_cycles
                 ):
                     return False
-            now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status=?, updated_at=? WHERE product_id=?",
-                (resume_status, now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status=resume_status
             )
             self._record_event(
                 product_id,
@@ -2601,10 +2915,10 @@ class StateStore:
                 or hypothesis_attempt > 3
             ):
                 return False
-            now = utc_now()
-            self._connection.execute(
-                "UPDATE products SET status='REPAIRING', updated_at=? WHERE product_id=?",
-                (now, product_id),
+            from .proof_obligations import RecoveryCertificateService
+
+            RecoveryCertificateService(self._connection).apply_ready(
+                product_id=product_id, resume_status="REPAIRING"
             )
             self._record_event(
                 product_id,

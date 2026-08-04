@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.local/schemas/release-qualification-manifest.schema.json",
+  "title": "Hermes Release Qualification Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "epoch_id",
+    "source_commit",
+    "stable_release_digest",
+    "controller_release_digest",
+    "candidate_digest",
+    "policy_digest",
+    "toolchain_manifest_digest",
+    "qualification_run_digests",
+    "transition_model_digest",
+    "historical_corpus_digest",
+    "migration_matrix_digest",
+    "clean_canary_reports",
+    "verifier",
+    "manifest_ref",
+    "backup_restore_proof_ref",
+    "rollback_proof_ref",
+    "shadow_report_ref",
+    "verifier_signature"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "epoch_id": {"type": "string", "pattern": "^RE-[A-F0-9]{24}$"},
+    "source_commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "stable_release_digest": {"$ref": "#/$defs/digest"},
+    "controller_release_digest": {"$ref": "#/$defs/digest"},
+    "candidate_digest": {"$ref": "#/$defs/digest"},
+    "policy_digest": {"$ref": "#/$defs/digest"},
+    "toolchain_manifest_digest": {"$ref": "#/$defs/digest"},
+    "transition_model_digest": {"$ref": "#/$defs/digest"},
+    "historical_corpus_digest": {"$ref": "#/$defs/digest"},
+    "migration_matrix_digest": {"$ref": "#/$defs/digest"},
+    "qualification_run_digests": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/digest"}
+    },
+    "clean_canary_reports": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {"$ref": "#/$defs/canary"}
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "public_key", "public_key_digest", "signature_algorithm"],
+      "properties": {
+        "digest": {"$ref": "#/$defs/digest"},
+        "public_key": {"type": "string", "minLength": 44, "maxLength": 44},
+        "public_key_digest": {"$ref": "#/$defs/digest"},
+        "signature_algorithm": {"const": "Ed25519"}
+      }
+    },
+    "manifest_ref": {"$ref": "#/$defs/immutableRef"},
+    "backup_restore_proof_ref": {"$ref": "#/$defs/immutableRef"},
+    "rollback_proof_ref": {"$ref": "#/$defs/immutableRef"},
+    "shadow_report_ref": {"$ref": "#/$defs/immutableRef"},
+    "verifier_signature": {"type": "string", "minLength": 88, "maxLength": 88}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "immutableRef": {
+      "type": "string",
+      "pattern": "^(artifact|b2|evidence|github|oci|s3|state|worm)://[^\\s]+$"
+    },
+    "canary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canary_id",
+        "scenario_id",
+        "product_id",
+        "state_fresh_proof_ref",
+        "initial_state_digest",
+        "controller_release_digest",
+        "completion_manifest_ref",
+        "observation_evidence_ref",
+        "observation_digest",
+        "controller_recovery_applications",
+        "manual_database_mutations",
+        "routine_owner_actions",
+        "unknown_controller_defects",
+        "release_changes",
+        "duplicate_side_effects",
+        "task_count",
+        "baseline_task_count"
+      ],
+      "properties": {
+        "canary_id": {"type": "string", "pattern": "^CC-[A-F0-9]{24}$"},
+        "scenario_id": {"type": "string", "minLength": 1},
+        "product_id": {"type": "string", "minLength": 1},
+        "state_fresh_proof_ref": {"$ref": "#/$defs/immutableRef"},
+        "initial_state_digest": {"$ref": "#/$defs/digest"},
+        "controller_release_digest": {"$ref": "#/$defs/digest"},
+        "completion_manifest_ref": {"$ref": "#/$defs/immutableRef"},
+        "observation_evidence_ref": {"$ref": "#/$defs/immutableRef"},
+        "observation_digest": {"$ref": "#/$defs/digest"},
+        "controller_recovery_applications": {"const": 0},
+        "manual_database_mutations": {"const": 0},
+        "routine_owner_actions": {"const": 0},
+        "unknown_controller_defects": {"const": 0},
+        "release_changes": {"const": 0},
+        "duplicate_side_effects": {"const": 0},
+        "task_count": {"type": "integer", "minimum": 1},
+        "baseline_task_count": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

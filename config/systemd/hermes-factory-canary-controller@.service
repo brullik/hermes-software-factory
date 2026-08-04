@@ -1,0 +1,31 @@
+[Unit]
+Description=Hermes clean-canary controller (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermescandidate
+Group=hermescandidate
+WorkingDirectory=/opt/hermes-factory-candidate/current
+Environment=FACTORY_CONFIG=/etc/hermes-factory/canaries/%i.yaml
+Environment=HOME=/var/lib/hermes-factory-candidate
+Environment=XDG_RUNTIME_DIR=/run/hermes-factory-canary-%i
+Environment=CREDENTIALS_DIRECTORY=/etc/hermes-factory/candidate-credentials.d
+Environment=PYTHONUNBUFFERED=1
+RuntimeDirectory=hermes-factory-canary-%i
+RuntimeDirectoryMode=0750
+ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m factory.controller --config /etc/hermes-factory/canaries/%i.yaml
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-canaries /var/log/hermes-factory-canaries /var/lib/hermes-factory-candidate /run/hermes-factory-canary-%i
+ReadOnlyPaths=/etc/hermes-factory/canaries/%i.yaml /etc/hermes-factory/candidate-model-registry.yaml /etc/hermes-factory/candidate-credentials.d
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/verifier.yaml /usr/local/sbin/hermes-factory-release-submit
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=1200M
+TasksMax=256

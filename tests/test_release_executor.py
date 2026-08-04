@@ -25,6 +25,7 @@ class FakeGitHub:
         self.calls: list[tuple[str, Any]] = []
         self.created = False
         self.candidate_sha = ""
+        self.is_merged = False
 
     def create_pull_request(self, **kwargs: Any) -> None:
         self.calls.append(("create", kwargs))
@@ -62,9 +63,12 @@ class FakeGitHub:
 
     def merge_pull_request_checked(self, *args: Any, **kwargs: Any) -> None:
         self.calls.append(("merge", (args, kwargs)))
+        self.is_merged = True
 
     def merged_commit(self, pull_request: str) -> str:
         self.calls.append(("merged", pull_request))
+        if not self.is_merged:
+            raise GitHubCommandError("pull request is not merged")
         return "b" * 40
 
 
@@ -77,7 +81,13 @@ class AllowlistedRunner:
         if argv[0] == "git" and "push" in argv:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0].endswith("sudo") or argv[0].endswith("sudo.exe"):
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            release_id = argv[argv.index("--release-id") + 1]
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps({"status": "PROMOTED", "release_id": release_id}) + "\n",
+                "",
+            )
         return subprocess.run(
             argv,
             cwd=cwd,
@@ -425,6 +435,52 @@ def test_production_merges_staged_candidate_and_calls_product_helper() -> None:
         assert "--product-id" in helper
         assert helper[helper.index("--product-id") + 1] == "P-RELEASE-001"
         assert helper[helper.index("--repository") + 1] == "brullik/bybit-grid-research"
+
+
+def test_production_reconcile_observes_merged_pr_without_second_merge() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(root)
+        config.raw["backup"]["offsite_configured"] = True
+        config.raw["deployment"]["production_helper"] = (
+            "/usr/local/sbin/hermes-factory-release-submit"
+        )
+        config.state_dir.mkdir(parents=True)
+        github = FakeGitHub()
+        runner = AllowlistedRunner()
+        executor = make_executor(config, github, runner)
+        source = workspace(root)
+        staging = executor.execute(
+            stage="staging",
+            proposed=proposal(),
+            product_id="P-RELEASE-001",
+            task_contract={"risk_tier": "medium"},
+            workspace=source,
+            expected_staging_digest=None,
+        )
+        digest = str(staging["release"]["image_digest"])
+        executor.execute(
+            stage="production",
+            proposed=proposal(),
+            product_id="P-RELEASE-001",
+            task_contract={"risk_tier": "medium"},
+            workspace=source,
+            expected_staging_digest=digest,
+        )
+
+        reconciled = executor.reconcile(
+            stage="production",
+            proposed=proposal(),
+            product_id="P-RELEASE-001",
+            task_contract={"risk_tier": "medium"},
+            workspace=source,
+            expected_staging_digest=digest,
+        )
+
+        merge_calls = [call for call in github.calls if call[0] == "merge"]
+        assert len(merge_calls) == 1
+        assert reconciled["merge"] == {"performed": True, "merge_sha": "b" * 40}
+        assert reconciled["production"] == "deployed"
 
 
 def test_release_digest_ignores_git_metadata() -> None:

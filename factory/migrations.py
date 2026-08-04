@@ -36,6 +36,136 @@ def _add_columns(
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
+def _execute_script_atomic(connection: sqlite3.Connection, script: str) -> None:
+    """Execute a DDL script without ``executescript``'s implicit commit.
+
+    ``sqlite3.Connection.executescript`` commits an open transaction before it
+    starts.  Migrations use ``BEGIN IMMEDIATE`` and must remain crash-atomic, so
+    complete SQL statements (including trigger bodies) are executed one by one
+    through the existing transaction.
+    """
+
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if not sqlite3.complete_statement(statement):
+            continue
+        if statement.strip():
+            connection.execute(statement)
+        statement = ""
+    if statement.strip():
+        raise RuntimeError("migration SQL script ends with an incomplete statement")
+
+
+def initialize_legacy_schema(connection: sqlite3.Connection) -> None:
+    """Create the exact pre-v2 baseline used by runtime and matrix fixtures."""
+
+    _execute_script_atomic(
+        connection,
+        """
+        CREATE TABLE IF NOT EXISTS products (
+            product_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            idea TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL REFERENCES products(product_id),
+            title TEXT NOT NULL,
+            role TEXT,
+            output_schema TEXT,
+            contract_ref TEXT,
+            priority INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            dependencies_json TEXT NOT NULL,
+            conflict_keys_json TEXT NOT NULL,
+            lease_owner TEXT,
+            lease_until TEXT,
+            heartbeat_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id TEXT,
+            task_id TEXT,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS attempts (
+            attempt_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            attempt_kind TEXT NOT NULL,
+            prompt_digest TEXT NOT NULL,
+            reason_code TEXT,
+            status TEXT NOT NULL,
+            semantic_counted INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, prompt_digest)
+        );
+        CREATE TABLE IF NOT EXISTS outbox (
+            outbox_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            lease_owner TEXT,
+            lease_until TEXT,
+            created_at TEXT NOT NULL,
+            delivered_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS intake_requests (
+            request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            created_at_epoch INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_events_product ON events(product_id, event_id);
+        CREATE INDEX IF NOT EXISTS idx_attempts_task ON attempts(task_id, tier);
+        CREATE INDEX IF NOT EXISTS idx_intake_requests_owner
+            ON intake_requests(source, owner_id, created_at_epoch);
+        """,
+    )
+    _add_columns(
+        connection,
+        "tasks",
+        (
+            ("role", "TEXT"),
+            ("output_schema", "TEXT"),
+            ("contract_ref", "TEXT"),
+            ("next_tier", "TEXT"),
+            ("next_attempt_kind", "TEXT NOT NULL DEFAULT 'initial'"),
+            ("repair_context_ref", "TEXT"),
+            ("stage_key", "TEXT"),
+            ("cycle", "INTEGER NOT NULL DEFAULT 0"),
+            ("terminal_reason", "TEXT"),
+            ("terminal_detail", "TEXT"),
+            ("result_ref", "TEXT"),
+            ("failure_kind", "TEXT"),
+            ("available_at", "TEXT"),
+        ),
+    )
+    _add_columns(
+        connection,
+        "outbox",
+        (
+            ("lease_until", "TEXT"),
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_error", "TEXT"),
+        ),
+    )
+
+
 def _migration_001_baseline(connection: sqlite3.Connection) -> None:
     """Record the pre-v2 schema as an explicit migration baseline."""
 
@@ -100,7 +230,8 @@ def _migration_002_autonomy_v2(connection: sqlite3.Connection) -> None:
             ("result_digest", "TEXT"),
         ),
     )
-    connection.executescript(
+    _execute_script_atomic(
+        connection,
         """
         CREATE TABLE IF NOT EXISTS plans (
             plan_id TEXT PRIMARY KEY,
@@ -835,7 +966,8 @@ def _migration_010_durable_capability_reconciliation(
 ) -> None:
     """Persist sanitized probe results and durable capability blockers."""
 
-    connection.executescript(
+    _execute_script_atomic(
+        connection,
         """
         CREATE TABLE IF NOT EXISTS capability_check_results (
             product_id TEXT NOT NULL REFERENCES products(product_id),
@@ -908,7 +1040,8 @@ def _migration_012_typed_semantic_lifecycle(
             ("proposal_digest", "TEXT"),
         ),
     )
-    connection.executescript(
+    _execute_script_atomic(
+        connection,
         """
         CREATE INDEX IF NOT EXISTS idx_tasks_lifecycle_stage
             ON tasks(product_id, plan_id, lifecycle_stage, graph_status);
@@ -938,7 +1071,8 @@ def _migration_013_maintenance_and_recovery_control(
         if products_table is not None
         else 0
     )
-    connection.executescript(
+    _execute_script_atomic(
+        connection,
         """
         CREATE TABLE IF NOT EXISTS factory_runtime_state (
             singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
@@ -1208,7 +1342,8 @@ def _migration_017_path_governor_semantic_state(
             ("root_problem_signature", "TEXT"),
         ),
     )
-    connection.executescript(
+    _execute_script_atomic(
+        connection,
         """
         CREATE TABLE IF NOT EXISTS semantic_nodes (
             semantic_node_id TEXT PRIMARY KEY,
@@ -1322,6 +1457,448 @@ def _migration_017_path_governor_semantic_state(
             ON tasks(product_id, result_binding_id, graph_status);
         CREATE INDEX IF NOT EXISTS idx_tasks_candidate_snapshot
             ON tasks(product_id, candidate_snapshot_id, graph_status);
+        """
+    )
+
+
+def _migration_018_error_free_process_control_plane(
+    connection: sqlite3.Connection,
+) -> None:
+    """Install the 2.4 proof-carrying and independent qualification plane."""
+
+    _add_columns(
+        connection,
+        "products",
+        (
+            ("delivery_profile", "TEXT"),
+            ("terminal_evidence_ref", "TEXT"),
+            ("controller_release_epoch_id", "TEXT"),
+            ("last_transition_receipt_id", "TEXT"),
+        ),
+    )
+    _add_columns(
+        connection,
+        "tasks",
+        (
+            ("capability_proof_digest", "TEXT"),
+            ("toolchain_manifest_digest", "TEXT"),
+            ("root_cause_key", "TEXT"),
+            ("occurrence_epoch_key", "TEXT"),
+        ),
+    )
+    _add_columns(
+        connection,
+        "failures",
+        (
+            ("failure_domain", "TEXT"),
+            ("failure_action", "TEXT"),
+            ("root_cause_key", "TEXT"),
+            ("occurrence_epoch_key", "TEXT"),
+        ),
+    )
+    _add_columns(
+        connection,
+        "capability_grants",
+        (("grant_epoch_id", "TEXT"),),
+    )
+    _execute_script_atomic(
+        connection,
+        """
+        CREATE TABLE IF NOT EXISTS transition_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            transition_id TEXT NOT NULL,
+            source_state TEXT NOT NULL,
+            target_state TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            evidence_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(product_id, transition_id, evidence_digest)
+        );
+        CREATE TABLE IF NOT EXISTS toolchain_manifests (
+            manifest_id TEXT PRIMARY KEY,
+            product_id TEXT,
+            controller_release_digest TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            manifest_digest TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS grant_epochs (
+            grant_epoch_id TEXT PRIMARY KEY,
+            product_id TEXT,
+            controller_release_digest TEXT NOT NULL,
+            policy_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            expires_at TEXT,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS capability_proofs (
+            proof_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            task_contract_digest TEXT NOT NULL,
+            canonical_profile TEXT NOT NULL,
+            toolchain_manifest_digest TEXT NOT NULL,
+            grants_json TEXT NOT NULL,
+            negative_assertions_json TEXT NOT NULL,
+            expires_at TEXT,
+            proof_digest TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            UNIQUE(task_id, task_contract_digest, toolchain_manifest_digest)
+        );
+        CREATE TABLE IF NOT EXISTS capability_proof_grants (
+            proof_id TEXT NOT NULL REFERENCES capability_proofs(proof_id),
+            grant_id TEXT NOT NULL,
+            grant_epoch_id TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            scope_digest TEXT NOT NULL,
+            PRIMARY KEY(proof_id, grant_id, capability)
+        );
+        CREATE TABLE IF NOT EXISTS decision_archives (
+            archive_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            archive_ref TEXT NOT NULL,
+            manifest_digest TEXT NOT NULL,
+            readback_digest TEXT NOT NULL,
+            export_checkpoint TEXT NOT NULL,
+            archive_receipt_ref TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS decision_archive_memberships (
+            archive_id TEXT NOT NULL REFERENCES decision_archives(archive_id),
+            decision_id TEXT NOT NULL,
+            decision_digest TEXT NOT NULL,
+            PRIMARY KEY(archive_id, decision_id)
+        );
+        CREATE TABLE IF NOT EXISTS trajectory_counters (
+            product_id TEXT PRIMARY KEY,
+            plan_deltas INTEGER NOT NULL DEFAULT 0,
+            distinct_product_root_causes INTEGER NOT NULL DEFAULT 0,
+            controller_root_causes INTEGER NOT NULL DEFAULT 0,
+            recovery_applications INTEGER NOT NULL DEFAULT 0,
+            routine_owner_actions INTEGER NOT NULL DEFAULT 0,
+            no_progress_decisions INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS controller_release_epochs (
+            epoch_id TEXT PRIMARY KEY,
+            source_commit TEXT NOT NULL,
+            stable_release_digest TEXT NOT NULL,
+            controller_release_digest TEXT NOT NULL,
+            candidate_digest TEXT NOT NULL,
+            policy_digest TEXT NOT NULL,
+            toolchain_manifest_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            controller_defect_count INTEGER NOT NULL DEFAULT 0,
+            correction_count INTEGER NOT NULL DEFAULT 0,
+            migration_fixup_count INTEGER NOT NULL DEFAULT 0,
+            shadow_started_at TEXT,
+            shadow_completed_at TEXT,
+            failure_reason TEXT,
+            failure_evidence_ref TEXT,
+            failed_at TEXT,
+            promotion_receipt_ref TEXT,
+            promoted_at TEXT,
+            observation_evidence_ref TEXT,
+            lts_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_release_epoch_one_active
+            ON controller_release_epochs((1))
+            WHERE status NOT IN ('QUALIFICATION_FAILED','LTS');
+        CREATE TABLE IF NOT EXISTS qualification_runs (
+            run_id TEXT PRIMARY KEY,
+            epoch_id TEXT NOT NULL REFERENCES controller_release_epochs(epoch_id),
+            stage TEXT NOT NULL,
+            stage_index INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            evidence_ref TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            run_digest TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            UNIQUE(epoch_id, stage)
+        );
+        CREATE TABLE IF NOT EXISTS shadow_decisions (
+            shadow_decision_id TEXT PRIMARY KEY,
+            epoch_id TEXT NOT NULL REFERENCES controller_release_epochs(epoch_id),
+            event_digest TEXT NOT NULL,
+            stable_decision_digest TEXT NOT NULL,
+            candidate_decision_digest TEXT NOT NULL,
+            comparison TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(epoch_id, event_digest)
+        );
+        CREATE TABLE IF NOT EXISTS clean_canary_runs (
+            canary_id TEXT PRIMARY KEY,
+            epoch_id TEXT NOT NULL REFERENCES controller_release_epochs(epoch_id),
+            scenario_id TEXT NOT NULL,
+            product_id TEXT,
+            state_fresh INTEGER NOT NULL,
+            state_fresh_proof_ref TEXT NOT NULL,
+            initial_state_digest TEXT NOT NULL,
+            controller_release_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            controller_recovery_applications INTEGER NOT NULL DEFAULT 0,
+            manual_database_mutations INTEGER NOT NULL DEFAULT 0,
+            routine_owner_actions INTEGER NOT NULL DEFAULT 0,
+            unknown_controller_defects INTEGER NOT NULL DEFAULT 0,
+            release_changes INTEGER NOT NULL DEFAULT 0,
+            duplicate_side_effects INTEGER NOT NULL DEFAULT 0,
+            task_count INTEGER NOT NULL DEFAULT 0,
+            baseline_task_count INTEGER NOT NULL DEFAULT 0,
+            terminal_status TEXT,
+            completion_manifest_ref TEXT,
+            observation_evidence_ref TEXT,
+            observation_digest TEXT,
+            rejection_reason TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE(epoch_id, scenario_id)
+        );
+        CREATE TABLE IF NOT EXISTS release_qualification_manifests (
+            manifest_id TEXT PRIMARY KEY,
+            epoch_id TEXT NOT NULL UNIQUE REFERENCES controller_release_epochs(epoch_id),
+            manifest_ref TEXT NOT NULL,
+            manifest_digest TEXT NOT NULL UNIQUE,
+            source_commit TEXT NOT NULL,
+            transition_model_digest TEXT NOT NULL,
+            historical_corpus_digest TEXT NOT NULL,
+            migration_matrix_digest TEXT NOT NULL,
+            verifier_digest TEXT NOT NULL,
+            verifier_public_key TEXT NOT NULL,
+            verifier_public_key_digest TEXT NOT NULL,
+            signature_algorithm TEXT NOT NULL,
+            verifier_signature TEXT NOT NULL,
+            signed_payload_digest TEXT NOT NULL,
+            backup_restore_proof_ref TEXT NOT NULL,
+            rollback_proof_ref TEXT NOT NULL,
+            shadow_report_ref TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS recovery_certificates (
+            certificate_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            previous_epoch_key TEXT NOT NULL,
+            new_epoch_key TEXT NOT NULL,
+            root_cause_key TEXT NOT NULL,
+            controller_release_digest TEXT NOT NULL,
+            policy_schema_digest TEXT NOT NULL,
+            fixed_invariant_id TEXT NOT NULL,
+            regression_evidence_ref TEXT NOT NULL,
+            migration_dry_run_digest TEXT NOT NULL,
+            backup_restore_proof_ref TEXT NOT NULL,
+            certificate_digest TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            applied_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS side_effect_intents (
+            intent_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            expected_postcondition_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS side_effect_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            intent_id TEXT NOT NULL UNIQUE REFERENCES side_effect_intents(intent_id),
+            receipt_ref TEXT NOT NULL,
+            receipt_digest TEXT NOT NULL UNIQUE,
+            observed_postcondition_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            verified_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS completion_manifests (
+            manifest_id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL UNIQUE,
+            manifest_ref TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            manifest_digest TEXT NOT NULL UNIQUE,
+            controller_release_digest TEXT NOT NULL,
+            policy_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+
+    # Repair representable legacy inconsistencies before enabling hard guards.
+    connection.execute(
+        """UPDATE products SET terminal_reason=NULL
+             WHERE status NOT IN ('FAILED_SAFE','CANCELLED')
+               AND terminal_reason IS NOT NULL"""
+    )
+    connection.execute(
+        """UPDATE products SET delivery_profile='DEPLOYED_SERVICE'
+             WHERE delivery_profile IS NULL OR delivery_profile=''"""
+    )
+    connection.execute(
+        """UPDATE products
+              SET terminal_reason=COALESCE(terminal_reason,'legacy_failed_safe'),
+                  terminal_evidence_ref=COALESCE(
+                      terminal_evidence_ref,
+                      'state://legacy-terminal/' || product_id
+                  )
+            WHERE status='FAILED_SAFE'"""
+    )
+    # A historical COMPLETED row without a cryptographically bound manifest is
+    # not silently grandfathered as PASS.  Preserve the row and its history,
+    # but move it to an explicit fail-safe terminal state for certified recovery.
+    connection.execute(
+        """UPDATE products
+              SET status='FAILED_SAFE',
+                  completion_evidence_ref=NULL,
+                  terminal_reason='legacy_completion_unverified',
+                  terminal_evidence_ref='state://legacy-terminal/' || product_id
+            WHERE status='COMPLETED'
+              AND NOT EXISTS (
+                  SELECT 1 FROM completion_manifests AS manifest
+                   WHERE manifest.product_id=products.product_id
+                     AND manifest.manifest_ref=products.completion_evidence_ref
+              )"""
+    )
+    connection.execute(
+        """UPDATE tasks SET status='FAILED_SAFE',graph_status='CANCELLED',
+                  lease_owner=NULL,lease_until=NULL,lease_token=NULL,
+                  heartbeat_at=NULL,terminal_reason='product_cancelled'
+            WHERE product_id IN (
+                SELECT product_id FROM products WHERE status='CANCELLED'
+            ) AND status IN ('PENDING','CLAIMED','WAITING')"""
+    )
+    _execute_script_atomic(
+        connection,
+        """
+        DROP TRIGGER IF EXISTS trg_products_active_no_terminal_insert;
+        DROP TRIGGER IF EXISTS trg_products_active_no_terminal_update;
+        CREATE TRIGGER trg_products_active_no_terminal_insert
+        BEFORE INSERT ON products
+        WHEN NEW.status NOT IN ('FAILED_SAFE','CANCELLED')
+             AND NEW.terminal_reason IS NOT NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'active product cannot have terminal_reason');
+        END;
+        CREATE TRIGGER trg_products_active_no_terminal_update
+        BEFORE UPDATE OF status,terminal_reason ON products
+        WHEN NEW.status NOT IN ('FAILED_SAFE','CANCELLED')
+             AND NEW.terminal_reason IS NOT NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'active product cannot have terminal_reason');
+        END;
+        DROP TRIGGER IF EXISTS trg_products_completed_requires_evidence_insert;
+        DROP TRIGGER IF EXISTS trg_products_completed_requires_evidence_update;
+        CREATE TRIGGER trg_products_completed_requires_evidence_insert
+        BEFORE INSERT ON products
+        WHEN NEW.status='COMPLETED'
+             AND (
+                 COALESCE(NEW.completion_evidence_ref,'')=''
+                 OR NOT EXISTS (
+                     SELECT 1 FROM completion_manifests AS manifest
+                      WHERE manifest.product_id=NEW.product_id
+                        AND manifest.manifest_ref=NEW.completion_evidence_ref
+                 )
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'COMPLETED product requires completion evidence');
+        END;
+        CREATE TRIGGER trg_products_completed_requires_evidence_update
+        BEFORE UPDATE OF status,completion_evidence_ref ON products
+        WHEN NEW.status='COMPLETED'
+             AND (
+                 COALESCE(NEW.completion_evidence_ref,'')=''
+                 OR NOT EXISTS (
+                     SELECT 1 FROM completion_manifests AS manifest
+                      WHERE manifest.product_id=NEW.product_id
+                        AND manifest.manifest_ref=NEW.completion_evidence_ref
+                 )
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'COMPLETED product requires completion evidence');
+        END;
+        DROP TRIGGER IF EXISTS trg_products_failed_safe_requires_evidence_insert;
+        DROP TRIGGER IF EXISTS trg_products_failed_safe_requires_evidence_update;
+        CREATE TRIGGER trg_products_failed_safe_requires_evidence_insert
+        BEFORE INSERT ON products
+        WHEN NEW.status='FAILED_SAFE'
+             AND (
+                 COALESCE(NEW.terminal_reason,'')=''
+                 OR COALESCE(NEW.terminal_evidence_ref,'')=''
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'FAILED_SAFE product requires terminal evidence');
+        END;
+        CREATE TRIGGER trg_products_failed_safe_requires_evidence_update
+        BEFORE UPDATE OF status,terminal_reason,terminal_evidence_ref ON products
+        WHEN NEW.status='FAILED_SAFE'
+             AND (
+                 COALESCE(NEW.terminal_reason,'')=''
+                 OR COALESCE(NEW.terminal_evidence_ref,'')=''
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'FAILED_SAFE product requires terminal evidence');
+        END;
+        DROP TRIGGER IF EXISTS trg_products_cancelled_has_no_claimable_tasks;
+        CREATE TRIGGER trg_products_cancelled_has_no_claimable_tasks
+        BEFORE UPDATE OF status ON products
+        WHEN NEW.status='CANCELLED' AND OLD.status!='CANCELLED'
+             AND EXISTS (
+                 SELECT 1 FROM tasks
+                  WHERE product_id=NEW.product_id
+                    AND status IN ('PENDING','CLAIMED','WAITING')
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'CANCELLED product cannot retain claimable tasks');
+        END;
+        DROP TRIGGER IF EXISTS trg_failed_safe_reopen_requires_certificate;
+        CREATE TRIGGER trg_failed_safe_reopen_requires_certificate
+        BEFORE UPDATE OF status ON products
+        WHEN OLD.status='FAILED_SAFE' AND NEW.status!='FAILED_SAFE'
+             AND NOT EXISTS (
+                 SELECT 1 FROM recovery_certificates
+                  WHERE product_id=OLD.product_id AND status='READY'
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'FAILED_SAFE reopen requires recovery certificate');
+        END;
+        DROP TRIGGER IF EXISTS trg_product_status_requires_transition_receipt;
+        CREATE TRIGGER trg_product_status_requires_transition_receipt
+        BEFORE UPDATE OF status ON products
+        WHEN OLD.status!=NEW.status
+             AND (
+                 COALESCE(NEW.last_transition_receipt_id,'')=''
+                 OR COALESCE(NEW.last_transition_receipt_id,'')=
+                    COALESCE(OLD.last_transition_receipt_id,'')
+                 OR NOT EXISTS (
+                     SELECT 1 FROM transition_receipts AS receipt
+                      WHERE receipt.receipt_id=NEW.last_transition_receipt_id
+                        AND receipt.product_id=NEW.product_id
+                        AND receipt.source_state=OLD.status
+                        AND receipt.target_state=NEW.status
+                 )
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'product status change requires transition receipt');
+        END;
+        DROP TRIGGER IF EXISTS trg_path_decisions_delete_requires_archive;
+        CREATE TRIGGER trg_path_decisions_delete_requires_archive
+        BEFORE DELETE ON path_decisions
+        WHEN NOT EXISTS (
+            SELECT 1 FROM decision_archive_memberships AS membership
+            JOIN decision_archives AS archive ON archive.archive_id=membership.archive_id
+            WHERE membership.decision_id=OLD.decision_id
+              AND archive.manifest_digest=archive.readback_digest
+              AND archive.archive_receipt_ref!=''
+              AND archive.export_checkpoint!=''
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'decision archive receipt required before compaction');
+        END;
         """
     )
 
@@ -1524,6 +2101,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         17,
         "path-governor-semantic-state",
         _migration_017_path_governor_semantic_state,
+    ),
+    (
+        18,
+        "error-free-process-control-plane",
+        _migration_018_error_free_process_control_plane,
     ),
 )
 

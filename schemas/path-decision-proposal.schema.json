@@ -23,10 +23,9 @@
     },
     "recommended_action": {
       "enum": [
-        "REPAIR_NODE",
-        "REPLAN_DELTA",
-        "CONTROLLER_RECOVERY",
-        "COMPACT_LINEAGE",
+        "REPAIR_NODE_VERSION",
+        "RECOMPILE_AFFECTED_SUBGRAPH",
+        "CONTROLLER_QUARANTINE",
         "FAIL_SAFE"
       ]
     },

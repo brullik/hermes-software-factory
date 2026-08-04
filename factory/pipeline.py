@@ -1104,6 +1104,9 @@ class PipelineCoordinator:
                 mandatory_replan_gate_ids=mandatory_replan_gate_ids,
                 blocked_replan_scope_paths=blocked_replan_scope_paths,
                 required_replan_scope_paths=required_replan_scope_paths,
+                delivery_profile=str(
+                    product.get("delivery_profile") or "DEPLOYED_SERVICE"
+                ),
             ),
             accepted_nodes=accepted_nodes,
             inherited_nodes=inherited_nodes,
@@ -1150,9 +1153,11 @@ class PipelineCoordinator:
         task_id = str(task["task_id"])
         stage_key = str(task.get("stage_key") or "")
         cycle = int(task.get("cycle") or 0)
-        successful_statuses = {"completed", "accepted"}
         if role == "incident-recovery":
-            successful_statuses.add("recovered")
+            raise PlanCompilationInvariantError(
+                "incident-recovery is not an executable model role"
+            )
+        successful_statuses = {"completed", "accepted"}
         if role == "path-arbiter":
             successful_statuses.add("proposed")
         if output.get("status") not in successful_statuses:
@@ -1188,6 +1193,13 @@ class PipelineCoordinator:
             str(plan.get("plan_id")) == task_plan_id and int(plan.get("revision") or 0) >= 1
             for plan in active_plans
         ):
+            from .delivery_profiles import delivery_profile
+
+            product = self.state.get_product(product_id) or {}
+            profile = delivery_profile(
+                str(product.get("delivery_profile") or "DEPLOYED_SERVICE")
+            )
+            final_delivery_stage = profile.lifecycle[-1]
             if effective_stage in {"production", "release-production"}:
                 release = output.get("release")
                 release_digest = (
@@ -1242,7 +1254,7 @@ class PipelineCoordinator:
             }.get(effective_stage)
             return PreparedPipelineOutcome(
                 product_status=product_status,
-                run_completion_reducer=effective_stage == "observation",
+                run_completion_reducer=effective_stage == final_delivery_stage,
             )
         if role == "builder":
             successor = self.prepare_task(

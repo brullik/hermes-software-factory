@@ -12,7 +12,7 @@ from factory.autonomy import CAPABILITY_PROFILES
 from factory.common import sha256_text
 from factory.config import FactoryConfig
 from factory.pipeline import PipelineCoordinator
-from factory.reconciler import PipelineReconciler
+from factory.reconciler import PipelineReconciler, ReconcileResult
 from factory.state import StateStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -462,7 +462,7 @@ def test_repair_budget_exhaustion_is_terminal_and_notified_in_russian() -> None:
         state.close()
 
 
-def test_expanded_bounded_budget_reopens_exact_security_repair() -> None:
+def test_expanded_budget_does_not_reopen_failed_safe_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         config.raw["controller"]["max_repair_cycles"] = 2
@@ -567,6 +567,12 @@ def test_expanded_bounded_budget_reopens_exact_security_repair() -> None:
 
         reopened_result = PipelineReconciler(config, state).reconcile_once()
 
+        assert reopened_result == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.active_tasks(product_id) == []
+        state.close()
+        return
+
         assert reopened_result.repaired == 1
         product = state.get_product(product_id)
         assert product is not None
@@ -606,7 +612,7 @@ def test_expanded_bounded_budget_reopens_exact_security_repair() -> None:
         state.close()
 
 
-def test_interrupted_started_attempt_is_recovered_without_owner_action() -> None:
+def test_interrupted_attempt_remains_failed_safe_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -655,6 +661,12 @@ def test_interrupted_started_attempt_is_recovered_without_owner_action() -> None
 
         result = PipelineReconciler(config, state).reconcile_once()
 
+        assert result == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.get_task(task_id)["status"] == "BLOCKED_EXTERNAL"
+        state.close()
+        return
+
         assert result.repaired == 1
         product = state.get_product(product_id)
         assert product is not None
@@ -675,7 +687,7 @@ def test_interrupted_started_attempt_is_recovered_without_owner_action() -> None
         state.close()
 
 
-def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() -> None:
+def test_completed_builder_is_not_adopted_from_failed_safe_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -784,6 +796,12 @@ def test_completed_builder_is_recovered_when_only_github_gate_is_downstream() ->
 
         result = PipelineReconciler(config, state).reconcile_once()
 
+        assert result == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.active_tasks(product_id) == []
+        state.close()
+        return
+
         assert result.recovered_successors == 1
         product = state.get_product(product_id)
         assert product is not None
@@ -871,7 +889,7 @@ def test_reconciler_reads_optional_gate_policy_fail_closed() -> None:
         state.close()
 
 
-def test_prior_builder_is_adopted_when_controller_gates_prove_completion() -> None:
+def test_prior_builder_is_not_adopted_from_failed_safe_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -1006,6 +1024,12 @@ def test_prior_builder_is_adopted_when_controller_gates_prove_completion() -> No
 
         result = PipelineReconciler(config, state).reconcile_once()
 
+        assert result == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.active_tasks(product_id) == []
+        state.close()
+        return
+
         assert result.recovered_successors == 1
         product = state.get_product(product_id)
         assert product is not None
@@ -1044,7 +1068,7 @@ def test_prior_builder_is_adopted_when_controller_gates_prove_completion() -> No
         state.close()
 
 
-def test_director_opens_new_budget_after_three_prior_distinct_diagnoses() -> None:
+def test_director_cannot_open_new_failed_safe_budget_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -1164,6 +1188,12 @@ def test_director_opens_new_budget_after_three_prior_distinct_diagnoses() -> Non
 
         replanned = PipelineReconciler(config, state).reconcile_once()
 
+        assert replanned == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.active_tasks(product_id) == []
+        state.close()
+        return
+
         assert replanned.repaired == 1
         product = state.get_product(product_id)
         assert product is not None
@@ -1203,7 +1233,7 @@ def test_director_opens_new_budget_after_three_prior_distinct_diagnoses() -> Non
         state.close()
 
 
-def test_director_reassesses_diagnosis_after_three_same_hypothesis_repairs() -> None:
+def test_director_cannot_reassess_failed_safe_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -1287,6 +1317,12 @@ def test_director_reassesses_diagnosis_after_three_same_hypothesis_repairs() -> 
 
         result = PipelineReconciler(config, state).reconcile_once()
 
+        assert result == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.active_tasks(product_id) == []
+        state.close()
+        return
+
         assert result.repaired == 1
         active = state.active_tasks(product_id)
         assert len(active) == 1
@@ -1315,7 +1351,7 @@ def test_director_reassesses_diagnosis_after_three_same_hypothesis_repairs() -> 
         state.close()
 
 
-def test_exhausted_builder_opens_next_cycle_with_exact_gate_traceback() -> None:
+def test_exhausted_builder_cannot_open_next_cycle_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -1406,6 +1442,12 @@ def test_exhausted_builder_opens_next_cycle_with_exact_gate_traceback() -> None:
 
         first = PipelineReconciler(config, state).reconcile_once()
 
+        assert first == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.active_tasks(product_id) == []
+        state.close()
+        return
+
         assert first.repaired == 1
         product = state.get_product(product_id)
         assert product is not None
@@ -1438,7 +1480,7 @@ def test_exhausted_builder_opens_next_cycle_with_exact_gate_traceback() -> None:
         state.close()
 
 
-def test_legacy_secret_exposure_is_retried_once_with_sanitizer_v2() -> None:
+def test_legacy_secret_exposure_is_not_retried_without_certificate() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory))
         state = StateStore(config.database_path)
@@ -1488,6 +1530,12 @@ def test_legacy_secret_exposure_is_retried_once_with_sanitizer_v2() -> None:
         state.transition_product(product_id, "FAILED_SAFE")
 
         recovered = PipelineReconciler(config, state).reconcile_once()
+
+        assert recovered == ReconcileResult()
+        assert state.get_product(product_id)["status"] == "FAILED_SAFE"
+        assert state.active_tasks(product_id) == []
+        state.close()
+        return
 
         assert recovered.repaired == 1
         product = state.get_product(product_id)

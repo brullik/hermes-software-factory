@@ -9,9 +9,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from .common import redact_text, sha256_text, utc_now
+from .common import redact_text, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
 from .github import GitHubAdapter, GitHubCommandError
+from .proof_obligations import SideEffectProtocol
 from .providers import ExternalBlocker
 from .state import StateStore
 
@@ -234,6 +235,75 @@ class RepositoryBootstrapper:
         return base[:90] or f"product-{sha256_text(str(product['product_id']))[:8]}"
 
     def ensure(self, product_id: str, destination: Path) -> dict[str, str]:
+        """Bootstrap through one crash-safe intent and verified receipt.
+
+        Repository creation, clone and the neutral bootstrap push form one
+        idempotent adapter operation.  A restart may reconcile that operation,
+        but it cannot silently execute it without the original durable intent
+        or create a second receipt.
+        """
+
+        product = self.state.get_product(product_id)
+        if product is None:
+            raise KeyError(product_id)
+        mode = str(product.get("delivery_mode") or "")
+        if mode not in {"new_repository", "existing_repository"}:
+            raise ValueError("canonical repository delivery_mode is missing")
+        expected_postcondition = {
+            "product_id": product_id,
+            "delivery_mode": mode,
+            "repository_name": self._name(product),
+            "repository_visibility": str(
+                product.get("repository_visibility") or "private"
+            ),
+            "repository_url": (
+                "controller-assigned"
+                if mode == "new_repository"
+                else str(product.get("repository_url") or "")
+            ),
+            "workspace": str(destination.resolve()),
+            "terminal_state": "READY",
+        }
+        side_effect_key = sha256_text(
+            stable_json(["repository-bootstrap-v1", expected_postcondition])
+        )
+        with self.state._lock, self.state._connection:
+            protocol = SideEffectProtocol(self.state._connection)
+            intent_id = protocol.prepare(
+                product_id=product_id,
+                operation="repository:bootstrap",
+                adapter="configured-repository-adapter",
+                idempotency_key=side_effect_key,
+                expected_postcondition=expected_postcondition,
+            )
+            status = protocol.status(intent_id)
+            prior = protocol.verified_result(intent_id)
+            if status == "PREPARED":
+                protocol.mark_executing(intent_id)
+
+        result = self._ensure_adapter(product_id, destination)
+        if set(result) != {
+            "repository_url",
+            "default_branch",
+            "starting_sha",
+            "bootstrap_sha",
+        }:
+            raise RuntimeError("repository bootstrap returned an invalid receipt")
+        if prior is not None and prior != result:
+            raise RuntimeError("repository bootstrap reconciliation conflicts with receipt")
+        if prior is None:
+            receipt_digest = sha256_text(stable_json(result))
+            with self.state._lock, self.state._connection:
+                SideEffectProtocol(self.state._connection).verify(
+                    intent_id=intent_id,
+                    receipt_ref=f"state://repository-saga/{product_id}",
+                    receipt_digest=receipt_digest,
+                    observed_postcondition=expected_postcondition,
+                    result=result,
+                )
+        return result
+
+    def _ensure_adapter(self, product_id: str, destination: Path) -> dict[str, str]:
         product = self.state.get_product(product_id)
         if product is None:
             raise KeyError(product_id)

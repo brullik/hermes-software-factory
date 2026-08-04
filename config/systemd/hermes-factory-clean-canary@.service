@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes independent clean-canary orchestration (%i)
+After=network-online.target hermes-factory-independent-verifier.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/hermes-factory-verifier/current
+Environment=CLEAN_CANARY_TIMEOUT_SECONDS=172800
+ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-clean-canary.sh %i
+TimeoutStartSec=48h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-canaries /var/log/hermes-factory-canaries /var/lib/hermes-factory-verifier /var/lib/hermes-factory-candidate /run/systemd
+ReadOnlyPaths=/etc/hermes-factory/canaries /etc/hermes-factory/qualification-control.yaml /etc/hermes-factory/candidate-model-registry.yaml /etc/hermes-factory/candidate-credentials.d /opt/hermes-factory-candidate /opt/hermes-factory-verifier
+InaccessiblePaths=/var/lib/hermes-factory /etc/hermes-factory/credentials.d /usr/local/sbin/hermes-factory-release-submit
+RestrictSUIDSGID=true
+LockPersonality=true

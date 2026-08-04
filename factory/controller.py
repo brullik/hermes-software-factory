@@ -133,6 +133,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
                     repository_url=payload.get("repository_url"),
                     repository_name=payload.get("repository_name"),
                     repository_visibility=str(payload.get("repository_visibility", "private")),
+                    delivery_profile=payload.get("delivery_profile"),
                     constraints=payload.get("constraints", {}),
                     idempotency_key=payload.get("idempotency_key"),
                     attachments=payload.get("attachments", []),
@@ -233,6 +234,11 @@ def serve(config: FactoryConfig) -> None:
         capability_reconciler=CapabilityReconciler(config, state),
     )
     reconciler.start()
+    if not reconciler.wait_until_ready(timeout=30.0):
+        reconciler.stop()
+        server.server_close()
+        state.close()
+        raise RuntimeError("controller startup reconciliation did not become ready")
     try:
         server.serve_forever()
     finally:
