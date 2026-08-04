@@ -1835,3 +1835,84 @@ def test_live_shadow_feed_is_redacted_evaluated_and_verified_once(tmp_path: Path
     assert batch_count == 1
     assert event_count == 2
     assert verify_shadow_batches(config)[1:] == (0, 0)
+
+
+def test_shadow_journal_uses_verifier_replay_time_not_feed_export_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stable_database = (tmp_path / "stable.db").resolve()
+    stable_state = StateStore(stable_database)
+    try:
+        stable_state.create_product(
+            product_id="stable-product",
+            owner_id="owner",
+            source="telegram",
+            idea="A stable product",
+            idempotency_key="stable-product",
+        )
+    finally:
+        stable_state.close()
+    feed_root = (tmp_path / "feed").resolve()
+    output_root = (tmp_path / "candidate-output").resolve()
+    export_stable_events(stable_database, feed_root)
+    evaluate_candidate_batches(feed_root, output_root)
+    feed = json.loads(next(feed_root.glob("*.json")).read_text(encoding="utf-8"))
+    verifier_observed_at = "2099-01-01T00:00:00+00:00"
+    monkeypatch.setattr(
+        "factory.shadow_qualification.utc_now",
+        lambda: verifier_observed_at,
+    )
+
+    repository = Path(__file__).parents[1]
+    stable_release = (tmp_path / "stable-release").resolve()
+    stable_release.mkdir()
+    config = {
+        "schema_version": "1.0",
+        "governor_database": str((tmp_path / "verifier/governor.db").resolve()),
+        "candidate_repository_root": str(repository.resolve()),
+        "evidence_root": str((tmp_path / "verifier/evidence").resolve()),
+        "shadow_journal_root": str((tmp_path / "verifier/journal").resolve()),
+        "shadow_feed_root": str(feed_root),
+        "candidate_shadow_output_root": str(output_root),
+        "stable_release_root": str(stable_release),
+        "candidate_database": str((tmp_path / "candidate.db").resolve()),
+        "canary_catalog_path": str(
+            (repository / "qualification/canaries/catalog.yaml").resolve()
+        ),
+        "canary_config_index": str((tmp_path / "canaries/index.json").resolve()),
+        "resilience_proof_index": str((tmp_path / "resilience/index.json").resolve()),
+        "promotion_receipt_path": str((tmp_path / "promotion.json").resolve()),
+        "production_observation_path": str((tmp_path / "observation.json").resolve()),
+        "production_rollback_path": str((tmp_path / "rollback.json").resolve()),
+        "factory_repository": "brullik/hermes-software-factory",
+        "source_commit": "0" * 40,
+        "stable_release_digest": "1" * 64,
+        "controller_release_digest": "2" * 64,
+        "candidate_digest": "3" * 64,
+        "policy_digest": "4" * 64,
+        "toolchain_manifest_digest": "5" * 64,
+        "trusted_verifier_public_key_digest": _TEST_VERIFIER_KEY_DIGEST,
+        "verifier_digest": "6" * 64,
+        "verifier_public_key": _TEST_VERIFIER_PUBLIC_KEY,
+        "manifest_request_path": str((tmp_path / "verifier/request.json").resolve()),
+        "signed_manifest_path": str((tmp_path / "verifier/signed.json").resolve()),
+        "verifier_private_key_path": str((tmp_path / "verifier/key").resolve()),
+        "manifest_install_root": str((tmp_path / "installed").resolve()),
+    }
+    epoch_id = initialize_epoch(config)
+    verifier_state = StateStore(Path(str(config["governor_database"])))
+    try:
+        governor = ReleaseQualificationGovernor(verifier_state._connection)
+        _qualify_to_clean_canary(governor, epoch_id, include_q7=False)
+        verifier_state._connection.commit()
+    finally:
+        verifier_state.close()
+
+    verify_shadow_batches(config)
+    summary = ShadowEvidenceJournal(
+        Path(str(config["shadow_journal_root"])),
+        epoch_id=epoch_id,
+    ).summarize()
+    assert summary.first_observed_at == verifier_observed_at
+    assert summary.first_observed_at != feed["exported_at"]

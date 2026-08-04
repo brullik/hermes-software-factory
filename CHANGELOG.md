@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.12 - 2026-08-04
+
+- Timestamp Q7 journal entries at independent-verifier replay time instead of
+  copying a Stable feed export timestamp that may predate the release epoch.
+- Keep feed provenance immutable while preventing prior-epoch observations from
+  satisfying a new candidate's 72-hour gate.
+
 ## 2.4.11 - 2026-08-04
 
 - Classify known-state pre-catalog transition records that lack their historical
