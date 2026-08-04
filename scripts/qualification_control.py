@@ -484,6 +484,62 @@ def finalize_shadow(
         state.close()
 
 
+def fail_qualification_orchestration(
+    config: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Record a sanitized immutable failure when systemd cannot start Q0-Q6."""
+
+    state = _store(config)
+    try:
+        governor = _governor(state, config)
+        latest = governor.connection.execute(
+            "SELECT * FROM controller_release_epochs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if latest is None:
+            raise QualificationControlError("qualification epoch is unavailable")
+        epoch_id = str(latest["epoch_id"])
+        if str(latest["status"]) == "QUALIFICATION_FAILED":
+            existing_ref = str(latest["failure_evidence_ref"] or "")
+            if not existing_ref:
+                raise QualificationControlError("failed epoch lacks immutable evidence")
+            return epoch_id, existing_ref
+        payload = {
+            "schema_version": "1.0",
+            "epoch_id": epoch_id,
+            "status": "FAIL",
+            "reason_code": "qualification_orchestrator_start_failed",
+            "source_commit": str(config["source_commit"]),
+            "candidate_digest": str(config["candidate_digest"]),
+            "created_at": utc_now(),
+        }
+        digest = sha256_text(stable_json(payload))
+        envelope = {**payload, "report_digest": digest}
+        encoded = json.dumps(
+            envelope,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        evidence_root = Path(str(config["evidence_root"])).resolve()
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        failure_path = evidence_root / f"orchestration-failure-{digest}.json"
+        descriptor = os.open(
+            failure_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o440,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        evidence_ref = f"artifact://qualification/orchestration-failure/{digest}"
+        governor.fail_orchestration(epoch_id=epoch_id, evidence_ref=evidence_ref)
+        state._connection.commit()
+        return epoch_id, evidence_ref
+    finally:
+        state.close()
+
+
 def verify_shadow_batches(config: Mapping[str, Any]) -> tuple[str, int, int]:
     """Compare each Stable A feed batch with the separately produced B output."""
 
@@ -1055,6 +1111,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
+    commands.add_parser("orchestration-fail")
     stage = commands.add_parser("stage")
     stage.add_argument("stage", choices=QUALIFICATION_STAGES[:7])
     commands.add_parser("shadow-verify")
@@ -1087,6 +1144,12 @@ def main(argv: list[str] | None = None) -> int:
         config = _load_config(args.config)
         if args.command == "init":
             result: dict[str, Any] = {"epoch_id": initialize_epoch(config)}
+        elif args.command == "orchestration-fail":
+            epoch_id, evidence_ref = fail_qualification_orchestration(config)
+            result = {
+                "epoch_id": epoch_id,
+                "failure_evidence_ref": evidence_ref,
+            }
         elif args.command == "stage":
             epoch_id, run_id = run_and_record_stage(config, args.stage)
             result = {"epoch_id": epoch_id, "run_id": run_id, "stage": args.stage}

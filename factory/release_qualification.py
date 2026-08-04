@@ -631,6 +631,26 @@ class ReleaseQualificationGovernor:
             "Q7_SHADOW_DIFFERENTIAL": ReleaseEpochState.CLEAN_CANARY,
         }[stage]
 
+    def fail_orchestration(self, *, epoch_id: str, evidence_ref: str) -> None:
+        """Fail a built epoch when the qualification orchestrator cannot start."""
+
+        epoch = self.epoch(epoch_id)
+        if str(epoch["status"]) == ReleaseEpochState.QUALIFICATION_FAILED.value:
+            return
+        if str(epoch["status"]) != ReleaseEpochState.CANDIDATE_BUILT.value:
+            raise QualificationError(
+                "orchestration failure is only valid before ordered qualification"
+            )
+        immutable_ref = _immutable_ref(
+            "orchestration failure evidence_ref",
+            evidence_ref,
+        )
+        self._fail_epoch(
+            epoch_id,
+            "qualification_orchestrator_start_failed",
+            immutable_ref,
+        )
+
     def _fail_epoch(self, epoch_id: str, reason: str, evidence_ref: str) -> None:
         now = utc_now()
         self.connection.execute(
