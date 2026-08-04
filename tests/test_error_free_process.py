@@ -1613,7 +1613,7 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert 'sed "s/@SOURCE_COMMIT@/${SOURCE_COMMIT}/g"' in bootstrap
     assert "hermes-factory-shadow-fail@.service" in bootstrap
     assert "hermes-factory-shadow-stop.service" in bootstrap
-    assert "systemctl reset-failed" in bootstrap
+    assert 'systemctl reset-failed "${reset_unit}"' in bootstrap
     assert 'SHADOW_OUTPUT_ROOT="${SHADOW_OUTPUT_ROOT:-/var/lib/hermes-factory-shadow-output}"' in bootstrap
     assert (
         '--candidate-database "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}/candidate-shadow.db"'
@@ -1659,11 +1659,31 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     ).read_text(encoding="utf-8")
     assert "ExecCondition=" in finalize
     assert "shadow-ready" in finalize
+    assert "OnSuccess=" not in finalize
+    assert (
+        "ExecStartPost=+/usr/bin/systemctl start --no-block "
+        "hermes-factory-clean-canaries.service"
+        in finalize
+    )
     clean_canaries = (
         repository / "config/systemd/hermes-factory-clean-canaries.service"
     ).read_text(encoding="utf-8")
     assert "ExecCondition=" in clean_canaries
     assert "canary-ready" in clean_canaries
+    assert "OnSuccess=" not in clean_canaries
+    assert (
+        "ExecStartPost=/usr/bin/systemctl start --no-block "
+        "hermes-factory-qualification-promote.service"
+        in clean_canaries
+    )
+    assert "RestrictSUIDSGID=true" not in clean_canaries
+    assert "LockPersonality=true" not in clean_canaries
+    promotion = (
+        repository / "config/systemd/hermes-factory-qualification-promote.service"
+    ).read_text(encoding="utf-8")
+    assert "run-manifest-and-promotion.sh" in promotion
+    assert "RestrictSUIDSGID=true" not in promotion
+    assert "LockPersonality=true" not in promotion
 
 
 def test_live_shadow_feed_is_redacted_evaluated_and_verified_once(tmp_path: Path) -> None:

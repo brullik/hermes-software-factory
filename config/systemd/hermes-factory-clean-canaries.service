@@ -2,7 +2,6 @@
 Description=Hermes exact ten clean-canary qualification sequence
 After=network-online.target
 Wants=network-online.target
-OnSuccess=hermes-factory-qualification-promote.service
 
 [Service]
 Type=oneshot
@@ -11,6 +10,7 @@ Group=root
 WorkingDirectory=/opt/hermes-factory-verifier/current
 ExecCondition=/opt/hermes-factory-verifier/venv/bin/python -m scripts.qualification_control canary-ready
 ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-all-clean-canaries.sh
+ExecStartPost=/usr/bin/systemctl start --no-block hermes-factory-qualification-promote.service
 TimeoutStartSec=0
 NoNewPrivileges=true
 PrivateTmp=true
@@ -19,5 +19,3 @@ ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory-canaries /var/log/hermes-factory-canaries /var/lib/hermes-factory-verifier /var/lib/hermes-factory-candidate /run/systemd
 ReadOnlyPaths=/etc/hermes-factory/canaries /etc/hermes-factory/qualification-control.yaml /etc/hermes-factory/candidate-model-registry.yaml /etc/hermes-factory/candidate-credentials.d /opt/hermes-factory-candidate /opt/hermes-factory-verifier
 InaccessiblePaths=/var/lib/hermes-factory /etc/hermes-factory/credentials.d /usr/local/sbin/hermes-factory-release-submit
-RestrictSUIDSGID=true
-LockPersonality=true

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.9 - 2026-08-04
+
+- Dispatch Q8 only after a real Q7 finalizer execution and dispatch promotion
+  only after a real ten-canary execution, never after a systemd condition skip.
+- Permit the root-owned canary and promotion orchestrators to drop into the
+  unprivileged Candidate and verifier identities while credentials remain hidden.
+- Clear stale Q7, canary, and promotion failed-state unit metadata per epoch.
+
 ## 2.4.8 - 2026-08-04
 
 - Bind Q7 boundary observation to a commit-scoped shadow ledger path instead of
