@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.3 - 2026-08-04
+
+- Preserve every Git-tracked executable bit while making Candidate and Verifier
+  release trees root-owned, and reject any post-install mode/content drift.
+
 ## 2.4.2 - 2026-08-04
 
 - Scope Git's ownership trust override to the exact root-owned, read-only

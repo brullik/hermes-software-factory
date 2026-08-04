@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 # Install Candidate B and its independent verifier beside an existing Stable A.
 # This script never writes Stable A's current tree, database, credentials, or units.
@@ -159,8 +160,10 @@ for release_root in "${CANDIDATE_RELEASE}" "${VERIFIER_RELEASE}"; do
   fi
   chown -R root:root "${release_root}"
   find "${release_root}" -type d -exec chmod 0755 {} +
-  find "${release_root}" -type f -exec chmod 0644 {} +
-  find "${release_root}/scripts" -type f -name '*.sh' -exec chmod 0755 {} +
+  if [[ -n "$(git -C "${release_root}" status --porcelain=v1 --untracked-files=all)" ]]; then
+    printf 'Immutable release mode/content differs from Git: %s\n' "${release_root}" >&2
+    exit 73
+  fi
 done
 
 for plane in candidate verifier; do
