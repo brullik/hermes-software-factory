@@ -178,6 +178,7 @@ for plane in candidate verifier; do
       --requirement "${release_root}/requirements.lock"
     "${venv_root}/bin/python" -m pip install --disable-pip-version-check \
       --no-deps "git+file://${release_root}@${SOURCE_COMMIT}"
+    "${venv_root}/bin/python" -m pip check
   fi
   chown -R root:root "${venv_root}"
   if [[ -e "${plane_root}/current" && ! -L "${plane_root}/current" ]]; then
@@ -250,6 +251,9 @@ if [[ -z "${HERMES_WHEEL}" ]] \
 fi
 "${CANDIDATE_ROOT}/venv/bin/python" -m pip install \
   --disable-pip-version-check --no-cache-dir "${HERMES_WHEEL}"
+"${CANDIDATE_ROOT}/venv/bin/python" -m pip install \
+  --disable-pip-version-check --requirement "${CANDIDATE_RELEASE}/requirements.lock"
+"${CANDIDATE_ROOT}/venv/bin/python" -m pip check
 rm -rf "${HERMES_WHEEL_DIR}"
 trap - EXIT
 chown -R root:root "${CANDIDATE_ROOT}/venvs/${SOURCE_COMMIT}"
@@ -435,6 +439,11 @@ done
 systemctl daemon-reload
 runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control init
-systemctl enable --now hermes-factory-qualification.service
+if ! systemctl enable --now hermes-factory-qualification.service; then
+  runuser -u "${VERIFIER_USER}" -- \
+    "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control \
+    orchestration-fail
+  exit 1
+fi
 
 printf 'Candidate B prepared at %s; Stable A was not modified.\n' "${SOURCE_COMMIT}"

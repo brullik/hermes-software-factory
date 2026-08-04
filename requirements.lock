@@ -2,11 +2,11 @@
 attrs==26.1.0
 boolean.py==5.0
 CacheControl==0.14.4
-certifi==2026.7.22
+certifi==2026.5.20
 cffi==2.1.0
 charset-normalizer==3.4.9
 colorama==0.4.6
-cryptography==45.0.7
+cryptography==46.0.7
 cyclonedx-python-lib==11.11.0
 defusedxml==0.7.1
 filelock==3.32.0
@@ -23,7 +23,7 @@ msgpack==1.2.1
 mypy==1.20.2
 mypy-extensions==1.1.0
 packageurl-python==0.17.6
-packaging==26.2
+packaging==26.0
 pathspec==1.1.1
 pip-api==0.0.34
 pip-audit==2.10.1
@@ -37,8 +37,8 @@ pycparser==3.0
 pytest==8.4.2
 PyYAML==6.0.3
 referencing==0.37.0
-requests==2.34.2
-rich==15.0.0
+requests==2.33.0
+rich==14.3.3
 rpds-py==2026.6.3
 ruff==0.16.0
 setuptools==83.0.0

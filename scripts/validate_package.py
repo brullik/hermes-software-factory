@@ -161,6 +161,22 @@ def requirement_names(requirements: list[str]) -> set[str]:
     return {canonicalize_name(Requirement(requirement).name) for requirement in requirements}
 
 
+def exact_requirement_pins(requirements: list[str]) -> dict[str, str]:
+    """Return normalized exact pins while rejecting ambiguous duplicate names."""
+
+    pins: dict[str, str] = {}
+    for raw in requirements:
+        requirement = Requirement(raw)
+        name = canonicalize_name(requirement.name)
+        specifiers = list(requirement.specifier)
+        if len(specifiers) != 1 or specifiers[0].operator != "==":
+            continue
+        if name in pins:
+            raise ValueError(f"duplicate exact requirement pin: {name}")
+        pins[name] = specifiers[0].version
+    return pins
+
+
 def validate_script_modes(errors: list[str]) -> None:
     """Require every tracked shebang entrypoint to be executable in Git."""
 
@@ -281,14 +297,40 @@ def validate() -> list[str]:
         (item for item in compatibility.get("components", []) if item.get("name") == "Hermes Agent"),
         None,
     )
-    required_hermes = {
+    hermes_runtime_pins = {
+        "certifi": "2026.5.20",
+        "cryptography": "46.0.7",
+        "packaging": "26.0",
+        "requests": "2.33.0",
+        "rich": "14.3.3",
+    }
+    required_hermes: dict[str, Any] = {
         "version": "0.19.0",
         "tag": "v2026.7.20",
         "source_commit": "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
         "artifact_sha256": "bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f",
+        "runtime_dependency_pins": hermes_runtime_pins,
     }
     if not isinstance(hermes, dict) or any(hermes.get(key) != value for key, value in required_hermes.items()):
         errors.append("Hermes compatibility pin is incomplete or changed")
+    else:
+        lock_pins = exact_requirement_pins(
+            [
+                line.strip()
+                for line in (ROOT / "requirements.lock").read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        )
+        incompatible = {
+            canonicalize_name(name): version
+            for name, version in hermes_runtime_pins.items()
+            if lock_pins.get(canonicalize_name(name)) != version
+        }
+        if incompatible:
+            errors.append(
+                "Factory lock differs from verified Hermes Agent dependencies: "
+                + ",".join(sorted(incompatible))
+            )
 
     return errors
 

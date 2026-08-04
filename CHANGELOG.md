@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.1 - 2026-08-04
+
+- Fail release epochs with sanitized immutable evidence when the Q0-Q6 systemd
+  orchestrator cannot start, without manual verifier database edits.
+- Treat not-yet-created Candidate database paths as optional namespace mounts
+  while preserving their inaccessible/read-only policy once present.
+- Reassert the exact Factory dependency lock after installing Hermes Agent and
+  require `pip check` for Candidate and Verifier environments.
+
 ## 2.4.0 - 2026-08-03
 
 - Replace permissive runtime routing with one closed failure catalog and a

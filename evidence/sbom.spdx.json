@@ -7,8 +7,8 @@
     ]
   },
   "dataLicense": "CC0-1.0",
-  "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.4.0",
-  "name": "hermes-software-factory-2.4.0",
+  "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.4.1",
+  "name": "hermes-software-factory-2.4.1",
   "packages": [
     {
       "SPDXID": "SPDXRef-Package-hermes-software-factory-spec",
@@ -16,7 +16,7 @@
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "hermes-software-factory-spec",
-      "versionInfo": "2.4.0"
+      "versionInfo": "2.4.1"
     },
     {
       "SPDXID": "SPDXRef-Package-hermes-agent",
@@ -58,11 +58,11 @@
     },
     {
       "SPDXID": "SPDXRef-Package-certifi",
-      "downloadLocation": "https://pypi.org/project/certifi/2026.7.22/",
+      "downloadLocation": "https://pypi.org/project/certifi/2026.5.20/",
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "certifi",
-      "versionInfo": "2026.7.22"
+      "versionInfo": "2026.5.20"
     },
     {
       "SPDXID": "SPDXRef-Package-cffi",
@@ -90,11 +90,11 @@
     },
     {
       "SPDXID": "SPDXRef-Package-cryptography",
-      "downloadLocation": "https://pypi.org/project/cryptography/45.0.7/",
+      "downloadLocation": "https://pypi.org/project/cryptography/46.0.7/",
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "cryptography",
-      "versionInfo": "45.0.7"
+      "versionInfo": "46.0.7"
     },
     {
       "SPDXID": "SPDXRef-Package-cyclonedx-python-lib",
@@ -226,11 +226,11 @@
     },
     {
       "SPDXID": "SPDXRef-Package-packaging",
-      "downloadLocation": "https://pypi.org/project/packaging/26.2/",
+      "downloadLocation": "https://pypi.org/project/packaging/26.0/",
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "packaging",
-      "versionInfo": "26.2"
+      "versionInfo": "26.0"
     },
     {
       "SPDXID": "SPDXRef-Package-pathspec",
@@ -338,19 +338,19 @@
     },
     {
       "SPDXID": "SPDXRef-Package-requests",
-      "downloadLocation": "https://pypi.org/project/requests/2.34.2/",
+      "downloadLocation": "https://pypi.org/project/requests/2.33.0/",
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "requests",
-      "versionInfo": "2.34.2"
+      "versionInfo": "2.33.0"
     },
     {
       "SPDXID": "SPDXRef-Package-rich",
-      "downloadLocation": "https://pypi.org/project/rich/15.0.0/",
+      "downloadLocation": "https://pypi.org/project/rich/14.3.3/",
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "rich",
-      "versionInfo": "15.0.0"
+      "versionInfo": "14.3.3"
     },
     {
       "SPDXID": "SPDXRef-Package-rpds-py",
