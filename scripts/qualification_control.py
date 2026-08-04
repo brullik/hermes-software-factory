@@ -788,7 +788,10 @@ def verify_shadow_batches(config: Mapping[str, Any]) -> tuple[str, int, int]:
                 candidate_decide=candidate_decide,
             ).replay(events)
             state._connection.commit()
-            journal.append(report, observed_at=str(batch["exported_at"]))
+            # The feed export time authenticates when Stable A produced the
+            # immutable input.  Q7 observation time is when the independent
+            # verifier actually replayed that input in this release epoch.
+            journal.append(report)
             verified_events += report.event_count
         return epoch_id, len(feeds) - processed, verified_events
     finally:
