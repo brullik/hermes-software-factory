@@ -9,6 +9,7 @@ import json
 import sqlite3
 import tarfile
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -77,7 +78,11 @@ from factory.service_qualification import (
 )
 from factory.shadow_feed import evaluate_candidate_batches, export_stable_events
 from factory.shadow_projection import candidate_shadow_decision, stable_observed_decision
-from factory.shadow_qualification import ShadowEvidenceJournal, ShadowJournalError
+from factory.shadow_qualification import (
+    ShadowEvidenceJournal,
+    ShadowHeartbeatJournal,
+    ShadowJournalError,
+)
 from factory.state import StateStore
 from factory.transition_catalog import ProductState, TransitionSpec
 from factory.transition_kernel import TransitionKernel, TransitionProofError
@@ -179,6 +184,10 @@ def _qualify_to_clean_canary(
             "historical_products_replayed": 12,
             "shadow_event_count": 1,
             "shadow_batch_count": 1,
+            "shadow_heartbeat_count": 72,
+            "shadow_max_heartbeat_gap_seconds": 60,
+            "shadow_last_heartbeat_age_seconds": 1,
+            "shadow_heartbeat_head_digest": "8" * 64,
             "task_amplification_ratio": 1.0,
             "max_evidence_indirection": 1,
         },
@@ -1187,9 +1196,18 @@ def test_shadow_journal_derives_q7_metrics_and_rejects_tampering(tmp_path: Path)
         ).replay([{"event": "task_created"}])
         journal = ShadowEvidenceJournal(tmp_path / "journal", epoch_id=epoch_id)
         journal.append(report)
+        decision_summary = journal.summarize()
+        heartbeat = ShadowHeartbeatJournal(
+            journal.root / "heartbeats",
+            epoch_id=epoch_id,
+        )
+        heartbeat.append(
+            decision_batch_count=decision_summary.batch_count,
+            decision_event_count=decision_summary.event_count,
+            decision_journal_head_digest=decision_summary.journal_head_digest,
+        )
         run_id = journal.finalize_q7(
             governor,
-            evidence_ref="evidence://qualification/shadow/1",
             historical_products_total=1,
             historical_products_replayed=1,
         )
@@ -1205,6 +1223,94 @@ def test_shadow_journal_derives_q7_metrics_and_rejects_tampering(tmp_path: Path)
             journal.summarize()
     finally:
         state.close()
+
+
+def test_shadow_heartbeat_requires_continuity_and_freshness(tmp_path: Path) -> None:
+    started = datetime(2026, 8, 4, tzinfo=UTC)
+    decision_summary = SimpleNamespace(
+        batch_count=1,
+        event_count=10,
+        journal_head_digest="a" * 64,
+    )
+    valid = ShadowHeartbeatJournal(tmp_path / "valid", epoch_id="RE-VALID")
+    for offset in (0, 60, 120):
+        valid.append(
+            decision_batch_count=1,
+            decision_event_count=10,
+            decision_journal_head_digest="a" * 64,
+            observed_at=(started + timedelta(seconds=offset)).isoformat(),
+        )
+    summary = valid.validate_continuity(
+        started_at=started,
+        current=started + timedelta(seconds=121),
+        minimum_hours=2 / 60,
+        maximum_gap_seconds=300,
+        decision_summary=decision_summary,
+    )
+    assert summary.heartbeat_count == 3
+    assert summary.maximum_gap_seconds == 60
+
+    gap = ShadowHeartbeatJournal(tmp_path / "gap", epoch_id="RE-GAP")
+    for offset in (0, 60, 400):
+        gap.append(
+            decision_batch_count=1,
+            decision_event_count=10,
+            decision_journal_head_digest="a" * 64,
+            observed_at=(started + timedelta(seconds=offset)).isoformat(),
+        )
+    with pytest.raises(ShadowJournalError, match="continuity has a gap"):
+        gap.validate_continuity(
+            started_at=started,
+            current=started + timedelta(seconds=401),
+            minimum_hours=0,
+            maximum_gap_seconds=300,
+            decision_summary=decision_summary,
+        )
+
+    stale = ShadowHeartbeatJournal(tmp_path / "stale", epoch_id="RE-STALE")
+    stale.append(
+        decision_batch_count=1,
+        decision_event_count=10,
+        decision_journal_head_digest="a" * 64,
+        observed_at=started.isoformat(),
+    )
+    with pytest.raises(ShadowJournalError, match="heartbeat is stale"):
+        stale.validate_continuity(
+            started_at=started,
+            current=started + timedelta(seconds=301),
+            minimum_hours=0,
+            maximum_gap_seconds=300,
+            decision_summary=decision_summary,
+        )
+
+    late = ShadowHeartbeatJournal(tmp_path / "late", epoch_id="RE-LATE")
+    late.append(
+        decision_batch_count=1,
+        decision_event_count=10,
+        decision_journal_head_digest="a" * 64,
+        observed_at=(started + timedelta(seconds=301)).isoformat(),
+    )
+    with pytest.raises(ShadowJournalError, match="heartbeat started too late"):
+        late.validate_continuity(
+            started_at=started,
+            current=started + timedelta(seconds=302),
+            minimum_hours=0,
+            maximum_gap_seconds=300,
+            decision_summary=decision_summary,
+        )
+
+    with pytest.raises(ShadowJournalError, match="does not bind current decisions"):
+        valid.validate_continuity(
+            started_at=started,
+            current=started + timedelta(seconds=121),
+            minimum_hours=2 / 60,
+            maximum_gap_seconds=300,
+            decision_summary=SimpleNamespace(
+                batch_count=1,
+                event_count=10,
+                journal_head_digest="b" * 64,
+            ),
+        )
 
 
 def test_clean_canary_catalog_is_exact_and_fresh_state_is_observed(tmp_path: Path) -> None:
@@ -1716,9 +1822,23 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     finalize = (
         repository / "config/systemd/hermes-factory-shadow-finalize.service"
     ).read_text(encoding="utf-8")
+    assert "Requires=hermes-factory-shadow-verify.service" in finalize
     assert "ExecCondition=" in finalize
     assert "shadow-ready" in finalize
     assert "OnSuccess=" not in finalize
+    stop_timers = finalize.index(
+        "ExecStartPre=+/usr/bin/systemctl disable --now "
+        "hermes-factory-shadow-verify.timer hermes-factory-shadow-finalize.timer"
+    )
+    finalize_q7 = finalize.index(
+        "ExecStart=/opt/hermes-factory-verifier/venv/bin/python "
+        "-m scripts.qualification_control shadow-finalize"
+    )
+    start_canaries = finalize.index(
+        "ExecStartPost=+/usr/bin/systemctl start --no-block "
+        "hermes-factory-clean-canaries.service"
+    )
+    assert stop_timers < finalize_q7 < start_canaries
     assert (
         "ExecStartPost=+/usr/bin/systemctl start --no-block "
         "hermes-factory-clean-canaries.service"
@@ -1834,7 +1954,13 @@ def test_live_shadow_feed_is_redacted_evaluated_and_verified_once(tmp_path: Path
     assert observed_epoch == epoch_id
     assert batch_count == 1
     assert event_count == 2
+    heartbeat = ShadowHeartbeatJournal(
+        Path(str(config["shadow_journal_root"])) / "heartbeats",
+        epoch_id=epoch_id,
+    )
+    assert heartbeat.entry_count() == 1
     assert verify_shadow_batches(config)[1:] == (0, 0)
+    assert heartbeat.entry_count() == 2
 
 
 def test_shadow_journal_uses_verifier_replay_time_not_feed_export_time(

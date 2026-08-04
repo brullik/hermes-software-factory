@@ -1,6 +1,6 @@
-# Hermes 2.4.12 error-free release process
+# Hermes 2.4.13 error-free release process
 
-Hermes 2.4.12 separates product autonomy from release authority. Stable A keeps
+Hermes 2.4.13 separates product autonomy from release authority. Stable A keeps
 production authority, Candidate B runs with a separate user, state root,
 database, runtime directory, and candidate-scoped credentials, and the
 independent verifier has neither model nor production credentials.
@@ -34,6 +34,13 @@ The immutable feed retains Stable A's export timestamp. The independent
 verifier separately timestamps each replay when it appends the commit-scoped Q7
 journal entry, so evidence from a prior release epoch cannot satisfy the 72-hour
 observation gate.
+
+Every verifier cycle also appends a separate commit-scoped heartbeat hash chain
+bound to the current decision-journal head. Q7 rejects late startup, gaps over
+five minutes, stale final heartbeats, downtime counted as soak, or a heartbeat
+that does not bind the complete replay. The finalizer requires a fresh verifier
+cycle before evaluating the gate, then quiesces the Q7 timers before recording
+the immutable decision and starting clean canaries.
 
 Any Controller defect starts a new release epoch. A corrected Controller cannot
 continue an old clean canary. Promotion requires an Ed25519 manifest from the

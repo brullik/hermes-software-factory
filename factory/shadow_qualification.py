@@ -6,7 +6,7 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,19 @@ class ShadowJournalSummary:
     max_evidence_indirection: int
     first_observed_at: str
     last_observed_at: str
+    journal_head_digest: str
+
+
+@dataclass(frozen=True)
+class ShadowHeartbeatSummary:
+    epoch_id: str
+    heartbeat_count: int
+    first_observed_at: str
+    last_observed_at: str
+    maximum_gap_seconds: float
+    decision_batch_count: int
+    decision_event_count: int
+    decision_journal_head_digest: str
     journal_head_digest: str
 
 
@@ -230,7 +243,6 @@ class ShadowEvidenceJournal:
         self,
         governor: ReleaseQualificationGovernor,
         *,
-        evidence_ref: str,
         historical_products_total: int,
         historical_products_replayed: int,
         now: datetime | None = None,
@@ -243,6 +255,26 @@ class ShadowEvidenceJournal:
             raise ShadowJournalError("verifier clock precedes shadow start")
         if _parse_time(summary.first_observed_at, "first observation") < started_at:
             raise ShadowJournalError("shadow evidence predates the release epoch")
+        heartbeat_summary = ShadowHeartbeatJournal(
+            self.root / "heartbeats",
+            epoch_id=self.epoch_id,
+        ).validate_continuity(
+            started_at=started_at,
+            current=current,
+            minimum_hours=governor.thresholds.minimum_shadow_hours,
+            maximum_gap_seconds=(
+                governor.thresholds.maximum_shadow_heartbeat_gap_seconds
+            ),
+            decision_summary=summary,
+        )
+        evidence_ref = "artifact://qualification/shadow/" + sha256_text(
+            stable_json(
+                [
+                    summary.journal_head_digest,
+                    heartbeat_summary.journal_head_digest,
+                ]
+            )
+        )
         ratio = (
             summary.candidate_task_count / summary.stable_task_count
             if summary.stable_task_count
@@ -264,6 +296,18 @@ class ShadowEvidenceJournal:
             "max_evidence_indirection": summary.max_evidence_indirection,
             "shadow_event_count": summary.event_count,
             "shadow_batch_count": summary.batch_count,
+            "shadow_heartbeat_count": heartbeat_summary.heartbeat_count,
+            "shadow_max_heartbeat_gap_seconds": (
+                heartbeat_summary.maximum_gap_seconds
+            ),
+            "shadow_last_heartbeat_age_seconds": (
+                current
+                - _parse_time(
+                    heartbeat_summary.last_observed_at,
+                    "last shadow heartbeat",
+                )
+            ).total_seconds(),
+            "shadow_heartbeat_head_digest": heartbeat_summary.journal_head_digest,
         }
         for key in (
             "candidate_side_effect_executions",
@@ -280,3 +324,214 @@ class ShadowEvidenceJournal:
             metrics=metrics,
             passed=True,
         )
+
+
+class ShadowHeartbeatJournal:
+    """Verifier-owned hash chain proving continuous Q7 execution."""
+
+    def __init__(self, root: Path, *, epoch_id: str) -> None:
+        self.root = root.resolve()
+        self.epoch_id = epoch_id
+
+    def _entries(self) -> list[Path]:
+        if not self.root.exists():
+            return []
+        entries = [path for path in self.root.iterdir() if _ENTRY_NAME.fullmatch(path.name)]
+        return sorted(entries, key=lambda path: path.name)
+
+    def entry_count(self) -> int:
+        return len(self._entries())
+
+    def append(
+        self,
+        *,
+        decision_batch_count: int,
+        decision_event_count: int,
+        decision_journal_head_digest: str,
+        observed_at: str | None = None,
+    ) -> str:
+        for label, value in (
+            ("decision batch count", decision_batch_count),
+            ("decision event count", decision_event_count),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ShadowJournalError(f"shadow heartbeat {label} is invalid")
+        expected_empty = "0" * 64
+        if decision_batch_count == 0:
+            if decision_event_count != 0 or decision_journal_head_digest != expected_empty:
+                raise ShadowJournalError("empty shadow heartbeat decision state is invalid")
+        elif (
+            len(decision_journal_head_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in decision_journal_head_digest
+            )
+        ):
+            raise ShadowJournalError("shadow heartbeat decision digest is invalid")
+
+        entries = self._entries()
+        sequence = len(entries) + 1
+        previous_digest = "0" * 64
+        if entries:
+            match = _ENTRY_NAME.fullmatch(entries[-1].name)
+            if match is None:
+                raise ShadowJournalError("shadow heartbeat filename is invalid")
+            previous_digest = match.group("digest")
+        timestamp = observed_at or utc_now()
+        _parse_time(timestamp, "shadow heartbeat")
+        payload = {
+            "schema_version": "1.0",
+            "epoch_id": self.epoch_id,
+            "sequence": sequence,
+            "previous_entry_digest": previous_digest,
+            "observed_at": timestamp,
+            "decision_batch_count": decision_batch_count,
+            "decision_event_count": decision_event_count,
+            "decision_journal_head_digest": decision_journal_head_digest,
+        }
+        digest = sha256_text(stable_json(payload))
+        destination = self.root / f"{sequence:012d}-{digest}.json"
+        _write_once(
+            destination,
+            json.dumps(payload | {"entry_digest": digest}, sort_keys=True, indent=2)
+            + "\n",
+        )
+        return digest
+
+    def summarize(self) -> ShadowHeartbeatSummary:
+        entries = self._entries()
+        if not entries:
+            raise ShadowJournalError("shadow heartbeat journal is empty")
+        previous_digest = "0" * 64
+        first_observed = ""
+        last_observed = ""
+        maximum_gap_seconds = 0.0
+        prior_batches = 0
+        prior_events = 0
+        decision_batch_count = 0
+        decision_event_count = 0
+        decision_head_digest = "0" * 64
+        for expected_sequence, path in enumerate(entries, start=1):
+            if path.is_symlink() or not path.is_file():
+                raise ShadowJournalError(
+                    "shadow heartbeat journal contains a non-regular entry"
+                )
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise ShadowJournalError("shadow heartbeat entry is unreadable") from error
+            if not isinstance(envelope, dict) or set(envelope) != {
+                "schema_version",
+                "epoch_id",
+                "sequence",
+                "previous_entry_digest",
+                "observed_at",
+                "decision_batch_count",
+                "decision_event_count",
+                "decision_journal_head_digest",
+                "entry_digest",
+            }:
+                raise ShadowJournalError("shadow heartbeat entry schema is invalid")
+            digest = str(envelope.pop("entry_digest"))
+            if sha256_text(stable_json(envelope)) != digest:
+                raise ShadowJournalError("shadow heartbeat entry digest differs")
+            match = _ENTRY_NAME.fullmatch(path.name)
+            if match is None or match.group("digest") != digest:
+                raise ShadowJournalError("shadow heartbeat filename digest differs")
+            if (
+                envelope.get("schema_version") != "1.0"
+                or envelope.get("epoch_id") != self.epoch_id
+                or envelope.get("sequence") != expected_sequence
+                or envelope.get("previous_entry_digest") != previous_digest
+            ):
+                raise ShadowJournalError("shadow heartbeat hash chain is invalid")
+            observed = str(envelope["observed_at"])
+            observed_time = _parse_time(observed, "shadow heartbeat")
+            if last_observed:
+                prior_time = _parse_time(last_observed, "prior shadow heartbeat")
+                if observed_time < prior_time:
+                    raise ShadowJournalError("shadow heartbeat time regressed")
+                maximum_gap_seconds = max(
+                    maximum_gap_seconds,
+                    (observed_time - prior_time).total_seconds(),
+                )
+            first_observed = first_observed or observed
+            last_observed = observed
+            batch_value = envelope["decision_batch_count"]
+            event_value = envelope["decision_event_count"]
+            if (
+                isinstance(batch_value, bool)
+                or not isinstance(batch_value, int)
+                or batch_value < prior_batches
+                or isinstance(event_value, bool)
+                or not isinstance(event_value, int)
+                or event_value < prior_events
+            ):
+                raise ShadowJournalError("shadow heartbeat decision state regressed")
+            decision_batch_count = batch_value
+            decision_event_count = event_value
+            decision_head_digest = str(envelope["decision_journal_head_digest"])
+            if decision_batch_count == 0:
+                if decision_event_count != 0 or decision_head_digest != "0" * 64:
+                    raise ShadowJournalError(
+                        "empty shadow heartbeat decision state is invalid"
+                    )
+            elif (
+                len(decision_head_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in decision_head_digest
+                )
+            ):
+                raise ShadowJournalError("shadow heartbeat decision digest is invalid")
+            prior_batches = decision_batch_count
+            prior_events = decision_event_count
+            previous_digest = digest
+        return ShadowHeartbeatSummary(
+            epoch_id=self.epoch_id,
+            heartbeat_count=len(entries),
+            first_observed_at=first_observed,
+            last_observed_at=last_observed,
+            maximum_gap_seconds=maximum_gap_seconds,
+            decision_batch_count=decision_batch_count,
+            decision_event_count=decision_event_count,
+            decision_journal_head_digest=decision_head_digest,
+            journal_head_digest=previous_digest,
+        )
+
+    def validate_continuity(
+        self,
+        *,
+        started_at: datetime,
+        current: datetime,
+        minimum_hours: float,
+        maximum_gap_seconds: float,
+        decision_summary: ShadowJournalSummary,
+    ) -> ShadowHeartbeatSummary:
+        if maximum_gap_seconds <= 0:
+            raise ShadowJournalError("shadow heartbeat gap threshold is invalid")
+        summary = self.summarize()
+        first = _parse_time(summary.first_observed_at, "first shadow heartbeat")
+        last = _parse_time(summary.last_observed_at, "last shadow heartbeat")
+        deadline = started_at + timedelta(hours=minimum_hours)
+        if first < started_at:
+            raise ShadowJournalError("shadow heartbeat predates the release epoch")
+        if (first - started_at).total_seconds() > maximum_gap_seconds:
+            raise ShadowJournalError("shadow heartbeat started too late")
+        if summary.maximum_gap_seconds > maximum_gap_seconds:
+            raise ShadowJournalError("shadow heartbeat continuity has a gap")
+        if last < deadline:
+            raise ShadowJournalError("shadow heartbeat duration is too short")
+        last_age = (current - last).total_seconds()
+        if last_age < 0:
+            raise ShadowJournalError("shadow heartbeat is in the future")
+        if last_age > maximum_gap_seconds:
+            raise ShadowJournalError("shadow heartbeat is stale")
+        if (
+            summary.decision_batch_count != decision_summary.batch_count
+            or summary.decision_event_count != decision_summary.event_count
+            or summary.decision_journal_head_digest
+            != decision_summary.journal_head_digest
+        ):
+            raise ShadowJournalError("shadow heartbeat does not bind current decisions")
+        return summary
