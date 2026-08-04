@@ -394,11 +394,17 @@ def run_and_record_stage(config: Mapping[str, Any], stage: str) -> tuple[str, st
                 raise QualificationControlError("Q0 candidate digest differs from root config")
     except Exception as error:
         evidence_root.mkdir(parents=True, exist_ok=True)
+        failure_coordinate = (
+            error.safe_coordinate
+            if isinstance(error, QualificationRunError)
+            else f"{stage.lower()}-{type(error).__name__.lower()}"
+        )
         payload = {
             "schema_version": "1.0",
             "stage": stage,
             "status": "FAIL",
             "error_type": type(error).__name__,
+            "failure_coordinate": failure_coordinate,
             "source_commit": str(config["source_commit"]),
             "candidate_digest": str(config["candidate_digest"]),
             "created_at": utc_now(),

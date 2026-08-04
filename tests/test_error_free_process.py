@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import sqlite3
+import tarfile
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,7 +58,11 @@ from factory.proof_obligations import (
     build_completion_manifest,
     profile_not_applicable_proof,
 )
-from factory.qualification_runner import _immutable_release_tree_digest
+from factory.qualification_runner import (
+    QualificationRunError,
+    _immutable_release_tree_digest,
+    _reproducible_wheel,
+)
 from factory.release_qualification import (
     REQUIRED_CANARY_SCENARIOS,
     QualificationError,
@@ -1296,6 +1302,52 @@ def test_q0_git_trust_is_scoped_to_the_exact_candidate_path(
     ]
 
 
+def test_q0_reproducible_wheel_builds_in_two_archive_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        payload = b"immutable source\n"
+        member = tarfile.TarInfo("source.txt")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    monkeypatch.setattr(qualification_runner, "_git", lambda *_args: "0")
+    monkeypatch.setattr(
+        qualification_runner,
+        "_immutable_source_archive",
+        lambda _repository: archive_buffer.getvalue(),
+    )
+    build_roots: list[Path] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        timeout: int,
+        environment: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
+        del timeout, environment
+        build_roots.append(cwd)
+        assert (cwd / "source.txt").read_text(encoding="utf-8") == "immutable source\n"
+        wheel_root = Path(command[command.index("--wheel-dir") + 1])
+        (wheel_root / "candidate.whl").write_bytes(b"reproducible wheel")
+        return 0, "transcript"
+
+    monkeypatch.setattr(qualification_runner, "_run", fake_run)
+    wheel_digest, transcript_digest = _reproducible_wheel(tmp_path / "candidate")
+    assert len(wheel_digest) == 64
+    assert len(transcript_digest) == 64
+    assert len(build_roots) == 2
+    assert build_roots[0] != build_roots[1]
+    assert all(root != (tmp_path / "candidate").resolve() for root in build_roots)
+
+
+def test_qualification_run_error_exposes_only_a_machine_safe_coordinate() -> None:
+    error = QualificationRunError("reproducible wheel build failed")
+    assert error.safe_coordinate == "reproducible-wheel-build-failed"
+
+
 def test_qualification_stage_crash_fails_release_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1336,6 +1388,10 @@ def test_qualification_stage_crash_fails_release_epoch(
         evidence_file = next((tmp_path / "evidence").glob("*.json"))
         text = evidence_file.read_text(encoding="utf-8")
         assert "sensitive diagnostic" not in text
+        assert (
+            json.loads(text)["failure_coordinate"]
+            == "q0_source_integrity-runtimeerror"
+        )
         assert str(tuple(epoch)[2]) == str(tuple(run)[1])
     finally:
         state.close()

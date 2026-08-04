@@ -6,6 +6,8 @@
   Candidate repository used by Q0; no user or global Git configuration changes.
 - Wait explicitly for the complete Q0-Q6 systemd job and fail the bootstrap if
   the qualification service fails after it is enabled.
+- Build reproducible Q0 wheels in two writable copies of one validated immutable
+  source archive, and persist a safe machine-readable failure coordinate.
 
 ## 2.4.1 - 2026-08-04
 
