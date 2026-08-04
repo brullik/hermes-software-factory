@@ -7,7 +7,7 @@ from typing import Any
 
 from .common import sha256_text, stable_json
 from .failure_catalog import failure_disposition
-from .transition_catalog import transition_spec
+from .transition_catalog import ProductState, transition_spec
 
 
 class ShadowProjectionError(RuntimeError):
@@ -53,6 +53,18 @@ def _observed_transition(event: Mapping[str, Any]) -> tuple[str, str | None]:
         source = str(payload.get("from") or "")
         transition_event = str(payload.get("event") or "")
         target = str(payload.get("to") or "")
+        if not transition_event:
+            try:
+                ProductState(source)
+                ProductState(target)
+            except ValueError:
+                return f"UNREGISTERED:{source}:{transition_event}:{target}", target or None
+            # Stable releases predating the closed transition catalog persisted
+            # the observed from/to outcome without its triggering event.  That
+            # record is evidence of an outcome, not a new event for Candidate B
+            # to execute.  Preserve the known-state observation explicitly; a
+            # non-empty unknown event still follows the fail-closed path below.
+            return f"LEGACY_OBSERVED:{source}:{target}", target
         try:
             spec = transition_spec(source, transition_event, target)
         except KeyError:
