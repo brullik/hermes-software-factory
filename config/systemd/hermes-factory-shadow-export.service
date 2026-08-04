@@ -1,5 +1,6 @@
 [Unit]
 Description=Export a redacted append-only Stable A event batch
+OnFailure=hermes-factory-shadow-fail@export.service
 
 [Service]
 Type=oneshot

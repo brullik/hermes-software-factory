@@ -457,12 +457,26 @@ for unit in \
   hermes-factory-qualification-stage@.service \
   hermes-factory-shadow-export.service \
   hermes-factory-shadow-evaluate.service \
+  hermes-factory-shadow-fail@.service \
   hermes-factory-shadow-verify.service \
   hermes-factory-shadow-verify.timer \
   hermes-factory-shadow-finalize.service \
   hermes-factory-shadow-finalize.timer; do
-  install -o root -g root -m 0644 \
-    "${CANDIDATE_RELEASE}/config/systemd/${unit}" "/etc/systemd/system/${unit}"
+  unit_source="${CANDIDATE_RELEASE}/config/systemd/${unit}"
+  unit_destination="/etc/systemd/system/${unit}"
+  if [[ "${unit}" == hermes-factory-shadow-evaluate.service ]]; then
+    rendered_unit="$(mktemp)"
+    sed "s/@SOURCE_COMMIT@/${SOURCE_COMMIT}/g" "${unit_source}" > "${rendered_unit}"
+    if grep -q '@SOURCE_COMMIT@' "${rendered_unit}"; then
+      printf 'Candidate shadow unit still contains an unresolved source commit\n' >&2
+      rm -f "${rendered_unit}"
+      exit 65
+    fi
+    install -o root -g root -m 0644 "${rendered_unit}" "${unit_destination}"
+    rm -f "${rendered_unit}"
+  else
+    install -o root -g root -m 0644 "${unit_source}" "${unit_destination}"
+  fi
 done
 systemctl daemon-reload
 runuser -u "${VERIFIER_USER}" -- \

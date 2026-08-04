@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.6 - 2026-08-04
+
+- Render the Q7 Candidate evaluator output path from the immutable source commit,
+  keeping systemd writes aligned with the verifier-owned epoch configuration.
+- Record failed shadow export, evaluation, verification, or finalization as a
+  sanitized terminal Q7 failure so a corrected immutable epoch can proceed.
+- Gate hourly Q7 finalization on the real verifier clock and gate Q8 startup on
+  a persisted Q7 PASS instead of using failed services as normal wait states.
+
 ## 2.4.5 - 2026-08-04
 
 - Prove rootless Podman network/IPAM with the existing isolated Candidate user

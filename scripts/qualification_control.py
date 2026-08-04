@@ -12,6 +12,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -567,6 +568,134 @@ def fail_qualification_orchestration(
         governor.fail_orchestration(epoch_id=epoch_id, evidence_ref=evidence_ref)
         state._connection.commit()
         return epoch_id, evidence_ref
+    finally:
+        state.close()
+
+
+_SHADOW_FAILURE_COMPONENTS = frozenset(
+    {"export", "evaluate", "verify", "finalize"}
+)
+
+
+def fail_shadow_pipeline(
+    config: Mapping[str, Any],
+    component: str,
+) -> tuple[str, str]:
+    """Terminally fail Q7 with sanitized evidence for a failed shadow unit."""
+
+    if component not in _SHADOW_FAILURE_COMPONENTS:
+        raise QualificationControlError("shadow failure component is invalid")
+    state = _store(config)
+    try:
+        governor = _governor(state, config)
+        latest = governor.connection.execute(
+            "SELECT * FROM controller_release_epochs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if latest is None:
+            raise QualificationControlError("qualification epoch is unavailable")
+        epoch_id = str(latest["epoch_id"])
+        if str(latest["status"]) == "QUALIFICATION_FAILED":
+            existing_ref = str(latest["failure_evidence_ref"] or "")
+            if not existing_ref:
+                raise QualificationControlError("failed epoch lacks immutable evidence")
+            return epoch_id, existing_ref
+        if str(latest["status"]) != "SHADOW_RUNNING":
+            raise QualificationControlError(
+                "shadow pipeline failure requires an active Q7 epoch"
+            )
+        failure_coordinate = f"q7_shadow_pipeline-{component}"
+        payload = {
+            "schema_version": "1.0",
+            "epoch_id": epoch_id,
+            "stage": "Q7_SHADOW_DIFFERENTIAL",
+            "status": "FAIL",
+            "reason_code": "shadow_pipeline_unit_failed",
+            "failure_coordinate": failure_coordinate,
+            "source_commit": str(config["source_commit"]),
+            "candidate_digest": str(config["candidate_digest"]),
+            "created_at": utc_now(),
+        }
+        digest = sha256_text(stable_json(payload))
+        envelope = {**payload, "report_digest": digest}
+        encoded = json.dumps(
+            envelope,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        evidence_root = Path(str(config["evidence_root"])).resolve()
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        failure_path = evidence_root / f"shadow-pipeline-failure-{digest}.json"
+        descriptor = os.open(
+            failure_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o440,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        evidence_ref = f"artifact://qualification/shadow-pipeline-failure/{digest}"
+        governor.record_qualification(
+            epoch_id=epoch_id,
+            stage="Q7_SHADOW_DIFFERENTIAL",
+            evidence_ref=evidence_ref,
+            metrics={
+                "unknown_transitions": 0,
+                "failure_coordinate": failure_coordinate,
+            },
+            passed=False,
+        )
+        state._connection.commit()
+        return epoch_id, evidence_ref
+    finally:
+        state.close()
+
+
+def shadow_finalization_ready(config: Mapping[str, Any]) -> tuple[str, bool]:
+    """Return true only when verifier-clock Q7 duration has really elapsed."""
+
+    state = _store(config)
+    try:
+        governor = _governor(state, config)
+        epoch_id = _active_epoch(governor)
+        epoch = governor.epoch(epoch_id)
+        if str(epoch["status"]) != "SHADOW_RUNNING":
+            return epoch_id, False
+        raw_started = str(epoch.get("shadow_started_at") or "")
+        try:
+            started = datetime.fromisoformat(raw_started)
+        except ValueError as error:
+            raise QualificationControlError(
+                "shadow start timestamp is invalid"
+            ) from error
+        if started.tzinfo is None:
+            raise QualificationControlError("shadow start timestamp lacks timezone")
+        observed_hours = (datetime.now(UTC) - started).total_seconds() / 3600
+        return epoch_id, observed_hours >= governor.thresholds.minimum_shadow_hours
+    finally:
+        state.close()
+
+
+def clean_canary_ready(config: Mapping[str, Any]) -> tuple[str, bool]:
+    """Return true only after the governor has persisted Q7 PASS."""
+
+    state = _store(config)
+    try:
+        governor = _governor(state, config)
+        epoch_id = _active_epoch(governor)
+        epoch = governor.epoch(epoch_id)
+        q7 = governor.connection.execute(
+            """SELECT status FROM qualification_runs
+                 WHERE epoch_id=? AND stage='Q7_SHADOW_DIFFERENTIAL'""",
+            (epoch_id,),
+        ).fetchone()
+        return (
+            epoch_id,
+            str(epoch["status"]) == "CLEAN_CANARY"
+            and q7 is not None
+            and str(q7["status"]) == "PASS",
+        )
     finally:
         state.close()
 
@@ -1143,10 +1272,14 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("orchestration-fail")
+    shadow_fail = commands.add_parser("shadow-fail")
+    shadow_fail.add_argument("component", choices=sorted(_SHADOW_FAILURE_COMPONENTS))
     stage = commands.add_parser("stage")
     stage.add_argument("stage", choices=QUALIFICATION_STAGES[:7])
     commands.add_parser("shadow-verify")
+    commands.add_parser("shadow-ready")
     commands.add_parser("shadow-finalize")
+    commands.add_parser("canary-ready")
     start = commands.add_parser("canary-start")
     start.add_argument("scenario_id")
     start.add_argument("--candidate-database", type=Path, required=True)
@@ -1181,6 +1314,12 @@ def main(argv: list[str] | None = None) -> int:
                 "epoch_id": epoch_id,
                 "failure_evidence_ref": evidence_ref,
             }
+        elif args.command == "shadow-fail":
+            epoch_id, evidence_ref = fail_shadow_pipeline(config, args.component)
+            result = {
+                "epoch_id": epoch_id,
+                "failure_evidence_ref": evidence_ref,
+            }
         elif args.command == "stage":
             epoch_id, run_id = run_and_record_stage(config, args.stage)
             result = {"epoch_id": epoch_id, "run_id": run_id, "stage": args.stage}
@@ -1191,9 +1330,21 @@ def main(argv: list[str] | None = None) -> int:
                 "verified_batch_count": batch_count,
                 "verified_event_count": event_count,
             }
+        elif args.command == "shadow-ready":
+            epoch_id, ready = shadow_finalization_ready(config)
+            result = {"epoch_id": epoch_id, "ready": ready}
+            if not ready:
+                print(stable_json({"status": "WAIT", **result}))
+                return 1
         elif args.command == "shadow-finalize":
             epoch_id, run_id = finalize_shadow(config)
             result = {"epoch_id": epoch_id, "run_id": run_id}
+        elif args.command == "canary-ready":
+            epoch_id, ready = clean_canary_ready(config)
+            result = {"epoch_id": epoch_id, "ready": ready}
+            if not ready:
+                print(stable_json({"status": "WAIT", **result}))
+                return 1
         elif args.command == "canary-start":
             epoch_id, canary_id, proof_ref = start_canary(
                 config,
@@ -1253,7 +1404,7 @@ def main(argv: list[str] | None = None) -> int:
             stable_json({"status": "FAIL", "error_type": type(error).__name__}),
             file=sys.stderr,
         )
-        return 1
+        return 255 if args.command in {"shadow-ready", "canary-ready"} else 1
     print(stable_json({"status": "PASS", **result}))
     return 0
 

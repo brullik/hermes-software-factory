@@ -2,6 +2,7 @@
 Description=Independently compare Stable A and Candidate B shadow decisions
 Requires=hermes-factory-shadow-evaluate.service
 After=hermes-factory-shadow-evaluate.service
+OnFailure=hermes-factory-shadow-fail@verify.service
 
 [Service]
 Type=oneshot

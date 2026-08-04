@@ -2,12 +2,14 @@
 Description=Finalize Hermes 72-hour shadow qualification when eligible
 After=hermes-factory-shadow-verify.service
 OnSuccess=hermes-factory-clean-canaries.service
+OnFailure=hermes-factory-shadow-fail@finalize.service
 
 [Service]
 Type=oneshot
 User=hermesverifier
 Group=hermesverifier
 WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecCondition=/opt/hermes-factory-verifier/venv/bin/python -m scripts.qualification_control shadow-ready
 ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.qualification_control shadow-finalize
 NoNewPrivileges=true
 PrivateTmp=true
@@ -21,4 +23,3 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryMax=512M
 TasksMax=128
-
