@@ -1541,6 +1541,7 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         repository / "scripts/bootstrap/build-canary-attestation.py"
     ).read_text(encoding="utf-8")
     assert 'scoped_argv[1:1] = ["--cgroup-manager=cgroupfs"]' in attestation_builder
+    assert "cwd=state_dir" in attestation_builder
 
     optional_candidate_database = "-/var/lib/hermes-factory-candidate/controller.db"
     for unit in (

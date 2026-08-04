@@ -39,6 +39,7 @@ def _run_as_user(
         text=True,
         capture_output=True,
         check=False,
+        cwd=state_dir,
         timeout=60,
     )
     if result.returncode != 0:
