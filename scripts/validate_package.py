@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 IGNORED_DIRS = {
@@ -151,12 +154,34 @@ def is_project_file(path: Path) -> bool:
     return not any(part in IGNORED_DIRS or part.endswith(".egg-info") for part in relative.parts)
 
 
+def requirement_names(requirements: list[str]) -> set[str]:
+    """Return normalized direct dependency names from requirement strings."""
+
+    return {canonicalize_name(Requirement(requirement).name) for requirement in requirements}
+
+
 def validate() -> list[str]:
     errors: list[str] = []
 
     for rel in REQUIRED:
         if not (ROOT / rel).is_file():
             errors.append(f"missing required file: {rel}")
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime_requirements = requirement_names(project["project"]["dependencies"])
+    development_requirements = requirement_names(
+        [
+            line.strip()
+            for line in (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    )
+    missing_runtime_requirements = sorted(runtime_requirements - development_requirements)
+    if missing_runtime_requirements:
+        errors.append(
+            "requirements-dev.txt omits runtime dependencies: "
+            + ",".join(missing_runtime_requirements)
+        )
 
     for path in sorted(path for path in ROOT.rglob("*.json") if is_project_file(path)):
         try:
