@@ -258,6 +258,10 @@ def _stage_report(
     stage: str,
     repository_root: Path,
     evidence_root: Path,
+    *,
+    q6_container_attestation: Path | None,
+    q6_container_attestation_digest: str,
+    expected_source_commit: str,
 ) -> QualificationStageReport:
     if stage == "Q0_SOURCE_INTEGRITY":
         return run_q0(repository_root, evidence_root)
@@ -272,7 +276,15 @@ def _stage_report(
     if stage == "Q5_MIGRATION_MATRIX":
         return run_q5(evidence_root)
     if stage == "Q6_SERVICE_E2E":
-        return run_q6(repository_root, evidence_root)
+        if q6_container_attestation is None:
+            raise VerifierConfigurationError("Q6 container attestation is required")
+        return run_q6(
+            repository_root,
+            evidence_root,
+            container_attestation_path=q6_container_attestation,
+            container_attestation_digest=q6_container_attestation_digest,
+            expected_source_commit=expected_source_commit,
+        )
     raise VerifierConfigurationError(f"unsupported qualification stage: {stage}")
 
 
@@ -283,6 +295,9 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("stage", choices=sorted(STAGE_RUNNERS))
     stage.add_argument("--repository-root", type=Path, default=Path.cwd())
     stage.add_argument("--evidence-root", type=Path, required=True)
+    stage.add_argument("--q6-container-attestation", type=Path)
+    stage.add_argument("--q6-container-attestation-digest", default="")
+    stage.add_argument("--expected-source-commit", default="")
     verify = subparsers.add_parser("verify")
     verify.add_argument(
         "--config",
@@ -307,7 +322,14 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "stage":
-            report = _stage_report(args.stage, args.repository_root, args.evidence_root)
+            report = _stage_report(
+                args.stage,
+                args.repository_root,
+                args.evidence_root,
+                q6_container_attestation=args.q6_container_attestation,
+                q6_container_attestation_digest=args.q6_container_attestation_digest,
+                expected_source_commit=args.expected_source_commit,
+            )
             result = {
                 "status": "PASS",
                 "stage": report.stage,

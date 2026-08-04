@@ -25,6 +25,8 @@ def main() -> int:
     parser.add_argument("--candidate-shadow-output-root", type=Path, required=True)
     parser.add_argument("--stable-release-root", type=Path, required=True)
     parser.add_argument("--candidate-database", type=Path, required=True)
+    parser.add_argument("--q6-capability-attestation-path", type=Path, required=True)
+    parser.add_argument("--q6-capability-attestation-digest", required=True)
     parser.add_argument("--manifest-request-path", type=Path, required=True)
     parser.add_argument("--signed-manifest-path", type=Path, required=True)
     parser.add_argument("--verifier-private-key-path", type=Path, required=True)
@@ -56,6 +58,7 @@ def main() -> int:
         args.candidate_shadow_output_root,
         args.stable_release_root,
         args.candidate_database,
+        args.q6_capability_attestation_path,
         args.manifest_request_path,
         args.signed_manifest_path,
         args.verifier_private_key_path,
@@ -81,6 +84,7 @@ def main() -> int:
         "toolchain_manifest_digest": args.toolchain_manifest_digest,
         "trusted_verifier_public_key_digest": args.trusted_verifier_public_key_digest,
         "verifier_digest": args.verifier_digest,
+        "q6_capability_attestation_digest": args.q6_capability_attestation_digest,
     }
     if any(_SHA256.fullmatch(value) is None for value in digests.values()):
         raise ValueError("qualification digest is invalid")
@@ -94,6 +98,7 @@ def main() -> int:
         "candidate_shadow_output_root": str(args.candidate_shadow_output_root),
         "stable_release_root": str(args.stable_release_root),
         "candidate_database": str(args.candidate_database),
+        "q6_capability_attestation_path": str(args.q6_capability_attestation_path),
         "manifest_request_path": str(args.manifest_request_path),
         "signed_manifest_path": str(args.signed_manifest_path),
         "verifier_private_key_path": str(args.verifier_private_key_path),

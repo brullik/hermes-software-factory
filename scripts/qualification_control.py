@@ -62,6 +62,8 @@ _CONFIG_KEYS = {
     "candidate_shadow_output_root",
     "stable_release_root",
     "candidate_database",
+    "q6_capability_attestation_path",
+    "q6_capability_attestation_digest",
     "canary_catalog_path",
     "canary_config_index",
     "resilience_proof_index",
@@ -113,6 +115,7 @@ def _load_config(path: Path) -> dict[str, Any]:
         "candidate_shadow_output_root",
         "stable_release_root",
         "candidate_database",
+        "q6_capability_attestation_path",
         "manifest_request_path",
         "signed_manifest_path",
         "verifier_private_key_path",
@@ -138,6 +141,7 @@ def _load_config(path: Path) -> dict[str, Any]:
         "toolchain_manifest_digest",
         "trusted_verifier_public_key_digest",
         "verifier_digest",
+        "q6_capability_attestation_digest",
     ):
         if not _SHA256.fullmatch(str(raw[key])):
             raise QualificationControlError(f"{key} is invalid")
@@ -312,6 +316,10 @@ def _run_stage(
     stage: str,
     repository: Path,
     evidence_root: Path,
+    *,
+    q6_capability_attestation_path: Path,
+    q6_capability_attestation_digest: str,
+    expected_source_commit: str,
 ) -> QualificationStageReport:
     runners: dict[str, Callable[[], QualificationStageReport]] = {
         "Q0_SOURCE_INTEGRITY": lambda: run_q0(repository, evidence_root),
@@ -320,7 +328,13 @@ def _run_stage(
         "Q3_PROPERTY_AND_MUTATION": lambda: run_q3(repository, evidence_root),
         "Q4_HISTORICAL_REPLAY": lambda: run_q4(repository, evidence_root),
         "Q5_MIGRATION_MATRIX": lambda: run_q5(evidence_root),
-        "Q6_SERVICE_E2E": lambda: run_q6(repository, evidence_root),
+        "Q6_SERVICE_E2E": lambda: run_q6(
+            repository,
+            evidence_root,
+            container_attestation_path=q6_capability_attestation_path,
+            container_attestation_digest=q6_capability_attestation_digest,
+            expected_source_commit=expected_source_commit,
+        ),
     }
     try:
         runner = runners[stage]
@@ -386,7 +400,18 @@ def run_and_record_stage(config: Mapping[str, Any], stage: str) -> tuple[str, st
     repository = Path(str(config["candidate_repository_root"])).resolve()
     evidence_root = Path(str(config["evidence_root"])).resolve()
     try:
-        report = _run_stage(stage, repository, evidence_root)
+        report = _run_stage(
+            stage,
+            repository,
+            evidence_root,
+            q6_capability_attestation_path=Path(
+                str(config["q6_capability_attestation_path"])
+            ),
+            q6_capability_attestation_digest=str(
+                config["q6_capability_attestation_digest"]
+            ),
+            expected_source_commit=str(config["source_commit"]),
+        )
         if stage == "Q0_SOURCE_INTEGRITY":
             if report.artifacts.get("source_commit") != config["source_commit"]:
                 raise QualificationControlError("Q0 source commit differs from root config")

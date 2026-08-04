@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.5 - 2026-08-04
+
+- Prove rootless Podman network/IPAM with the existing isolated Candidate user
+  and bind the exact result to a root-owned Q6 capability attestation.
+- Keep the independent verifier unprivileged: it validates the attestation
+  digest, subject, source commit, runtime, version, and exact capability scope.
+
 ## 2.4.4 - 2026-08-04
 
 - Run Q1 Ruff without a cache and direct mypy's cache to `/dev/null`, keeping

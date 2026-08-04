@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -151,6 +152,64 @@ def _wait_controller(port: int, process: subprocess.Popen[str]) -> None:
     raise ServiceQualificationError("isolated controller health timed out")
 
 
+def _load_q6_container_attestation(
+    path: Path,
+    *,
+    expected_digest: str,
+    expected_source_commit: str,
+    trust_policy: Callable[[Path], bool] | None = None,
+) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink() or sha256_file(path) != expected_digest:
+        raise ServiceQualificationError("Q6 container attestation is unavailable")
+    metadata = path.stat()
+    trusted = (
+        trust_policy(path)
+        if trust_policy is not None
+        else os.name == "nt" or (metadata.st_uid == 0 and not metadata.st_mode & 0o022)
+    )
+    if not trusted:
+        raise ServiceQualificationError("Q6 container attestation is not root-owned")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    capability = "toolchain.container_builder"
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "plane", "capabilities"}
+        or payload.get("schema_version") != "1.0"
+        or payload.get("plane") != "ISOLATED_Q6"
+        or not isinstance(payload.get("capabilities"), dict)
+        or set(payload["capabilities"]) != {capability}
+    ):
+        raise ServiceQualificationError("Q6 container attestation schema is invalid")
+    raw = payload["capabilities"][capability]
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"status", "scope"}
+        or raw.get("status") != "AVAILABLE"
+        or not isinstance(raw.get("scope"), dict)
+    ):
+        raise ServiceQualificationError("Q6 container attestation entry is invalid")
+    scope = raw["scope"]
+    if set(scope) != {
+        "allowed_operations",
+        "runtime",
+        "runroot",
+        "network_preflight",
+        "exact_version",
+        "subject_user",
+        "source_commit",
+    } or not (
+        scope["allowed_operations"] == [capability]
+        and scope["runtime"] == "podman"
+        and scope["runroot"] == "/run/hermes-factory-candidate/containers"
+        and scope["network_preflight"] == "passed"
+        and str(scope["exact_version"]).startswith("podman version ")
+        and scope["subject_user"] == "hermescandidate"
+        and scope["source_commit"] == expected_source_commit
+    ):
+        raise ServiceQualificationError("Q6 container attestation scope is invalid")
+    return dict(raw)
+
+
 def _stop(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -168,6 +227,9 @@ def _candidate_config(
     *,
     controller_port: int,
     telegram_port: int,
+    container_attestation_path: Path,
+    container_attestation_digest: str,
+    expected_source_commit: str,
 ) -> Path:
     raw = yaml.safe_load(
         (repository_root / "config" / "factory-config.example.yaml").read_text(
@@ -211,18 +273,26 @@ def _candidate_config(
         )
     )
     attestation = state / "isolated-capabilities.json"
+    capability_attestations = {
+        capability: {
+            "status": "AVAILABLE",
+            "scope": {"allowed_operations": [capability]},
+        }
+        for capability in attested_capabilities
+    }
+    capability_attestations["toolchain.container_builder"] = (
+        _load_q6_container_attestation(
+            container_attestation_path,
+            expected_digest=container_attestation_digest,
+            expected_source_commit=expected_source_commit,
+        )
+    )
     attestation.write_text(
         json.dumps(
             {
                 "schema_version": "1.0",
                 "plane": "ISOLATED_Q6",
-                "capabilities": {
-                    capability: {
-                        "status": "AVAILABLE",
-                        "scope": {"allowed_operations": [capability]},
-                    }
-                    for capability in attested_capabilities
-                },
+                "capabilities": capability_attestations,
             },
             sort_keys=True,
         )
@@ -340,6 +410,10 @@ def _candidate_boundary_metrics(
 def run_service_qualification(
     repository_root: Path,
     work_root: Path,
+    *,
+    container_attestation_path: Path,
+    container_attestation_digest: str,
+    expected_source_commit: str,
 ) -> ServiceQualificationReport:
     """Run controller, worker, gateway, Hermes, SQLite, and deploy adapter."""
 
@@ -354,6 +428,9 @@ def run_service_qualification(
         work_root,
         controller_port=controller_port,
         telegram_port=telegram.server_port,
+        container_attestation_path=container_attestation_path,
+        container_attestation_digest=container_attestation_digest,
+        expected_source_commit=expected_source_commit,
     )
     credentials = work_root / "credentials"
     credentials.mkdir()

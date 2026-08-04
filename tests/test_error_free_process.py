@@ -30,7 +30,7 @@ from factory.canary_qualification import (
     observe_completion,
     prove_fresh_state,
 )
-from factory.common import sha256_text, stable_json
+from factory.common import sha256_file, sha256_text, stable_json
 from factory.delivery_profiles import DELIVERY_PROFILES
 from factory.failure_catalog import (
     FAILURE_CATALOG,
@@ -71,6 +71,10 @@ from factory.release_qualification import (
     verify_qualification_manifest_envelope,
 )
 from factory.scenario_corpus import ScenarioError, load_scenario, replay_corpus
+from factory.service_qualification import (
+    ServiceQualificationError,
+    _load_q6_container_attestation,
+)
 from factory.shadow_feed import evaluate_candidate_batches, export_stable_events
 from factory.shadow_qualification import ShadowEvidenceJournal, ShadowJournalError
 from factory.state import StateStore
@@ -1371,6 +1375,48 @@ def test_q1_static_tools_do_not_write_to_the_immutable_release(
     assert "--cache-dir=/dev/null" in commands[1]
 
 
+def test_q6_container_attestation_is_digest_and_source_bound(tmp_path: Path) -> None:
+    source_commit = "a" * 40
+    capability = "toolchain.container_builder"
+    payload = {
+        "schema_version": "1.0",
+        "plane": "ISOLATED_Q6",
+        "capabilities": {
+            capability: {
+                "status": "AVAILABLE",
+                "scope": {
+                    "allowed_operations": [capability],
+                    "runtime": "podman",
+                    "runroot": "/run/hermes-factory-candidate/containers",
+                    "network_preflight": "passed",
+                    "exact_version": "podman version 5.4.2",
+                    "subject_user": "hermescandidate",
+                    "source_commit": source_commit,
+                },
+            }
+        },
+    }
+    path = tmp_path / "q6-attestation.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = _load_q6_container_attestation(
+        path,
+        expected_digest=sha256_file(path),
+        expected_source_commit=source_commit,
+        trust_policy=lambda _path: True,
+    )
+    assert loaded == payload["capabilities"][capability]
+
+    payload["capabilities"][capability]["scope"]["source_commit"] = "b" * 40
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ServiceQualificationError, match="scope"):
+        _load_q6_container_attestation(
+            path,
+            expected_digest=sha256_file(path),
+            expected_source_commit=source_commit,
+            trust_policy=lambda _path: True,
+        )
+
+
 def test_qualification_stage_crash_fails_release_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1386,6 +1432,10 @@ def test_qualification_stage_crash_fails_release_epoch(
         "policy_digest": "4" * 64,
         "toolchain_manifest_digest": "5" * 64,
         "trusted_verifier_public_key_digest": _TEST_VERIFIER_KEY_DIGEST,
+        "q6_capability_attestation_path": str(
+            (tmp_path / "q6-attestation.json").resolve()
+        ),
+        "q6_capability_attestation_digest": "7" * 64,
     }
 
     def fail_stage(*_args: object, **_kwargs: object) -> object:
@@ -1483,6 +1533,15 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "umask 022" in bootstrap
     assert 'find "${release_root}" -type f -exec chmod 0644' not in bootstrap
     assert "Immutable release mode/content differs from Git" in bootstrap
+    assert 'SERVICE_USER="${CANDIDATE_USER}"' in bootstrap
+    assert "q6-capability-attestation.json" in bootstrap
+    assert "--q6-capability-attestation-digest" in bootstrap
+    assert "--add-subuids 1200000" not in bootstrap
+    attestation_builder = (
+        repository / "scripts/bootstrap/build-canary-attestation.py"
+    ).read_text(encoding="utf-8")
+    assert 'scoped_argv[1:1] = ["--cgroup-manager=cgroupfs"]' in attestation_builder
+    assert "cwd=state_dir" in attestation_builder
 
     optional_candidate_database = "-/var/lib/hermes-factory-candidate/controller.db"
     for unit in (

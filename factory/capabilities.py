@@ -105,11 +105,17 @@ class ConfiguredCapabilityProbe:
         if not isinstance(capabilities, dict):
             raise TypeError("isolated capability attestations must be an object")
         checks: dict[str, CapabilityCheck] = {}
-        allowed_prefixes = ("git.", "github.", "repository.")
         for capability, raw in capabilities.items():
+            repository_capability = isinstance(capability, str) and capability.startswith(
+                ("git.", "github.", "repository.")
+            )
+            q6_container_capability = (
+                expected_plane == "ISOLATED_Q6"
+                and capability == "toolchain.container_builder"
+            )
             if (
                 not isinstance(capability, str)
-                or not capability.startswith(allowed_prefixes)
+                or not (repository_capability or q6_container_capability)
                 or not isinstance(raw, dict)
                 or set(raw) != {"status", "scope"}
                 or raw["status"] != "AVAILABLE"
@@ -117,6 +123,25 @@ class ConfiguredCapabilityProbe:
                 or raw["scope"].get("allowed_operations") != [capability]
             ):
                 raise ValueError("isolated capability attestation entry is invalid")
+            if q6_container_capability:
+                scope = raw["scope"]
+                if set(scope) != {
+                    "allowed_operations",
+                    "runtime",
+                    "runroot",
+                    "network_preflight",
+                    "exact_version",
+                    "subject_user",
+                    "source_commit",
+                } or not (
+                    scope["runtime"] == "podman"
+                    and Path(str(scope["runroot"])).is_absolute()
+                    and scope["network_preflight"] == "passed"
+                    and str(scope["exact_version"]).startswith("podman version ")
+                    and scope["subject_user"] == "hermescandidate"
+                    and re.fullmatch(r"[a-f0-9]{40}", str(scope["source_commit"]))
+                ):
+                    raise ValueError("isolated Q6 container attestation is invalid")
             checks[capability] = CapabilityCheck(
                 capability,
                 "AVAILABLE",
