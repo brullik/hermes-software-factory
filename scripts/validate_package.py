@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -160,6 +161,38 @@ def requirement_names(requirements: list[str]) -> set[str]:
     return {canonicalize_name(Requirement(requirement).name) for requirement in requirements}
 
 
+def validate_script_modes(errors: list[str]) -> None:
+    """Require every tracked shebang entrypoint to be executable in Git."""
+
+    if not (ROOT / ".git").exists():
+        return
+    completed = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "scripts"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        errors.append("unable to inspect Git script modes")
+        return
+    tracked_modes: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        metadata, separator, relative = line.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            errors.append("invalid Git index entry for scripts")
+            return
+        tracked_modes[relative] = fields[0]
+    for relative, mode in sorted(tracked_modes.items()):
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        first_line = path.open(encoding="utf-8", errors="replace").readline()
+        if first_line.startswith("#!") and mode != "100755":
+            errors.append(f"shebang script is not executable in Git: {relative}")
+
+
 def validate() -> list[str]:
     errors: list[str] = []
 
@@ -182,6 +215,7 @@ def validate() -> list[str]:
             "requirements-dev.txt omits runtime dependencies: "
             + ",".join(missing_runtime_requirements)
         )
+    validate_script_modes(errors)
 
     for path in sorted(path for path in ROOT.rglob("*.json") if is_project_file(path)):
         try:
