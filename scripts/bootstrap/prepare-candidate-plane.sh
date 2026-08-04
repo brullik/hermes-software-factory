@@ -369,7 +369,7 @@ if [[ ! -f "${CONFIG_ROOT}/qualification-control.yaml" ]]; then
     --shadow-feed-root /var/lib/hermes-factory-shadow-feed \
     --candidate-shadow-output-root "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}" \
     --stable-release-root /opt/hermes-factory/current \
-    --candidate-database "${CANDIDATE_STATE}/controller.db" \
+    --candidate-database "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}/candidate-shadow.db" \
     --q6-capability-attestation-path "${Q6_ATTESTATION}" \
     --q6-capability-attestation-digest "${Q6_ATTESTATION_DIGEST}" \
     --manifest-request-path "${MANIFEST_REQUEST_PATH}" \
