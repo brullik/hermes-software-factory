@@ -1,6 +1,6 @@
-# Hermes 2.4.4 error-free release process
+# Hermes 2.4.5 error-free release process
 
-Hermes 2.4.4 separates product autonomy from release authority. Stable A keeps
+Hermes 2.4.5 separates product autonomy from release authority. Stable A keeps
 production authority, Candidate B runs with a separate user, state root,
 database, runtime directory, and candidate-scoped credentials, and the
 independent verifier has neither model nor production credentials.

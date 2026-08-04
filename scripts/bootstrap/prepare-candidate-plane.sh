@@ -27,7 +27,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 HERMES_AGENT_VERSION="${HERMES_AGENT_VERSION:-0.19.0}"
 HERMES_AGENT_SHA256="${HERMES_AGENT_SHA256:-bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f}"
 
-for command_name in git make openssl podman restic "${PYTHON_BIN}"; do
+for command_name in cc git make openssl podman restic "${PYTHON_BIN}"; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     printf 'Required Candidate B tool is missing: %s\n' "${command_name}" >&2
     exit 69
@@ -219,7 +219,8 @@ if (( ALLOW_EPOCH_SWITCH == 1 )); then
   install -d -o root -g root -m 0711 "${EPOCH_CONFIG_ARCHIVE}"
   for epoch_config in \
     qualification-control.yaml verifier.yaml candidate.yaml \
-    candidate-model-registry.yaml canary-capability-attestation.json; do
+    candidate-model-registry.yaml canary-capability-attestation.json \
+    q6-capability-attestation.json; do
     if [[ -e "${CONFIG_ROOT}/${epoch_config}" ]]; then
       if [[ -e "${EPOCH_CONFIG_ARCHIVE}/${epoch_config}" ]]; then
         printf 'Previous epoch config archive conflicts: %s\n' "${epoch_config}" >&2
@@ -334,6 +335,28 @@ if [[ ! -f "${QUALIFICATION_BACKUP_ROOT}/repository/config" ]]; then
     restic init >/dev/null
 fi
 
+Q6_ATTESTATION="${CONFIG_ROOT}/q6-capability-attestation.json"
+Q6_PODMAN_STATE="${CANDIDATE_STATE}/podman"
+Q6_RUNTIME_DIR="/run/hermes-factory-candidate"
+env \
+  SERVICE_USER="${CANDIDATE_USER}" \
+  STATE_DIR="${Q6_PODMAN_STATE}" \
+  RUNTIME_DIR="${Q6_RUNTIME_DIR}" \
+  "${CANDIDATE_RELEASE}/scripts/bootstrap/preflight-rootless-podman.sh"
+if [[ ! -f "${Q6_ATTESTATION}" ]]; then
+  "${VERIFIER_ROOT}/venv/bin/python" \
+    "${VERIFIER_RELEASE}/scripts/bootstrap/build-canary-attestation.py" \
+    --output "${Q6_ATTESTATION}" \
+    --plane ISOLATED_Q6 \
+    --service-user "${CANDIDATE_USER}" \
+    --state-dir "${Q6_PODMAN_STATE}" \
+    --runtime-dir "${Q6_RUNTIME_DIR}" \
+    --source-commit "${SOURCE_COMMIT}"
+  chown root:"${VERIFIER_USER}" "${Q6_ATTESTATION}"
+  chmod 0640 "${Q6_ATTESTATION}"
+fi
+Q6_ATTESTATION_DIGEST="$(sha256sum "${Q6_ATTESTATION}" | awk '{print $1}')"
+
 if [[ ! -f "${CONFIG_ROOT}/qualification-control.yaml" ]]; then
   "${VERIFIER_ROOT}/venv/bin/python" \
     "${VERIFIER_ROOT}/current/scripts/bootstrap/build-qualification-config.py" \
@@ -346,6 +369,8 @@ if [[ ! -f "${CONFIG_ROOT}/qualification-control.yaml" ]]; then
     --candidate-shadow-output-root "${CANDIDATE_STATE}/shadow-output/${SOURCE_COMMIT}" \
     --stable-release-root /opt/hermes-factory/current \
     --candidate-database "${CANDIDATE_STATE}/controller.db" \
+    --q6-capability-attestation-path "${Q6_ATTESTATION}" \
+    --q6-capability-attestation-digest "${Q6_ATTESTATION_DIGEST}" \
     --manifest-request-path "${MANIFEST_REQUEST_PATH}" \
     --signed-manifest-path "${SIGNED_MANIFEST_PATH}" \
     --verifier-private-key-path "${VERIFIER_STATE}/verifier-ed25519.key" \

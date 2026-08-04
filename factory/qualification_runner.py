@@ -502,12 +502,22 @@ def run_q5(evidence_root: Path) -> QualificationStageReport:
     )
 
 
-def run_q6(repository_root: Path, evidence_root: Path) -> QualificationStageReport:
+def run_q6(
+    repository_root: Path,
+    evidence_root: Path,
+    *,
+    container_attestation_path: Path,
+    container_attestation_digest: str,
+    expected_source_commit: str,
+) -> QualificationStageReport:
     repository_root = repository_root.resolve()
     with tempfile.TemporaryDirectory(prefix="hermes-q6-service-") as temporary:
         report = run_service_qualification(
             repository_root,
             Path(temporary) / "service",
+            container_attestation_path=container_attestation_path,
+            container_attestation_digest=container_attestation_digest,
+            expected_source_commit=expected_source_commit,
         )
     metrics = {
         "unknown_transitions": 0,
