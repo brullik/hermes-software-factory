@@ -1,6 +1,6 @@
-# Hermes 2.4.10 error-free release process
+# Hermes 2.4.11 error-free release process
 
-Hermes 2.4.10 separates product autonomy from release authority. Stable A keeps
+Hermes 2.4.11 separates product autonomy from release authority. Stable A keeps
 production authority, Candidate B runs with a separate user, state root,
 database, runtime directory, and candidate-scoped credentials, and the
 independent verifier has neither model nor production credentials.
@@ -23,6 +23,12 @@ Every candidate release must pass, in order:
 7. Q6 real isolated Controller/worker/Gateway/Hermes/SQLite/service adapters;
 8. Q7 at least 72 actual hours of side-effect-free shadow differential replay;
 9. Q8 exactly ten fresh-state, first-pass canary archetypes.
+
+Q7 treats a known-state `product_transition` from a pre-catalog Stable release
+that lacks its historical triggering `event` as an explicit
+`LEGACY_OBSERVED` outcome. It is never executed by Candidate B. A non-empty
+unknown event or an unknown state remains a Controller quarantine and an
+unexplained divergence.
 
 Any Controller defect starts a new release epoch. A corrected Controller cannot
 continue an old clean canary. Promotion requires an Ed25519 manifest from the

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.11 - 2026-08-04
+
+- Classify known-state pre-catalog transition records that lack their historical
+  triggering event as observation-only Q7 evidence instead of executable
+  unknown events.
+- Preserve fail-closed Controller quarantine for non-empty unknown events and
+  unknown states, with regression coverage across the compatibility boundary.
+
 ## 2.4.10 - 2026-08-04
 
 - Prime Q7 verification and its condition-safe finalizer after each new epoch so

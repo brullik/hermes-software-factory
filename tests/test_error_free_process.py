@@ -76,6 +76,7 @@ from factory.service_qualification import (
     _load_q6_container_attestation,
 )
 from factory.shadow_feed import evaluate_candidate_batches, export_stable_events
+from factory.shadow_projection import candidate_shadow_decision, stable_observed_decision
 from factory.shadow_qualification import ShadowEvidenceJournal, ShadowJournalError
 from factory.state import StateStore
 from factory.transition_catalog import ProductState, TransitionSpec
@@ -1059,6 +1060,59 @@ def test_candidate_shadow_has_distinct_state_credentials_and_zero_authority(
         assert report.candidate_write_count == 0
     finally:
         state.close()
+
+
+def test_shadow_projection_preserves_known_legacy_observation_without_event() -> None:
+    event = {
+        "event_id": 1,
+        "product_id": "product-legacy",
+        "task_id": None,
+        "event_type": "product_transition",
+        "payload": {"from": "FAILED_SAFE", "to": "BACKLOG_READY"},
+        "created_at": "2026-08-04T00:00:00+00:00",
+    }
+
+    stable = stable_observed_decision(event)
+    candidate = candidate_shadow_decision(event)
+
+    assert stable == candidate
+    assert stable["chosen_transition"] == "LEGACY_OBSERVED:FAILED_SAFE:BACKLOG_READY"
+    assert stable["terminal_result"] == "BACKLOG_READY"
+
+
+@pytest.mark.parametrize(
+    ("payload", "stable_transition"),
+    [
+        (
+            {"from": "IMPLEMENTING", "event": "UNKNOWN_EVENT", "to": "INTEGRATING"},
+            "UNREGISTERED:IMPLEMENTING:UNKNOWN_EVENT:INTEGRATING",
+        ),
+        (
+            {"from": "UNKNOWN_STATE", "to": "INTEGRATING"},
+            "UNREGISTERED:UNKNOWN_STATE::INTEGRATING",
+        ),
+    ],
+)
+def test_shadow_projection_still_quarantines_unknown_coordinates(
+    payload: dict[str, str],
+    stable_transition: str,
+) -> None:
+    event = {
+        "event_id": 1,
+        "product_id": "product-unknown",
+        "task_id": None,
+        "event_type": "product_transition",
+        "payload": payload,
+        "created_at": "2026-08-04T00:00:00+00:00",
+    }
+
+    stable = stable_observed_decision(event)
+    candidate = candidate_shadow_decision(event)
+
+    assert stable["chosen_transition"] == stable_transition
+    assert candidate["chosen_transition"] == "CONTROLLER_QUARANTINE"
+    assert candidate["failure_owner"] == "controller"
+    assert candidate["terminal_result"] == "FAILED_SAFE"
 
 
 def test_two_plane_layout_rejects_shared_credential_fingerprint(
