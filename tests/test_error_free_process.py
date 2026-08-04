@@ -1457,6 +1457,9 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         "if ! systemctl start --wait hermes-factory-qualification.service" in bootstrap
     )
     assert "orchestration-fail" in bootstrap
+    assert "umask 022" in bootstrap
+    assert 'find "${release_root}" -type f -exec chmod 0644' not in bootstrap
+    assert "Immutable release mode/content differs from Git" in bootstrap
 
     optional_candidate_database = "-/var/lib/hermes-factory-candidate/controller.db"
     for unit in (
