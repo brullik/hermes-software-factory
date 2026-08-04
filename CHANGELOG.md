@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.4 - 2026-08-04
+
+- Run Q1 Ruff without a cache and direct mypy's cache to `/dev/null`, keeping
+  independent static qualification compatible with immutable release trees.
+
 ## 2.4.3 - 2026-08-04
 
 - Preserve every Git-tracked executable bit while making Candidate and Verifier
