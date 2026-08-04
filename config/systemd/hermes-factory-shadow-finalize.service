@@ -1,7 +1,6 @@
 [Unit]
 Description=Finalize Hermes 72-hour shadow qualification when eligible
 After=hermes-factory-shadow-verify.service
-OnSuccess=hermes-factory-clean-canaries.service
 OnFailure=hermes-factory-shadow-fail@finalize.service
 
 [Service]
@@ -11,6 +10,7 @@ Group=hermesverifier
 WorkingDirectory=/opt/hermes-factory-verifier/current
 ExecCondition=/opt/hermes-factory-verifier/venv/bin/python -m scripts.qualification_control shadow-ready
 ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.qualification_control shadow-finalize
+ExecStartPost=+/usr/bin/systemctl start --no-block hermes-factory-clean-canaries.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

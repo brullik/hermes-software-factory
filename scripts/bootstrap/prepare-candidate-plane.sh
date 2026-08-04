@@ -481,11 +481,15 @@ for unit in \
   fi
 done
 systemctl daemon-reload
-systemctl reset-failed \
+for reset_unit in \
   hermes-factory-shadow-export.service \
   hermes-factory-shadow-evaluate.service \
   hermes-factory-shadow-verify.service \
-  hermes-factory-shadow-finalize.service || true
+  hermes-factory-shadow-finalize.service \
+  hermes-factory-clean-canaries.service \
+  hermes-factory-qualification-promote.service; do
+  systemctl reset-failed "${reset_unit}" >/dev/null 2>&1 || true
+done
 runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control init
 systemctl enable hermes-factory-qualification.service
