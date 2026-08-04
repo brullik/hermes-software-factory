@@ -1601,6 +1601,63 @@ def test_AUT_P0_025_production_profile_underdeclaration_is_atomic(
         state.close()
 
 
+def test_CAP_P0_004_unknown_capability_is_rejected_before_sqlite_mutation(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        root_id = "T-CAP-P0-004-ROOT"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Unknown capability planner",
+            role="task-specifier",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-CAP-P0-004",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[("release-staging", "T-CAP-P0-004", "accept-release")],
+            edges=[],
+        )
+        contract = plan["nodes"][0]["task_contract"]
+        contract["role"] = "release-operator"
+        contract["output_schema"] = "release-operation-result.schema.json"
+        contract["capability_profile"] = "release_staging"
+        contract["required_capabilities"] = [
+            *CAPABILITY_PROFILES["release_staging"],
+            "controller.unknown-capability",
+        ]
+        before = {
+            table: state._connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in ("plans", "tasks", "task_edges", "task_outcomes", "outbox")
+        }
+        with pytest.raises(ValueError, match="contains unknown capability"):
+            state.ingest_plan(
+                plan,
+                plan_artifact_ref="evidence/cap-p0-004.json",
+                plan_digest=sha256_text(json.dumps(plan, sort_keys=True)),
+                created_by_task_id=root_id,
+            )
+        after = {
+            table: state._connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in before
+        }
+        assert after == before
+    finally:
+        state.close()
+
+
 def test_AUT_P0_026_contents_read_never_implies_github_write(
     tmp_path: Path,
 ) -> None:

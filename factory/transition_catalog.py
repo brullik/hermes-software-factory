@@ -402,13 +402,25 @@ _TRANSITIONS.extend(
 )
 
 
-TRANSITION_CATALOG: Final[tuple[TransitionSpec, ...]] = tuple(_TRANSITIONS)
-TRANSITION_INDEX: Final[dict[tuple[ProductState, str, ProductState], TransitionSpec]] = {
-    (item.source, item.event, item.target): item for item in TRANSITION_CATALOG
-}
+def build_transition_index(
+    transitions: tuple[TransitionSpec, ...],
+) -> dict[tuple[ProductState, str, ProductState], TransitionSpec]:
+    """Build an exact cardinality-independent index and reject duplicates."""
 
-if len(TRANSITION_INDEX) != len(TRANSITION_CATALOG):
-    raise RuntimeError("duplicate closed-world transition coordinate")
+    index: dict[tuple[ProductState, str, ProductState], TransitionSpec] = {}
+    dispatch_coordinates: set[tuple[ProductState, str]] = set()
+    for item in transitions:
+        coordinate = (item.source, item.event, item.target)
+        dispatch_coordinate = (item.source, item.event)
+        if coordinate in index or dispatch_coordinate in dispatch_coordinates:
+            raise RuntimeError("duplicate closed-world transition coordinate")
+        index[coordinate] = item
+        dispatch_coordinates.add(dispatch_coordinate)
+    return index
+
+
+TRANSITION_CATALOG: Final[tuple[TransitionSpec, ...]] = tuple(_TRANSITIONS)
+TRANSITION_INDEX: Final = build_transition_index(TRANSITION_CATALOG)
 
 
 def transition_spec(

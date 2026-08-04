@@ -202,6 +202,47 @@ def test_AUT_P0_032_plan_compiler_is_deterministic_and_controller_owned(
         )
 
 
+def test_ID_P0_008_completion_obligation_ids_do_not_depend_on_plan_id(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    semantic = proposal(config)
+    compiler = PlanCompiler(policy_digest=policy_digest(config))
+    first_context = CompileContext(
+        product_id="product-semantic",
+        revision=1,
+        parent_plan_id="PLAN-PARENT-ONE",
+        source_failure_id=None,
+        created_by_task_id="T-TASKSPECIFIER001",
+        root_task_id="T-ROOTSEMANTIC001",
+        root_context_ref="evidence/intake-product-semantic.json",
+        external_repository=False,
+        proposal_artifact_ref="evidence/plan-proposal-semantic-001.json",
+    )
+    first = compiler.compile(semantic, first_context)
+    second = compiler.compile(
+        semantic,
+        replace(
+            first_context,
+            revision=2,
+            parent_plan_id=str(first["plan_id"]),
+            created_by_task_id="T-REPLANNER002",
+        ),
+    )
+    assert first["plan_id"] != second["plan_id"]
+
+    def obligations(plan: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+        return {
+            str(node["node_id"]): tuple(
+                str(value)
+                for value in node["task_contract"]["completion_obligation_ids"]
+            )
+            for node in plan["nodes"]
+        }
+
+    assert obligations(first) == obligations(second)
+
+
 def test_replan_compiler_merges_and_reuses_accepted_lineage_nodes(
     tmp_path: Path,
 ) -> None:

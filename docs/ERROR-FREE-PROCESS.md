@@ -1,6 +1,6 @@
-# Hermes 2.4.13 error-free release process
+# Hermes 2.4.14 error-free release process
 
-Hermes 2.4.13 separates product autonomy from release authority. Stable A keeps
+Hermes 2.4.14 separates product autonomy from release authority. Stable A keeps
 production authority, Candidate B runs with a separate user, state root,
 database, runtime directory, and candidate-scoped credentials, and the
 independent verifier has neither model nor production credentials.
@@ -52,3 +52,13 @@ The executable stage runner is `python -m scripts.release_qualify stage ...`.
 The verifier signs with `python -m scripts.release_qualify verify`; a separate
 root service installs the verified envelope. Candidate B cannot access either
 the verifier state or `/usr/local/sbin/hermes-factory-release-submit`.
+
+The completion audit is executable rather than declarative. Capability grants
+cover unknown, read-only, and expired cases before claim; catalog, evidence,
+and capability resolvers run the required `0/1/2/32/99/100/101/500/10,000`
+matrix; plans above 100 nodes, 79-way snapshots, malformed scanners, empty
+optional lists, duplicate sets, and missing/orphan/conflicting artifacts all
+fail closed. The bounded model derives privilege, causal-action, failure
+liveness, and rollback-state metrics from reachable states. Candidate task
+surfaces are also statically proven to receive no Docker socket or Docker group
+and no task-level `apt-get` path.

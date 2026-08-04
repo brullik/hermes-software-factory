@@ -419,6 +419,7 @@ def run_q2(evidence_root: Path) -> QualificationStageReport:
         + report.evidence_free_pass_count
         + report.multiple_active_action_count
         + report.rollback_unknown_state_count
+        + report.bounded_failure_escape_count
     )
     if unsafe:
         raise QualificationRunError("Q2 bounded model contains an unsafe state")

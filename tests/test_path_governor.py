@@ -324,6 +324,89 @@ def test_LOOP_P0_005_reviews_share_one_candidate_snapshot(tmp_path: Path) -> Non
         state.close()
 
 
+def test_ID_P0_007_missing_orphan_and_conflicting_artifacts_fail_closed(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    try:
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        with pytest.raises(ResultLineageIdentityError, match="missing or cross-product"):
+            governor.create_candidate_snapshot(
+                product_id="product-path-governor",
+                plan_id=str(state.get_task("T-ROOT0001")["plan_id"]),
+                repository_commit="d" * 40,
+                tree_digest="sha256:" + "e" * 64,
+                architecture_binding_id="RB-MISSING",
+                result_binding_ids=("RB-MISSING",),
+            )
+
+        _accept_source(state, "T-ROOT0001", "attempt-root")
+        binding = governor.bind_result(
+            task_id="T-ROOT0001",
+            source_task_id="T-ROOT0001",
+            source_attempt_id="attempt-root",
+            result_ref="evidence/output-root.json",
+            result_digest="c" * 64,
+            output_schema="attempt-result.schema.json",
+        )
+        with pytest.raises(ResultLineageIdentityError, match="conflicts"):
+            governor.bind_result(
+                task_id="T-ROOT0001",
+                source_task_id="T-ROOT0001",
+                source_attempt_id="attempt-root",
+                result_ref="evidence/output-conflict.json",
+                result_digest="f" * 64,
+                output_schema="attempt-result.schema.json",
+            )
+        assert governor.direct_binding("T-ROOT0001") == binding
+        state._connection.commit()
+
+        state.create_product(
+            product_id="product-orphan-source",
+            owner_id="owner",
+            source="cli",
+            idea="Create a cross-product artifact",
+            idempotency_key="intake-product-orphan-source",
+        )
+        state.add_task(
+            task_id="T-ORPHAN-SOURCE",
+            product_id="product-orphan-source",
+            title="Cross-product source",
+            role="builder",
+            output_schema="attempt-result.schema.json",
+            contract_ref="evidence/task-T-ORPHAN-SOURCE.json",
+            stage_key="implementation-slice",
+            plan_node_id="orphan-source",
+            graph_status="READY",
+        )
+        with state._connection:
+            state._connection.execute(
+                """UPDATE tasks SET lifecycle_stage='implementation-slice',
+                          semantic_node_key='orphan-source'
+                    WHERE task_id='T-ORPHAN-SOURCE'"""
+            )
+        _accept_source(state, "T-ORPHAN-SOURCE", "attempt-orphan-source")
+        orphan = governor.bind_result(
+            task_id="T-ORPHAN-SOURCE",
+            source_task_id="T-ORPHAN-SOURCE",
+            source_attempt_id="attempt-orphan-source",
+            result_ref="evidence/output-orphan-source.json",
+            result_digest="9" * 64,
+            output_schema="attempt-result.schema.json",
+        )
+        with pytest.raises(ResultLineageIdentityError, match="missing or cross-product"):
+            governor.create_candidate_snapshot(
+                product_id="product-path-governor",
+                plan_id=str(state.get_task("T-ROOT0001")["plan_id"]),
+                repository_commit="d" * 40,
+                tree_digest="sha256:" + "e" * 64,
+                architecture_binding_id=orphan.binding_id,
+                result_binding_ids=(orphan.binding_id,),
+            )
+    finally:
+        state.close()
+
+
 def test_candidate_snapshot_is_dependency_ancestry_cut(tmp_path: Path) -> None:
     state = _state(tmp_path)
     try:

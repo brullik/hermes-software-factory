@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections.abc import Mapping
@@ -1665,6 +1666,75 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(tasks[0]["status"], "DONE")
             state.close()
 
+    def test_TXN_P0_006_lost_lease_during_execution_never_commits_result(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = make_config(
+                root,
+                selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+            )
+            state = StateStore(
+                config.database_path,
+                max_active_workers=config.max_active_workers,
+            )
+            try:
+                state.create_product(
+                    product_id="P-LEASE-LOST",
+                    owner_id="owner",
+                    source="test",
+                    idea="Reject an outcome after lease ownership changes",
+                    idempotency_key="lease-lost-during-execution",
+                )
+                PipelineCoordinator(config, state).seed_initial("P-LEASE-LOST")
+                worker = AgentWorker(
+                    config,
+                    state,
+                    runner=FakeRunner("{}"),
+                    repository_root=ROOT,
+                    lease_seconds=1,
+                    heartbeat_interval_seconds=0.01,
+                )
+                lease_lost = threading.Event()
+
+                def slow_execute(spec: TaskExecutionSpec) -> WorkerResult:
+                    assert lease_lost.wait(timeout=1)
+                    return WorkerResult(
+                        str(spec.task_contract["task_id"]),
+                        "completed",
+                        None,
+                    )
+
+                def lose_lease(*_args: object, **_kwargs: object) -> None:
+                    lease_lost.set()
+                    raise ValueError("lease ownership changed")
+
+                with (
+                    patch.object(worker, "execute", side_effect=slow_execute),
+                    patch.object(
+                        worker.workflow,
+                        "heartbeat",
+                        side_effect=lose_lease,
+                    ),
+                ):
+                    result = worker.run_once()
+
+                assert result is not None
+                self.assertEqual(result.status, "lease_lost")
+                self.assertEqual(result.reason_code, "task_lease_lost")
+                task = state.list_tasks("P-LEASE-LOST")[0]
+                self.assertEqual(task["status"], "CLAIMED")
+                self.assertEqual(
+                    state._connection.execute(
+                        "SELECT COUNT(*) FROM task_outcomes WHERE task_id=?",
+                        (task["task_id"],),
+                    ).fetchone()[0],
+                    0,
+                )
+            finally:
+                state.close()
+
     def test_direct_candidate_snapshot_evidence_skips_recursive_ancestry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2696,7 +2766,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(executor.calls, [])
             state.close()
 
-    def test_release_worker_reconciles_executing_intent_after_crash_checkpoint(
+    def test_TXN_P0_003_release_worker_reconciles_effect_before_receipt_after_crash(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
