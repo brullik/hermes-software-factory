@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.7 - 2026-08-04
+
+- Move Candidate shadow evaluations into a dedicated commit-scoped shared root,
+  preserving Candidate write access and verifier read access without exposing
+  the private Candidate state parent.
+- Stop Q7 timers automatically after an immutable terminal shadow failure and
+  reset inherited failed service state before a corrected release epoch starts.
+
 ## 2.4.6 - 2026-08-04
 
 - Render the Q7 Candidate evaluator output path from the immutable source commit,

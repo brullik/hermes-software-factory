@@ -20,6 +20,7 @@ CANDIDATE_STATE="${CANDIDATE_STATE:-/var/lib/hermes-factory-candidate}"
 VERIFIER_STATE="${VERIFIER_STATE:-/var/lib/hermes-factory-verifier}"
 CANARY_STATE="${CANARY_STATE:-/var/lib/hermes-factory-canaries}"
 CANARY_LOG_ROOT="${CANARY_LOG_ROOT:-/var/log/hermes-factory-canaries}"
+SHADOW_OUTPUT_ROOT="${SHADOW_OUTPUT_ROOT:-/var/lib/hermes-factory-shadow-output}"
 QUALIFICATION_BACKUP_ROOT="${QUALIFICATION_BACKUP_ROOT:-/var/lib/hermes-factory-qualification-backup}"
 CONFIG_ROOT="${CONFIG_ROOT:-/etc/hermes-factory}"
 CANARY_EXISTING_REPOSITORY_URL="${CANARY_EXISTING_REPOSITORY_URL:-https://github.com/brullik/hermes-path-governor-shadow-20260803}"
@@ -122,7 +123,6 @@ fi
 install -d -o "${CANDIDATE_USER}" -g "${CANDIDATE_USER}" -m 0750 \
   "${CANDIDATE_STATE}" "${CANDIDATE_STATE}/evidence" \
   "${CANDIDATE_STATE}/qualification" "${CANDIDATE_STATE}/worktrees" \
-  "${CANDIDATE_STATE}/shadow-output/${SOURCE_COMMIT}" \
   /var/log/hermes-factory-candidate
 install -d -o "${VERIFIER_USER}" -g "${VERIFIER_USER}" -m 0750 \
   "${VERIFIER_STATE}" "${VERIFIER_STATE}/evidence/${SOURCE_COMMIT}" \
@@ -132,10 +132,11 @@ install -d -o "${VERIFIER_USER}" -g "${VERIFIER_USER}" -m 0750 \
 install -d -o "${CANDIDATE_USER}" -g "${CANDIDATE_USER}" -m 0750 \
   "${CANARY_STATE}" "${CANARY_STATE}/${SOURCE_COMMIT}" \
   "${CANARY_LOG_ROOT}" "${CANARY_LOG_ROOT}/${SOURCE_COMMIT}"
+install -d -o root -g hermesshadow -m 2750 "${SHADOW_OUTPUT_ROOT}"
+install -d -o "${CANDIDATE_USER}" -g hermesshadow -m 2750 \
+  "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}"
 install -d -o "${SERVICE_USER}" -g hermesshadow -m 2750 \
   /var/lib/hermes-factory-shadow-feed
-chown "${CANDIDATE_USER}":hermesshadow "${CANDIDATE_STATE}/shadow-output/${SOURCE_COMMIT}"
-chmod 2750 "${CANDIDATE_STATE}/shadow-output/${SOURCE_COMMIT}"
 install -d -o root -g "${CANDIDATE_USER}" -m 0750 \
   "${CONFIG_ROOT}/candidate-credentials.d"
 install -d -o root -g root -m 0755 "${CONFIG_ROOT}/qualification-manifests"
@@ -366,7 +367,7 @@ if [[ ! -f "${CONFIG_ROOT}/qualification-control.yaml" ]]; then
     --evidence-root "${VERIFIER_STATE}/evidence/${SOURCE_COMMIT}" \
     --shadow-journal-root "${VERIFIER_STATE}/shadow-journal/${SOURCE_COMMIT}" \
     --shadow-feed-root /var/lib/hermes-factory-shadow-feed \
-    --candidate-shadow-output-root "${CANDIDATE_STATE}/shadow-output/${SOURCE_COMMIT}" \
+    --candidate-shadow-output-root "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}" \
     --stable-release-root /opt/hermes-factory/current \
     --candidate-database "${CANDIDATE_STATE}/controller.db" \
     --q6-capability-attestation-path "${Q6_ATTESTATION}" \
@@ -458,6 +459,7 @@ for unit in \
   hermes-factory-shadow-export.service \
   hermes-factory-shadow-evaluate.service \
   hermes-factory-shadow-fail@.service \
+  hermes-factory-shadow-stop.service \
   hermes-factory-shadow-verify.service \
   hermes-factory-shadow-verify.timer \
   hermes-factory-shadow-finalize.service \
@@ -479,6 +481,11 @@ for unit in \
   fi
 done
 systemctl daemon-reload
+systemctl reset-failed \
+  hermes-factory-shadow-export.service \
+  hermes-factory-shadow-evaluate.service \
+  hermes-factory-shadow-verify.service \
+  hermes-factory-shadow-finalize.service || true
 runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control init
 systemctl enable hermes-factory-qualification.service
