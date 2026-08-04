@@ -1612,6 +1612,9 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "--add-subuids 1200000" not in bootstrap
     assert 'sed "s/@SOURCE_COMMIT@/${SOURCE_COMMIT}/g"' in bootstrap
     assert "hermes-factory-shadow-fail@.service" in bootstrap
+    assert "hermes-factory-shadow-stop.service" in bootstrap
+    assert "systemctl reset-failed" in bootstrap
+    assert 'SHADOW_OUTPUT_ROOT="${SHADOW_OUTPUT_ROOT:-/var/lib/hermes-factory-shadow-output}"' in bootstrap
     attestation_builder = (
         repository / "scripts/bootstrap/build-canary-attestation.py"
     ).read_text(encoding="utf-8")
@@ -1631,11 +1634,20 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         repository / "config/systemd/hermes-factory-shadow-evaluate.service"
     ).read_text(encoding="utf-8")
     epoch_output = (
-        "/var/lib/hermes-factory-candidate/shadow-output/@SOURCE_COMMIT@"
+        "/var/lib/hermes-factory-shadow-output/@SOURCE_COMMIT@"
     )
     assert f"--output-root {epoch_output}" in evaluate
     assert f"ReadWritePaths={epoch_output}" in evaluate
     assert "OnFailure=hermes-factory-shadow-fail@evaluate.service" in evaluate
+
+    shadow_failure = (
+        repository / "config/systemd/hermes-factory-shadow-fail@.service"
+    ).read_text(encoding="utf-8")
+    assert "OnSuccess=hermes-factory-shadow-stop.service" in shadow_failure
+    shadow_stop = (
+        repository / "config/systemd/hermes-factory-shadow-stop.service"
+    ).read_text(encoding="utf-8")
+    assert "disable --now hermes-factory-shadow-verify.timer" in shadow_stop
 
     finalize = (
         repository / "config/systemd/hermes-factory-shadow-finalize.service"

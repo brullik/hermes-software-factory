@@ -1,0 +1,19 @@
+[Unit]
+Description=Stop Hermes Q7 timers after terminal shadow failure
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/systemctl disable --now hermes-factory-shadow-verify.timer hermes-factory-shadow-finalize.timer
+ExecStart=/usr/bin/systemctl stop hermes-factory-shadow-verify.service hermes-factory-shadow-evaluate.service hermes-factory-shadow-export.service hermes-factory-shadow-finalize.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateNetwork=true
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-candidate /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=128M
+TasksMax=32

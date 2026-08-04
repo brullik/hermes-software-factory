@@ -1,5 +1,6 @@
 [Unit]
 Description=Record terminal Hermes Q7 shadow failure (%i)
+OnSuccess=hermes-factory-shadow-stop.service
 
 [Service]
 Type=oneshot
