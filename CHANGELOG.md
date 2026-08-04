@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.4.14 - 2026-08-04
+
+- Complete the audit P0 capability matrix with pre-mutation rejection of
+  unknown capabilities, read-only negative grants, and automatic claim
+  blocking for expired grants.
+- Exercise catalog, capability, transition-evidence, plan, dependency,
+  scanner, optional-list, duplicate-set, and artifact boundaries at the exact
+  required cardinalities, including 10,000 items and plans above 100 nodes.
+- Derive transition coverage, privilege expansion, active causal action,
+  bounded-failure liveness, and rollback-state safety from the executable model
+  instead of returning constant report values.
+- Add direct crash, durable outbox, lost-lease, missing/orphan/conflicting
+  artifact, stable-obligation, and Candidate task-boundary proofs, including
+  explicit rejection of Docker socket/group and task-level package installs.
+
 ## 2.4.13 - 2026-08-04
 
 - Add a verifier-owned Q7 heartbeat hash chain bound to the current decision

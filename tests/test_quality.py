@@ -408,6 +408,43 @@ class QualityGateTests(unittest.TestCase):
         self.assertIn("database is stale", result["summary"])
         scanner_runner.assert_not_called()
 
+    def test_CARD_P0_malformed_scanner_result_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scanner = root / "osv-scanner"
+            scanner.write_bytes(b"verified-scanner")
+            database = root / "osv-cache" / "osv-scanner" / "PyPI" / "all.zip"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"verified-database")
+            gate = self._offline_dependency_gate(root, scanner)
+            malformed = subprocess.CompletedProcess(
+                args=[str(scanner)],
+                returncode=0,
+                stdout="{not-json",
+                stderr="",
+            )
+            with (
+                patch("scripts.quality_gate._target_site_packages", return_value=root),
+                patch(
+                    "scripts.quality_gate._runtime_dependency_records",
+                    return_value=(
+                        [{"name": "example", "version": "1.0", "license": "MIT"}],
+                        ["example"],
+                    ),
+                ),
+                patch("scripts.quality_gate.subprocess.run", return_value=malformed),
+            ):
+                result = run_gate(
+                    gate,
+                    root,
+                    "5" * 64,
+                    python_executable="target-python",
+                )
+
+        self.assertEqual(result["status"], "ERROR")
+        self.assertIsNone(result["exit_code"])
+        self.assertIn("target dependency audit failed closed", result["summary"])
+
     def test_target_dependency_audit_attests_explicit_zero_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

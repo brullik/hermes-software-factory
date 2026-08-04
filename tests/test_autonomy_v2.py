@@ -4548,6 +4548,131 @@ def test_AUT_P0_014_capability_preflight_controls_ready_frontier(
         state.close()
 
 
+def test_CAP_P0_007_expired_grant_blocks_claim_until_replaced(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        root_id = "T-ROOT-EXPIRED-GRANT"
+        task_id = "T-RELEASE-EXPIRED-GRANT"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Expired grant planner",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-EXPIRED-GRANT",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=[("release-staging", task_id, "accept-release")],
+            edges=[],
+        )
+        contract = plan["nodes"][0]["task_contract"]
+        contract["role"] = "release-operator"
+        contract["output_schema"] = "release-operation-result.schema.json"
+        contract["capability_profile"] = "release_staging"
+        contract["required_capabilities"] = list(CAPABILITY_PROFILES["release_staging"])
+        expired_capability = "github.pull_request.create"
+        for capability in CAPABILITY_PROFILES["release_staging"]:
+            state.grant_capability(
+                product_id="product-autonomy",
+                task_id=None,
+                capability=capability,
+                provider="fake-controller",
+                scope={"repository": "brullik/durable-task-service"},
+                status="AVAILABLE",
+                expires_at=(
+                    "2000-01-01T00:00:00Z"
+                    if capability == expired_capability
+                    else None
+                ),
+            )
+        persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=root_id,
+        )
+
+        blocked = state.get_task(task_id)
+        assert blocked is not None
+        assert blocked["graph_status"] == "BLOCKED_CAPABILITY"
+        assert blocked["blocked_reason"] == "missing_capability"
+        assert expired_capability in json.loads(str(blocked["blocked_ref"]))
+        assert state.claim_task(worker_id="worker") is None
+
+        state.grant_capability(
+            product_id="product-autonomy",
+            task_id=None,
+            capability=expired_capability,
+            provider="fake-controller",
+            scope={"repository": "brullik/durable-task-service"},
+            status="AVAILABLE",
+        )
+        ready = state.get_task(task_id)
+        assert ready is not None and ready["graph_status"] == "READY"
+        claimed = state.claim_task(worker_id="worker")
+        assert claimed is not None and claimed["task_id"] == task_id
+    finally:
+        state.close()
+
+
+def test_CARD_P0_plan_above_one_hundred_nodes_and_large_dependency_inventory(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        root_id = "T-ROOT-LARGE-PLAN"
+        state.add_task(
+            task_id=root_id,
+            product_id="product-autonomy",
+            title="Large plan compiler",
+        )
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        node_specs = [
+            (f"node-{index:03d}", f"T-LARGE-{index:03d}", f"accept-{index:03d}")
+            for index in range(101)
+        ]
+        aggregate_node = node_specs[-1][0]
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-LARGE-101",
+            root_task_id=root_id,
+            parent_plan_id=str(product["active_plan_id"]),
+            node_specs=node_specs,
+            edges=[(node_id, aggregate_node) for node_id, _task_id, _accept in node_specs[:-1]],
+        )
+        task_ids = persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id=root_id,
+        )
+
+        assert len(task_ids) == 101
+        aggregate = state.get_task(node_specs[-1][1])
+        assert aggregate is not None
+        assert aggregate["graph_status"] == "BLOCKED_DEPENDENCY"
+        dependencies = [
+            edge
+            for edge in state.list_edges("PLAN-LARGE-101")
+            if edge["to_task_id"] == node_specs[-1][1]
+        ]
+        assert len(dependencies) == 100
+    finally:
+        state.close()
+
+
 class InternalGapProbe:
     def check(
         self,

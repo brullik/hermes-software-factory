@@ -38,6 +38,7 @@ from factory.failure_catalog import (
     FailureAction,
     assert_catalog_total,
     discover_runtime_reason_literals,
+    failure_disposition,
 )
 from factory.failure_router import ContractIntegrityError, FailureRouter
 from factory.migration_qualification import run_migration_matrix
@@ -218,6 +219,11 @@ def _qualify_to_clean_canary(
 
 
 def test_p0_unknown_reason_is_controller_quarantine() -> None:
+    disposition = failure_disposition("not_registered_anywhere")
+    assert not disposition.registered
+    assert disposition.reason_code == "not_registered_anywhere"
+    assert disposition.reason_code != "internal_blocker"
+    assert disposition.action is FailureAction.CONTROLLER_QUARANTINE
     assert (
         failure_owner(
             failure_class="semantic",
@@ -238,6 +244,15 @@ def test_p0_repair_capabilities_do_not_union_parent_lineage() -> None:
             "repository.write_tests_scoped",
             "test.execute",
         }
+    )
+
+
+def test_CAP_P0_005_readonly_role_has_no_repository_write() -> None:
+    readonly = set(CAPABILITY_PROFILES["reviewer_readonly"])
+    assert "repository.read" in readonly
+    assert not any(
+        capability.startswith(("repository.write", "git.", "github."))
+        for capability in readonly
     )
 
 
@@ -606,6 +621,42 @@ def test_side_effect_intent_receipt_is_replay_safe_and_conflict_closed(
         state.close()
 
 
+def test_TXN_P0_002_prepared_intent_survives_restart_before_effect(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "controller.db"
+    state = StateStore(database)
+    try:
+        state.create_product(
+            product_id="P-PREPARED-INTENT",
+            owner_id="owner",
+            source="test",
+            idea="Persist an outbox intent before the external effect",
+            idempotency_key="prepared-intent",
+        )
+        with state._connection:
+            intent_id = SideEffectProtocol(state._connection).prepare(
+                product_id="P-PREPARED-INTENT",
+                operation="release:staging",
+                adapter="fixture",
+                idempotency_key="prepared-before-effect",
+                expected_postcondition={"candidate_digest": "a" * 64},
+            )
+    finally:
+        state.close()
+
+    restarted = StateStore(database)
+    try:
+        protocol = SideEffectProtocol(restarted._connection)
+        assert protocol.status(intent_id) == "PREPARED"
+        assert protocol.verified_result(intent_id) is None
+        with restarted._connection:
+            protocol.mark_executing(intent_id)
+        assert protocol.status(intent_id) == "EXECUTING"
+    finally:
+        restarted.close()
+
+
 def test_completion_not_applicable_reference_is_profile_bound_and_verified() -> None:
     profile = DELIVERY_PROFILES[next(iter(sorted(DELIVERY_PROFILES, key=lambda item: item.value)))]
     proof = profile_not_applicable_proof(
@@ -643,6 +694,31 @@ def test_completion_not_applicable_reference_is_profile_bound_and_verified() -> 
         build_completion_manifest(**{**arguments, "not_applicable_proofs": [tampered]})
 
 
+def test_CARD_P0_empty_optional_proof_list_is_preserved() -> None:
+    profile = DELIVERY_PROFILES[next(iter(sorted(DELIVERY_PROFILES, key=lambda item: item.value)))]
+    manifest = build_completion_manifest(
+        product_id="P-EMPTY-OPTIONAL",
+        delivery_profile=profile.name.value,
+        delivery_profile_digest=profile.digest,
+        product_contract_digest="1" * 64,
+        semantic_graph_digest="2" * 64,
+        candidate_snapshot_digest="3" * 64,
+        pr_checks_ref="evidence://checks/empty-optional",
+        staging_ref="evidence://staging/empty-optional",
+        acceptance_ref="evidence://acceptance/empty-optional",
+        production_ref="evidence://production/empty-optional",
+        rollback_restore_ref="evidence://rollback/empty-optional",
+        observation_ref="evidence://observation/empty-optional",
+        controller_release_digest="4" * 64,
+        policy_digest="5" * 64,
+        open_problem_count=0,
+        open_controller_incident_count=0,
+        not_applicable_proofs=[],
+        created_at="2026-08-03T00:00:00Z",
+    )
+    assert manifest.not_applicable_proofs == ()
+
+
 def test_closed_transition_model_is_deterministic_bounded_and_terminal_reachable() -> None:
     report = check_transition_catalog()
     assert report.state_event_coverage_percent == 100
@@ -658,8 +734,13 @@ def test_closed_transition_model_is_deterministic_bounded_and_terminal_reachable
     assert report.crash_bound == 1
     assert report.deadlock_count == 0
     assert report.livelock_count == 0
+    assert report.unsafe_terminal_count == 0
     assert report.duplicate_side_effect_count == 0
+    assert report.privilege_expansion_count == 0
     assert report.evidence_free_pass_count == 0
+    assert report.multiple_active_action_count == 0
+    assert report.rollback_unknown_state_count == 0
+    assert report.bounded_failure_escape_count == 0
 
 
 def test_model_checker_rejects_a_cycle_without_ranking_function(
@@ -678,6 +759,19 @@ def test_model_checker_rejects_a_cycle_without_ranking_function(
         (*model_check.TRANSITION_CATALOG, mutant),
     )
     with pytest.raises(model_check.ModelCheckError, match="ranking"):
+        model_check.check_transition_catalog()
+
+
+def test_CWT_P0_001_duplicate_state_event_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    duplicate = model_check.TRANSITION_CATALOG[0]
+    monkeypatch.setattr(
+        model_check,
+        "TRANSITION_CATALOG",
+        (*model_check.TRANSITION_CATALOG, duplicate),
+    )
+    with pytest.raises(model_check.ModelCheckError, match="ambiguous state/event"):
         model_check.check_transition_catalog()
 
 
@@ -1790,7 +1884,6 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     ).read_text(encoding="utf-8")
     assert 'scoped_argv[1:1] = ["--cgroup-manager=cgroupfs"]' in attestation_builder
     assert "cwd=state_dir" in attestation_builder
-
     optional_candidate_database = "-/var/lib/hermes-factory-candidate/controller.db"
     for unit in (
         "hermes-factory-qualification.service",
@@ -1873,6 +1966,46 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         "systemctl start --wait hermes-factory-shadow-finalize.service"
     )
     assert verify_prime < finalize_prime
+
+
+def test_HARD_P0_candidate_tasks_have_no_docker_socket_group_or_apt_get() -> None:
+    repository = Path(__file__).parents[1]
+    candidate_units = sorted(
+        (repository / "config" / "systemd").glob("hermes-factory-candidate*.service")
+    )
+    candidate_units.extend(
+        sorted(
+            (repository / "config" / "systemd").glob(
+                "hermes-factory-canary*.service"
+            )
+        )
+    )
+    task_surfaces = [
+        repository / "factory" / "capabilities.py",
+        repository / "factory" / "service_qualification.py",
+        repository / "factory" / "worker.py",
+        repository / "scripts" / "canary_candidate.py",
+        repository / "scripts" / "bootstrap" / "prepare-candidate-plane.sh",
+        *candidate_units,
+    ]
+    contents = {
+        path.relative_to(repository).as_posix(): path.read_text(encoding="utf-8")
+        for path in task_surfaces
+    }
+    assert contents
+    assert all("docker.sock" not in text.lower() for text in contents.values())
+    assert all("apt-get" not in text for text in contents.values())
+
+    bootstrap = contents["scripts/bootstrap/prepare-candidate-plane.sh"]
+    privilege_lines = [
+        line.lower()
+        for line in bootstrap.splitlines()
+        if "usermod" in line or "groupadd" in line
+    ]
+    assert privilege_lines
+    assert all("docker" not in line for line in privilege_lines)
+    assert "podman" in bootstrap
+    assert 'usermod --append --groups hermesshadow "${shadow_member}"' in bootstrap
 
 
 def test_live_shadow_feed_is_redacted_evaluated_and_verified_once(tmp_path: Path) -> None:

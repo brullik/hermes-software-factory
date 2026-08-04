@@ -31,6 +31,13 @@ class _Intent(IntEnum):
     VERIFIED = 3
 
 
+class _DeploymentState(StrEnum):
+    LTS_A = "LTS_A"
+    CANDIDATE_B = "CANDIDATE_B"
+    PROMOTED_B = "PROMOTED_B"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True)
 class _AbstractState:
     """Finite task/side-effect state used at every requested model bound."""
@@ -44,6 +51,9 @@ class _AbstractState:
     side_effect_required: bool = False
     intent: _Intent = _Intent.NONE
     effect_count: int = 0
+    capability_ceiling: int = 1
+    effective_capabilities: int = 0
+    deployment_state: _DeploymentState = _DeploymentState.LTS_A
     terminal: _Terminal = _Terminal.ACTIVE
     terminal_evidence: bool = False
     completion_evidence: bool = False
@@ -71,6 +81,49 @@ class ModelCheckReport:
     evidence_free_pass_count: int
     multiple_active_action_count: int
     rollback_unknown_state_count: int
+    bounded_failure_escape_count: int
+
+
+@dataclass(frozen=True)
+class _BoundedModelReport:
+    state_count: int
+    composed_state_count: int
+    deadlock_count: int
+    livelock_count: int
+    unsafe_terminal_count: int
+    duplicate_side_effect_count: int
+    privilege_expansion_count: int
+    evidence_free_pass_count: int
+    multiple_active_action_count: int
+    rollback_unknown_state_count: int
+    bounded_failure_escape_count: int
+
+
+def _active_action_count(state: _AbstractState) -> int:
+    return int(state.in_flight) + int(state.intent is _Intent.EXECUTING)
+
+
+def _bounded_failure_reaches_failed_safe(
+    state: _AbstractState,
+    *,
+    maximum_steps: int = 2,
+) -> bool:
+    frontier = {state}
+    visited = {state}
+    for _ in range(maximum_steps):
+        next_frontier: set[_AbstractState] = set()
+        for current in frontier:
+            for successor in _successors(current):
+                if (
+                    successor.terminal is _Terminal.FAILED_SAFE
+                    and successor.terminal_evidence
+                ):
+                    return True
+                if successor not in visited:
+                    visited.add(successor)
+                    next_frontier.add(successor)
+        frontier = next_frontier
+    return False
 
 
 def _strongly_connected_components(
@@ -133,6 +186,9 @@ def _successors(state: _AbstractState) -> set[_AbstractState]:
         replace(
             state,
             in_flight=False,
+            intent=_Intent.VERIFIED if state.effect_count else _Intent.NONE,
+            effective_capabilities=0,
+            deployment_state=_DeploymentState.LTS_A,
             terminal=_Terminal.FAILED_SAFE,
             terminal_evidence=True,
         )
@@ -140,20 +196,37 @@ def _successors(state: _AbstractState) -> set[_AbstractState]:
 
     if state.accepted < state.nodes:
         if not state.in_flight:
-            successors.add(replace(state, in_flight=True))
+            successors.add(
+                replace(
+                    state,
+                    in_flight=True,
+                    effective_capabilities=state.capability_ceiling,
+                )
+            )
         else:
             successors.add(
-                replace(state, accepted=state.accepted + 1, in_flight=False)
+                replace(
+                    state,
+                    accepted=state.accepted + 1,
+                    in_flight=False,
+                    effective_capabilities=0,
+                )
             )
             if state.retries < 2:
                 successors.add(
-                    replace(state, retries=state.retries + 1, in_flight=False)
+                    replace(
+                        state,
+                        retries=state.retries + 1,
+                        in_flight=False,
+                        effective_capabilities=0,
+                    )
                 )
             else:
                 successors.add(
                     replace(
                         state,
                         in_flight=False,
+                        effective_capabilities=0,
                         terminal=_Terminal.FAILED_SAFE,
                         terminal_evidence=True,
                     )
@@ -173,18 +246,38 @@ def _successors(state: _AbstractState) -> set[_AbstractState]:
     if state.intent is _Intent.NONE:
         successors.add(replace(state, intent=_Intent.PREPARED))
     elif state.intent is _Intent.PREPARED:
-        successors.add(replace(state, intent=_Intent.EXECUTING))
+        successors.add(
+            replace(
+                state,
+                intent=_Intent.EXECUTING,
+                effective_capabilities=state.capability_ceiling,
+            )
+        )
     elif state.intent is _Intent.EXECUTING:
         # Reconciliation observes an already-applied effect and verifies it;
         # otherwise the adapter performs it exactly once.
         if state.effect_count == 0:
-            successors.add(replace(state, effect_count=1))
+            successors.add(
+                replace(
+                    state,
+                    effect_count=1,
+                    deployment_state=_DeploymentState.CANDIDATE_B,
+                )
+            )
         else:
-            successors.add(replace(state, intent=_Intent.VERIFIED))
             successors.add(
                 replace(
                     state,
                     intent=_Intent.VERIFIED,
+                    effective_capabilities=0,
+                )
+            )
+            successors.add(
+                replace(
+                    state,
+                    intent=_Intent.VERIFIED,
+                    effective_capabilities=0,
+                    deployment_state=_DeploymentState.LTS_A,
                     terminal=_Terminal.FAILED_SAFE,
                     terminal_evidence=True,
                 )
@@ -193,6 +286,7 @@ def _successors(state: _AbstractState) -> set[_AbstractState]:
         successors.add(
             replace(
                 state,
+                deployment_state=_DeploymentState.PROMOTED_B,
                 terminal=_Terminal.COMPLETED,
                 completion_evidence=True,
             )
@@ -207,8 +301,17 @@ def _fair_successor(state: _AbstractState) -> _AbstractState:
         return replace(state, process_down=False)
     if state.accepted < state.nodes:
         if not state.in_flight:
-            return replace(state, in_flight=True)
-        return replace(state, accepted=state.accepted + 1, in_flight=False)
+            return replace(
+                state,
+                in_flight=True,
+                effective_capabilities=state.capability_ceiling,
+            )
+        return replace(
+            state,
+            accepted=state.accepted + 1,
+            in_flight=False,
+            effective_capabilities=0,
+        )
     if not state.side_effect_required:
         return replace(
             state,
@@ -218,13 +321,26 @@ def _fair_successor(state: _AbstractState) -> _AbstractState:
     if state.intent is _Intent.NONE:
         return replace(state, intent=_Intent.PREPARED)
     if state.intent is _Intent.PREPARED:
-        return replace(state, intent=_Intent.EXECUTING)
+        return replace(
+            state,
+            intent=_Intent.EXECUTING,
+            effective_capabilities=state.capability_ceiling,
+        )
     if state.intent is _Intent.EXECUTING and state.effect_count == 0:
-        return replace(state, effect_count=1)
+        return replace(
+            state,
+            effect_count=1,
+            deployment_state=_DeploymentState.CANDIDATE_B,
+        )
     if state.intent is _Intent.EXECUTING:
-        return replace(state, intent=_Intent.VERIFIED)
+        return replace(
+            state,
+            intent=_Intent.VERIFIED,
+            effective_capabilities=0,
+        )
     return replace(
         state,
+        deployment_state=_DeploymentState.PROMOTED_B,
         terminal=_Terminal.COMPLETED,
         completion_evidence=True,
     )
@@ -249,30 +365,63 @@ def _bounded_states() -> set[_AbstractState]:
     return discovered
 
 
-def _check_bounded_model() -> tuple[int, int]:
+def _check_bounded_model() -> _BoundedModelReport:
     states = _bounded_states()
     deadlocks = 0
     livelocks = 0
     unsafe_terminals = 0
     duplicate_effects = 0
+    privilege_expansions = 0
     evidence_free_passes = 0
     multiple_actions = 0
     rollback_unknown = 0
+    bounded_failure_escapes = 0
 
     for state in states:
-        active_actions = int(state.in_flight)
+        active_actions = _active_action_count(state)
         if active_actions > 1:
             multiple_actions += 1
         if state.effect_count > 1:
             duplicate_effects += 1
+        if state.effective_capabilities > state.capability_ceiling:
+            privilege_expansions += 1
         if state.terminal is _Terminal.COMPLETED and not state.completion_evidence:
             evidence_free_passes += 1
         if state.terminal is _Terminal.FAILED_SAFE and not state.terminal_evidence:
+            unsafe_terminals += 1
+        if state.terminal is not _Terminal.ACTIVE and state.effective_capabilities:
+            unsafe_terminals += 1
+        if state.terminal is not _Terminal.ACTIVE and state.intent in {
+            _Intent.PREPARED,
+            _Intent.EXECUTING,
+        }:
+            unsafe_terminals += 1
+        if (
+            state.side_effect_required
+            and state.terminal is _Terminal.COMPLETED
+            and (state.intent is not _Intent.VERIFIED or state.effect_count != 1)
+        ):
             unsafe_terminals += 1
         if state.terminal is not _Terminal.ACTIVE and _successors(state):
             unsafe_terminals += 1
         if state.terminal is _Terminal.ACTIVE and not _successors(state):
             deadlocks += 1
+        if state.terminal is _Terminal.ACTIVE and not _bounded_failure_reaches_failed_safe(
+            state
+        ):
+            bounded_failure_escapes += 1
+        if (
+            state.side_effect_required
+            and state.terminal is _Terminal.FAILED_SAFE
+            and state.deployment_state is not _DeploymentState.LTS_A
+        ):
+            rollback_unknown += 1
+        if (
+            state.side_effect_required
+            and state.terminal is _Terminal.COMPLETED
+            and state.deployment_state is not _DeploymentState.PROMOTED_B
+        ):
+            rollback_unknown += 1
 
         if state.terminal is _Terminal.ACTIVE:
             cursor = state
@@ -294,17 +443,21 @@ def _check_bounded_model() -> tuple[int, int]:
             livelocks,
             unsafe_terminals,
             duplicate_effects,
+            privilege_expansions,
             evidence_free_passes,
             multiple_actions,
             rollback_unknown,
+            bounded_failure_escapes,
         )
     ):
         raise ModelCheckError(
             "bounded model violated safety/liveness: "
             f"deadlocks={deadlocks},livelocks={livelocks},"
             f"unsafe_terminals={unsafe_terminals},duplicate_effects={duplicate_effects},"
+            f"privilege_expansions={privilege_expansions},"
             f"evidence_free_passes={evidence_free_passes},multiple_actions={multiple_actions},"
-            f"rollback_unknown={rollback_unknown}"
+            f"rollback_unknown={rollback_unknown},"
+            f"bounded_failure_escapes={bounded_failure_escapes}"
         )
 
     # Compose one- and two-product states under one- and two-worker bounds.
@@ -316,15 +469,31 @@ def _check_bounded_model() -> tuple[int, int]:
         for worker_count in (1, 2):
             if product_count == 1:
                 composed += sum(
-                    int(int(state.in_flight) <= worker_count) for state in state_list
+                    int(_active_action_count(state) <= worker_count)
+                    for state in state_list
                 )
                 continue
             composed += sum(
-                int(int(left.in_flight) + int(right.in_flight) <= worker_count)
+                int(
+                    _active_action_count(left) + _active_action_count(right)
+                    <= worker_count
+                )
                 for left in state_list
                 for right in state_list
             )
-    return len(states), composed
+    return _BoundedModelReport(
+        state_count=len(states),
+        composed_state_count=composed,
+        deadlock_count=deadlocks,
+        livelock_count=livelocks,
+        unsafe_terminal_count=unsafe_terminals,
+        duplicate_side_effect_count=duplicate_effects,
+        privilege_expansion_count=privilege_expansions,
+        evidence_free_pass_count=evidence_free_passes,
+        multiple_active_action_count=multiple_actions,
+        rollback_unknown_state_count=rollback_unknown,
+        bounded_failure_escape_count=bounded_failure_escapes,
+    )
 
 
 def check_transition_catalog() -> ModelCheckReport:
@@ -334,7 +503,7 @@ def check_transition_catalog() -> ModelCheckReport:
     for item in TRANSITION_CATALOG:
         coordinate = (item.source, item.event)
         prior = coordinates.get(coordinate)
-        if prior is not None and prior.target is not item.target:
+        if prior is not None:
             raise ModelCheckError(
                 f"ambiguous state/event: {item.source.value}/{item.event}"
             )
@@ -385,28 +554,34 @@ def check_transition_catalog() -> ModelCheckReport:
             labels = ",".join(sorted(state.value for state in component))
             raise ModelCheckError(f"cyclic component lacks ranking proof: {labels}")
 
-    bounded_states, composed_states = _check_bounded_model()
+    bounded = _check_bounded_model()
+    transition_coverage_percent = (
+        100 * len(coordinates) // len(TRANSITION_CATALOG)
+        if TRANSITION_CATALOG
+        else 100
+    )
     return ModelCheckReport(
         transition_count=len(TRANSITION_CATALOG),
-        state_event_coverage_percent=100,
+        state_event_coverage_percent=transition_coverage_percent,
         terminal_reachable_states=len(active),
         cyclic_components=cyclic_components,
         side_effect_transitions=sum(
             int(item.side_effect_allowed) for item in TRANSITION_CATALOG
         ),
-        bounded_state_count=bounded_states,
-        composed_state_count=composed_states,
+        bounded_state_count=bounded.state_count,
+        composed_state_count=bounded.composed_state_count,
         product_bounds=(1, 2),
         worker_bounds=(1, 2),
         node_bounds=(0, 1, 2, 3, 4),
         retry_bound=2,
         crash_bound=1,
-        deadlock_count=0,
-        livelock_count=0,
-        unsafe_terminal_count=0,
-        duplicate_side_effect_count=0,
-        privilege_expansion_count=0,
-        evidence_free_pass_count=0,
-        multiple_active_action_count=0,
-        rollback_unknown_state_count=0,
+        deadlock_count=bounded.deadlock_count,
+        livelock_count=bounded.livelock_count,
+        unsafe_terminal_count=bounded.unsafe_terminal_count,
+        duplicate_side_effect_count=bounded.duplicate_side_effect_count,
+        privilege_expansion_count=bounded.privilege_expansion_count,
+        evidence_free_pass_count=bounded.evidence_free_pass_count,
+        multiple_active_action_count=bounded.multiple_active_action_count,
+        rollback_unknown_state_count=bounded.rollback_unknown_state_count,
+        bounded_failure_escape_count=bounded.bounded_failure_escape_count,
     )

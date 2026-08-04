@@ -12,7 +12,13 @@ from factory.common import sha256_text
 from factory.failure_catalog import FAILURE_CATALOG, FailureAction, failure_disposition
 from factory.path_governor import occurrence_epoch_key, root_cause_key
 from factory.proof_obligations import ProofObligationError, compile_capability_proof
-from factory.transition_catalog import TRANSITION_CATALOG
+from factory.transition_catalog import (
+    TRANSITION_CATALOG,
+    ProductState,
+    TransitionSpec,
+    build_transition_index,
+)
+from factory.transition_kernel import TransitionKernel, TransitionProofError
 
 PROPERTY_SETTINGS = settings(
     max_examples=200,
@@ -210,6 +216,83 @@ def test_capability_resolver_has_no_cardinality_boundary(cardinality: int) -> No
         now="2026-08-03T00:00:00Z",
     )
     assert len(proof.grants) == cardinality
+
+
+@pytest.mark.parametrize("cardinality", CARDINALITIES)
+def test_CARD_P0_transition_catalog_has_no_cardinality_boundary(
+    cardinality: int,
+) -> None:
+    transitions = tuple(
+        TransitionSpec(
+            transition_id=f"cardinality-{index}",
+            source=ProductState.IDEA_RECEIVED,
+            event=f"CARDINALITY-{index}",
+            target=ProductState.CONTRACT_DRAFTED,
+            action=FailureAction.CONTINUE,
+        )
+        for index in range(cardinality)
+    )
+    index = build_transition_index(transitions)
+    assert len(index) == cardinality
+    assert all(
+        index[(item.source, item.event, item.target)] is item
+        for item in transitions
+    )
+
+
+@pytest.mark.parametrize("cardinality", CARDINALITIES)
+def test_CARD_P0_transition_evidence_resolver_has_no_cardinality_boundary(
+    cardinality: int,
+) -> None:
+    names = tuple(f"evidence-{index}" for index in range(cardinality))
+    spec = TransitionSpec(
+        transition_id=f"evidence-cardinality-{cardinality}",
+        source=ProductState.IDEA_RECEIVED,
+        event="CARDINALITY-EVIDENCE",
+        target=ProductState.CONTRACT_DRAFTED,
+        action=FailureAction.CONTINUE,
+        required_evidence=names,
+    )
+    evidence = {name: f"evidence://{name}" for name in names}
+    digest = TransitionKernel._validate_evidence(spec, evidence)
+    assert len(digest) == 64
+    if names:
+        with pytest.raises(TransitionProofError, match=names[-1]):
+            TransitionKernel._validate_evidence(
+                spec,
+                {name: evidence[name] for name in names[:-1]},
+            )
+
+
+def test_CARD_P0_duplicate_capability_sets_normalize_to_one_grant() -> None:
+    proof = compile_capability_proof(
+        task_id="T-DUPLICATE-CAPABILITY",
+        task_contract_digest="1" * 64,
+        canonical_profile="property",
+        canonical_capabilities=["artifact.read", "artifact.read"],
+        toolchain_manifest_digest="2" * 64,
+        grants=[
+            {
+                "grant_id": "G-DUPLICATE-1",
+                "grant_epoch_id": "GE-DUPLICATE",
+                "capability": "artifact.read",
+                "provider": "property",
+                "status": "AVAILABLE",
+                "scope": {"allowed_operations": ["artifact.read"]},
+            },
+            {
+                "grant_id": "G-DUPLICATE-2",
+                "grant_epoch_id": "GE-DUPLICATE",
+                "capability": "artifact.read",
+                "provider": "property",
+                "status": "AVAILABLE",
+                "scope": {"allowed_operations": ["artifact.read"]},
+            },
+        ],
+        now="2026-08-03T00:00:00Z",
+    )
+    assert len(proof.grants) == 1
+    assert proof.grants[0].grant_id == "G-DUPLICATE-1"
 
 
 def test_every_side_effect_transition_has_explicit_evidence() -> None:
