@@ -86,6 +86,19 @@
     "summary": {"type": "string", "minLength": 1},
     "compiler_version": {"type": "string", "minLength": 1},
     "lifecycle_version": {"type": "string", "minLength": 1},
+    "delivery_profile": {
+      "enum": [
+        "DEPLOYED_SERVICE",
+        "TELEGRAM_BOT",
+        "WEB_APPLICATION",
+        "CLI_PACKAGE",
+        "LIBRARY_PACKAGE",
+        "GITHUB_AUTOMATION",
+        "OFFLINE_BATCH",
+        "STAGING_ONLY_PROTOTYPE"
+      ]
+    },
+    "delivery_profile_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "proposal_artifact_ref": {"type": "string", "minLength": 1},
     "proposal_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
   }

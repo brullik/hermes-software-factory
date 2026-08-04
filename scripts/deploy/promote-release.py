@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -31,6 +34,17 @@ SERVICES = (
     "hermes-factory-worker.service",
 )
 OPTIONAL_SERVICES = ("hermes-factory-worker-2.service",)
+CANDIDATE_RUNTIME_LINK = Path("/opt/hermes-factory-candidate/venv")
+
+
+def root_owned_immutable_runtime(path: Path) -> bool:
+    """Return whether a runtime satisfies the production ownership boundary."""
+
+    metadata = path.stat()
+    return os.name == "nt" or (
+        metadata.st_uid == 0
+        and not metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
 
 
 def validate_health_url(value: str) -> str:
@@ -76,6 +90,118 @@ def restart_services() -> None:
     run_checked(["systemctl", "restart", *SERVICES, *installed_optional])
 
 
+@dataclass
+class RuntimeSwitch:
+    """Crash-reconcilable switch between the Stable A and Candidate B runtimes."""
+
+    install_root: Path
+    release_id: str
+    old_release_digest: str
+    candidate_release_digest: str
+    candidate_runtime_link: Path = CANDIDATE_RUNTIME_LINK
+    candidate_runtime_root: Path = Path("/opt/hermes-factory-candidate/venvs")
+    candidate_runtime_trust: Callable[[Path], bool] = root_owned_immutable_runtime
+
+    @property
+    def runtime_link(self) -> Path:
+        return self.install_root / "venv"
+
+    @property
+    def preserved_runtime(self) -> Path:
+        return self.install_root / f"venv-lts-before-{self.release_id[:12]}"
+
+    @property
+    def journal_path(self) -> Path:
+        return self.install_root / f".runtime-{self.release_id}.json"
+
+    def _candidate_runtime(self) -> Path:
+        target = self.candidate_runtime_link.resolve()
+        expected_root = self.candidate_runtime_root.resolve()
+        if (
+            not target.is_dir()
+            or target.parent != expected_root
+            or target.name != self.release_id
+            or not (target / "bin" / "python").is_file()
+        ):
+            raise DeploymentError("Candidate runtime is not bound to the release commit")
+        if not self.candidate_runtime_trust(target):
+            raise DeploymentError("Candidate runtime is not root-owned immutable data")
+        return target
+
+    def prepare(self) -> None:
+        candidate_runtime = self._candidate_runtime()
+        expected = {
+            "schema_version": "1.0",
+            "release_id": self.release_id,
+            "old_release_digest": self.old_release_digest,
+            "candidate_release_digest": self.candidate_release_digest,
+            "candidate_runtime": str(candidate_runtime),
+            "preserved_runtime": str(self.preserved_runtime),
+        }
+        encoded = json.dumps(expected, sort_keys=True) + "\n"
+        if self.journal_path.exists():
+            if self.journal_path.is_symlink() or self.journal_path.read_text(encoding="utf-8") != encoded:
+                raise DeploymentError("runtime switch journal conflicts")
+        else:
+            descriptor = os.open(
+                self.journal_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o400,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+        if self.runtime_link.is_dir() and not self.runtime_link.is_symlink():
+            if self.preserved_runtime.exists() or self.preserved_runtime.is_symlink():
+                raise DeploymentError("preserved Stable runtime already exists")
+            self.runtime_link.replace(self.preserved_runtime)
+        elif self.runtime_link.is_symlink() and not (
+            self.preserved_runtime.exists() or self.preserved_runtime.is_symlink()
+        ):
+            self.preserved_runtime.symlink_to(
+                self.runtime_link.resolve(), target_is_directory=True
+            )
+        if not self.preserved_runtime.is_dir():
+            raise DeploymentError("Stable runtime rollback target is unavailable")
+        current = self.install_root / "current"
+        if current.is_dir() and not current.is_symlink():
+            self.select_for(current)
+        elif not (
+            (self.install_root / f"backup-{self.release_id}-previous").is_dir()
+            and (self.install_root / f"failed-{self.release_id}").is_dir()
+        ):
+            raise DeploymentError("runtime switch found an unknown source transaction state")
+
+    def _replace_link(self, target: Path) -> None:
+        if self.runtime_link.is_symlink() and self.runtime_link.resolve() == target.resolve():
+            return
+        if (self.runtime_link.exists() or self.runtime_link.is_symlink()) and not self.runtime_link.is_symlink():
+            raise DeploymentError("runtime link boundary contains a directory")
+        temporary = self.install_root / f".venv-next-{self.release_id[:12]}"
+        if temporary.exists() or temporary.is_symlink():
+            if not temporary.is_symlink() or temporary.resolve() != target.resolve():
+                raise DeploymentError("runtime switch temporary path conflicts")
+        else:
+            temporary.symlink_to(target, target_is_directory=True)
+        temporary.replace(self.runtime_link)
+
+    def select_for(self, current: Path) -> None:
+        from factory.release_executor import _release_digest
+
+        observed = _release_digest(current).removeprefix("sha256:")
+        if observed == self.candidate_release_digest:
+            self._replace_link(self._candidate_runtime())
+        elif observed == self.old_release_digest:
+            self._replace_link(self.preserved_runtime)
+        else:
+            raise DeploymentError("current release is outside the runtime switch contract")
+
+    def activate(self) -> None:
+        self.select_for(self.install_root / "current")
+        restart_services()
+
+
 def health_probe(url: str, attempts: int, delay_seconds: float) -> Callable[[Path], bool]:
     if attempts < 1:
         raise ValueError("health attempts must be positive")
@@ -115,11 +241,21 @@ def main(argv: list[str] | None = None) -> int:
         health_url = validate_health_url(args.health_url)
         source = args.source.resolve()
         validate_source(source)
-        run_checked(["systemctl", "start", "hermes-factory-backup.service"])
+        from factory.release_executor import _release_digest
+
+        current = args.install_root.resolve() / "current"
+        runtime = RuntimeSwitch(
+            install_root=args.install_root.resolve(),
+            release_id=args.release_id,
+            old_release_digest=_release_digest(current).removeprefix("sha256:"),
+            candidate_release_digest=_release_digest(source).removeprefix("sha256:"),
+        )
+        runtime.prepare()
+        run_checked(["systemctl", "start", "hermes-factory-resilience-proof.service"])
         result = TransactionalDeployer(
             args.install_root,
             health_probe(health_url, args.health_attempts, args.health_delay),
-            activate=restart_services,
+            activate=runtime.activate,
         ).promote(args.release_id, source)
     except (DeploymentError, OSError, RuntimeError, ValueError) as error:
         print(json.dumps({"status": "FAILED_SAFE", "reason": type(error).__name__}))

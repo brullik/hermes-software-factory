@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "SHA256SUMS"
 IGNORED_DIRS = {
     ".git",
+    ".hypothesis",
     ".deployment",
     "build",
     "dist",

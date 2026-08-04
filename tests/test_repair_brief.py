@@ -8,6 +8,7 @@ from jsonschema import Draft202012Validator
 from factory.repair_brief import (
     builder_result_is_controller_complete,
     builder_result_is_locally_complete,
+    controller_runtime_repair_findings,
     normalized_repair_findings,
     product_goals_are_proven,
     repair_finding_detail,
@@ -62,6 +63,44 @@ def test_plan_proposal_failed_safe_summary_remains_actionable() -> None:
     assert "status=failed_safe" in detail
     assert "implementation inventory" in detail
     assert "hypothesis chain" in detail
+
+
+def test_controller_runtime_findings_require_exclusive_controller_ownership() -> None:
+    output = {
+        "status": "repair_required",
+        "findings": [
+            {
+                "code": "CONTROLLER_PODMAN_IPAM_DATABASE_MISSING",
+                "severity": "high",
+                "text": "The controller RunRoot has no initialized IPAM database.",
+            },
+            {
+                "code": "FULL_PYTEST_BLOCKED_BY_CONTROLLER_RUNTIME",
+                "severity": "medium",
+                "text": "The suite reached one controller-runtime-dependent test.",
+            },
+        ],
+    }
+
+    assert [
+        item.finding_id for item in controller_runtime_repair_findings(output)
+    ] == [
+        "CONTROLLER_PODMAN_IPAM_DATABASE_MISSING",
+        "FULL_PYTEST_BLOCKED_BY_CONTROLLER_RUNTIME",
+    ]
+
+    mixed = {
+        **output,
+        "findings": [
+            *output["findings"],
+            {
+                "code": "PRODUCT_COMPOSE_DEFECT",
+                "severity": "high",
+                "text": "A repository defect also remains.",
+            },
+        ],
+    }
+    assert controller_runtime_repair_findings(mixed) == ()
 
 
 def test_repair_brief_schema_requires_every_actionable_field() -> None:

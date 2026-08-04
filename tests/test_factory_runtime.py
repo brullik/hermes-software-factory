@@ -1027,6 +1027,27 @@ class FactoryRuntimeTests(unittest.TestCase):
                 (root / "failed-candidate-2" / "VERSION").read_text(encoding="utf-8").strip(), "bad"
             )
 
+    def test_transactional_deployer_reactivates_restored_release_after_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("bad\n", encoding="utf-8")
+            (root / "current").mkdir(parents=True)
+            (root / "current" / "VERSION").write_text("safe\n", encoding="utf-8")
+            activations: list[str] = []
+
+            result = TransactionalDeployer(
+                root,
+                health_probe=lambda _current: False,
+                activate=lambda: activations.append(
+                    (root / "current" / "VERSION").read_text(encoding="utf-8").strip()
+                ),
+            ).promote("candidate-reactivate", source)
+
+            self.assertEqual(result.status, "ROLLED_BACK")
+            self.assertEqual(activations, ["bad", "safe"])
+
     def test_transactional_deployer_rejects_existing_backup_before_swap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "install"
@@ -1038,6 +1059,98 @@ class FactoryRuntimeTests(unittest.TestCase):
                 TransactionalDeployer(root, health_probe=lambda _current: True).promote(
                     "candidate-3", source
                 )
+
+    def test_transactional_deployer_reconciles_exact_effect_without_second_activation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("new\n", encoding="utf-8")
+            calls: list[str] = []
+            deployer = TransactionalDeployer(
+                root,
+                health_probe=lambda current: (current / "VERSION").is_file(),
+                activate=lambda: calls.append("activate"),
+            )
+
+            first = deployer.promote("candidate-replay", source)
+            second = deployer.promote("candidate-replay", source)
+
+            self.assertEqual(first.status, "PROMOTED")
+            self.assertEqual(second.status, "PROMOTED")
+            self.assertIn("reconciled", second.reason)
+            self.assertEqual(calls, ["activate"])
+
+    def test_transactional_deployer_resumes_crash_between_atomic_swaps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("new\n", encoding="utf-8")
+            previous = root / "backup-candidate-crash-previous"
+            staged = root / ".staged-candidate-crash"
+            previous.mkdir(parents=True)
+            staged.mkdir(parents=True)
+            (previous / "VERSION").write_text("old\n", encoding="utf-8")
+            (staged / "VERSION").write_text("new\n", encoding="utf-8")
+
+            deployer = TransactionalDeployer(
+                root,
+                health_probe=lambda current: (
+                    (current / "VERSION").read_text(encoding="utf-8").strip() == "new"
+                ),
+            )
+            deployer._write_journal(
+                release_id="candidate-crash",
+                source_digest=deployer._tree_digest(source),
+                status="PREPARED",
+            )
+            result = deployer.promote("candidate-crash", source)
+
+            self.assertEqual(result.status, "PROMOTED")
+            self.assertEqual(
+                (root / "current" / "VERSION").read_text(encoding="utf-8").strip(),
+                "new",
+            )
+            self.assertEqual(
+                (previous / "VERSION").read_text(encoding="utf-8").strip(),
+                "old",
+            )
+
+    def test_transactional_deployer_reconciles_crash_during_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "install"
+            source = Path(directory) / "candidate"
+            source.mkdir(parents=True)
+            (source / "VERSION").write_text("bad\n", encoding="utf-8")
+            previous = root / "backup-candidate-rollback-crash-previous"
+            failed = root / "failed-candidate-rollback-crash"
+            previous.mkdir(parents=True)
+            failed.mkdir(parents=True)
+            (previous / "VERSION").write_text("safe\n", encoding="utf-8")
+            (failed / "VERSION").write_text("bad\n", encoding="utf-8")
+            activations: list[str] = []
+            deployer = TransactionalDeployer(
+                root,
+                health_probe=lambda _current: False,
+                activate=lambda: activations.append("restored"),
+            )
+            deployer._write_journal(
+                release_id="candidate-rollback-crash",
+                source_digest=deployer._tree_digest(source),
+                status="PREPARED",
+            )
+
+            result = deployer.promote("candidate-rollback-crash", source)
+
+            self.assertEqual(result.status, "ROLLED_BACK")
+            self.assertEqual(
+                (root / "current" / "VERSION").read_text(encoding="utf-8").strip(),
+                "safe",
+            )
+            self.assertEqual(activations, ["restored"])
 
     def test_github_cli_boundary_is_allowlisted_and_sha_guarded(self) -> None:
         calls: list[list[str]] = []

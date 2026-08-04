@@ -1,0 +1,12 @@
+[Unit]
+Description=Run heightened Hermes production observation every minute
+
+[Timer]
+OnActiveSec=10s
+OnUnitInactiveSec=1min
+AccuracySec=5s
+Persistent=true
+Unit=hermes-factory-production-observation.service
+
+[Install]
+WantedBy=timers.target

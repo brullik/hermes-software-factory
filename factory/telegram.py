@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class TelegramApiError(RuntimeError):
@@ -17,12 +18,30 @@ RequestHandler = Callable[[str, dict[str, object]], dict[str, Any]]
 
 
 class TelegramApi:
-    def __init__(self, token: str, *, timeout: float = 35.0, request: RequestHandler | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        timeout: float = 35.0,
+        request: RequestHandler | None = None,
+        api_base_url: str = "https://api.telegram.org",
+    ) -> None:
         if not token.strip() or any(char.isspace() for char in token):
             raise ValueError("Telegram token must be a non-empty single-line value")
         self._token = token.strip()
         self._timeout = timeout
         self._request_handler = request
+        base = api_base_url.rstrip("/")
+        parsed = urlsplit(base)
+        production = parsed.scheme == "https" and parsed.hostname == "api.telegram.org"
+        isolated = (
+            parsed.scheme == "http"
+            and parsed.hostname in {"127.0.0.1", "localhost"}
+            and parsed.port is not None
+        )
+        if not (production or isolated) or parsed.username or parsed.password or parsed.query:
+            raise ValueError("Telegram API base URL is outside the allowlisted boundary")
+        self._api_base_url = base
 
     def _request(self, method: str, payload: dict[str, object]) -> dict[str, Any]:
         if self._request_handler is not None:
@@ -30,7 +49,7 @@ class TelegramApi:
             if result.get("ok") is not True:
                 raise TelegramApiError("Telegram API returned a failure")
             return result
-        url = f"https://api.telegram.org/bot{self._token}/{method}"
+        url = f"{self._api_base_url}/bot{self._token}/{method}"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             url,

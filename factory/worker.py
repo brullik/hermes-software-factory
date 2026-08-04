@@ -51,11 +51,20 @@ from .pipeline import PipelineCoordinator, PreparedPipelineOutcome
 from .plan_semantics import PlanContractViolation
 from .policy import policy_digest
 from .prompting import PromptCompiler
+from .proof_obligations import SideEffectProtocol
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
 from .quality import QualityGateEngine, QualityGateRun, UnknownQualityGatesError
 from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
-from .release import ReleaseExecutor, ReleasePolicyError, validate_release_operation
+from .release import (
+    RELEASE_OPERATIONS,
+    ReleaseExecutor,
+    ReleaseOperationFailed,
+    ReleasePolicyError,
+    canonical_release_operation,
+    release_predecessor_evidence,
+    validate_release_operation,
+)
 from .release_executor import (
     CandidateChecksFailed,
     CandidateChecksPending,
@@ -64,6 +73,7 @@ from .release_executor import (
 from .repair_brief import (
     builder_result_is_controller_complete,
     builder_result_is_locally_complete,
+    controller_runtime_repair_findings,
     product_goals_are_proven,
     repair_finding_detail,
     repair_requirements,
@@ -87,6 +97,7 @@ _ALIAS_BY_TIER = {
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.:/-]+$")
 _MAX_USAGE_BYTES = 256 * 1024
 _MAX_ATTEMPT_EVIDENCE_BYTES = 512 * 1024
+_MAX_TASK_CONTRACT_BYTES = 256 * 1024
 _MAX_DEPENDENCY_RESULT_CHARS = 12_000
 _MAX_REPAIR_BRIEF_CHARS = 12_000
 _MAX_REVIEW_RESULT_CHARS = 12_000
@@ -755,6 +766,17 @@ class SubprocessHermesRunner:
             "PYTHONUNBUFFERED",
         }
         environment = {key: value for key, value in os.environ.items() if key in allowed}
+        existing_path = environment.get("PATH", "")
+        interpreter_directory = str(Path(sys.executable).resolve().parent)
+        path_entries = existing_path.split(os.pathsep) if existing_path else []
+        if os.path.normcase(interpreter_directory) not in {
+            os.path.normcase(entry) for entry in path_entries if entry
+        }:
+            environment["PATH"] = (
+                interpreter_directory
+                if not existing_path
+                else interpreter_directory + os.pathsep + existing_path
+            )
         if cwd is not None:
             venv = cwd.parent / "venv"
             binary_directory = venv / ("Scripts" if os.name == "nt" else "bin")
@@ -851,6 +873,7 @@ class TaskExecutionSpec:
     role: str
     output_schema: str
     subject_sha: str
+    lifecycle_stage: str = ""
     candidates: tuple[tuple[str, str], ...] = ()
     evidence: tuple[dict[str, str], ...] = ()
     decisions: tuple[str, ...] = ()
@@ -877,6 +900,27 @@ class WorkerResult:
     failure_data: FailureData | None = None
 
 
+def _local_file_reference(reference: str) -> Path | None:
+    """Return a readable local file while treating URI references as opaque."""
+
+    if "://" in reference:
+        return None
+    path = Path(reference)
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _worker_result_digest(artifact_ref: str, fallback: Mapping[str, Any]) -> str:
+    """Digest a local result artifact without dereferencing controller URIs."""
+
+    artifact_path = _local_file_reference(artifact_ref)
+    if artifact_path is not None:
+        return sha256_file(artifact_path)
+    return sha256_text(stable_json(fallback))
+
+
 def _normalized_output_status(
     role: str,
     reported_status: str,
@@ -886,7 +930,10 @@ def _normalized_output_status(
 ) -> str:
     if role == "path-arbiter":
         recommended_action = str((output or {}).get("recommended_action") or "")
-        if reported_status == "proposed" and recommended_action == "REPLAN_DELTA":
+        if (
+            reported_status == "proposed"
+            and recommended_action == "RECOMPILE_AFFECTED_SUBGRAPH"
+        ):
             return "completed"
         if reported_status in {"proposed", "no_safe_path"}:
             return "needs_replan"
@@ -1194,18 +1241,64 @@ class AgentWorker:
 
     def default_spec(self, task: Mapping[str, Any]) -> TaskExecutionSpec:
         task_id = str(task["task_id"])
-        contract_path = self.config.evidence_dir / f"task-{task_id}.json"
-        if not contract_path.is_file():
-            raise ExternalBlocker(f"Task Contract is missing for {task_id}")
-        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract_ref = str(task.get("contract_ref") or "")
+        if not contract_ref:
+            contract_ref = f"evidence/task-{task_id}.json"
+        contract_name = Path(contract_ref).name
+        accepted_references = {
+            f"evidence/{contract_name}",
+            str(self.config.evidence_dir / contract_name),
+        }
+        unresolved_contract_path = self.config.evidence_dir / contract_name
+        contract_path = unresolved_contract_path.resolve()
+        if (
+            contract_ref not in accepted_references
+            or contract_path.parent != self.config.evidence_dir.resolve()
+            or unresolved_contract_path.is_symlink()
+            or not contract_path.is_file()
+        ):
+            raise ExternalBlocker(
+                f"Task Contract reference is invalid for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
+        if contract_path.stat().st_size > _MAX_TASK_CONTRACT_BYTES:
+            raise ExternalBlocker(
+                f"Task Contract exceeds the safe size limit for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
+        try:
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ExternalBlocker(
+                f"Task Contract is unreadable for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            ) from error
         if not isinstance(contract, dict):
-            raise ExternalBlocker(f"Task Contract is not an object for {task_id}")
+            raise ExternalBlocker(
+                f"Task Contract is not an object for {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
         contract_schema = (
             "task-contract-v2.schema.json"
             if str(contract.get("schema_version")) == "2.0"
             else "task-contract.schema.json"
         )
         self.schemas.validate(contract_schema, contract)
+        if (
+            str(contract.get("task_id") or "") != task_id
+            or str(contract.get("product_id") or "") != str(task["product_id"])
+        ):
+            raise ExternalBlocker(
+                f"Task Contract identity does not match durable task {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
+        if str(contract.get("schema_version")) == "2.0" and int(
+            contract.get("task_revision") or 0
+        ) != int(task.get("task_revision") or 1):
+            raise ExternalBlocker(
+                f"Task Contract revision does not match durable task {task_id}",
+                reason_code="invalid_task_contract_reference",
+            )
         failure_id = str(task.get("failure_id") or "")
         if str(task.get("stage_key") or "") == "repair" and failure_id:
             failure = next(
@@ -1266,10 +1359,12 @@ class AgentWorker:
         prompt_role = role.replace("_", "-")
         subject_sha = os.environ.get("FACTORY_SUBJECT_SHA", "")
         if not re.fullmatch(r"[a-f0-9]{7,64}", subject_sha):
-            subject_file = self.repository_root / "SHA256SUMS"
+            subject_file = _local_file_reference(
+                str(self.repository_root / "SHA256SUMS")
+            )
             subject_sha = (
                 sha256_file(subject_file)
-                if subject_file.is_file()
+                if subject_file is not None
                 else sha256_text(stable_json(contract))
             )
         product = self.state.get_product(str(task["product_id"])) or {}
@@ -1325,6 +1420,13 @@ class AgentWorker:
                 "allowed_paths. When the repository's task-local acceptance command passes, "
                 "report that evidence and complete the implementation."
             )
+            decisions.append(
+                "Context Pack subject_sha is the controller's SHA-256 digest of the exact "
+                "leased workspace snapshot, not a Git commit ID. Do not compare it with "
+                "git rev-parse HEAD and do not reject tracked, modified, or untracked files "
+                "merely because they differ from HEAD: they are part of the bound candidate "
+                "unless controller gate evidence identifies an out-of-scope mutation."
+            )
         if prompt_role == "security-reviewer":
             decisions.append(
                 "Controller gate evidence preserves mandatory status. A failed mandatory gate "
@@ -1362,12 +1464,12 @@ class AgentWorker:
             decisions.append(
                 "Evaluate exactly one controller-owned Path Snapshot. Preserve its "
                 "root_problem_signature, remain read-only, and return only a typed "
-                "REPLAN_DELTA recommendation or no_safe_path/FAIL_SAFE. Do not assign "
+                "RECOMPILE_AFFECTED_SUBGRAPH recommendation or no_safe_path/FAIL_SAFE. Do not assign "
                 "task or plan IDs, claim PASS evidence, run SQL, use credentials, or "
                 "perform repository/GitHub actions."
             )
             decisions.append(
-                "Missing repository evidence is a valid bounded REPLAN_DELTA when a "
+                "Missing repository evidence is a valid bounded RECOMPILE_AFFECTED_SUBGRAPH when a "
                 "Builder can inspect the repository, produce a truthful subject-bound "
                 "inventory or explicit zero-result attestation, and rerun the unchanged "
                 "mandatory gate. The future evidence need not already be present in the "
@@ -1410,6 +1512,9 @@ class AgentWorker:
             role=prompt_role,
             output_schema=output_schema,
             subject_sha=subject_sha,
+            lifecycle_stage=str(
+                task.get("lifecycle_stage") or task.get("stage_key") or ""
+            ),
             candidates=(
                 (f"schemas/{output_schema}", "required output contract"),
                 (f"prompts/roles/{prompt_role}.md", "role boundary"),
@@ -3000,12 +3105,18 @@ class AgentWorker:
             None,
         )
         failures = self.state.list_failures(str(task["product_id"]))
+        task_failure_id = str(task_row.get("failure_id") or "")
         open_failure = next(
             (
                 failure
                 for failure in reversed(failures)
-                if str(failure.get("task_id")) == str(task["task_id"])
-                and str(failure.get("status")) in {"OPEN", "ROUTED", "OWNER_BLOCKED"}
+                if (
+                    str(failure.get("failure_id")) == task_failure_id
+                    if task_failure_id
+                    else str(failure.get("task_id")) == str(task["task_id"])
+                )
+                and str(failure.get("status"))
+                in {"OPEN", "ROUTED", "OWNER_BLOCKED"}
             ),
             None,
         )
@@ -3250,8 +3361,24 @@ class AgentWorker:
             )
         return prompt.prompt, prompt.digest, context.path
 
-    def _accepted_staging_digest(self, product_id: str) -> str | None:
-        """Read the immutable digest from the durable staging operation artifact."""
+    def _accepted_release_digest(
+        self,
+        product_id: str,
+        evidence_type: str,
+    ) -> str | None:
+        """Read an immutable predecessor digest from durable product evidence."""
+
+        with self.state._lock:
+            row = self.state._connection.execute(
+                """SELECT artifact_digest FROM product_evidence
+                     WHERE product_id=? AND evidence_type=? AND status='PASS'
+                     ORDER BY created_at DESC LIMIT 1""",
+                (product_id, evidence_type),
+            ).fetchone()
+        if row is not None and re.fullmatch(r"[a-f0-9]{64}", str(row[0])):
+            return "sha256:" + str(row[0])
+        if evidence_type != "staging":
+            return None
 
         candidates = sorted(
             self.config.evidence_dir.glob(f"release-operation-result-{product_id}-*.json"),
@@ -3354,9 +3481,9 @@ class AgentWorker:
         fingerprint = sanitized.normalized_fingerprint(str(task["task_id"]))
         failure_id = f"failure-{fingerprint[:20]}"
         source_ref = sanitized.evidence_ref
-        source_path = Path(source_ref)
+        source_path = _local_file_reference(source_ref)
         if (
-            source_path.is_file()
+            source_path is not None
             and source_path.parent.resolve() == self.config.evidence_dir.resolve()
         ):
             source_ref = f"evidence/{source_path.name}"
@@ -4439,29 +4566,92 @@ class AgentWorker:
                     [str(path) for path in spec.task_contract["forbidden_paths"]],
                 ):
                     raise ValueError("scope_violation")
-                lifecycle_stage = str(spec.task_contract.get("lifecycle_stage") or "")
-                stage = (
-                    lifecycle_stage
-                    if lifecycle_stage in {"staging", "production"}
-                    else "staging"
-                    if "staging" in str(spec.task_contract.get("title", "")).lower()
-                    else "production"
-                )
+                lifecycle_stage = spec.lifecycle_stage
+                if lifecycle_stage not in RELEASE_OPERATIONS and lifecycle_stage not in {
+                    "release-staging",
+                    "release-production",
+                }:
+                    raise ValueError("release_policy_violation")
+                stage = canonical_release_operation(lifecycle_stage)
                 assert self.release_executor is not None
+                predecessor_evidence = release_predecessor_evidence(stage)
                 expected_staging_digest = (
-                    self._accepted_staging_digest(str(spec.task_contract["product_id"]))
-                    if stage == "production"
+                    self._accepted_release_digest(
+                        str(spec.task_contract["product_id"]),
+                        predecessor_evidence,
+                    )
+                    if predecessor_evidence is not None
                     else None
                 )
-                try:
-                    authoritative = self.release_executor.execute(
-                        stage=stage,
-                        proposed=output,
-                        product_id=str(spec.task_contract["product_id"]),
-                        task_contract=spec.task_contract,
-                        workspace=lease.path,
-                        expected_staging_digest=expected_staging_digest,
+                side_effect_postcondition = {
+                    "product_id": str(spec.task_contract["product_id"]),
+                    "task_id": str(spec.task_contract["task_id"]),
+                    "stage": stage,
+                    "expected_staging_digest": expected_staging_digest or "not-applicable",
+                }
+                side_effect_key = sha256_text(
+                    stable_json(
+                        [
+                            spec.task_contract.get("idempotency_key"),
+                            side_effect_postcondition,
+                            "release-adapter-v2",
+                        ]
                     )
+                )
+                with self.state._lock, self.state._connection:
+                    side_effects = SideEffectProtocol(self.state._connection)
+                    side_effect_intent_id = side_effects.prepare(
+                        product_id=str(spec.task_contract["product_id"]),
+                        operation=f"release:{stage}",
+                        adapter="configured-release-executor",
+                        idempotency_key=side_effect_key,
+                        expected_postcondition=side_effect_postcondition,
+                    )
+                    intent_status = side_effects.status(side_effect_intent_id)
+                    replayed_authoritative = side_effects.verified_result(
+                        side_effect_intent_id
+                    )
+                    if intent_status == "PREPARED":
+                        side_effects.mark_executing(side_effect_intent_id)
+                try:
+                    authoritative: Mapping[str, Any]
+                    if (
+                        replayed_authoritative is not None
+                        and replayed_authoritative.get("status") == "FAILED_SAFE"
+                        and replayed_authoritative.get("reason_code")
+                    ):
+                        raise ReleaseOperationFailed(
+                            "Replayed release operation retained its proven safe failure.",
+                            reason_code=str(replayed_authoritative["reason_code"]),
+                            receipt_ref=str(
+                                replayed_authoritative.get("evidence_ref")
+                                or f"state://side-effect/{side_effect_intent_id}"
+                            ),
+                            receipt_result=replayed_authoritative,
+                        )
+                    if replayed_authoritative is not None:
+                        authoritative = replayed_authoritative
+                    elif intent_status == "EXECUTING":
+                        reconcile = getattr(self.release_executor, "reconcile", None)
+                        if not callable(reconcile):
+                            raise ValueError("side_effect_outcome_indeterminate")
+                        authoritative = reconcile(
+                            stage=stage,
+                            proposed=output,
+                            product_id=str(spec.task_contract["product_id"]),
+                            task_contract=spec.task_contract,
+                            workspace=lease.path,
+                            expected_staging_digest=expected_staging_digest,
+                        )
+                    else:
+                        authoritative = self.release_executor.execute(
+                            stage=stage,
+                            proposed=output,
+                            product_id=str(spec.task_contract["product_id"]),
+                            task_contract=spec.task_contract,
+                            workspace=lease.path,
+                            expected_staging_digest=expected_staging_digest,
+                        )
                 except CandidateChecksFailed as error:
                     route_action = self._route(
                         spec,
@@ -4535,6 +4725,59 @@ class AgentWorker:
                         attempt.attempt_id,
                         detail=str(error),
                     )
+                except ReleaseOperationFailed as error:
+                    if replayed_authoritative is None:
+                        receipt_result = dict(error.receipt_result)
+                        with self.state._lock, self.state._connection:
+                            SideEffectProtocol(self.state._connection).verify(
+                                intent_id=side_effect_intent_id,
+                                receipt_ref=error.receipt_ref,
+                                receipt_digest=sha256_text(stable_json(receipt_result)),
+                                observed_postcondition=side_effect_postcondition,
+                                result=receipt_result,
+                            )
+                    route_action = self._route(
+                        spec,
+                        tier,
+                        success=False,
+                        reason_code=error.reason_code,
+                        new_evidence=True,
+                        attempt=attempt,
+                    )
+                    result_path = self._attempt_artifact(
+                        spec,
+                        attempt,
+                        selection,
+                        status="repair_required",
+                        summary=(
+                            "Release adapter proved a safe rollback before repair; "
+                            f"routing={route_action}."
+                        ),
+                        prompt_digest=prompt_digest,
+                        subject_sha=spec.subject_sha,
+                        command_result="fail",
+                        command_ref=str(context_path),
+                        output_ref=None,
+                        reason_code=error.reason_code,
+                        extra_evidence_refs=[error.receipt_ref],
+                    )
+                    return WorkerResult(
+                        str(spec.task_contract["task_id"]),
+                        "repair_handoff",
+                        error.reason_code,
+                        str(result_path),
+                        attempt.attempt_id,
+                        detail=str(error),
+                        failure_data=FailureData(
+                            failure_class="semantic",
+                            reason_code=error.reason_code,
+                            safe_message=str(error),
+                            evidence_ref=error.receipt_ref,
+                            attempt_id=attempt.attempt_id,
+                            actual={"safe_release_receipt": dict(error.receipt_result)},
+                            retryable=True,
+                        ),
+                    )
                 except ExternalBlocker as error:
                     reason_code = error.reason_code
                     route_action = self._route(
@@ -4568,7 +4811,37 @@ class AgentWorker:
                         attempt.attempt_id,
                         detail=str(error),
                     )
-                except (OSError, RuntimeError, ValueError):
+                except ValueError as error:
+                    if str(error) == "side_effect_outcome_indeterminate":
+                        raise
+                    route_action = self._route(
+                        spec,
+                        tier,
+                        success=False,
+                        reason_code="release_adapter_error",
+                        attempt=attempt,
+                    )
+                    result_path = self._attempt_artifact(
+                        spec,
+                        attempt,
+                        selection,
+                        status="failed_safe",
+                        summary=f"Release side-effect adapter failed; routing={route_action}.",
+                        prompt_digest=prompt_digest,
+                        subject_sha=spec.subject_sha,
+                        command_result="fail",
+                        command_ref=str(context_path),
+                        output_ref=None,
+                        reason_code="release_adapter_error",
+                    )
+                    return WorkerResult(
+                        str(spec.task_contract["task_id"]),
+                        "failed_safe",
+                        "release_adapter_error",
+                        str(result_path),
+                        attempt.attempt_id,
+                    )
+                except (OSError, RuntimeError):
                     route_action = self._route(
                         spec,
                         tier,
@@ -4611,6 +4884,22 @@ class AgentWorker:
                     )
                 except ReleasePolicyError as error:
                     raise ValueError("release_policy_violation") from error
+                if replayed_authoritative is None:
+                    receipt_digest = sha256_text(stable_json(dict(authoritative)))
+                    evidence_refs = authoritative.get("evidence_refs", [])
+                    receipt_ref = (
+                        str(evidence_refs[-1])
+                        if isinstance(evidence_refs, list) and evidence_refs
+                        else f"state://side-effect/{side_effect_intent_id}"
+                    )
+                    with self.state._lock, self.state._connection:
+                        SideEffectProtocol(self.state._connection).verify(
+                            intent_id=side_effect_intent_id,
+                            receipt_ref=receipt_ref,
+                            receipt_digest=receipt_digest,
+                            observed_postcondition=side_effect_postcondition,
+                            result=dict(authoritative),
+                        )
             after_snapshot = _workspace_snapshot(lease.path)
             actual_changed_paths = {
                 path
@@ -4821,6 +5110,7 @@ class AgentWorker:
             ):
                 output_status = "repair_required"
             if output_status not in {"completed", "accepted"}:
+                controller_runtime_findings = controller_runtime_repair_findings(output)
                 incident_handoff = (
                     spec.role == "incident-recovery"
                     and output_status == "needs_replan"
@@ -4835,7 +5125,11 @@ class AgentWorker:
                     else _repair_request_detail(output)
                 )
                 reason_code = (
-                    "needs_replan" if output_status == "needs_replan" else "model_requested_repair"
+                    "controller_runtime_precondition_failed"
+                    if controller_runtime_findings
+                    else "needs_replan"
+                    if output_status == "needs_replan"
+                    else "model_requested_repair"
                 )
                 if incident_handoff:
                     blocker_ids = ["controller-incident-contained"]
@@ -4861,7 +5155,9 @@ class AgentWorker:
                     output_status == "repair_required" and spec.role == "security-reviewer"
                 )
                 route_action = (
-                    "builder_repair_handoff"
+                    "controller_incident_handoff"
+                    if controller_runtime_findings
+                    else "builder_repair_handoff"
                     if reviewer_handoff
                     else self._route(
                         spec,
@@ -4901,7 +5197,9 @@ class AgentWorker:
                     attempt.attempt_id,
                     detail=repair_detail,
                     failure_data=FailureData(
-                        failure_class="semantic",
+                        failure_class=(
+                            "controller" if controller_runtime_findings else "semantic"
+                        ),
                         reason_code=reason_code,
                         safe_message=repair_detail,
                         evidence_ref=f"evidence/{result_path.name}",
@@ -5007,6 +5305,7 @@ class AgentWorker:
                 "schema_validation",
                 *_PLAN_CONTRACT_REASONS,
                 "release_policy_violation",
+                "side_effect_outcome_indeterminate",
                 "scope_violation",
             }
             if str(error) not in known_reasons:
@@ -5223,20 +5522,14 @@ class AgentWorker:
                 detail="bounded retry metadata is incomplete",
             )
         artifact_ref = result.artifact_ref or f"internal://task/{task_id}"
-        artifact_path = Path(artifact_ref)
-        result_digest = (
-            sha256_file(artifact_path)
-            if artifact_path.is_file()
-            else sha256_text(
-                stable_json(
-                    {
-                        "task_id": task_id,
-                        "status": result.status,
-                        "reason_code": result.reason_code,
-                        "detail": result.detail,
-                    }
-                )
-            )
+        result_digest = _worker_result_digest(
+            artifact_ref,
+            {
+                "task_id": task_id,
+                "status": result.status,
+                "reason_code": result.reason_code,
+                "detail": result.detail,
+            },
         )
         task_row = self.state.get_task(task_id)
         if task_row is None:
@@ -5284,6 +5577,7 @@ class AgentWorker:
                 reason_code
                 in {
                     "release_adapter_missing",
+                    "side_effect_outcome_indeterminate",
                     "model_route_unapproved",
                     "internal_task_route",
                 }
@@ -5377,7 +5671,11 @@ class AgentWorker:
             available_at=result.retry_available_at,
             next_tier=result.next_tier.value if result.next_tier else None,
             next_attempt_kind=result.next_attempt_kind,
-            repair_context_ref=result.repair_context_ref,
+            repair_context_ref=(
+                result.repair_context_ref
+                or str(task_row.get("repair_context_ref") or "")
+                or None
+            ),
             product_status=prepared.product_status,
             successors=prepared.successors,
             edges=prepared.edges,
@@ -5526,14 +5824,31 @@ class AgentWorker:
             evidence.append(("observation", artifact_digest))
         if stage == "product-acceptance" and output.get("status") == "accepted":
             evidence.append(("product_acceptance", artifact_digest))
-        for evidence_type, digest in evidence:
+        produced_types = self._produced_evidence_types(task)
+        immutable_release_types = {
+            "staging",
+            "production",
+            "signed_release",
+            "signed_publish",
+        }
+        for evidence_type in produced_types:
+            if evidence_type in {"goal_evidence", "completion", "candidate_snapshot"}:
+                continue
+            digest = (
+                release_digest
+                if evidence_type in immutable_release_types
+                and re.fullmatch(r"[a-f0-9]{64}", release_digest)
+                else artifact_digest
+            )
+            evidence.append((evidence_type, digest))
+        for evidence_type, digest in dict(evidence).items():
             self.state.record_product_evidence(
                 product_id=product_id,
                 evidence_type=evidence_type,
                 artifact_ref=artifact_ref,
                 artifact_digest=digest,
             )
-        if stage != "product-acceptance" or output.get("status") != "accepted":
+        if "goal_evidence" not in produced_types:
             return
         for plan in self.state.list_plans(product_id):
             if str(plan.get("status")) != "ACTIVE":

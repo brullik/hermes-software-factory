@@ -14,14 +14,26 @@ INSTALL_ROOT="${INSTALL_ROOT:-/opt/hermes-factory}"
 STATE_DIR="${STATE_DIR:-/var/lib/hermes-factory}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/hermes-factory}"
 SERVICE_USER="${SERVICE_USER:-hermesfactory}"
+CANDIDATE_USER="${CANDIDATE_USER:-hermescandidate}"
+VERIFIER_USER="${VERIFIER_USER:-hermesverifier}"
+CANDIDATE_INSTALL_ROOT="${CANDIDATE_INSTALL_ROOT:-/opt/hermes-factory-candidate}"
+VERIFIER_INSTALL_ROOT="${VERIFIER_INSTALL_ROOT:-/opt/hermes-factory-verifier}"
+CANDIDATE_STATE_DIR="${CANDIDATE_STATE_DIR:-/var/lib/hermes-factory-candidate}"
+VERIFIER_STATE_DIR="${VERIFIER_STATE_DIR:-/var/lib/hermes-factory-verifier}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 HERMES_AGENT_VERSION="${HERMES_AGENT_VERSION:-0.19.0}"
 HERMES_AGENT_SHA256="${HERMES_AGENT_SHA256:-bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f}"
 OSV_SCANNER_VERSION="2.4.0"
 OSV_SCANNER_SHA256="15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0"
 
-if [[ ! "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-  printf 'SERVICE_USER contains unsafe characters\n' >&2
+for candidate_name in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}"; do
+  if [[ ! "${candidate_name}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    printf 'service user contains unsafe characters\n' >&2
+    exit 78
+  fi
+done
+if [[ "${SERVICE_USER}" == "${CANDIDATE_USER}" || "${SERVICE_USER}" == "${VERIFIER_USER}" || "${CANDIDATE_USER}" == "${VERIFIER_USER}" ]]; then
+  printf 'Stable, candidate, and verifier users must be distinct\n' >&2
   exit 78
 fi
 
@@ -88,32 +100,64 @@ fi
 if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${STATE_DIR}" --create-home --shell /usr/sbin/nologin "${SERVICE_USER}"
 fi
+if ! id "${CANDIDATE_USER}" >/dev/null 2>&1; then
+  useradd --system --home-dir "${CANDIDATE_STATE_DIR}" --create-home --shell /usr/sbin/nologin "${CANDIDATE_USER}"
+fi
+if ! id "${VERIFIER_USER}" >/dev/null 2>&1; then
+  useradd --system --home-dir "${VERIFIER_STATE_DIR}" --create-home --shell /usr/sbin/nologin "${VERIFIER_USER}"
+fi
 if ! grep -q "^${SERVICE_USER}:" /etc/subuid; then
   usermod --add-subuids 1000000-1065535 "${SERVICE_USER}"
 fi
 if ! grep -q "^${SERVICE_USER}:" /etc/subgid; then
   usermod --add-subgids 1000000-1065535 "${SERVICE_USER}"
 fi
+if ! grep -q "^${CANDIDATE_USER}:" /etc/subuid; then
+  usermod --add-subuids 1100000-1165535 "${CANDIDATE_USER}"
+fi
+if ! grep -q "^${CANDIDATE_USER}:" /etc/subgid; then
+  usermod --add-subgids 1100000-1165535 "${CANDIDATE_USER}"
+fi
 
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 \
   "${INSTALL_ROOT}/current" "${STATE_DIR}/evidence" "${STATE_DIR}/worktrees" "${STATE_DIR}/profiles" "${STATE_DIR}/kanban" \
   /var/log/hermes-factory /run/hermes-factory
 install -d -o root -g root -m 0750 "${INSTALL_ROOT}/bin"
+install -d -o "${CANDIDATE_USER}" -g "${CANDIDATE_USER}" -m 0750 \
+  "${CANDIDATE_STATE_DIR}" \
+  "${CANDIDATE_STATE_DIR}/evidence" \
+  "${CANDIDATE_STATE_DIR}/qualification" \
+  "${CANDIDATE_STATE_DIR}/worktrees" \
+  /var/log/hermes-factory-candidate \
+  /run/hermes-factory-candidate
+install -d -o "${VERIFIER_USER}" -g "${VERIFIER_USER}" -m 0750 \
+  "${VERIFIER_STATE_DIR}"
 install -d -o root -g "${SERVICE_USER}" -m 0750 "${CONFIG_DIR}" "${CONFIG_DIR}/credentials.d"
+install -d -o root -g "${CANDIDATE_USER}" -m 0750 "${CONFIG_DIR}/candidate-credentials.d"
+install -d -o root -g root -m 0755 "${CONFIG_DIR}/qualification-manifests"
 install -d -o root -g "${SERVICE_USER}" -m 0750 \
   /var/cache/hermes-factory \
   /var/cache/hermes-factory/osv \
   /var/cache/hermes-factory/osv/osv-scanner \
   /var/cache/hermes-factory/osv/osv-scanner/PyPI
 chown root:"${SERVICE_USER}" "${CONFIG_DIR}" "${CONFIG_DIR}/credentials.d"
-chmod 0750 "${CONFIG_DIR}" "${CONFIG_DIR}/credentials.d"
+chown root:root "${CONFIG_DIR}"
+chmod 0711 "${CONFIG_DIR}"
+chmod 0750 "${CONFIG_DIR}/credentials.d"
 
 if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
   install -o root -g "${SERVICE_USER}" -m 0640 \
     "${ROOT_DIR}/config/factory-config.example.yaml" "${CONFIG_DIR}/config.yaml"
 fi
 
-cp -a "${ROOT_DIR}/." "${INSTALL_ROOT}/current/"
+if [[ -n "$(find "${INSTALL_ROOT}/current" -mindepth 1 -print -quit)" ]]; then
+  if ! diff -qr --exclude=.git "${ROOT_DIR}" "${INSTALL_ROOT}/current" >/dev/null; then
+    printf 'Stable A already exists; upgrades require the qualified blue/green release path\n' >&2
+    exit 73
+  fi
+else
+  cp -a "${ROOT_DIR}/." "${INSTALL_ROOT}/current/"
+fi
 chown -R root:root "${INSTALL_ROOT}/current"
 find "${INSTALL_ROOT}/current" -type d -exec chmod 0755 {} +
 find "${INSTALL_ROOT}/current" -type f -exec chmod 0644 {} +
@@ -216,8 +260,8 @@ systemctl enable \
   hermes-factory-backup-offsite.timer \
   hermes-factory-osv-db.timer
 systemctl start fail2ban.service
-runuser -u "${SERVICE_USER}" -- env \
-  HOME="${STATE_DIR}" \
-  XDG_RUNTIME_DIR=/run/hermes-factory \
-  podman info --format json >/dev/null
-printf 'Bootstrap files installed. Credentials, Hermes compatibility, firewall, SSH hardening, and service start require separate evidence-backed steps.\n'
+SERVICE_USER="${SERVICE_USER}" \
+STATE_DIR="${STATE_DIR}" \
+RUNTIME_DIR=/run/hermes-factory \
+bash "${ROOT_DIR}/scripts/bootstrap/preflight-rootless-podman.sh"
+printf 'Stable A bootstrap files installed. After Stable health is proven, prepare Candidate B only from a clean immutable Git checkout with prepare-candidate-plane.sh.\n'

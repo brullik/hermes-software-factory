@@ -288,7 +288,19 @@ def main() -> int:
         max_active_products=config.max_active_products,
     )
     try:
-        TelegramGateway(config, state, ArtifactStore(config), TelegramApi(token)).run_forever()
+        TelegramGateway(
+            config,
+            state,
+            ArtifactStore(config),
+            TelegramApi(
+                token,
+                api_base_url=str(
+                    config.raw.get("telegram", {}).get(
+                        "api_base_url", "https://api.telegram.org"
+                    )
+                ),
+            ),
+        ).run_forever()
     finally:
         state.close()
     return 0

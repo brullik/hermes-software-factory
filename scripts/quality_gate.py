@@ -38,6 +38,8 @@ _TARGET_DEPENDENCY_ADAPTER = "target_dependency_audit"
 _TARGET_DEPENDENCY_COMMAND = "controller:target-dependency-audit"
 _TARGET_LICENSE_ADAPTER = "target_license_check"
 _TARGET_LICENSE_COMMAND = "controller:target-license-check"
+_TARGET_CONTAINER_IMAGE_ADAPTER = "target_container_image_scan"
+_TARGET_CONTAINER_IMAGE_COMMAND = "controller:target-container-image-scan"
 _TARGET_SECRET_PATTERN = re.compile(
     rb"(?:ghp_|github_pat_|(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|"
     rb"BEGIN\s+(?:(?:RSA|EC|OPENSSH)\s+)?PRIVATE\s+KEY)"
@@ -861,6 +863,266 @@ def _license_check(
     )
 
 
+def _container_image_scan(
+    gate: dict[str, Any],
+    cwd: Path,
+    subject_sha: str,
+    python_executable: str | None,
+) -> dict[str, Any]:
+    """Build and scan the exact candidate image under controller ownership."""
+
+    command = str(gate.get("command", ""))
+    started = utc_now()
+    valid, reason = _adapter_configuration_valid(
+        gate,
+        adapter=_TARGET_CONTAINER_IMAGE_ADAPTER,
+        command=_TARGET_CONTAINER_IMAGE_COMMAND,
+    )
+    if not valid:
+        return _adapter_evidence(
+            gate,
+            subject_sha,
+            command=command,
+            started=started,
+            status="ERROR",
+            output=f"target container image adapter rejected: {reason}",
+            exit_code=None,
+        )
+    if not python_executable:
+        return _adapter_evidence(
+            gate,
+            subject_sha,
+            command=command,
+            started=started,
+            status="ERROR",
+            output="target container image scan failed closed: target interpreter unavailable",
+            exit_code=None,
+        )
+
+    root = cwd.resolve()
+    container_coordinates = (
+        Path("container/Containerfile"),
+        Path("Containerfile"),
+        Path("Dockerfile"),
+        Path("compose.yml"),
+        Path("compose.yaml"),
+        Path("docker-compose.yml"),
+        Path("docker-compose.yaml"),
+    )
+    if not any((root / coordinate).is_file() for coordinate in container_coordinates):
+        return _adapter_evidence(
+            gate,
+            subject_sha,
+            command=command,
+            started=started,
+            status="PASS",
+            output="container_image_scan=not_applicable; container_coordinates=none",
+            exit_code=0,
+        )
+
+    image_ref = f"localhost/hermes-quality-{subject_sha[:16]}:scan"
+    builder = "podman"
+    image_built = False
+    status = "ERROR"
+    exit_code: int | None = None
+    output = "target container image scan failed closed"
+    try:
+        verifier = root / "scripts" / "image_security_verify.py"
+        if verifier.is_symlink():
+            raise RuntimeError("image security verifier must not be a symbolic link")
+        verifier = verifier.resolve(strict=True)
+        verifier.relative_to(root)
+        if not verifier.is_file():
+            raise RuntimeError("image security verifier is not a regular file")
+
+        require_root_owned = bool(gate.get("require_root_owned", False))
+        scanner, _ = _trusted_gate_file(
+            Path(str(gate.get("scanner_path", ""))),
+            label="OSV-Scanner executable",
+            require_root_owned=require_root_owned,
+        )
+        expected_scanner_digest = str(gate.get("scanner_sha256", "")).lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_scanner_digest):
+            raise RuntimeError("OSV-Scanner digest pin is invalid")
+        scanner_digest = digest_file(scanner)
+        if scanner_digest != expected_scanner_digest:
+            raise RuntimeError("OSV-Scanner executable digest mismatch")
+
+        timeout = int(gate.get("timeout_seconds", 900))
+        if timeout < 1:
+            raise RuntimeError("container image scan timeout must be positive")
+        with tempfile.TemporaryDirectory(prefix="hermes-container-gate-") as directory:
+            temporary = Path(directory)
+            environment = os.environ.copy()
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            environment["PYTHONPYCACHEPREFIX"] = str(temporary / "pycache")
+            build_output = temporary / "image-build.json"
+            build_command = [
+                python_executable,
+                str(verifier),
+                "build",
+                "--root",
+                str(root),
+                "--image-ref",
+                image_ref,
+                "--subject-sha",
+                subject_sha,
+                "--output",
+                str(build_output),
+                "--builder",
+                builder,
+            ]
+            built = subprocess.run(
+                build_command,
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+            exit_code = built.returncode
+            if built.returncode != 0 or not build_output.is_file():
+                raise RuntimeError(
+                    f"image build command failed with exit code {built.returncode}"
+                )
+            build_payload = json.loads(build_output.read_text(encoding="utf-8"))
+            image_digest = str(build_payload.get("image_digest", ""))
+            immutable_ref = str(build_payload.get("immutable_image_ref", ""))
+            if (
+                build_payload.get("status") != "pass"
+                or build_payload.get("subject_sha") != subject_sha
+                or build_payload.get("image_ref") != image_ref
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_digest)
+                or immutable_ref != f"{image_ref}@{image_digest}"
+            ):
+                raise RuntimeError("image build evidence is not subject-bound and immutable")
+            image_built = True
+
+            scan_output = temporary / "container-scan.json"
+            scan_command = [
+                python_executable,
+                str(verifier),
+                "scan",
+                "--root",
+                str(root),
+                "--image-digest",
+                immutable_ref,
+                "--subject-sha",
+                subject_sha,
+                "--output",
+                str(scan_output),
+                "--scanner",
+                str(scanner),
+                "--builder",
+                builder,
+            ]
+            scanned = subprocess.run(
+                scan_command,
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+            exit_code = scanned.returncode
+            if not scan_output.is_file():
+                raise RuntimeError("container scanner did not retain an evidence record")
+            scan_payload = json.loads(scan_output.read_text(encoding="utf-8"))
+            binding_valid = bool(
+                scan_payload.get("subject_sha") == subject_sha
+                and scan_payload.get("image_ref") == immutable_ref
+                and scan_payload.get("image_digest") == image_digest
+                and scan_payload.get("scanner") == str(scanner)
+                and scan_payload.get("evidence_valid") is True
+                and isinstance(scan_payload.get("blocking_findings"), int)
+                and not isinstance(scan_payload.get("blocking_findings"), bool)
+                and isinstance(scan_payload.get("scanner_exit_code"), int)
+            )
+            if not binding_valid:
+                raise RuntimeError("container scan evidence is malformed or unbound")
+            blocking = int(scan_payload["blocking_findings"])
+            scanner_exit = int(scan_payload["scanner_exit_code"])
+            raw_findings = scan_payload.get("findings", [])
+            if not isinstance(raw_findings, list) or any(
+                not isinstance(finding, dict) for finding in raw_findings
+            ):
+                raise RuntimeError("container scan findings are malformed")
+            finding_coordinates = sorted(
+                {
+                    ":".join(
+                        (
+                            str(finding.get("id", "unknown")),
+                            str(finding.get("severity", "unknown")),
+                            str(finding.get("package", "unknown")),
+                        )
+                    )
+                    for finding in raw_findings
+                }
+            )
+            passed = (
+                scanned.returncode == 0
+                and scan_payload.get("status") == "pass"
+                and scanner_exit == 0
+                and blocking == 0
+            )
+            status = "PASS" if passed else "FAIL"
+            output = (
+                f"container_image_scan={'pass' if passed else 'fail'}; "
+                f"subject_sha={subject_sha}; image_digest={image_digest}; "
+                f"osv_scanner_sha256={scanner_digest}; "
+                f"scanner_evidence_sha256={digest_file(scan_output)}; "
+                f"scanner_exit_code={scanner_exit}; blocking_findings={blocking}; "
+                "finding_coordinates="
+                + (",".join(finding_coordinates[:50]) or "none")
+            )
+    except subprocess.TimeoutExpired as error:
+        output = f"target container image scan timed out: {error}"
+        status = "ERROR"
+        exit_code = None
+    except (
+        json.JSONDecodeError,
+        OSError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        TypeError,
+        ValueError,
+    ) as error:
+        output = f"target container image scan failed closed: {error}"
+        status = "ERROR"
+        exit_code = None
+    finally:
+        if image_built:
+            cleanup: subprocess.CompletedProcess[str] | None
+            try:
+                cleanup = subprocess.run(
+                    [builder, "image", "rm", "--force", image_ref],
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                    timeout=120,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                cleanup = None
+            if cleanup is None or cleanup.returncode != 0:
+                status = "ERROR"
+                exit_code = None if cleanup is None else cleanup.returncode
+                output += "; image_cleanup=failed"
+            else:
+                output += "; image_cleanup=pass"
+    return _adapter_evidence(
+        gate,
+        subject_sha,
+        command=command,
+        started=started,
+        status=status,
+        output=output,
+        exit_code=exit_code,
+    )
+
+
 def run_gate(
     gate: dict[str, Any],
     cwd: Path,
@@ -877,6 +1139,8 @@ def run_gate(
         return _dependency_audit(gate, cwd, subject_sha, python_executable)
     if adapter == _TARGET_LICENSE_ADAPTER:
         return _license_check(gate, cwd, subject_sha, python_executable)
+    if adapter == _TARGET_CONTAINER_IMAGE_ADAPTER:
+        return _container_image_scan(gate, cwd, subject_sha, python_executable)
     if adapter is not None:
         return _adapter_evidence(
             gate,

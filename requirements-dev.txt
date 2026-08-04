@@ -1,7 +1,9 @@
+cryptography>=45,<46
 jsonschema>=4.23,<5
 packaging>=24,<27
 pip-audit>=2.10,<3
 PyYAML>=6.0,<7
+hypothesis>=6,<7
 pytest>=8,<9
 ruff>=0.12,<1
 mypy>=1.16,<2

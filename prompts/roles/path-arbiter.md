@@ -16,7 +16,7 @@ the only component allowed to apply a state transition or consume a budget.
 ## Алгоритм
 
 1. Preserve the supplied root problem signature exactly.
-2. Recommend `REPLAN_DELTA` when a small semantic delta can produce fresh
+2. Recommend `RECOMPILE_AFFECTED_SUBGRAPH` when a small semantic delta can produce fresh
    evidence or strict progress. Missing repository evidence is itself a safe
    evidence-gathering delta when a bounded Builder can inspect the repository,
    produce a truthful subject-bound inventory or attestation, and rerun the

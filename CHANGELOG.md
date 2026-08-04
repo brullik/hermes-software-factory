@@ -1,5 +1,106 @@
 # Changelog
 
+## 2.4.0 - 2026-08-03
+
+- Replace permissive runtime routing with one closed failure catalog and a
+  catalog-backed transition kernel; unknown reasons and events now quarantine
+  the Controller before any model or product repair can run.
+- Bind every repair to a stable root-cause key and a release-specific
+  occurrence epoch while eliminating causal-lineage capability inheritance,
+  wildcard contract reconstruction, and model-authored controller recovery.
+- Add exact product-bound capability proofs, toolchain manifests, grant epochs,
+  terminal database guards, recovery certificates, append-only/WORM-exported
+  decision history, and crash-safe side-effect intent/receipt protocols.
+- Compile eight controller-owned delivery profiles with profile-specific
+  lifecycle, evidence, capability, release, rollback, observation, and
+  completion semantics. Non-service distribution no longer receives service
+  production, backup, or rollback authority.
+- Add a release qualification governor whose first Controller defect fails the
+  immutable release epoch and whose clean canaries reject recovery, manual DB
+  mutation, routine owner action, release drift, and task amplification.
+- Add Stable A/Candidate B/verifier isolation, an independent Ed25519-signed
+  qualification manifest, root-owned manifest installation, and an exact
+  candidate-digest check at the production helper.
+- Add executable Q0-Q6 qualification stages, exhaustive bounded model checking,
+  Hypothesis properties, a 100% nine-mutant safety gate, 1,814 historical
+  incident replays, every-version crash/restart migrations, and the exact
+  production-shaped SQLite fixture.
+- Add an isolated real-process service harness for Controller, worker, Gateway,
+  Hermes stdin, SQLite, outbox, and transactional deployment. External
+  capabilities use a digest-bound local Q6 target; production credentials and
+  production helpers are inaccessible.
+- Make SQLite migrations crash-atomic without `executescript` implicit commits;
+  legacy completion rows without real manifests now fail safe instead of being
+  silently grandfathered as PASS.
+
+
+## 2.3.11 - 2026-08-03
+
+- Route any semantic or policy finding from a read-only reviewer through the
+  remaining bounded Builder execution after the one-shot Path Arbiter has
+  already been consumed, including `model_requested_repair` outcomes.
+- Give container/image findings an explicit Docker, Compose, and scanner-script
+  repair scope while preserving inherited container-builder and scanner
+  capabilities; reviewer pseudo-gate IDs are never added to the quality catalog.
+- Add an idempotent, maintenance-fenced production recovery that preserves the
+  product-semantic security finding, reopens only its incorrect controller
+  route decision, and consumes exactly the second Builder slot.
+- Keep controller-owned `internal://task/...` outcome and failure-evidence
+  references out of local filesystem probing so a worker step cannot crash
+  during durable result persistence on Linux.
+- Treat an inaccessible optional `SHA256SUMS` in an inherited worker cwd as an
+  opaque local reference and fall back to the stable task-contract digest; add
+  an idempotent, maintenance-fenced recovery that resumes the same immutable
+  Builder attempt under its parent semantic finding without changing any Path
+  Governor counter.
+- Route bounded reviewer repairs through the registered canonical Builder
+  `attempt-result.schema.json` contract. Add an idempotent recovery that writes
+  a new immutable corrected task contract and resumes the same Builder while
+  preserving the parent finding and all Path Governor counters.
+- Preserve an existing repair brief across controller and terminal outcomes,
+  bind a routed repair Context Pack to `task.failure_id` even when the source
+  finding belongs to the reviewer task, and define `subject_sha` explicitly as
+  a workspace-snapshot digest rather than a Git commit. Add a bounded recovery
+  for the historical lost repair-context binding without resetting its budget.
+- Treat an accepted cross-role Builder repair as new evidence that must be
+  revalidated by the original read-only reviewer, never as reviewer acceptance.
+  Preserve the downstream reviewer dependency and add an idempotent,
+  maintenance-fenced recovery for the historical replacement-lineage defect
+  without changing the Path Governor problem budget.
+- Make immutable container-image scanning a controller-owned mandatory gate for
+  external-repository security review. The gate builds the exact candidate,
+  verifies digest/subject binding, runs the pinned scanner, records actionable
+  finding coordinates, and cleans up the image. Container repairs inherit
+  `container/**` scope, and a bounded recovery replaces historical provider-only
+  completion evidence while preserving the `1:1:2` Path Governor budget.
+- Initialize rootless Podman networking during installation and runtime upgrade
+  with an offline, temporary API-service container probe, then remove its image,
+  network, socket, and build context. Capability preflight now rejects a Podman
+  RunRoot outside the worker runtime and refuses Builder execution until the
+  controller-owned IPAM database and ephemeral network lifecycle are proven.
+- Classify exclusively `CONTROLLER_*` provider findings as controller-runtime
+  incidents rather than product-semantic repairs. The failed product node stays
+  unaccepted and is rerun with fresh evidence after deterministic host recovery.
+- Revise persisted Security Reviewer contracts during the bounded container
+  repair recovery so revalidation itself requires `target-container-image-scan`
+  and its container/scanner capabilities. Add an idempotent recovery for an
+  already-repaired historical task whose stale reviewer contract reports
+  `CONTAINER-SCAN-EVIDENCE-MISSING`; it reuses subject-bound accepted Builder
+  scan evidence and preserves the exhausted `1:1:2` problem budget.
+- Resolve every durable task's exact immutable `contract_ref` at execution
+  time, with bounded path, identity, and revision validation. Explicit revised
+  contracts can no longer be shadowed by a stale canonical task filename, and
+  invalid references fail closed instead of silently changing task semantics.
+- Expose the controller's current Python virtual-environment binaries to the
+  provider subprocess while preserving the restricted environment boundary,
+  so read-only reviewers can invoke the approved `pytest` and `pip` toolchain
+  even when the candidate repository has no sibling virtual environment.
+- Add an idempotent, maintenance-fenced recovery for the historical Security
+  Reviewer attempt that ignored an already revised image-gated contract and
+  lacked the controller Python toolchain. It requeues the same contract and
+  revision, records the controller incident, and preserves the exhausted
+  `1:1:2` Path Governor budget without creating product-semantic work.
+
 ## 2.3.10 - 2026-08-03
 
 - Accept an explicit zero-runtime-dependency Python project only after a

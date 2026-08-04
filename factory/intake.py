@@ -95,6 +95,7 @@ class IntakeService:
         repository_url: str | None = None,
         repository_name: str | None = None,
         repository_visibility: str = "private",
+        delivery_profile: str | None = None,
         constraints: Mapping[str, Any] | None = None,
         owner_defaults_ref: str | None = None,
         idempotency_key: str | None = None,
@@ -108,6 +109,7 @@ class IntakeService:
             and delivery_mode is None
             and repository_url is None
             and repository_name is None
+            and delivery_profile is None
             and constraints is None
             and owner_defaults_ref is None
             and repository_visibility == "private"
@@ -142,6 +144,13 @@ class IntakeService:
             raise IntakeRejected("new_repository does not accept repository_url")
         if repository_visibility not in {"private", "public"}:
             raise IntakeRejected("repository_visibility is invalid")
+        if delivery_profile is not None:
+            from .delivery_profiles import DeliveryProfileName
+
+            try:
+                delivery_profile = DeliveryProfileName(delivery_profile).value
+            except ValueError as error:
+                raise IntakeRejected("delivery_profile is invalid") from error
         if repository_name is not None:
             repository_name = repository_name.strip()
             if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?", repository_name):
@@ -169,7 +178,8 @@ class IntakeService:
             if legacy_boundary
             else sha256_text(
                 f"{source}:{owner_id}:{clean_goal}:{selected_mode}:"
-                f"{repository_url or ''}:{repository_name or ''}"
+                f"{repository_url or ''}:{repository_name or ''}:"
+                f"{delivery_profile or ''}"
             )
         )
         if not isinstance(raw_key, str) or not raw_key.strip():
@@ -214,6 +224,7 @@ class IntakeService:
                 constraints_ref=constraints_ref,
                 owner_defaults_ref=owner_defaults_ref,
                 idempotency_key=key,
+                delivery_profile=delivery_profile,
                 rate_limit=(
                     self.config.intake_rate_limit_requests,
                     self.config.intake_rate_limit_window_seconds,
@@ -238,6 +249,7 @@ class IntakeService:
             "goal_text": redacted_goal,
             "idea": redacted_goal,
             "delivery_mode": selected_mode,
+            "delivery_profile": str(row["delivery_profile"]),
             "repository_url": repository_url,
             "repository_name": repository_name,
             "repository_visibility": repository_visibility,

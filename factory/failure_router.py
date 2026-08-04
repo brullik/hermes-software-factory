@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import ArtifactStore
-from .autonomy import CAPABILITY_PROFILES
+from .autonomy import CANONICAL_ROLE_OUTPUT_SCHEMAS, CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
-from .path_governor import PathGovernor, failure_owner, stable_root_problem_signature
+from .failure_catalog import FailureAction, failure_disposition
+from .path_governor import PathGovernor, stable_root_problem_signature
 from .policy import policy_digest
 from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
@@ -40,7 +41,6 @@ _CONTROLLER_PREFIXES = (
     "artifact_",
     "repair_requeue_",
 )
-_MAX_CONTROLLER_RECOVERY_DEPTH = 3
 _CONTROL_GATE_IDS = {
     "model_requested_repair",
     "needs_replan",
@@ -48,6 +48,10 @@ _CONTROL_GATE_IDS = {
     "repeated_hypothesis",
     "liveness_invariant_violation",
 }
+
+
+class ContractIntegrityError(RuntimeError):
+    """The exact immutable task contract is absent, invalid, or mismatched."""
 
 
 class FailureRouter:
@@ -333,13 +337,18 @@ class FailureRouter:
                     now,
                 ),
             )
-            self.state._connection.execute(
-                """UPDATE products
-                   SET status='FAILED_SAFE',
-                       terminal_reason='path_governor_problem_budget_exhausted',
-                       updated_at=?
-                   WHERE product_id=?""",
-                (now, failed["product_id"]),
+            from .transition_kernel import TransitionKernel
+
+            TransitionKernel(self.state._connection).apply_product(
+                product_id=str(failed["product_id"]),
+                target="FAILED_SAFE",
+                event="CONTROLLER_QUARANTINE",
+                evidence={
+                    "controller_incident": incident_id,
+                    "terminal_evidence": str(failure["evidence_ref"]),
+                },
+                terminal_reason="path_governor_problem_budget_exhausted",
+                terminal_evidence_ref=str(failure["evidence_ref"]),
             )
             self.state._record_event(
                 str(failed["product_id"]),
@@ -353,96 +362,135 @@ class FailureRouter:
             )
         return str(failed["task_id"])
 
+    def _quarantine_failure(
+        self,
+        *,
+        failure: dict[str, Any],
+        failed: dict[str, Any],
+        reason_code: str,
+        evidence_ref: str,
+    ) -> str:
+        """Stop the line without creating model work for controller/data defects."""
+
+        product_id = str(failed["product_id"])
+        task_id = str(failed["task_id"])
+        now = str(failure.get("last_seen_at") or failure.get("first_seen_at") or "")
+        incident_id = "incident-" + sha256_text(
+            stable_json([product_id, task_id, reason_code, evidence_ref])
+        )[:20]
+        disposition = failure_disposition(reason_code)
+        with self.state._lock, self.state._connection:
+            self.state._connection.execute(
+                """INSERT OR IGNORE INTO controller_incidents
+                   (incident_id, product_id, task_id, reason_code,
+                    evidence_ref, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, 'OPEN', ?)""",
+                (incident_id, product_id, task_id, reason_code, evidence_ref, now),
+            )
+            self.state._connection.execute(
+                """UPDATE failures
+                      SET status='ROUTED', failure_domain=?, failure_action=?
+                    WHERE failure_id=?""",
+                (
+                    disposition.domain.value,
+                    disposition.action.value,
+                    failure["failure_id"],
+                ),
+            )
+            from .transition_kernel import TransitionKernel
+
+            TransitionKernel(self.state._connection).apply_product(
+                product_id=product_id,
+                target="FAILED_SAFE",
+                event="CONTROLLER_QUARANTINE",
+                evidence={
+                    "controller_incident": incident_id,
+                    "terminal_evidence": evidence_ref,
+                },
+                terminal_reason=reason_code,
+                terminal_evidence_ref=evidence_ref,
+            )
+            self.state._record_event(
+                product_id,
+                task_id,
+                "controller_quarantine",
+                {
+                    "failure_id": str(failure["failure_id"]),
+                    "incident_id": incident_id,
+                    "reason_code": reason_code,
+                    "registered": disposition.registered,
+                    "domain": disposition.domain.value,
+                    "action": disposition.action.value,
+                },
+            )
+        epoch_id = str(
+            (self.state.get_product(product_id) or {}).get("controller_release_epoch_id")
+            or ""
+        )
+        if epoch_id:
+            from .release_qualification import (
+                QualificationError,
+                ReleaseQualificationGovernor,
+            )
+
+            try:
+                ReleaseQualificationGovernor(
+                    self.state._connection
+                ).record_controller_defect(
+                    epoch_id=epoch_id,
+                    reason_code=reason_code,
+                    evidence_ref=evidence_ref,
+                )
+            except (KeyError, QualificationError):
+                # A terminal/previous epoch remains immutable; the product is
+                # already quarantined and cannot continue.
+                pass
+        return ""
+
     def _contract(self, task: dict[str, Any]) -> dict[str, Any]:
         reference = str(task.get("contract_ref") or "")
         task_id = str(task.get("task_id") or "")
-        candidates = [self.config.evidence_dir / Path(reference).name]
-        if re.fullmatch(r"T-[A-Z0-9_-]{4,}", task_id):
-            candidates.append(self.config.evidence_dir / f"task-{task_id}.json")
-        inspected: set[Path] = set()
-        for path in candidates:
-            if path in inspected or not path.is_file():
-                continue
-            inspected.add(path)
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if (
-                isinstance(payload, dict)
-                and str(payload.get("task_id") or "") == task_id
-                and str(payload.get("product_id") or "") == str(task.get("product_id") or "")
-            ):
-                return payload
-        readonly = str(task.get("capability_profile") or "") in {
-            "planning_readonly",
-            "reviewer_readonly",
-        }
-        return {
-            "_reconstructed": True,
-            "acceptance": [
-                {
-                    "criterion_id": (
-                        "reconstruct-"
-                        + sha256_text(f"{task.get('product_id')}:{task_id}:task-contract")[:16]
-                    ),
-                    "verification": (
-                        "Reconstruct this plan node from durable task metadata "
-                        "and the active plan, then prove every mandatory active-plan "
-                        "completion criterion before acceptance."
-                    ),
-                    "mandatory": True,
-                }
-            ],
-            "allowed_paths": ["artifacts/**"] if readonly else ["**"],
-        }
-
-    def _record_contract_reconstruction(
-        self,
-        *,
-        failed: dict[str, Any],
-        failure: dict[str, Any],
-    ) -> None:
-        task_id = str(failed["task_id"])
-        coordinate = sha256_text(
-            stable_json(
-                [
-                    failed["product_id"],
-                    task_id,
-                    failed.get("contract_ref"),
-                ]
-            )
+        expected_ref = f"evidence/task-{task_id}.json"
+        if reference != expected_ref:
+            raise ContractIntegrityError("task contract reference is not exact")
+        unresolved = self.config.evidence_dir / Path(reference).name
+        try:
+            path = unresolved.resolve(strict=True)
+        except OSError as error:
+            raise ContractIntegrityError("task contract is missing") from error
+        if (
+            path.parent != self.config.evidence_dir.resolve()
+            or unresolved.is_symlink()
+            or not path.is_file()
+        ):
+            raise ContractIntegrityError("task contract path is outside immutable evidence")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ContractIntegrityError("task contract is unreadable") from error
+        if not isinstance(payload, dict):
+            raise ContractIntegrityError("task contract is not an object")
+        if (
+            str(payload.get("task_id") or "") != task_id
+            or str(payload.get("product_id") or "")
+            != str(task.get("product_id") or "")
+        ):
+            raise ContractIntegrityError("task contract identity mismatch")
+        allowed_paths = payload.get("allowed_paths")
+        if not isinstance(allowed_paths, list) or any(
+            str(value).strip() in {"*", "**", "**/*"} for value in allowed_paths
+        ):
+            raise ContractIntegrityError("task contract has an unbounded write scope")
+        schema = (
+            "task-contract-v2.schema.json"
+            if str(payload.get("schema_version") or "") == "2.0"
+            else "task-contract.schema.json"
         )
-        incident_id = f"incident-{coordinate[:20]}"
-        with self.state._lock, self.state._connection:
-            inserted = self.state._connection.execute(
-                """
-                INSERT OR IGNORE INTO controller_incidents
-                    (incident_id, product_id, task_id, reason_code,
-                     evidence_ref, status, created_at, resolved_at)
-                VALUES (?, ?, ?, 'artifact_task_contract_reconstructed',
-                        ?, 'RESOLVED', ?, ?)
-                """,
-                (
-                    incident_id,
-                    failed["product_id"],
-                    task_id,
-                    f"state://task-contract/{coordinate[:20]}",
-                    failure["last_seen_at"],
-                    failure["last_seen_at"],
-                ),
-            ).rowcount
-            if inserted:
-                self.state._record_event(
-                    str(failed["product_id"]),
-                    task_id,
-                    "task_contract_reconstructed",
-                    {
-                        "incident_id": incident_id,
-                        "failure_id": str(failure["failure_id"]),
-                        "coordinate": coordinate[:20],
-                    },
-                )
+        try:
+            self.schemas.validate(schema, payload)
+        except Exception as error:
+            raise ContractIntegrityError("task contract schema is invalid") from error
+        return payload
 
     @staticmethod
     def _acceptance(contract: dict[str, Any]) -> list[dict[str, Any]]:
@@ -485,8 +533,20 @@ class FailureRouter:
         """Give a post-arbitration Builder the smallest useful repository scope."""
 
         paths = ["pyproject.toml", "src/**", "tests/**"]
-        if any("dependency" in gate_id or "license" in gate_id for gate_id in failed_gate_ids):
+        normalized = [gate_id.lower() for gate_id in failed_gate_ids]
+        if any("dependency" in gate_id or "license" in gate_id for gate_id in normalized):
             paths.insert(1, "requirements*.txt")
+        if any("container" in gate_id or "image" in gate_id for gate_id in normalized):
+            paths.extend(
+                [
+                    "Dockerfile",
+                    "docker/**",
+                    "container/**",
+                    "compose*.yaml",
+                    "compose*.yml",
+                    "scripts/**",
+                ]
+            )
         return paths
 
     @staticmethod
@@ -509,72 +569,6 @@ class FailureRouter:
                 "verification": (
                     "Every failed mandatory gate is rerun and produces fresh, "
                     "subject-bound controller evidence that passes."
-                ),
-                "mandatory": True,
-            },
-        ]
-
-    @staticmethod
-    def _controller_incident_acceptance() -> list[dict[str, Any]]:
-        """Keep controller recovery separate from product-semantic acceptance."""
-
-        return [
-            {
-                "criterion_id": "AC-CONTROLLER-INCIDENT-CONTAINMENT",
-                "verification": (
-                    "The supplied controller incident is explicitly contained or "
-                    "recovered using only allowlisted, non-destructive actions; "
-                    "the result states when no production mutation was required."
-                ),
-                "mandatory": True,
-            },
-            {
-                "criterion_id": "AC-CONTROLLER-INCIDENT-EVIDENCE",
-                "verification": (
-                    "The IncidentResult binds containment, data-integrity status, "
-                    "and root-cause or validation-plan claims to supplied safe "
-                    "controller evidence without inventing product findings."
-                ),
-                "mandatory": True,
-            },
-            {
-                "criterion_id": "AC-CONTROLLER-INCIDENT-NEXT-STEP",
-                "verification": (
-                    "The result identifies a bounded controller recovery, repair, "
-                    "or retry path and does not require the incident-recovery role "
-                    "to prove the failed product task's semantic acceptance."
-                ),
-                "mandatory": True,
-            },
-        ]
-
-    @staticmethod
-    def _controller_replan_acceptance() -> list[dict[str, Any]]:
-        """Require fresh product evidence after a contained controller incident."""
-
-        return [
-            {
-                "criterion_id": "AC-CONTROLLER-REPLAN-AFFECTED-NODE",
-                "verification": (
-                    "Plan revision N+1 retries or replaces the affected product "
-                    "node and requires fresh product-semantic evidence; an "
-                    "IncidentResult is not reused as proof that the product node passed."
-                ),
-                "mandatory": True,
-            },
-            {
-                "criterion_id": "AC-CONTROLLER-REPLAN-PRESERVE-ACCEPTED",
-                "verification": (
-                    "The plan preserves accepted unaffected implementation and "
-                    "lifecycle evidence while invalidating only the affected causal path."
-                ),
-                "mandatory": True,
-            },
-            {
-                "criterion_id": "AC-CONTROLLER-REPLAN-BOUNDED",
-                "verification": (
-                    "The plan is bound to the supplied controller failure chain, "
-                    "uses a bounded scope, and does not invent a product finding."
                 ),
                 "mandatory": True,
             },
@@ -638,7 +632,7 @@ class FailureRouter:
             {
                 "criterion_id": "AC-PATH-ARBITER-READONLY",
                 "verification": (
-                    "The proposal recommends REPLAN_DELTA or reports no safe path; "
+                    "The proposal recommends RECOMPILE_AFFECTED_SUBGRAPH or reports no safe path; "
                     "it does not assign IDs, mutate state, run SQL, or use credentials."
                 ),
                 "mandatory": True,
@@ -652,43 +646,6 @@ class FailureRouter:
                 "mandatory": True,
             },
         ]
-
-    @staticmethod
-    def _row_required_capabilities(task: dict[str, Any]) -> list[str]:
-        try:
-            values = json.loads(str(task.get("required_capabilities_json") or "[]"))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(values, list):
-            return []
-        return [str(value) for value in values if isinstance(value, str) and value]
-
-    def _lineage_required_capabilities(
-        self,
-        failed: dict[str, Any],
-        capability_profile: str,
-    ) -> list[str]:
-        """Preserve controller-granted tools when routing an exact-node repair."""
-
-        required = set(CAPABILITY_PROFILES[capability_profile])
-        current: dict[str, Any] | None = failed
-        seen: set[str] = set()
-        while current is not None and len(seen) < 64:
-            task_id = str(current.get("task_id") or "")
-            if not task_id or task_id in seen:
-                break
-            seen.add(task_id)
-            required.update(self._row_required_capabilities(current))
-            parent_id = str(current.get("parent_task_id") or "")
-            if not parent_id:
-                break
-            parent = self.state.get_task(parent_id)
-            if parent is None or str(parent.get("product_id") or "") != str(
-                failed.get("product_id") or ""
-            ):
-                break
-            current = parent
-        return sorted(required)
 
     def _write_contract(
         self,
@@ -804,7 +761,8 @@ class FailureRouter:
             str(proposal.get("status") or "") != "proposed"
             or str(proposal.get("root_problem_signature") or "")
             != root_problem_signature
-            or str(proposal.get("recommended_action") or "") != "REPLAN_DELTA"
+            or str(proposal.get("recommended_action") or "")
+            != FailureAction.RECOMPILE_AFFECTED_SUBGRAPH.value
         ):
             raise ValueError("Path Arbiter proposal is not an applicable replan delta")
         failure_id = str(task.get("failure_id") or "")
@@ -815,17 +773,12 @@ class FailureRouter:
         if failure_row is None:
             raise ValueError("Path Arbiter source failure is missing")
         failure = dict(failure_row)
-        source_task_row = self.state._connection.execute(
-            "SELECT * FROM tasks WHERE task_id=? AND product_id=?",
-            (failure["task_id"], task["product_id"]),
-        ).fetchone()
-        source_task = dict(source_task_row) if source_task_row is not None else task
         scope_reassessment_required, required_scope_paths = self._causal_scope_evidence(
             failure,
             product_id=str(task["product_id"]),
         )
         objective = (
-            "Apply the accepted Path Arbiter REPLAN_DELTA recommendation. Create "
+            "Apply the accepted Path Arbiter RECOMPILE_AFFECTED_SUBGRAPH recommendation. Create "
             "one minimal semantic plan delta from the inherited root goal, active "
             "plan, affected nodes, complete failure chain, and immutable evidence. "
             "Preserve every accepted unaffected node."
@@ -853,11 +806,7 @@ class FailureRouter:
             allowed_paths=["artifacts/**"],
             task_revision=int(task.get("task_revision") or 1) + 1,
             node_suffix="replan-after-arbiter",
-            acceptance=(
-                self._controller_replan_acceptance()
-                if self._controller_recovery_depth(source_task) > 0
-                else self._product_replan_acceptance()
-            ),
+            acceptance=self._product_replan_acceptance(),
             model_floor="terra",
         )
         return {
@@ -988,30 +937,6 @@ class FailureRouter:
         ).fetchone()
         return str(row[0]) if row is not None and row[0] else None
 
-    def _controller_recovery_depth(self, task: dict[str, Any]) -> int:
-        """Count the bounded causal chain of controller-recovery tasks."""
-
-        depth = 0
-        current = task
-        visited: set[str] = set()
-        while str(current.get("role") or "") == "incident-recovery":
-            task_id = str(current.get("task_id") or "")
-            if not task_id or task_id in visited:
-                break
-            visited.add(task_id)
-            depth += 1
-            parent_id = str(current.get("parent_task_id") or current.get("source_task_id") or "")
-            if not parent_id:
-                break
-            parent = self.state._connection.execute(
-                "SELECT * FROM tasks WHERE task_id=? AND product_id=?",
-                (parent_id, current["product_id"]),
-            ).fetchone()
-            if parent is None:
-                break
-            current = dict(parent)
-        return depth
-
     def _invalid_plan_output_schema(
         self,
         *,
@@ -1062,10 +987,7 @@ class FailureRouter:
             task_revision=int(routed.get("task_revision") or 1) + 1,
             node_suffix="active-plan-reanchor",
             required_capabilities=(
-                self._lineage_required_capabilities(
-                    routed,
-                    capability_profile,
-                )
+                sorted(CAPABILITY_PROFILES[capability_profile])
                 if role != "replanner"
                 else None
             ),
@@ -1168,6 +1090,67 @@ class FailureRouter:
                 raise RuntimeError("failure source task is missing")
             failed = dict(failed_row)
             reason = str(failure["reason_code"])
+            disposition = failure_disposition(reason)
+            if str(failed.get("role") or "") == "incident-recovery":
+                return self._quarantine_failure(
+                    failure=failure,
+                    failed=failed,
+                    reason_code="internal_task_route",
+                    evidence_ref=str(failure["evidence_ref"]),
+                )
+            if disposition.action is FailureAction.CONTROLLER_QUARANTINE:
+                return self._quarantine_failure(
+                    failure=failure,
+                    failed=failed,
+                    reason_code=reason if disposition.registered else "unknown_reason_code",
+                    evidence_ref=str(failure["evidence_ref"]),
+                )
+            if disposition.action is FailureAction.WAIT_EXTERNAL:
+                with self.state._lock, self.state._connection:
+                    self.state._connection.execute(
+                        "UPDATE failures SET status='OWNER_BLOCKED',failure_domain=?,failure_action=? WHERE failure_id=?",
+                        (
+                            disposition.domain.value,
+                            disposition.action.value,
+                            failure_id,
+                        ),
+                    )
+                    from .transition_kernel import TransitionKernel
+
+                    TransitionKernel(self.state._connection).apply_product(
+                        product_id=str(failed["product_id"]),
+                        target="BLOCKED_OWNER",
+                        event="EXTERNAL_BLOCK",
+                        evidence={
+                            "owner_action_contract": str(failure["evidence_ref"])
+                        },
+                    )
+                return ""
+            if disposition.action is FailureAction.ROLLBACK:
+                with self.state._lock, self.state._connection:
+                    self.state._connection.execute(
+                        "UPDATE failures SET status='ROUTED',failure_domain=?,failure_action=? WHERE failure_id=?",
+                        (
+                            disposition.domain.value,
+                            disposition.action.value,
+                            failure_id,
+                        ),
+                    )
+                    from .transition_kernel import TransitionKernel
+
+                    TransitionKernel(self.state._connection).apply_product(
+                        product_id=str(failed["product_id"]),
+                        target="ROLLING_BACK",
+                        event="ROLLBACK_REQUIRED",
+                        evidence={"rollback_intent": str(failure["evidence_ref"])},
+                    )
+                    self.state._record_event(
+                        str(failed["product_id"]),
+                        str(failed["task_id"]),
+                        "rollback_required",
+                        {"failure_id": failure_id, "evidence_ref": failure["evidence_ref"]},
+                    )
+                return ""
             (
                 scope_reassessment_required,
                 required_scope_paths,
@@ -1175,7 +1158,20 @@ class FailureRouter:
                 dict(failure),
                 product_id=str(failed["product_id"]),
             )
-            original = self._contract(failed)
+            try:
+                original = self._contract(failed)
+            except ContractIntegrityError:
+                coordinate = sha256_text(
+                    stable_json(
+                        [failed["product_id"], failed["task_id"], failed.get("contract_ref")]
+                    )
+                )
+                return self._quarantine_failure(
+                    failure=failure,
+                    failed=failed,
+                    reason_code="invalid_task_contract",
+                    evidence_ref=f"internal://contract-integrity/{coordinate[:24]}",
+                )
             original_allowed_paths = [
                 str(value)
                 for value in original.get("allowed_paths", ["artifacts/**"])
@@ -1194,34 +1190,19 @@ class FailureRouter:
                 failed=failed,
             )
             if invalid_plan_output_schema:
-                resolved_incidents = self.state._connection.execute(
-                    """
-                    UPDATE controller_incidents
-                       SET status='RESOLVED', resolved_at=?
-                     WHERE product_id=? AND task_id=? AND reason_code=?
-                       AND status='OPEN'
-                    """,
-                    (
-                        failure["last_seen_at"],
-                        failed["product_id"],
-                        failed["task_id"],
-                        reason,
-                    ),
-                ).rowcount
-                if resolved_incidents:
-                    self.state._record_event(
-                        str(failed["product_id"]),
-                        str(failed["task_id"]),
-                        "invalid_output_schema_incident_resolved",
-                        {
-                            "failure_id": failure_id,
-                            "resolved_incidents": resolved_incidents,
-                        },
-                    )
-            controller_recovery_depth = self._controller_recovery_depth(failed)
-            controller_handoff = (
-                str(failed.get("role") or "") == "incident-recovery" and reason == "needs_replan"
-            )
+                return self._quarantine_failure(
+                    failure=failure,
+                    failed=failed,
+                    reason_code="invalid_output_schema",
+                    evidence_ref=str(failure["evidence_ref"]),
+                )
+            if legacy_replanner_scope_contract:
+                return self._quarantine_failure(
+                    failure=failure,
+                    failed=failed,
+                    reason_code="invalid_capability_contract",
+                    evidence_ref=str(failure["evidence_ref"]),
+                )
             root_problem_signature = self._stable_causal_problem_signature(
                 failure,
                 failed,
@@ -1232,82 +1213,66 @@ class FailureRouter:
                 "UPDATE tasks SET root_problem_signature=? WHERE task_id=?",
                 (root_problem_signature, str(failed["task_id"])),
             )
-            controller_fault = (
-                not invalid_plan_output_schema
-                and not controller_handoff
-                and controller_recovery_depth < _MAX_CONTROLLER_RECOVERY_DEPTH
-                and failure_owner(
-                    failure_class=str(failure["failure_class"]),
-                    reason_code=reason,
-                )
-                == "controller"
-            )
             hypothesis = None
             hypothesis_id: str | None = None
             attempts_used = 0
-            same_role_problem_count = 0
             diagnosis_reassessment = str(failed.get("stage_key") or "") == "diagnosis-reassessment"
-            if not controller_fault and not controller_handoff:
-                same_role_problem_count = self._same_role_problem_count(
-                    dict(failure),
-                    dict(failed),
-                )
-                inherited_hypothesis_id = str(failed.get("hypothesis_id") or "")
-                if inherited_hypothesis_id:
-                    hypothesis = self.state._connection.execute(
-                        """SELECT * FROM hypotheses
-                           WHERE hypothesis_id=? AND status='ACTIVE'""",
-                        (inherited_hypothesis_id,),
-                    ).fetchone()
-                if hypothesis is None:
-                    hypothesis = self.state._connection.execute(
-                        """SELECT * FROM hypotheses
-                           WHERE failure_id=? AND status='ACTIVE'
-                           ORDER BY created_at DESC LIMIT 1""",
-                        (failure_id,),
-                    ).fetchone()
-                if hypothesis is None:
-                    signature = sha256_text(
-                        stable_json(
-                            [
-                                failed["product_id"],
-                                failure["reason_code"],
-                                failure["fingerprint"],
-                            ]
-                        )
-                    )
-                    hypothesis_id = f"hypothesis-{signature[:20]}"
-                    self.state._connection.execute(
-                        """INSERT OR IGNORE INTO hypotheses
-                           (hypothesis_id, product_id, failure_id, signature,
-                            statement, required_evidence_json, status,
-                            semantic_budget, attempts_used, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', 3, 0, ?)""",
-                        (
-                            hypothesis_id,
-                            failed["product_id"],
-                            failure_id,
-                            signature,
-                            failure["safe_message"],
-                            stable_json([failure["evidence_ref"]]),
-                            failure["first_seen_at"],
-                        ),
-                    )
-                else:
-                    hypothesis_id = str(hypothesis["hypothesis_id"])
-                    attempts_used = int(hypothesis["attempts_used"] or 0)
-            reassessment_threshold = (
-                2 if str(failed.get("role") or "") == "incident-recovery" else 3
+            same_role_problem_count = self._same_role_problem_count(
+                dict(failure),
+                dict(failed),
             )
+            inherited_hypothesis_id = str(failed.get("hypothesis_id") or "")
+            if inherited_hypothesis_id:
+                hypothesis = self.state._connection.execute(
+                    """SELECT * FROM hypotheses
+                       WHERE hypothesis_id=? AND status='ACTIVE'""",
+                    (inherited_hypothesis_id,),
+                ).fetchone()
+            if hypothesis is None:
+                hypothesis = self.state._connection.execute(
+                    """SELECT * FROM hypotheses
+                       WHERE failure_id=? AND status='ACTIVE'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (failure_id,),
+                ).fetchone()
+            if hypothesis is None:
+                signature = sha256_text(
+                    stable_json(
+                        [
+                            failed["product_id"],
+                            failure["reason_code"],
+                            failure["fingerprint"],
+                        ]
+                    )
+                )
+                hypothesis_id = f"hypothesis-{signature[:20]}"
+                self.state._connection.execute(
+                    """INSERT OR IGNORE INTO hypotheses
+                       (hypothesis_id, product_id, failure_id, signature,
+                        statement, required_evidence_json, status,
+                        semantic_budget, attempts_used, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', 3, 0, ?)""",
+                    (
+                        hypothesis_id,
+                        failed["product_id"],
+                        failure_id,
+                        signature,
+                        failure["safe_message"],
+                        stable_json([failure["evidence_ref"]]),
+                        failure["first_seen_at"],
+                    ),
+                )
+            else:
+                hypothesis_id = str(hypothesis["hypothesis_id"])
+                attempts_used = int(hypothesis["attempts_used"] or 0)
+            reassessment_threshold = 3
             repeated_problem_requires_reassessment = (
                 same_role_problem_count >= reassessment_threshold
                 and not diagnosis_reassessment
                 and not legacy_replanner_scope_contract
             )
             needs_replan = (
-                invalid_plan_output_schema
-                or controller_handoff
-                or reason in _REPLAN_REASONS
+                reason in _REPLAN_REASONS
                 or (
                     str(failed.get("capability_profile") or "") == "reviewer_readonly"
                     and str(failure.get("failure_class") or "") in {"semantic", "policy"}
@@ -1319,7 +1284,6 @@ class FailureRouter:
                 or attempts_used >= 3
                 or repeated_problem_requires_reassessment
                 or scope_reassessment_required
-                or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
                 or str(failed.get("role") or "") == "path-arbiter"
             )
             budget_row = self.state._connection.execute(
@@ -1330,62 +1294,35 @@ class FailureRouter:
             ).fetchone()
             bounded_reviewer_gate_repair = (
                 needs_replan
-                and reason == "mandatory_gate_failed"
                 and str(failed.get("capability_profile") or "") == "reviewer_readonly"
+                and str(failure.get("failure_class") or "") in {"semantic", "policy"}
                 and budget_row is not None
                 and int(budget_row["arbiter_calls_used"] or 0) >= 1
                 and int(budget_row["execution_attempts_used"] or 0) < 2
                 and str(budget_row["status"] or "") == "ACTIVE"
             )
-            if controller_fault or invalid_plan_output_schema or legacy_replanner_scope_contract:
-                budget_action_kind = "deterministic"
-                path_action = "CONTROLLER_RECOVERY"
-            elif needs_replan and not bounded_reviewer_gate_repair:
+            if needs_replan and not bounded_reviewer_gate_repair:
                 budget_action_kind = "arbiter"
-                path_action = "REPLAN_DELTA"
+                path_action = FailureAction.RECOMPILE_AFFECTED_SUBGRAPH.value
             else:
                 budget_action_kind = "execution"
-                path_action = "REPAIR_NODE"
+                path_action = FailureAction.REPAIR_NODE_VERSION.value
             if self._consume_path_budget(
                 failed=failed,
                 failure=failure,
                 root_problem_signature=root_problem_signature,
                 action_kind=budget_action_kind,
                 action=path_action,
-                reserve_execution=controller_fault,
+                reserve_execution=False,
             ) != "CONTINUE":
                 return self._terminate_path_governor_budget(
                     failed=failed,
                     failure=failure,
                     root_problem_signature=root_problem_signature,
                 )
-            if controller_fault:
-                incident_id = f"incident-{sha256_text(failure_id)[:20]}"
-                self.state._connection.execute(
-                    """INSERT OR IGNORE INTO controller_incidents
-                       (incident_id, product_id, task_id, reason_code,
-                        evidence_ref, status, created_at)
-                       VALUES (?, ?, ?, ?, ?, 'OPEN', ?)""",
-                    (
-                        incident_id,
-                        failed["product_id"],
-                        failed["task_id"],
-                        reason,
-                        failure["evidence_ref"],
-                        failure["first_seen_at"],
-                    ),
-                )
-                role = "incident-recovery"
-                output_schema = "incident-result.schema.json"
-                capability_profile = "controller_incident"
-                suffix = "controller-incident"
-                objective = (
-                    "Repair the controller invariant using the exact safe failure "
-                    "evidence; do not consume a product semantic budget."
-                )
-            elif bounded_reviewer_gate_repair:
+            if bounded_reviewer_gate_repair:
                 role = "builder"
-                output_schema = "implementation-result.schema.json"
+                output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS[role]
                 capability_profile = "builder_workspace"
                 suffix = "repair"
                 objective = (
@@ -1405,7 +1342,6 @@ class FailureRouter:
                 elif (
                     attempts_used >= 3
                     or repeated_problem_requires_reassessment
-                    or controller_recovery_depth >= _MAX_CONTROLLER_RECOVERY_DEPTH
                 ):
                     assert hypothesis_id is not None
                     self.state._connection.execute(
@@ -1477,7 +1413,7 @@ class FailureRouter:
                     objective = (
                         "Evaluate the controller-supplied immutable Path Snapshot once. "
                         "Return one read-only path decision proposal bound to the exact "
-                        "root problem signature. Recommend REPLAN_DELTA when a bounded "
+                        "root problem signature. Recommend RECOMPILE_AFFECTED_SUBGRAPH when a bounded "
                         "semantic delta can produce fresh evidence, including a Builder "
                         "slice that truthfully discovers and attests missing inventory. "
                         "The future evidence need not already exist in the snapshot. "
@@ -1492,11 +1428,6 @@ class FailureRouter:
                 objective = (
                     "Repair the exact failed plan node while preserving its root goal, "
                     "acceptance, scope, failure, and hypothesis lineage."
-                )
-            if bool(original.get("_reconstructed")):
-                self._record_contract_reconstruction(
-                    failed=failed,
-                    failure=failure,
                 )
             # ``allowed_paths`` is the write boundary of the *current* task.
             # A Replanner is a read-only planning task and must never inherit a
@@ -1518,24 +1449,12 @@ class FailureRouter:
             else:
                 allowed_paths = [
                     str(value)
-                    for value in (
-                        ["artifacts/**"]
-                        if bool(original.get("_reconstructed"))
-                        and capability_profile
-                        in {"planning_readonly", "reviewer_readonly"}
-                        else original.get("allowed_paths", ["artifacts/**"])
-                    )
+                    for value in original.get("allowed_paths", ["artifacts/**"])
                 ]
-            if role == "incident-recovery":
-                contract_acceptance = self._controller_incident_acceptance()
-            elif role == "path-arbiter":
+            if role == "path-arbiter":
                 contract_acceptance = self._path_arbiter_acceptance()
             elif role == "replanner":
-                contract_acceptance = (
-                    self._controller_replan_acceptance()
-                    if controller_recovery_depth > 0
-                    else self._product_replan_acceptance()
-                )
+                contract_acceptance = self._product_replan_acceptance()
             elif bounded_reviewer_gate_repair:
                 contract_acceptance = self._reviewer_gate_repair_acceptance(
                     self._failure_gate_ids(failure)
@@ -1545,6 +1464,15 @@ class FailureRouter:
             repair_quality_gates: list[str] | None = None
             if suffix == "repair":
                 repair_quality_gates = self._quality_gates(original)
+                if bounded_reviewer_gate_repair and any(
+                    "container" in gate_id.lower() or "image" in gate_id.lower()
+                    for gate_id in self._failure_gate_ids(failure)
+                ):
+                    repair_quality_gates = list(
+                        dict.fromkeys(
+                            [*repair_quality_gates, "target-container-image-scan"]
+                        )
+                    )
                 if reason == "mandatory_gate_failed":
                     repair_quality_gates = list(
                         dict.fromkeys(
@@ -1567,10 +1495,7 @@ class FailureRouter:
                 node_suffix=suffix,
                 acceptance=contract_acceptance,
                 required_capabilities=(
-                    self._lineage_required_capabilities(
-                        failed,
-                        capability_profile,
-                    )
+                    sorted(CAPABILITY_PROFILES[capability_profile])
                     if suffix == "repair"
                     else None
                 ),
@@ -1697,5 +1622,7 @@ class FailureRouter:
                 # Routing the same open FailureEnvelope at the same time would
                 # create a second causal branch for one failed attempt.
                 continue
-            routed.append(self.route(str(failure["failure_id"])))
+            task_id = self.route(str(failure["failure_id"]))
+            if task_id:
+                routed.append(task_id)
         return routed

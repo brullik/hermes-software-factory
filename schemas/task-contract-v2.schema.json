@@ -83,6 +83,7 @@
         "repository_bootstrap",
         "release_staging",
         "release_production",
+        "release_distribution",
         "controller_incident"
       ]
     },

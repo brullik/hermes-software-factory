@@ -1,0 +1,13 @@
+schema_version: "1.0"
+scenario_id: needs-replan-2.2.x
+source_release: 2.2.x
+source_incident_count: 111
+initial_state: {schema_version: 16, product_status: IMPLEMENTING, task_count: 9186, accepted_result_count: 376, sanitized: true}
+events:
+  - {event_id: failure-1, type: failure_received, reason_code: needs_replan}
+injected_faults: [semantic-plan-conflict]
+expected_decisions:
+  - {event_id: failure-1, owner: product, action: RECOMPILE_AFFECTED_SUBGRAPH, registered: true}
+forbidden_decisions:
+  - {event_id: failure-1, owner: product, action: REPAIR_NODE_VERSION, registered: true}
+expected_terminal: REPAIRING

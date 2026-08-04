@@ -52,10 +52,9 @@ def _state(tmp_path: Path, product_id: str = "product-path-governor") -> StateSt
                       result_digest=? WHERE task_id='T-ROOT0001'""",
             ("b" * 64,),
         )
-        state._connection.execute(
-            "UPDATE products SET status='IMPLEMENTING' WHERE product_id=?",
-            (product_id,),
-        )
+    state.transition_product(product_id, "RISK_CLASSIFIED")
+    state.transition_product(product_id, "ARCHITECTED")
+    state.transition_product(product_id, "IMPLEMENTING")
     return state
 
 
@@ -681,7 +680,9 @@ def test_candidate_materializer_uses_plan_delta_memberships(
             f"test@candidate:{candidate['candidate_snapshot_id']}"
         )
         assert downstream["semantic_node_id"] != legacy_test["semantic_node_id"]
-        assert downstream["contract_digest"] != legacy_test["contract_digest"]
+        # Candidate scope separates execution identity without mutating the
+        # immutable semantic task contract.
+        assert downstream["contract_digest"] == legacy_test["contract_digest"]
         assert state._connection.execute(
             """SELECT COUNT(*) FROM plan_memberships
                 WHERE plan_id='PLAN-DELTA-MATERIALIZE'
@@ -808,7 +809,7 @@ def test_LOOP_P0_007_root_signature_ignores_ids_and_reason_wording() -> None:
     product_problem = {
         "product_id": "product-path-governor",
         "failure_class": "semantic",
-        "reason_code": "internal_blocker",
+        "reason_code": "mandatory_gate_failed",
         "semantic_node_key": "security-review@candidate:CS-ONE",
         "lifecycle_stage": "security-review",
         "failed_gate_ids": ["target-dependency-audit"],
@@ -935,7 +936,7 @@ def test_LOOP_P0_010_path_arbiter_is_read_only_and_one_shot() -> None:
             "status": "proposed",
             "root_problem_signature": signature,
             "root_cause_class": "controller_invariant",
-            "recommended_action": "COMPACT_LINEAGE",
+            "recommended_action": "RECOMPILE_AFFECTED_SUBGRAPH",
             "affected_semantic_node_keys": ["test"],
             "evidence_refs": ["state://path-snapshot"],
             "expected_progress_delta": {"lineage_indirection_depth": -147},
@@ -945,7 +946,7 @@ def test_LOOP_P0_010_path_arbiter_is_read_only_and_one_shot() -> None:
     assert sandbox.propose(
         root_problem_signature=signature,
         path_snapshot={"product": "safe", "progress": {"depth": 147}},
-    )["recommended_action"] == "COMPACT_LINEAGE"
+    )["recommended_action"] == "RECOMPILE_AFFECTED_SUBGRAPH"
     with pytest.raises(PathDecisionError, match="exhausted"):
         sandbox.propose(root_problem_signature=signature, path_snapshot={"product": "safe"})
 
@@ -1101,7 +1102,7 @@ def test_LOOP_P0_014_completion_requires_real_production_evidence(tmp_path: Path
         state.close()
 
 
-def test_LOOP_P1_001_decision_storage_is_bounded_after_one_thousand_writes(
+def test_LOOP_P1_001_decision_storage_is_append_only_after_one_thousand_writes(
     tmp_path: Path,
 ) -> None:
     state = _state(tmp_path)
@@ -1112,7 +1113,7 @@ def test_LOOP_P1_001_decision_storage_is_bounded_after_one_thousand_writes(
                 governor.record_decision(
                     product_id="product-path-governor",
                     root_problem_signature=None,
-                    action=f"ACTION-{index:04d}",
+                    action="CONTINUE",
                     path_snapshot_digest=f"{index + 1:064x}",
                     progress_before=_progress(2),
                     expected_progress_after=_progress(1),
@@ -1120,7 +1121,7 @@ def test_LOOP_P1_001_decision_storage_is_bounded_after_one_thousand_writes(
         assert state._connection.execute(
             "SELECT COUNT(*) FROM path_decisions WHERE product_id=?",
             ("product-path-governor",),
-        ).fetchone()[0] == 256
+        ).fetchone()[0] == 1_000
     finally:
         state.close()
 

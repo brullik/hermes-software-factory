@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .common import sha256_text, stable_json, utc_now
+from .failure_catalog import FailureAction, failure_disposition
 
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 _TERMINAL_ACCEPTED = {"ACCEPTED", "SUPERSEDED"}
@@ -50,23 +51,10 @@ class PathDecisionError(RuntimeError):
 def failure_owner(*, failure_class: str, reason_code: str) -> str:
     """Classify ownership before any repair role or plan is selected."""
 
-    if failure_class in {"controller", "transient"} or reason_code.startswith(
-        ("controller_", "migration_", "artifact_", "repair_requeue_")
-    ):
-        return "controller"
-    if reason_code in {
-        "missing_credential",
-        "oauth_device_code",
-        "two_factor_authentication",
-        "captcha",
-        "external_account_creation",
-        "paid_resource_purchase",
-        "dns_action_without_access",
-        "legal_decision",
-        "unapproved_irreversible_production_action",
-    }:
-        return "external"
-    return "product"
+    # ``failure_class`` is retained for API compatibility and evidence, but it
+    # cannot grant ownership. Only the exact closed-world reason catalog can.
+    _ = failure_class
+    return failure_disposition(reason_code).owner
 
 
 class PathArbiterSandbox:
@@ -125,11 +113,10 @@ class PathArbiterSandbox:
         if proposal.get("root_problem_signature") != root_problem_signature:
             raise PathDecisionError("Path Arbiter proposal signature conflicts")
         if proposal.get("recommended_action") not in {
-            "REPAIR_NODE",
-            "REPLAN_DELTA",
-            "CONTROLLER_RECOVERY",
-            "COMPACT_LINEAGE",
-            "FAIL_SAFE",
+            FailureAction.REPAIR_NODE_VERSION.value,
+            FailureAction.RECOMPILE_AFFECTED_SUBGRAPH.value,
+            FailureAction.CONTROLLER_QUARANTINE.value,
+            FailureAction.FAIL_SAFE.value,
         }:
             raise PathDecisionError("Path Arbiter proposal action is invalid")
         return proposal
@@ -206,14 +193,27 @@ class ProgressVector:
         }
 
     def strictly_improves(self, previous: ProgressVector) -> bool:
-        before = tuple(previous.as_dict().values())
-        after = tuple(self.as_dict().values())
+        # Retry/no-progress counters are monotonic trajectory telemetry, not a
+        # ranking function. Including them here made real progress impossible
+        # to order once a counter increased.
+        progress_keys = (
+            "unmet_mandatory_obligations",
+            "unresolved_root_problem_signatures",
+            "unaccepted_changed_semantic_nodes",
+            "open_controller_incidents",
+            "missing_candidate_evidence",
+            "lineage_indirection_depth",
+        )
+        before_values = previous.as_dict()
+        after_values = self.as_dict()
+        before = tuple(before_values[key] for key in progress_keys)
+        after = tuple(after_values[key] for key in progress_keys)
         return all(new <= old for old, new in zip(before, after, strict=True)) and any(
             new < old for old, new in zip(before, after, strict=True)
         )
 
 
-def stable_root_problem_signature(values: Mapping[str, Any]) -> str:
+def root_cause_key(values: Mapping[str, Any]) -> str:
     """Hash semantic coordinates while excluding volatile attempt prose/ids."""
 
     failed_gate_ids = sorted(
@@ -244,6 +244,32 @@ def stable_root_problem_signature(values: Mapping[str, Any]) -> str:
             {str(value) for value in values.get("required_paths", ())}
         ),
     }
+    return sha256_text(stable_json(coordinates))
+
+
+def stable_root_problem_signature(values: Mapping[str, Any]) -> str:
+    """Compatibility alias for the Hermes 2.4 ``root_cause_key``."""
+
+    return root_cause_key(values)
+
+
+def occurrence_epoch_key(values: Mapping[str, Any]) -> str:
+    """Bind one root cause to an exact controller/candidate/toolchain epoch."""
+
+    required = (
+        "root_cause_key",
+        "controller_release_digest",
+        "candidate_snapshot_digest",
+        "policy_digest",
+        "contract_digest",
+        "toolchain_manifest_digest",
+    )
+    coordinates: dict[str, str] = {}
+    for name in required:
+        value = str(values.get(name) or "")
+        if not _SHA256.fullmatch(value):
+            raise ValueError(f"{name} must be a lowercase SHA-256")
+        coordinates[name] = value
     return sha256_text(stable_json(coordinates))
 
 
@@ -674,11 +700,10 @@ class PathGovernor:
             if not base_key.endswith(scope_suffix):
                 task["semantic_node_key"] = f"{base_key}{scope_suffix}"
                 identity_rescoped = True
-        contract = str(
-            task_contract_digest(task)
-            if identity_rescoped
-            else task.get("contract_digest") or task_contract_digest(task)
-        )
+        # Candidate scoping changes execution identity, never the immutable
+        # task-contract digest.  Re-digesting after appending ``@candidate``
+        # would make the durable row disagree with its signed contract file.
+        contract = str(task.get("contract_digest") or task_contract_digest(task))
         node_id = str(
             semantic_node_id(task, contract)
             if identity_rescoped
@@ -1225,7 +1250,7 @@ class PathGovernor:
         status: str = "APPLIED",
         max_history: int = 256,
     ) -> str:
-        """Persist an idempotent decision and compact old terminal history."""
+        """Persist one idempotent append-only decision."""
 
         if max_history < 16:
             raise ValueError("Path Governor decision history bound is too small")
@@ -1237,6 +1262,10 @@ class PathGovernor:
             raise ValueError("root problem signature must be a lowercase SHA-256")
         if status not in {"PROPOSED", "APPLYING", "APPLIED", "REJECTED", "FAILED_SAFE"}:
             raise ValueError("Path Governor decision status is invalid")
+        try:
+            FailureAction(action)
+        except ValueError as error:
+            raise ValueError("Path Governor action is outside the closed catalog") from error
         if status == "APPLIED" and not expected_progress_after.strictly_improves(
             progress_before
         ) and evidence_digest is None:
@@ -1274,15 +1303,8 @@ class PathGovernor:
                 now if status == "APPLIED" else None,
             ),
         )
-        self.connection.execute(
-            """DELETE FROM path_decisions
-                WHERE decision_id IN (
-                    SELECT decision_id FROM path_decisions
-                     WHERE product_id=?
-                       AND status IN ('APPLIED','REJECTED','FAILED_SAFE')
-                     ORDER BY created_at DESC, decision_id DESC
-                     LIMIT -1 OFFSET ?
-                )""",
-            (product_id, max_history),
-        )
+        # Hot-state compaction is a separate explicit operation and requires a
+        # WORM archive receipt enforced by the database trigger. Merely crossing
+        # a row-count threshold can never erase forensic history.
+        _ = max_history
         return decision_id

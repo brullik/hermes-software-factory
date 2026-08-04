@@ -7,8 +7,8 @@
     ]
   },
   "dataLicense": "CC0-1.0",
-  "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.3.10",
-  "name": "hermes-software-factory-2.3.10",
+  "documentNamespace": "https://brullik.github.io/hermes-software-factory/sbom/2.4.0",
+  "name": "hermes-software-factory-2.4.0",
   "packages": [
     {
       "SPDXID": "SPDXRef-Package-hermes-software-factory-spec",
@@ -16,7 +16,7 @@
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "name": "hermes-software-factory-spec",
-      "versionInfo": "2.3.10"
+      "versionInfo": "2.4.0"
     },
     {
       "SPDXID": "SPDXRef-Package-hermes-agent",
@@ -65,6 +65,14 @@
       "versionInfo": "2026.7.22"
     },
     {
+      "SPDXID": "SPDXRef-Package-cffi",
+      "downloadLocation": "https://pypi.org/project/cffi/2.1.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "cffi",
+      "versionInfo": "2.1.0"
+    },
+    {
       "SPDXID": "SPDXRef-Package-charset-normalizer",
       "downloadLocation": "https://pypi.org/project/charset-normalizer/3.4.9/",
       "licenseConcluded": "NOASSERTION",
@@ -79,6 +87,14 @@
       "licenseDeclared": "NOASSERTION",
       "name": "colorama",
       "versionInfo": "0.4.6"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-cryptography",
+      "downloadLocation": "https://pypi.org/project/cryptography/45.0.7/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "cryptography",
+      "versionInfo": "45.0.7"
     },
     {
       "SPDXID": "SPDXRef-Package-cyclonedx-python-lib",
@@ -111,6 +127,14 @@
       "licenseDeclared": "NOASSERTION",
       "name": "idna",
       "versionInfo": "3.18"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-hypothesis",
+      "downloadLocation": "https://pypi.org/project/hypothesis/6.165.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "hypothesis",
+      "versionInfo": "6.165.0"
     },
     {
       "SPDXID": "SPDXRef-Package-iniconfig",
@@ -279,6 +303,14 @@
       "licenseDeclared": "NOASSERTION",
       "name": "pyparsing",
       "versionInfo": "3.3.2"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-pycparser",
+      "downloadLocation": "https://pypi.org/project/pycparser/3.0/",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "pycparser",
+      "versionInfo": "3.0"
     },
     {
       "SPDXID": "SPDXRef-Package-pytest",

@@ -810,7 +810,7 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         product_id: str,
         release_id: str,
         staging_digest: str,
-    ) -> None:
+    ) -> dict[str, str]:
         helper = self._validate_production_helper()
         sudo = shutil.which("sudo") or "/usr/bin/sudo"
         result = self.command_runner(
@@ -831,6 +831,141 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         )
         if result.returncode != 0:
             raise ReleaseAdapterError("allowlisted production release helper failed")
+        receipt: object | None = None
+        for line in reversed(result.stdout.splitlines()):
+            try:
+                receipt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            break
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("status") != "PROMOTED"
+            or receipt.get("release_id") != release_id
+        ):
+            raise ReleaseAdapterError("production helper returned an invalid receipt")
+        return {
+            "status": "PROMOTED",
+            "release_id": release_id,
+        }
+
+    def _merge_or_observe(
+        self,
+        *,
+        github: ReleaseGitHub,
+        pull_request: str,
+        candidate_sha: str,
+        required_checks: tuple[str, ...],
+        owner_override: bool,
+    ) -> tuple[str, bool]:
+        """Return an existing merge receipt or perform the checked merge once."""
+
+        try:
+            merge_sha = github.merged_commit(pull_request)
+        except GitHubCommandError:
+            derived_pull_request = github.pull_request_for_head_sha(candidate_sha)
+            if derived_pull_request != pull_request:
+                raise GitHubCommandError(
+                    "accepted staging pull request no longer matches its candidate"
+                )
+            github.verify_pull_request(
+                pull_request,
+                expected_sha=candidate_sha,
+                required_checks=required_checks,
+                owner_override=owner_override,
+                owner_override_reason=(
+                    self.owner_override_reason if owner_override else None
+                ),
+            )
+            github.merge_pull_request_checked(
+                pull_request,
+                expected_sha=candidate_sha,
+                required_checks=required_checks,
+                owner_override=owner_override,
+                owner_override_reason=(
+                    self.owner_override_reason if owner_override else None
+                ),
+            )
+            return github.merged_commit(pull_request), True
+        if not _SHA.fullmatch(merge_sha):
+            raise GitHubCommandError("merged pull request lacks an immutable merge SHA")
+        return merge_sha, False
+
+    def _execute_non_service_promotion(
+        self,
+        *,
+        stage: str,
+        proposed: Mapping[str, Any],
+        product_id: str,
+        repository: str,
+        github: ReleaseGitHub,
+        expected_digest: str,
+    ) -> Mapping[str, Any]:
+        """Promote a checked immutable package/repository artifact without VPS deploy."""
+
+        record = self._load_staging_record(product_id)
+        if repository != record["repository"]:
+            raise ExternalBlocker("release repository differs from accepted package candidate")
+        if not _DIGEST.fullmatch(expected_digest) or record["image_digest"] != expected_digest:
+            raise ExternalBlocker("accepted package digest differs from the trusted dry run")
+        candidate_sha = record["candidate_sha"]
+        pull_request = record["pull_request"]
+        required_checks = (
+            self.required_checks
+            if repository == self.repository
+            else self.external_required_checks
+        )
+        if repository == self.repository and not required_checks:
+            raise ExternalBlocker("required GitHub checks are not configured")
+        owner_override = self.owner_override_enabled
+        if owner_override and self.owner_override_reason_required and not self.owner_override_reason:
+            raise ExternalBlocker("owner override reason is not configured")
+        try:
+            merge_sha, _merge_performed = self._merge_or_observe(
+                github=github,
+                pull_request=pull_request,
+                candidate_sha=candidate_sha,
+                required_checks=required_checks,
+                owner_override=owner_override,
+            )
+        except GitHubCommandError as error:
+            raise ExternalBlocker(str(error)) from error
+        evidence_ref = self._write_audit(
+            product_id,
+            merge_sha,
+            {
+                "stage": stage,
+                "repository": repository,
+                "pull_request": pull_request,
+                "candidate_sha": candidate_sha,
+                "merge_sha": merge_sha,
+                "artifact_digest": expected_digest,
+                "approval_mode": "owner_override" if owner_override else "independent",
+            },
+        )
+        return self._authoritative_result(
+            proposed,
+            product_id,
+            {
+                "status": "completed",
+                "repository": repository,
+                "candidate_sha": merge_sha,
+                "merge": {"performed": True, "merge_sha": merge_sha},
+                "release": {
+                    "version": record["version"],
+                    "image_digest": expected_digest,
+                },
+                "staging": "deployed",
+                "production": "deployed",
+                "rollback": "not_needed",
+                "summary": (
+                    "Adapter verified and promoted the exact checked package/repository "
+                    "artifact without invoking the service-production helper."
+                ),
+                "findings": [],
+                "evidence_refs": [evidence_ref],
+            },
+        )
 
     def execute(
         self,
@@ -842,11 +977,59 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         workspace: Path,
         expected_staging_digest: str | None,
     ) -> Mapping[str, Any]:
-        if stage not in {"staging", "production"}:
-            raise ValueError("release stage must be staging or production")
+        if stage not in {
+            "staging",
+            "production",
+            "publish-dry-run",
+            "signed-release",
+            "signed-publish",
+        }:
+            raise ValueError("release operation is not catalogued")
         product_id = self._safe_product_id(product_id)
         repository = self._repository_for_workspace(workspace)
         github = self._github_for_repository(repository)
+
+        if stage == "publish-dry-run":
+            return self.execute(
+                stage="staging",
+                proposed=proposed,
+                product_id=product_id,
+                task_contract=task_contract,
+                workspace=workspace,
+                expected_staging_digest=None,
+            )
+        if stage == "signed-release":
+            prepared = self.execute(
+                stage="staging",
+                proposed=proposed,
+                product_id=product_id,
+                task_contract=task_contract,
+                workspace=workspace,
+                expected_staging_digest=None,
+            )
+            release = prepared.get("release")
+            if not isinstance(release, Mapping):
+                raise ReleaseAdapterError("signed release preparation lacks artifact digest")
+            prepared_digest = str(release.get("image_digest") or "")
+            return self._execute_non_service_promotion(
+                stage=stage,
+                proposed=proposed,
+                product_id=product_id,
+                repository=repository,
+                github=github,
+                expected_digest=prepared_digest,
+            )
+        if stage == "signed-publish":
+            if expected_staging_digest is None:
+                raise ExternalBlocker("accepted publish dry-run digest is missing")
+            return self._execute_non_service_promotion(
+                stage=stage,
+                proposed=proposed,
+                product_id=product_id,
+                repository=repository,
+                github=github,
+                expected_digest=expected_staging_digest,
+            )
 
         if stage == "staging":
             try:
@@ -965,25 +1148,14 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             raise ExternalBlocker("owner override reason is not configured")
         self._validate_production_helper()
         try:
-            derived_pull_request = github.pull_request_for_head_sha(candidate_sha)
-            if derived_pull_request != pull_request:
-                raise GitHubCommandError("accepted staging pull request no longer matches its candidate")
-            github.verify_pull_request(
-                pull_request,
-                expected_sha=candidate_sha,
+            merge_sha, _merge_performed = self._merge_or_observe(
+                github=github,
+                pull_request=pull_request,
+                candidate_sha=candidate_sha,
                 required_checks=required_checks,
                 owner_override=owner_override,
-                owner_override_reason=self.owner_override_reason if owner_override else None,
             )
-            github.merge_pull_request_checked(
-                pull_request,
-                expected_sha=candidate_sha,
-                required_checks=required_checks,
-                owner_override=owner_override,
-                owner_override_reason=self.owner_override_reason if owner_override else None,
-            )
-            merge_sha = github.merged_commit(pull_request)
-            self._run_production_helper(
+            helper_receipt = self._run_production_helper(
                 repository=repository,
                 product_id=product_id,
                 release_id=merge_sha,
@@ -1001,6 +1173,7 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 "candidate_sha": candidate_sha,
                 "merge_sha": merge_sha,
                 "image_digest": expected_staging_digest,
+                "root_helper_receipt": helper_receipt,
                 "approval_mode": "owner_override" if owner_override else "independent",
             },
         )
@@ -1020,6 +1193,27 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 "findings": [],
                 "evidence_refs": [evidence_ref],
             },
+        )
+
+    def reconcile(
+        self,
+        *,
+        stage: str,
+        proposed: Mapping[str, Any],
+        product_id: str,
+        task_contract: Mapping[str, Any],
+        workspace: Path,
+        expected_staging_digest: str | None,
+    ) -> Mapping[str, Any]:
+        """Resume the same deterministic idempotent operation after a crash boundary."""
+
+        return self.execute(
+            stage=stage,
+            proposed=proposed,
+            product_id=product_id,
+            task_contract=task_contract,
+            workspace=workspace,
+            expected_staging_digest=expected_staging_digest,
         )
 
 

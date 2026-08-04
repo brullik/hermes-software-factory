@@ -53,7 +53,7 @@ The live Failure Router computes this signature before selecting a recovery,
 persists it on every routed task, consumes the matching `problem_budgets` row,
 and records the decision in `path_decisions`. The read-only arbitration slot is
 executed by the explicit Sol `path-arbiter` role with
-`path-decision-proposal.schema.json`; an accepted `REPLAN_DELTA` recommendation
+`path-decision-proposal.schema.json`; an accepted `RECOMPILE_AFFECTED_SUBGRAPH` recommendation
 creates one bounded Replanner successor, while any repeated or unsafe
 arbitration fails closed. Plan Delta ingestion inherits the same signature and
 transactionally reserves all fresh implementation executions before activating

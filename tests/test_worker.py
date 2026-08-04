@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -13,11 +15,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
+import pytest
 import yaml
 
 from factory.artifacts import ArtifactStore, artifact_metadata
 from factory.attempts import IdenticalAttemptError
-from factory.autonomy import CAPABILITY_PROFILES
+from factory.autonomy import CAPABILITY_PROFILES, FailureData
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
 from factory.hermes_stdin import _invoke_hermes, read_stdin_prompt
@@ -25,7 +28,8 @@ from factory.intake import IntakeService
 from factory.path_governor import ResultLineageIdentityError
 from factory.pipeline import PipelineCoordinator
 from factory.policy import policy_digest
-from factory.providers import ModelSelection
+from factory.proof_obligations import RecoveryCertificateService, SideEffectProtocol
+from factory.providers import ExternalBlocker, ModelSelection
 from factory.quality import QualityGateRun
 from factory.reconciler import PipelineReconciler
 from factory.state import StateStore
@@ -37,16 +41,240 @@ from factory.worker import (
     TaskExecutionSpec,
     WorkerResult,
     _current_replan_frontier,
+    _local_file_reference,
     _mandatory_gate_failure_data,
     _normalized_output_status,
     _replanner_failure_inventory,
     _replanner_hypothesis_inventory,
     _replanner_scope_policy,
+    _worker_result_digest,
     _workspace_snapshot,
     public_github_repository_url,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_worker_result_digest_never_dereferences_internal_uri() -> None:
+    fallback = {
+        "task_id": "T-INTERNAL-RESULT",
+        "status": "completed",
+        "reason_code": None,
+        "detail": None,
+    }
+
+    with patch("factory.worker.Path.is_file") as is_file:
+        digest = _worker_result_digest(
+            "internal://task/T-INTERNAL-RESULT",
+            fallback,
+        )
+
+    is_file.assert_not_called()
+    assert digest == sha256_text(stable_json(fallback))
+
+
+def test_failure_envelope_preserves_internal_evidence_uri() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=ROOT,
+        )
+        internal_ref = "internal://task/T-INTERNAL-FAILURE"
+
+        assert _local_file_reference(internal_ref) is None
+        sanitized, path = worker._failure_envelope(
+            {
+                "product_id": "P-INTERNAL-FAILURE",
+                "task_id": "T-INTERNAL-FAILURE",
+            },
+            FailureData(
+                failure_class="controller",
+                reason_code="controller_exception_permission_error",
+                safe_message="Controller result persistence failed safely.",
+                evidence_ref=internal_ref,
+            ),
+        )
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["evidence_refs"] == [internal_ref]
+        assert sanitized.evidence_ref == f"evidence/{path.name}"
+        state.close()
+
+
+def test_default_spec_falls_back_when_optional_subject_manifest_is_inaccessible() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-OPAQUE-SUBJECT-FALLBACK"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Compile a task without relying on inherited cwd access",
+            idempotency_key="opaque-subject-fallback",
+        )
+        PipelineCoordinator(config, state).seed_initial(product_id)
+        task = state.list_tasks(product_id)[0]
+        repository_root = root / "inaccessible-cwd"
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=repository_root,
+        )
+
+        with patch(
+            "factory.worker._local_file_reference",
+            return_value=None,
+        ) as local_file:
+            spec = worker.default_spec(task)
+
+        local_file.assert_called_once_with(str(repository_root / "SHA256SUMS"))
+        assert spec.subject_sha == sha256_text(stable_json(spec.task_contract))
+        state.close()
+
+
+def test_default_spec_uses_exact_revised_contract_ref_instead_of_stale_canonical() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-REVISED-CONTRACT"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Execute the exact revised security review contract",
+            idempotency_key="revised-contract-ref",
+        )
+        task_id = "T-REVISED-CONTRACT"
+        canonical = replanner_task_contract(config, product_id, task_id)
+        canonical["quality_gates"] = ["target-sast"]
+        canonical_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json",
+            canonical,
+            filename=f"task-{task_id}.json",
+        )
+        state.add_task(
+            task_id=task_id,
+            product_id=product_id,
+            title=str(canonical["title"]),
+            role="replanner",
+            output_schema="backlog-plan-v2.schema.json",
+            contract_ref=f"evidence/{canonical_path.name}",
+            stage_key="replanner",
+            conflict_keys=[f"{product_id}:planning"],
+            capability_profile="planning_readonly",
+            required_capabilities=list(canonical["required_capabilities"]),
+        )
+        revised = {
+            **canonical,
+            "task_revision": 2,
+            "quality_gates": ["target-sast", "target-container-image-scan"],
+        }
+        revised_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json",
+            revised,
+            filename=f"task-{task_id}-container-gate.json",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET contract_ref=?, task_revision=? WHERE task_id=?",
+                (
+                    f"evidence/{revised_path.name}",
+                    revised["task_revision"],
+                    task_id,
+                ),
+            )
+        durable = state.get_task(task_id)
+        assert durable is not None
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            health_probe=lambda _: True,
+            repository_root=ROOT,
+        )
+
+        spec = worker.default_spec(durable)
+
+        assert spec.task_contract["quality_gates"] == [
+            "target-sast",
+            "target-container-image-scan",
+        ]
+        state.close()
+
+
+def test_default_spec_rejects_contract_ref_with_stale_revision() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-STALE-CONTRACT"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Reject stale immutable task contract revisions",
+            idempotency_key="stale-contract-ref",
+        )
+        task_id = "T-STALE-CONTRACT"
+        contract = replanner_task_contract(config, product_id, task_id)
+        contract_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json",
+            contract,
+            filename=f"task-{task_id}.json",
+        )
+        state.add_task(
+            task_id=task_id,
+            product_id=product_id,
+            title=str(contract["title"]),
+            role="replanner",
+            output_schema="backlog-plan-v2.schema.json",
+            contract_ref=f"evidence/{contract_path.name}",
+            stage_key="replanner",
+            conflict_keys=[f"{product_id}:planning"],
+            capability_profile="planning_readonly",
+            required_capabilities=list(contract["required_capabilities"]),
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET task_revision=task_revision+1 WHERE task_id=?",
+                (task_id,),
+            )
+        durable = state.get_task(task_id)
+        assert durable is not None
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            health_probe=lambda _: True,
+            repository_root=ROOT,
+        )
+
+        with pytest.raises(ExternalBlocker) as error:
+            worker.default_spec(durable)
+
+        assert error.value.reason_code == "invalid_task_contract_reference"
+        state.close()
 
 
 def test_current_replan_frontier_excludes_only_historical_superseded_nodes() -> None:
@@ -1355,7 +1583,11 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                result.status,
+                "completed",
+                msg=f"reason={result.reason_code}; detail={result.detail}",
+            )
             self.assertIsNone(result.reason_code)
             self.assertIsNotNone(result.artifact_ref)
             attempt = json.loads(Path(str(result.artifact_ref)).read_text(encoding="utf-8"))
@@ -1423,7 +1655,11 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                result.status,
+                "completed",
+                msg=f"{result.reason_code}: {result.detail}",
+            )
             self.assertGreaterEqual(heartbeat.call_count, 2)
             tasks = state.list_tasks("P-LEASE-HEARTBEAT")
             self.assertEqual(tasks[0]["status"], "DONE")
@@ -1645,6 +1881,10 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(durable)
             assert durable is not None
             self.assertEqual(durable["status"], "FAILED_SAFE")
+            self.assertEqual(
+                durable["repair_context_ref"],
+                f"evidence/{brief_path.name}",
+            )
             failure = state.list_failures(intake_result.product_id)[-1]
             self.assertEqual(failure["exception_type"], "ValueError")
             self.assertTrue(failure["stack_fingerprint"])
@@ -2405,7 +2645,14 @@ class WorkerTests(unittest.TestCase):
 
             self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                result.status,
+                "completed",
+                msg=(
+                    f"reason={result.reason_code}; detail={result.detail}; "
+                    f"executor_calls={executor.calls}"
+                ),
+            )
             self.assertEqual(len(executor.calls), 1)
             self.assertEqual(executor.calls[0]["proposed"], proposed)
             output_paths = list(config.evidence_dir.glob("release-operation-result-*.json"))
@@ -2447,6 +2694,83 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result.status, "failed_safe")
             self.assertEqual(result.reason_code, "scope_violation")
             self.assertEqual(executor.calls, [])
+            state.close()
+
+    def test_release_worker_reconciles_executing_intent_after_crash_checkpoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            product_id, contract_path = staging_release_task(config, state, artifacts)
+            task_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            task = state.list_tasks(product_id)[0]
+            postcondition = {
+                "product_id": product_id,
+                "task_id": str(task["task_id"]),
+                "stage": "staging",
+                "expected_staging_digest": "not-applicable",
+            }
+            side_effect_key = sha256_text(
+                stable_json(
+                    [
+                        task_contract.get("idempotency_key"),
+                        postcondition,
+                        "release-adapter-v2",
+                    ]
+                )
+            )
+            with state._connection:
+                protocol = SideEffectProtocol(state._connection)
+                intent_id = protocol.prepare(
+                    product_id=product_id,
+                    operation="release:staging",
+                    adapter="configured-release-executor",
+                    idempotency_key=side_effect_key,
+                    expected_postcondition=postcondition,
+                )
+                protocol.mark_executing(intent_id)
+
+            authoritative = release_operation(
+                config,
+                product_id,
+                candidate_sha="c" * 40,
+                image_digest="sha256:" + "d" * 64,
+            )
+
+            class ReconcileOnlyExecutor:
+                def __init__(self) -> None:
+                    self.execute_calls = 0
+                    self.reconcile_calls = 0
+
+                def execute(self, **_: Any) -> Mapping[str, Any]:
+                    self.execute_calls += 1
+                    raise AssertionError("external effect must not be executed twice")
+
+                def reconcile(self, **_: Any) -> Mapping[str, Any]:
+                    self.reconcile_calls += 1
+                    return authoritative
+
+            executor = ReconcileOnlyExecutor()
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(authoritative)),
+                release_executor=executor,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            assert result is not None
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(executor.execute_calls, 0)
+            self.assertEqual(executor.reconcile_calls, 1)
+            self.assertEqual(SideEffectProtocol(state._connection).status(intent_id), "VERIFIED")
             state.close()
 
     def test_worker_runs_selected_provider_and_persists_contract_and_attempt(self) -> None:
@@ -2831,6 +3155,19 @@ class WorkerTests(unittest.TestCase):
                 failure_kind="semantic",
             )
             state.transition_product(product_id, "FAILED_SAFE")
+            with state._lock, state._connection:
+                RecoveryCertificateService(state._connection).issue(
+                    product_id=product_id,
+                    previous_epoch_key=sha256_text("worker-deferred-previous"),
+                    new_epoch_key=sha256_text("worker-deferred-new"),
+                    root_cause_key=sha256_text("worker-deferred-cause"),
+                    controller_release_digest=state.controller_release_digest,
+                    policy_schema_digest=policy_digest(config),
+                    fixed_invariant_id="FIX-WORKER-DEFERRED-BUILDER",
+                    regression_evidence_ref="evidence://regression/worker-deferred",
+                    migration_dry_run_digest=sha256_text("worker-deferred-migration"),
+                    backup_restore_proof_ref="evidence://backup/worker-deferred",
+                )
             self.assertTrue(
                 state.recover_deferred_builder_gate(
                     product_id=product_id,
@@ -3065,6 +3402,19 @@ class WorkerTests(unittest.TestCase):
                 failure_kind="semantic",
             )
             state.transition_product(adopted_product_id, "FAILED_SAFE")
+            with state._lock, state._connection:
+                RecoveryCertificateService(state._connection).issue(
+                    product_id=adopted_product_id,
+                    previous_epoch_key=sha256_text("worker-adopted-previous"),
+                    new_epoch_key=sha256_text("worker-adopted-new"),
+                    root_cause_key=sha256_text("worker-adopted-cause"),
+                    controller_release_digest=state.controller_release_digest,
+                    policy_schema_digest=policy_digest(config),
+                    fixed_invariant_id="FIX-WORKER-ADOPTED-BUILDER",
+                    regression_evidence_ref="evidence://regression/worker-adopted",
+                    migration_dry_run_digest=sha256_text("worker-adopted-migration"),
+                    backup_restore_proof_ref="evidence://backup/worker-adopted",
+                )
             self.assertTrue(
                 state.adopt_controller_valid_builder(
                     product_id=adopted_product_id,
@@ -3684,6 +4034,21 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(environment["XDG_RUNTIME_DIR"], "/run/hermes-factory")
         self.assertNotIn("UNTRUSTED_SECRET", environment)
 
+    def test_subprocess_runner_exposes_controller_python_toolchain(self) -> None:
+        runner = SubprocessHermesRunner()
+
+        with patch.dict(
+            "factory.worker.os.environ",
+            {"PATH": "/usr/local/bin:/usr/bin"},
+            clear=True,
+        ):
+            environment = runner._environment(Path("/workspace/product"))
+
+        self.assertEqual(
+            environment["PATH"].split(os.pathsep)[0],
+            str(Path(sys.executable).resolve().parent),
+        )
+
     def test_AUT_P0_035_success_stdout_json_excludes_stderr_diagnostics(self) -> None:
         selection = ModelSelection(
             "openai-codex",
@@ -3958,6 +4323,101 @@ class WorkerTests(unittest.TestCase):
             attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
             self.assertIn("builder_repair_handoff", attempt["summary"])
             self.assertIn("SEC-001 [medium]", attempt["summary"])
+            state.close()
+
+    def test_controller_runtime_finding_is_not_routed_as_product_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / "README.md").write_text("minimal workspace\n", encoding="utf-8")
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            product_id = "P-CONTROLLER-RUNTIME-HANDOFF"
+            state.create_product(
+                product_id=product_id,
+                owner_id="owner",
+                source="test",
+                idea="Keep controller runtime defects outside product repair",
+                idempotency_key="controller-runtime-handoff-test",
+            )
+            task_path = PipelineCoordinator(config, state, ArtifactStore(config)).create_task(
+                product_id,
+                "security-reviewer",
+            )
+            contract = json.loads(task_path.read_text(encoding="utf-8"))
+            output = {
+                **artifact_metadata(
+                    config,
+                    "security-reviewer",
+                    "controller-runtime-handoff-test",
+                    product_id,
+                ),
+                "producer": {
+                    "role": "security-reviewer",
+                    "tier": "terra",
+                    "provider": "openai_codex_subscription",
+                    "model": "gpt-5.6-terra",
+                },
+                "task_id": contract["task_id"],
+                "subject_sha": "b" * 64,
+                "status": "repair_required",
+                "changed_trust_boundaries": [],
+                "findings": [
+                    {
+                        "id": "CONTROLLER_PODMAN_IPAM_DATABASE_MISSING",
+                        "severity": "high",
+                        "category": "controller-runtime",
+                        "description": "The controller RunRoot has no initialized IPAM database.",
+                        "evidence": "controller://podman/runroot/networks",
+                        "required_fix": "Initialize and revalidate the controller-owned rootless runtime.",
+                    },
+                    {
+                        "id": "FULL_PYTEST_BLOCKED_BY_CONTROLLER_RUNTIME",
+                        "severity": "medium",
+                        "category": "controller-runtime",
+                        "description": "The full suite reached one runtime-dependent topology test.",
+                        "evidence": "tests/container/test_compose_topology.py",
+                        "required_fix": "Rerun the same immutable task after controller recovery.",
+                    },
+                ],
+                "release_blocked": True,
+                "assumptions": [],
+                "evidence_refs": ["internal://capability/container-runtime"],
+            }
+            runner = FakeRunner(json.dumps(output))
+            worker = AgentWorker(
+                config,
+                state,
+                runner=runner,
+                health_probe=lambda _: True,
+                repository_root=repository,
+            )
+            worker.quality = PassingQuality()  # type: ignore[assignment]
+            spec = TaskExecutionSpec(
+                task_contract=contract,
+                role="security-reviewer",
+                output_schema="security-review-result.schema.json",
+                subject_sha="a" * 64,
+            )
+
+            result = worker.execute(spec)
+
+            self.assertEqual(result.status, "repair_required")
+            self.assertEqual(result.reason_code, "controller_runtime_precondition_failed")
+            self.assertIsNotNone(result.failure_data)
+            assert result.failure_data is not None
+            self.assertEqual(result.failure_data.failure_class, "controller")
+            self.assertEqual(
+                result.failure_data.failed_gate_ids,
+                (
+                    "CONTROLLER_PODMAN_IPAM_DATABASE_MISSING",
+                    "FULL_PYTEST_BLOCKED_BY_CONTROLLER_RUNTIME",
+                ),
+            )
+            attempt = json.loads(Path(result.artifact_ref or "").read_text(encoding="utf-8"))
+            self.assertIn("controller_incident_handoff", attempt["summary"])
             state.close()
 
     def test_security_preflight_failure_skips_provider_call(self) -> None:

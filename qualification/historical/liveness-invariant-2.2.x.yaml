@@ -1,0 +1,13 @@
+schema_version: "1.0"
+scenario_id: liveness-invariant-2.2.x
+source_release: 2.2.x
+source_incident_count: 57
+initial_state: {schema_version: 16, product_status: IMPLEMENTING, task_count: 9186, accepted_result_count: 376, sanitized: true}
+events:
+  - {event_id: failure-1, type: failure_received, reason_code: liveness_invariant_violation}
+injected_faults: [no-progress-controller-state]
+expected_decisions:
+  - {event_id: failure-1, owner: controller, action: CONTROLLER_QUARANTINE, registered: true}
+forbidden_decisions:
+  - {event_id: failure-1, owner: product, action: RECOMPILE_AFFECTED_SUBGRAPH, registered: true}
+expected_terminal: FAILED_SAFE

@@ -1,0 +1,13 @@
+schema_version: "1.0"
+scenario_id: remaining-sanitized-incidents-2.2.x
+source_release: 2.2.x
+source_incident_count: 66
+initial_state: {schema_version: 16, product_status: FAILED_SAFE, task_count: 10536, accepted_result_count: 2516, sanitized: true}
+events:
+  - {event_id: failure-1, type: failure_received, reason_code: historical_unclassified_controller_failure}
+injected_faults: [sanitized-unknown-historical-reason]
+expected_decisions:
+  - {event_id: failure-1, owner: controller, action: CONTROLLER_QUARANTINE, registered: false}
+forbidden_decisions:
+  - {event_id: failure-1, owner: product, action: REPAIR_NODE_VERSION, registered: false}
+expected_terminal: FAILED_SAFE

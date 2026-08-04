@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Hermes Q7 shadow comparison continuously
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Persistent=true
+Unit=hermes-factory-shadow-verify.service
+
+[Install]
+WantedBy=timers.target

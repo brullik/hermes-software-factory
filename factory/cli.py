@@ -26,7 +26,15 @@ from .recovery import (
     apply_recovery_plan,
     build_recovery_plan,
     finalize_recovery_application,
+    resume_canonical_builder_schema_failure,
     resume_controller_compilation_failure,
+    resume_missing_security_container_gate_failure,
+    resume_opaque_subject_reference_failure,
+    resume_repair_context_binding_failure,
+    resume_reviewer_builder_route_failure,
+    resume_reviewer_revalidation_lineage_failure,
+    resume_stale_reviewer_execution_failure,
+    resume_unverified_container_repair_failure,
     resume_zero_dependency_audit_failure,
     state_audit,
     verify_active_graphs,
@@ -393,6 +401,172 @@ def zero_dependency_audit_recovery_command(args: argparse.Namespace) -> int:
     )
     try:
         result = resume_zero_dependency_audit_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def reviewer_builder_route_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_reviewer_builder_route_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def opaque_subject_reference_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_opaque_subject_reference_failure(
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def canonical_builder_schema_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_canonical_builder_schema_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def repair_context_binding_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_repair_context_binding_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def reviewer_revalidation_lineage_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_reviewer_revalidation_lineage_failure(
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def unverified_container_repair_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_unverified_container_repair_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def security_container_gate_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_missing_security_container_gate_failure(
+            config,
+            state,
+            product_id=str(args.product_id),
+            failure_id=str(args.failure_id),
+            correction_evidence_digest=str(args.correction_evidence_digest),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        state.close()
+
+
+def stale_reviewer_execution_recovery_command(args: argparse.Namespace) -> int:
+    config = _config(args.config)
+    state = StateStore(
+        config.database_path,
+        max_active_workers=config.max_active_workers,
+        max_active_products=config.max_active_products,
+    )
+    try:
+        result = resume_stale_reviewer_execution_failure(
             config,
             state,
             product_id=str(args.product_id),
@@ -884,6 +1058,110 @@ def build_parser() -> argparse.ArgumentParser:
     )
     zero_dependency_audit_recovery.set_defaults(
         function=zero_dependency_audit_recovery_command
+    )
+    reviewer_builder_route_recovery = subparsers.add_parser(
+        "reviewer-builder-route-recovery"
+    )
+    reviewer_builder_route_recovery.add_argument("--config", type=Path)
+    reviewer_builder_route_recovery.add_argument("--product-id", required=True)
+    reviewer_builder_route_recovery.add_argument("--failure-id", required=True)
+    reviewer_builder_route_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    reviewer_builder_route_recovery.set_defaults(
+        function=reviewer_builder_route_recovery_command
+    )
+    opaque_subject_reference_recovery = subparsers.add_parser(
+        "opaque-subject-reference-recovery"
+    )
+    opaque_subject_reference_recovery.add_argument("--config", type=Path)
+    opaque_subject_reference_recovery.add_argument("--product-id", required=True)
+    opaque_subject_reference_recovery.add_argument("--failure-id", required=True)
+    opaque_subject_reference_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    opaque_subject_reference_recovery.set_defaults(
+        function=opaque_subject_reference_recovery_command
+    )
+    canonical_builder_schema_recovery = subparsers.add_parser(
+        "canonical-builder-schema-recovery"
+    )
+    canonical_builder_schema_recovery.add_argument("--config", type=Path)
+    canonical_builder_schema_recovery.add_argument("--product-id", required=True)
+    canonical_builder_schema_recovery.add_argument("--failure-id", required=True)
+    canonical_builder_schema_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    canonical_builder_schema_recovery.set_defaults(
+        function=canonical_builder_schema_recovery_command
+    )
+    repair_context_binding_recovery = subparsers.add_parser(
+        "repair-context-binding-recovery"
+    )
+    repair_context_binding_recovery.add_argument("--config", type=Path)
+    repair_context_binding_recovery.add_argument("--product-id", required=True)
+    repair_context_binding_recovery.add_argument("--failure-id", required=True)
+    repair_context_binding_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    repair_context_binding_recovery.set_defaults(
+        function=repair_context_binding_recovery_command
+    )
+    reviewer_revalidation_lineage_recovery = subparsers.add_parser(
+        "reviewer-revalidation-lineage-recovery"
+    )
+    reviewer_revalidation_lineage_recovery.add_argument("--config", type=Path)
+    reviewer_revalidation_lineage_recovery.add_argument("--product-id", required=True)
+    reviewer_revalidation_lineage_recovery.add_argument("--failure-id", required=True)
+    reviewer_revalidation_lineage_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    reviewer_revalidation_lineage_recovery.set_defaults(
+        function=reviewer_revalidation_lineage_recovery_command
+    )
+    unverified_container_repair_recovery = subparsers.add_parser(
+        "unverified-container-repair-recovery"
+    )
+    unverified_container_repair_recovery.add_argument("--config", type=Path)
+    unverified_container_repair_recovery.add_argument("--product-id", required=True)
+    unverified_container_repair_recovery.add_argument("--failure-id", required=True)
+    unverified_container_repair_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    unverified_container_repair_recovery.set_defaults(
+        function=unverified_container_repair_recovery_command
+    )
+    security_container_gate_recovery = subparsers.add_parser(
+        "security-container-gate-recovery"
+    )
+    security_container_gate_recovery.add_argument("--config", type=Path)
+    security_container_gate_recovery.add_argument("--product-id", required=True)
+    security_container_gate_recovery.add_argument("--failure-id", required=True)
+    security_container_gate_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    security_container_gate_recovery.set_defaults(
+        function=security_container_gate_recovery_command
+    )
+    stale_reviewer_execution_recovery = subparsers.add_parser(
+        "stale-reviewer-execution-recovery"
+    )
+    stale_reviewer_execution_recovery.add_argument("--config", type=Path)
+    stale_reviewer_execution_recovery.add_argument("--product-id", required=True)
+    stale_reviewer_execution_recovery.add_argument("--failure-id", required=True)
+    stale_reviewer_execution_recovery.add_argument(
+        "--correction-evidence-digest",
+        required=True,
+    )
+    stale_reviewer_execution_recovery.set_defaults(
+        function=stale_reviewer_execution_recovery_command
     )
     graph_verify = subparsers.add_parser("graph-verify")
     graph_verify.add_argument("--config", type=Path)

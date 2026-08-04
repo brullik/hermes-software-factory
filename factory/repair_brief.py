@@ -15,6 +15,9 @@ _BUILDER_CONTROLLER_COMPLETE_FINDINGS = {
     "CANONICAL_DETECTOR_SCOPE_CONFLICT",
     "UNTRACKED_BYTECODE_PRESENT",
 }
+_CONTROLLER_RUNTIME_FINDING_CODES = {
+    "FULL_PYTEST_BLOCKED_BY_CONTROLLER_RUNTIME",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,32 @@ def normalized_repair_findings(output: Mapping[str, Any] | None) -> tuple[Repair
             )
         )
     return tuple(findings)
+
+
+def controller_runtime_repair_findings(
+    output: Mapping[str, Any] | None,
+) -> tuple[RepairFinding, ...]:
+    """Recognize a provider-reported controller precondition without accepting work.
+
+    A controller handoff is allowed only when every blocking finding is explicitly
+    controller-owned and at least one finding supplies a ``CONTROLLER_`` anchor.
+    The failed product task remains unaccepted and must be rerun after deterministic
+    runtime recovery.
+    """
+
+    findings = normalized_repair_findings(output)
+    if not findings:
+        return ()
+    finding_ids = {item.finding_id.upper() for item in findings}
+    if not any(value.startswith("CONTROLLER_") for value in finding_ids):
+        return ()
+    if not all(
+        value.startswith("CONTROLLER_")
+        or value in _CONTROLLER_RUNTIME_FINDING_CODES
+        for value in finding_ids
+    ):
+        return ()
+    return findings
 
 
 def repair_requirements(

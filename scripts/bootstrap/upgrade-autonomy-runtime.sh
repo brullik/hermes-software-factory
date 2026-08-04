@@ -65,33 +65,9 @@ install -o root -g root -m 0755 \
   /usr/local/sbin/hermes-factory-release-submit
 systemctl daemon-reload
 
-PROBE_DIR="$(mktemp -d "${STATE_DIR}/podman-preflight.XXXXXX")"
-chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}"
-chmod 0700 "${PROBE_DIR}"
-cleanup_probe() {
-  if [[ "${PROBE_DIR}" == "${STATE_DIR}"/podman-preflight.* ]]; then
-    rm -f -- "${PROBE_DIR}/Containerfile" "${PROBE_DIR}/payload"
-    rmdir -- "${PROBE_DIR}" 2>/dev/null || true
-  fi
-}
-trap cleanup_probe EXIT
-install -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0644 \
-  /dev/null "${PROBE_DIR}/payload"
-printf 'FROM scratch\nCOPY payload /payload\n' > "${PROBE_DIR}/Containerfile"
-chown "${SERVICE_USER}:${SERVICE_USER}" "${PROBE_DIR}/Containerfile"
-runuser -u "${SERVICE_USER}" -- env \
-  HOME="${STATE_DIR}" \
-  XDG_RUNTIME_DIR="${RUNTIME_DIR}" \
-  podman info --format json >/dev/null
-runuser -u "${SERVICE_USER}" -- env \
-  HOME="${STATE_DIR}" \
-  XDG_RUNTIME_DIR="${RUNTIME_DIR}" \
-  podman build --pull=never --no-cache \
-  --tag localhost/hermes-toolchain-probe:latest \
-  --file "${PROBE_DIR}/Containerfile" "${PROBE_DIR}" >/dev/null
-runuser -u "${SERVICE_USER}" -- env \
-  HOME="${STATE_DIR}" \
-  XDG_RUNTIME_DIR="${RUNTIME_DIR}" \
-  podman image rm --force localhost/hermes-toolchain-probe:latest >/dev/null
+SERVICE_USER="${SERVICE_USER}" \
+STATE_DIR="${STATE_DIR}" \
+RUNTIME_DIR="${RUNTIME_DIR}" \
+bash "${ROOT_DIR}/scripts/bootstrap/preflight-rootless-podman.sh"
 
 printf 'AUTONOMY HOST RUNTIME PASSED\n'

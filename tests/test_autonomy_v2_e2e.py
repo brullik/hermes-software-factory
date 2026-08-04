@@ -341,6 +341,8 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
             product_id,
             tmp_path / "private-workspace",
         )
+        for status in ("RISK_CLASSIFIED", "ARCHITECTED", "IMPLEMENTING"):
+            state.transition_product(product_id, status)
         root_id = "T-PRIVROOT01"
         state.add_task(
             task_id=root_id,
@@ -970,7 +972,7 @@ def test_AUT_P1_007_cancel_pause_resume_preserve_graph(
         state.close()
 
 
-def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
+def test_AUT_P1_008_controller_incident_quarantines_without_model_recovery(
     tmp_path: Path,
 ) -> None:
     config = configured(tmp_path)
@@ -1026,30 +1028,20 @@ def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
         routed = FailureRouter(config, state).route_open_failures(
             "product-autonomy"
         )
-        assert len(routed) == 1
-        incident_task = state.get_task(routed[0])
-        assert incident_task is not None
-        assert incident_task["role"] == "incident-recovery"
-        assert incident_task["capability_profile"] == "controller_incident"
-        incident_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(incident_task["contract_ref"])).name
-            ).read_text(encoding="utf-8")
-        )
-        assert {
-            item["criterion_id"]
-            for item in incident_contract["acceptance"]
-        } == {
-            "AC-CONTROLLER-INCIDENT-CONTAINMENT",
-            "AC-CONTROLLER-INCIDENT-EVIDENCE",
-            "AC-CONTROLLER-INCIDENT-NEXT-STEP",
-        }
-        assert all(
-            "accept-controller" not in item["verification"]
-            for item in incident_contract["acceptance"]
+        assert routed == []
+        assert not any(
+            task["role"] == "incident-recovery"
+            for task in state.list_tasks("product-autonomy")
         )
         assert state.list_hypotheses("product-autonomy") == []
+        product = state.get_product("product-autonomy")
+        assert product is not None
+        assert product["status"] == "FAILED_SAFE"
+        assert product["terminal_reason"] == "controller_schema_corruption"
+        assert state._connection.execute(
+            "SELECT COUNT(*) FROM problem_budgets WHERE product_id=?",
+            ("product-autonomy",),
+        ).fetchone()[0] == 0
         with state._lock:
             incidents = state._connection.execute(
                 "SELECT reason_code, status FROM controller_incidents",
@@ -1057,83 +1049,11 @@ def test_AUT_P1_008_controller_incident_does_not_consume_semantic_budget(
         assert [tuple(row) for row in incidents] == [
             ("controller_schema_corruption", "OPEN")
         ]
-
-        first_recovery = state.claim_task(worker_id="incident-recovery-1")
-        assert first_recovery is not None
-        assert first_recovery["task_id"] == incident_task["task_id"]
-        first_failure_id = str(incident_task["failure_id"])
-        failed_recovery = state.commit_task_outcome(
-            TaskOutcome(
-                task_id=str(first_recovery["task_id"]),
-                worker_id="incident-recovery-1",
-                lease_token=str(first_recovery["lease_token"]),
-                expected_task_revision=int(first_recovery["task_revision"]),
-                expected_plan_revision=1,
-                idempotency_key=sha256_text("incident-recovery-first-failure"),
-                result_ref="internal://incident/recovery-first-failure",
-                result_digest=sha256_text("incident-recovery-first-failure"),
-                status="FAILED_SEMANTIC",
-                failure=FailureData(
-                    failure_class="semantic",
-                    reason_code="model_requested_repair",
-                    safe_message="Recovery evidence requires one corrected retry",
-                    evidence_ref="internal://incident/recovery-first-failure",
-                    parent_failure_id=first_failure_id,
-                ),
-            )
-        )
-        assert failed_recovery.failure_id is not None
-        rerouted = FailureRouter(config, state).route_open_failures(
-            "product-autonomy"
-        )
-        assert len(rerouted) == 1
-        final_recovery = state.claim_task(worker_id="incident-recovery-2")
-        assert final_recovery is not None
-        assert final_recovery["task_id"] == rerouted[0]
-        final_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(final_recovery["contract_ref"])).name
-            ).read_text(encoding="utf-8")
-        )
-        assert {
-            item["criterion_id"] for item in final_contract["acceptance"]
-        } == {
-            "AC-CONTROLLER-INCIDENT-CONTAINMENT",
-            "AC-CONTROLLER-INCIDENT-EVIDENCE",
-            "AC-CONTROLLER-INCIDENT-NEXT-STEP",
-        }
-        state.commit_task_outcome(
-            TaskOutcome(
-                task_id=str(final_recovery["task_id"]),
-                worker_id="incident-recovery-2",
-                lease_token=str(final_recovery["lease_token"]),
-                expected_task_revision=int(final_recovery["task_revision"]),
-                expected_plan_revision=1,
-                idempotency_key=sha256_text("incident-recovery-success"),
-                result_ref="internal://incident/recovered",
-                result_digest=sha256_text("incident-recovered"),
-                status="ACCEPTED",
-            )
-        )
-
-        assert {
-            failure["status"]
-            for failure in state.list_failures("product-autonomy")
-        } == {"RESOLVED"}
-        with state._lock:
-            resolved_incidents = state._connection.execute(
-                "SELECT status, resolved_at FROM controller_incidents"
-            ).fetchall()
-        assert all(
-            row["status"] == "RESOLVED" and row["resolved_at"]
-            for row in resolved_incidents
-        )
     finally:
         state.close()
 
 
-def test_AUT_P1_008_two_identical_recoveries_force_diagnosis_reassessment(
+def test_AUT_P1_008_controller_defect_cannot_start_recovery_retry_loop(
     tmp_path: Path,
 ) -> None:
     config = configured(tmp_path)
@@ -1190,78 +1110,19 @@ def test_AUT_P1_008_two_identical_recoveries_force_diagnosis_reassessment(
         routed = FailureRouter(config, state).route_open_failures(
             "product-autonomy"
         )
-        assert len(routed) == 1
-
-        # Two identical same-role recovery failures exhaust the hypothesis.
-        # A third incident-recovery provider call is forbidden.
-        for recovery_number in range(1, 3):
-            recovery = state.claim_task(
-                worker_id=f"incident-depth-{recovery_number}"
-            )
-            assert recovery is not None
-            assert recovery["task_id"] == routed[0]
-            assert recovery["role"] == "incident-recovery"
-            outcome = state.commit_task_outcome(
-                TaskOutcome(
-                    task_id=str(recovery["task_id"]),
-                    worker_id=f"incident-depth-{recovery_number}",
-                    lease_token=str(recovery["lease_token"]),
-                    expected_task_revision=int(recovery["task_revision"]),
-                    expected_plan_revision=1,
-                    idempotency_key=sha256_text(
-                        f"incident-depth-failure-{recovery_number}"
-                    ),
-                    result_ref=(
-                        f"internal://incident/depth-failure-{recovery_number}"
-                    ),
-                    result_digest=sha256_text(
-                        f"incident-depth-failure-{recovery_number}"
-                    ),
-                    status="FAILED_SEMANTIC",
-                    failure=FailureData(
-                        failure_class="semantic",
-                        reason_code="model_requested_repair",
-                        safe_message=(
-                            "The current controller recovery hypothesis did not "
-                            "restore the invariant"
-                        ),
-                        evidence_ref=(
-                            f"internal://incident/depth-failure-{recovery_number}"
-                        ),
-                        parent_failure_id=str(recovery["failure_id"]),
-                    ),
-                )
-            )
-            assert outcome.failure_id is not None
-            routed = FailureRouter(config, state).route_open_failures(
-                "product-autonomy"
-            )
-            assert len(routed) == 1
-            routed_task = state.get_task(routed[0])
-            assert routed_task is not None
-            if recovery_number < 2:
-                assert routed_task["role"] == "incident-recovery"
-            else:
-                assert routed_task["role"] == "path-arbiter"
-                assert routed_task["stage_key"] == "path-arbiter"
-                assert routed_task["capability_profile"] == "planning_readonly"
-                budget = state._connection.execute(
-                    """SELECT deterministic_actions_used, arbiter_calls_used,
-                              execution_attempts_used, status
-                         FROM problem_budgets
-                        WHERE product_id=? AND root_problem_signature=?""",
-                    (
-                        "product-autonomy",
-                        routed_task["root_problem_signature"],
-                    ),
-                ).fetchone()
-                assert budget is not None
-                assert tuple(budget) == (1, 1, 2, "ACTIVE")
+        assert routed == []
+        assert FailureRouter(config, state).route_open_failures("product-autonomy") == []
+        assert state.claim_task(worker_id="incident-depth-forbidden") is None
+        assert not any(
+            task["role"] in {"incident-recovery", "path-arbiter"}
+            for task in state.list_tasks("product-autonomy")
+        )
+        assert state.get_product("product-autonomy")["status"] == "FAILED_SAFE"
     finally:
         state.close()
 
 
-def test_AUT_P1_008_contained_incident_routes_directly_to_fresh_product_replan(
+def test_AUT_P1_008_transient_transport_routes_product_retry_not_controller_recovery(
     tmp_path: Path,
 ) -> None:
     config = configured(tmp_path)
@@ -1325,68 +1186,12 @@ def test_AUT_P1_008_contained_incident_routes_directly_to_fresh_product_replan(
         recovery = state.claim_task(worker_id="incident-contained")
         assert recovery is not None
         assert recovery["task_id"] == routed[0]
-        assert recovery["role"] == "incident-recovery"
-
-        contained = state.commit_task_outcome(
-            TaskOutcome(
-                task_id=str(recovery["task_id"]),
-                worker_id="incident-contained",
-                lease_token=str(recovery["lease_token"]),
-                expected_task_revision=int(recovery["task_revision"]),
-                expected_plan_revision=1,
-                idempotency_key=sha256_text("incident-contained-handoff"),
-                result_ref="internal://incident/contained-handoff",
-                result_digest=sha256_text("incident-contained-handoff"),
-                status="FAILED_SEMANTIC",
-                failure=FailureData(
-                    failure_class="semantic",
-                    reason_code="needs_replan",
-                    safe_message=(
-                        "Controller incident is contained; fresh product "
-                        "semantic evidence is required."
-                    ),
-                    evidence_ref="internal://incident/contained-handoff",
-                    parent_failure_id=str(recovery["failure_id"]),
-                ),
-            )
+        assert recovery["role"] == "builder"
+        assert recovery["role"] != "incident-recovery"
+        assert not any(
+            task["role"] == "incident-recovery"
+            for task in state.list_tasks("product-autonomy")
         )
-        assert contained.failure_id is not None
-        replans = FailureRouter(config, state).route_open_failures(
-            "product-autonomy"
-        )
-        assert len(replans) == 1
-        arbiter = state.get_task(replans[0])
-        assert arbiter is not None and arbiter["role"] == "path-arbiter"
-        replan_id = accept_path_arbiter_and_prepare_replanner(
-            config,
-            state,
-            ArtifactStore(config),
-            str(arbiter["task_id"]),
-        )
-        replan = state.get_task(replan_id)
-        assert replan is not None
-        assert replan["role"] == "replanner"
-        assert replan["stage_key"] == "replan-after-arbiter"
-        assert replan["hypothesis_id"] is None
-        contract = json.loads(
-            (
-                config.evidence_dir / Path(str(replan["contract_ref"])).name
-            ).read_text(encoding="utf-8")
-        )
-        assert {
-            item["criterion_id"] for item in contract["acceptance"]
-        } == {
-            "AC-CONTROLLER-REPLAN-AFFECTED-NODE",
-            "AC-CONTROLLER-REPLAN-PRESERVE-ACCEPTED",
-            "AC-CONTROLLER-REPLAN-BOUNDED",
-        }
-        assert all(
-            "fresh" in item["verification"]
-            or "preserves accepted" in item["verification"]
-            or "bounded scope" in item["verification"]
-            for item in contract["acceptance"]
-        )
-        assert state.list_hypotheses("product-autonomy") == []
     finally:
         state.close()
 
@@ -1891,6 +1696,76 @@ def test_admin_permission_proves_configure_and_merge_when_governance_is_unreadab
             probe.check("github.pull_request.merge", product=product).status
             == "AVAILABLE"
         )
+
+
+def test_container_capability_requires_subject_runtime_ipam_and_network_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = configured(tmp_path)
+    runtime = tmp_path / "runtime"
+    runroot = runtime / "containers"
+    networks = runroot / "networks"
+    networks.mkdir(parents=True)
+    ipam = networks / "ipam.db"
+    ipam.write_bytes(b"controller-owned-ipam")
+    ipam.chmod(0o600)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> ProbeCommandResult:
+        calls.append(argv)
+        if argv[:3] == ["podman", "info", "--format"]:
+            return ProbeCommandResult(0, str(runroot) + "\n")
+        if argv[:3] in (
+            ["podman", "network", "create"],
+            ["podman", "network", "rm"],
+        ):
+            return ProbeCommandResult(0)
+        if argv == ["podman", "--version"]:
+            return ProbeCommandResult(0, "podman version 5.6.0\n")
+        raise AssertionError(argv)
+
+    with patch("factory.capabilities.shutil.which", return_value="/safe/podman"):
+        result = ConfiguredCapabilityProbe(config, command_runner=runner).check(
+            "toolchain.container_builder",
+            product={"product_id": "container-capability-product"},
+        )
+
+    assert result.status == "AVAILABLE"
+    assert result.scope is not None
+    assert result.scope["runtime"] == "podman"
+    assert [call[:3] for call in calls] == [
+        ["podman", "info", "--format"],
+        ["podman", "network", "create"],
+        ["podman", "network", "rm"],
+        ["podman", "--version"],
+    ]
+
+
+def test_container_capability_rejects_runroot_outside_worker_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = configured(tmp_path)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "shadow-runtime"))
+
+    def runner(argv: list[str]) -> ProbeCommandResult:
+        if argv[:3] == ["podman", "info", "--format"]:
+            return ProbeCommandResult(
+                0,
+                str(tmp_path / "production-runtime" / "containers") + "\n",
+            )
+        raise AssertionError(argv)
+
+    with patch("factory.capabilities.shutil.which", return_value="/safe/podman"):
+        result = ConfiguredCapabilityProbe(config, command_runner=runner).check(
+            "toolchain.container_builder",
+            product={"product_id": "mis-scoped-container-product"},
+        )
+
+    assert result.status == "DENIED_POLICY"
+    assert result.reason_code == "controller_toolchain_container_storage_scope_mismatch"
 
 
 class QueuedRuntimeRunner:

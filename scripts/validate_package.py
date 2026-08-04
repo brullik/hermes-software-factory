@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 IGNORED_DIRS = {
@@ -57,6 +61,29 @@ REQUIRED = [
     "factory/quality.py",
     "factory/reconciler.py",
     "factory/telegram.py",
+    "factory/failure_catalog.py",
+    "factory/transition_catalog.py",
+    "factory/transition_kernel.py",
+    "factory/proof_obligations.py",
+    "factory/release_qualification.py",
+    "factory/canary_qualification.py",
+    "factory/canary_faults.py",
+    "factory/canary_release.py",
+    "factory/resilience_qualification.py",
+    "factory/production_observation.py",
+    "factory/shadow_feed.py",
+    "factory/shadow_qualification.py",
+    "scripts/qualification_control.py",
+    "scripts/qualification_resilience.py",
+    "scripts/production_observation.py",
+    "scripts/release_qualify.py",
+    "scripts/canary_candidate.py",
+    "scripts/bootstrap/prepare-candidate-plane.sh",
+    "scripts/bootstrap/build-canary-configs.py",
+    "scripts/qualification/run-initial-qualification.sh",
+    "scripts/qualification/run-manifest-and-promotion.sh",
+    "scripts/qualification/run-clean-canary.sh",
+    "scripts/qualification/run-all-clean-canaries.sh",
     "scripts/bootstrap/install-telegram-credential.sh",
     "scripts/bootstrap/upgrade-autonomy-runtime.sh",
     "scripts/bootstrap/configure-telegram-owner.sh",
@@ -73,6 +100,19 @@ REQUIRED = [
     "config/sudoers/hermes-factory-release",
     "config/systemd/hermes-factory-osv-db.service",
     "config/systemd/hermes-factory-osv-db.timer",
+    "config/systemd/hermes-factory-canary-controller@.service",
+    "config/systemd/hermes-factory-canary-worker@.service",
+    "config/systemd/hermes-factory-clean-canary@.service",
+    "config/systemd/hermes-factory-clean-canaries.service",
+    "config/systemd/hermes-factory-qualification.service",
+    "config/systemd/hermes-factory-qualification-promote.service",
+    "config/systemd/hermes-factory-resilience-proof.service",
+    "config/systemd/hermes-factory-production-observation.service",
+    "config/systemd/hermes-factory-production-observation.timer",
+    "config/systemd/hermes-factory-shadow-finalize.service",
+    "config/systemd/hermes-factory-shadow-finalize.timer",
+    "qualification/canaries/catalog.yaml",
+    "schemas/release-qualification-manifest.schema.json",
     "scripts/pilot_black_box.py",
     "policies/autonomy-policy.yaml",
     "policies/model-routing-policy.yaml",
@@ -115,12 +155,67 @@ def is_project_file(path: Path) -> bool:
     return not any(part in IGNORED_DIRS or part.endswith(".egg-info") for part in relative.parts)
 
 
+def requirement_names(requirements: list[str]) -> set[str]:
+    """Return normalized direct dependency names from requirement strings."""
+
+    return {canonicalize_name(Requirement(requirement).name) for requirement in requirements}
+
+
+def validate_script_modes(errors: list[str]) -> None:
+    """Require every tracked shebang entrypoint to be executable in Git."""
+
+    if not (ROOT / ".git").exists():
+        return
+    completed = subprocess.run(
+        ["git", "ls-files", "--stage", "--", "scripts"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        errors.append("unable to inspect Git script modes")
+        return
+    tracked_modes: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        metadata, separator, relative = line.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            errors.append("invalid Git index entry for scripts")
+            return
+        tracked_modes[relative] = fields[0]
+    for relative, mode in sorted(tracked_modes.items()):
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        first_line = path.open(encoding="utf-8", errors="replace").readline()
+        if first_line.startswith("#!") and mode != "100755":
+            errors.append(f"shebang script is not executable in Git: {relative}")
+
+
 def validate() -> list[str]:
     errors: list[str] = []
 
     for rel in REQUIRED:
         if not (ROOT / rel).is_file():
             errors.append(f"missing required file: {rel}")
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime_requirements = requirement_names(project["project"]["dependencies"])
+    development_requirements = requirement_names(
+        [
+            line.strip()
+            for line in (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    )
+    missing_runtime_requirements = sorted(runtime_requirements - development_requirements)
+    if missing_runtime_requirements:
+        errors.append(
+            "requirements-dev.txt omits runtime dependencies: "
+            + ",".join(missing_runtime_requirements)
+        )
+    validate_script_modes(errors)
 
     for path in sorted(path for path in ROOT.rglob("*.json") if is_project_file(path)):
         try:
