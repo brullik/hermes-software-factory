@@ -26,3 +26,9 @@ done
 # survive reboot while Candidate B remains isolated from Stable A authority.
 systemctl enable --now hermes-factory-shadow-verify.timer
 systemctl enable --now hermes-factory-shadow-finalize.timer
+
+# Prime both epoch-scoped schedules after enabling them. Persistent timer stamps
+# from an earlier terminal epoch can otherwise leave a newly enabled timer in
+# active (elapsed) with no next trigger. The early finalizer is condition-safe.
+systemctl start --wait hermes-factory-shadow-verify.service
+systemctl start --wait hermes-factory-shadow-finalize.service

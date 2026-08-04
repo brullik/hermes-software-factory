@@ -1606,6 +1606,11 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "umask 022" in bootstrap
     assert 'find "${release_root}" -type f -exec chmod 0644' not in bootstrap
     assert "Immutable release mode/content differs from Git" in bootstrap
+    assert "Candidate source must be a complete Git checkout" in bootstrap
+    assert "remote.origin.promisor" in bootstrap
+    assert 'venv_ready_marker="${venv_root}/.hermes-bootstrap-complete"' in bootstrap
+    assert 'rm -rf -- "${venv_root}"' in bootstrap
+    assert "Refusing to rebuild the active incomplete environment" in bootstrap
     assert 'SERVICE_USER="${CANDIDATE_USER}"' in bootstrap
     assert "q6-capability-attestation.json" in bootstrap
     assert "--q6-capability-attestation-digest" in bootstrap
@@ -1684,6 +1689,16 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "run-manifest-and-promotion.sh" in promotion
     assert "RestrictSUIDSGID=true" not in promotion
     assert "LockPersonality=true" not in promotion
+    initial_qualification = (
+        repository / "scripts/qualification/run-initial-qualification.sh"
+    ).read_text(encoding="utf-8")
+    verify_prime = initial_qualification.index(
+        "systemctl start --wait hermes-factory-shadow-verify.service"
+    )
+    finalize_prime = initial_qualification.index(
+        "systemctl start --wait hermes-factory-shadow-finalize.service"
+    )
+    assert verify_prime < finalize_prime
 
 
 def test_live_shadow_feed_is_redacted_evaluated_and_verified_once(tmp_path: Path) -> None:
