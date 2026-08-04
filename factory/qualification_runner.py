@@ -34,6 +34,13 @@ from .service_qualification import run_service_qualification
 class QualificationRunError(RuntimeError):
     """A qualification stage failed or attempted to overwrite evidence."""
 
+    @property
+    def safe_coordinate(self) -> str:
+        normalized = "".join(
+            character if character.isalnum() else " " for character in str(self).lower()
+        )
+        return "-".join(normalized.split())[:120] or "qualification-run-failed"
+
 
 @dataclass(frozen=True)
 class QualificationStageReport:
@@ -74,9 +81,10 @@ def _run(
 
 
 def _git(repository_root: Path, *arguments: str) -> str:
+    trusted_root = repository_root.resolve()
     result = subprocess.run(
-        ["git", *arguments],
-        cwd=repository_root,
+        ["git", "-c", f"safe.directory={trusted_root}", *arguments],
+        cwd=trusted_root,
         text=True,
         capture_output=True,
         check=False,
@@ -178,11 +186,15 @@ def _reproducible_wheel(repository_root: Path) -> tuple[str, str]:
     commit_epoch = _git(repository_root, "show", "-s", "--format=%ct", "HEAD")
     environment = os.environ.copy()
     environment.update(SOURCE_DATE_EPOCH=commit_epoch, PYTHONHASHSEED="0")
+    source_archive = _immutable_source_archive(repository_root)
     with tempfile.TemporaryDirectory(prefix="hermes-q0-wheel-") as temporary:
         root = Path(temporary)
         digests: list[str] = []
         transcript_digests: list[str] = []
         for name in ("first", "second"):
+            source = root / f"{name}-source"
+            source.mkdir()
+            _extract_immutable_source_archive(source_archive, source)
             destination = root / name
             destination.mkdir()
             code, transcript = _run(
@@ -197,7 +209,7 @@ def _reproducible_wheel(repository_root: Path) -> tuple[str, str]:
                     "--wheel-dir",
                     str(destination),
                 ],
-                cwd=repository_root,
+                cwd=source,
                 timeout=180,
                 environment=environment,
             )
@@ -211,30 +223,47 @@ def _reproducible_wheel(repository_root: Path) -> tuple[str, str]:
         return digests[0], sha256_text(stable_json(transcript_digests))
 
 
-def _immutable_release_tree_digest(repository_root: Path) -> str:
+def _immutable_source_archive(repository_root: Path) -> bytes:
+    trusted_root = repository_root.resolve()
     result = subprocess.run(
-        ["git", "archive", "--format=tar", "HEAD"],
-        cwd=repository_root,
+        [
+            "git",
+            "-c",
+            f"safe.directory={trusted_root}",
+            "archive",
+            "--format=tar",
+            "HEAD",
+        ],
+        cwd=trusted_root,
         capture_output=True,
         check=False,
         timeout=60,
     )
     if result.returncode != 0:
         raise QualificationRunError("immutable source archive failed")
+    return result.stdout
+
+
+def _extract_immutable_source_archive(payload: bytes, destination: Path) -> None:
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+        for member in archive.getmembers():
+            target = (destination / member.name).resolve()
+            if (
+                Path(member.name).is_absolute()
+                or (target != destination and destination not in target.parents)
+                or member.issym()
+                or member.islnk()
+            ):
+                raise QualificationRunError("immutable source archive is unsafe")
+        archive.extractall(destination, filter="data")
+
+
+def _immutable_release_tree_digest(repository_root: Path) -> str:
+    source_archive = _immutable_source_archive(repository_root)
     with tempfile.TemporaryDirectory(prefix="hermes-q0-source-") as temporary:
         destination = Path(temporary) / "source"
         destination.mkdir()
-        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
-            for member in archive.getmembers():
-                target = (destination / member.name).resolve()
-                if (
-                    Path(member.name).is_absolute()
-                    or (target != destination and destination not in target.parents)
-                    or member.issym()
-                    or member.islnk()
-                ):
-                    raise QualificationRunError("immutable source archive is unsafe")
-            archive.extractall(destination, filter="data")
+        _extract_immutable_source_archive(source_archive, destination)
         return _release_digest(destination).removeprefix("sha256:")
 
 

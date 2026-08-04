@@ -439,7 +439,8 @@ done
 systemctl daemon-reload
 runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control init
-if ! systemctl enable --now hermes-factory-qualification.service; then
+systemctl enable hermes-factory-qualification.service
+if ! systemctl start --wait hermes-factory-qualification.service; then
   runuser -u "${VERIFIER_USER}" -- \
     "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control \
     orchestration-fail
