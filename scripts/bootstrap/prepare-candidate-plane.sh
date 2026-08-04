@@ -46,6 +46,11 @@ if [[ -n "$(git -C "${SOURCE_ROOT}" status --porcelain=v1 --untracked-files=all)
   printf 'Candidate source checkout is not clean\n' >&2
   exit 65
 fi
+if [[ "$(git -C "${SOURCE_ROOT}" config --bool --get remote.origin.promisor || true)" == true ]] \
+  || [[ -n "$(git -C "${SOURCE_ROOT}" config --get extensions.partialClone || true)" ]]; then
+  printf 'Candidate source must be a complete Git checkout, not a partial clone\n' >&2
+  exit 65
+fi
 
 SOURCE_COMMIT="$(git -C "${SOURCE_ROOT}" rev-parse HEAD)"
 if [[ ! "${SOURCE_COMMIT}" =~ ^[a-f0-9]{40}$ ]]; then
@@ -176,13 +181,31 @@ for plane in candidate verifier; do
     release_root="${VERIFIER_RELEASE}"
   fi
   venv_root="${plane_root}/venvs/${SOURCE_COMMIT}"
-  if [[ ! -x "${venv_root}/bin/python" ]]; then
+  venv_ready_marker="${venv_root}/.hermes-bootstrap-complete"
+  venv_valid=0
+  if [[ -d "${venv_root}" ]] \
+    && [[ -x "${venv_root}/bin/python" ]] \
+    && [[ -f "${venv_ready_marker}" ]] \
+    && [[ "$(<"${venv_ready_marker}")" == "${SOURCE_COMMIT}" ]] \
+    && "${venv_root}/bin/python" -m pip check >/dev/null 2>&1; then
+    venv_valid=1
+  fi
+  if [[ -e "${venv_root}" && "${venv_valid}" -ne 1 ]]; then
+    if [[ -L "${plane_root}/venv" ]] \
+      && [[ "$(readlink -f "${plane_root}/venv")" == "${venv_root}" ]]; then
+      printf 'Refusing to rebuild the active incomplete environment: %s\n' "${venv_root}" >&2
+      exit 73
+    fi
+    rm -rf -- "${venv_root}"
+  fi
+  if (( venv_valid != 1 )); then
     "${PYTHON_BIN}" -m venv "${venv_root}"
     "${venv_root}/bin/python" -m pip install --disable-pip-version-check \
       --requirement "${release_root}/requirements.lock"
     "${venv_root}/bin/python" -m pip install --disable-pip-version-check \
       --no-deps "git+file://${release_root}@${SOURCE_COMMIT}"
     "${venv_root}/bin/python" -m pip check
+    printf '%s\n' "${SOURCE_COMMIT}" > "${venv_ready_marker}"
   fi
   chown -R root:root "${venv_root}"
   if [[ -e "${plane_root}/current" && ! -L "${plane_root}/current" ]]; then

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.10 - 2026-08-04
+
+- Prime Q7 verification and its condition-safe finalizer after each new epoch so
+  persistent timer stamps cannot leave qualification active without a next run.
+- Reject partial Git checkouts before Candidate bootstrap mutates release state.
+- Rebuild an incomplete, inactive per-commit virtual environment automatically
+  after an interrupted dependency installation.
+
 ## 2.4.9 - 2026-08-04
 
 - Dispatch Q8 only after a real Q7 finalizer execution and dispatch promotion
