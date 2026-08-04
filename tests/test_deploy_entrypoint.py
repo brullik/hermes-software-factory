@@ -134,6 +134,7 @@ class DeployEntrypointTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Windows test process cannot create symlinks")
     def test_runtime_switch_binds_code_and_python_then_restores_lts(self) -> None:
+        from factory.deployment import DeploymentError
         from factory.release_executor import _release_digest
 
         with tempfile.TemporaryDirectory() as directory:
@@ -157,13 +158,23 @@ class DeployEntrypointTests(unittest.TestCase):
             candidate_source.mkdir()
             (candidate_source / "VERSION").write_text("new\n", encoding="utf-8")
             candidate_digest = _release_digest(candidate_source).removeprefix("sha256:")
+            switch_arguments = {
+                "install_root": install,
+                "release_id": release_id,
+                "old_release_digest": old_digest,
+                "candidate_release_digest": candidate_digest,
+                "candidate_runtime_link": runtime_link,
+                "candidate_runtime_root": candidate_runtime_root,
+            }
+            untrusted_switch = type(self).runtime_switch(
+                **switch_arguments,
+                candidate_runtime_trust=lambda _path: False,
+            )
+            with self.assertRaises(DeploymentError):
+                untrusted_switch.prepare()
             switch = type(self).runtime_switch(
-                install_root=install,
-                release_id=release_id,
-                old_release_digest=old_digest,
-                candidate_release_digest=candidate_digest,
-                candidate_runtime_link=runtime_link,
-                candidate_runtime_root=candidate_runtime_root,
+                **switch_arguments,
+                candidate_runtime_trust=lambda _path: True,
             )
 
             switch.prepare()

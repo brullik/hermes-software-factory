@@ -10,7 +10,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -61,13 +61,21 @@ def _mapping(value: Any, label: str) -> dict[str, Any]:
     return {str(key): item for key, item in value.items()}
 
 
-def _load_config(path: Path) -> dict[str, Any]:
+def root_owned_read_only_config(path: Path) -> bool:
+    """Return whether a verifier config satisfies the production trust boundary."""
+
     metadata = path.stat()
+    return os.name == "nt" or (metadata.st_uid == 0 and not metadata.st_mode & 0o022)
+
+
+def _load_config(
+    path: Path,
+    *,
+    config_trust_policy: Callable[[Path], bool] = root_owned_read_only_config,
+) -> dict[str, Any]:
     if not path.is_file() or path.is_symlink():
         raise VerifierConfigurationError("verifier config must be a regular file")
-    if os.name != "nt" and (
-        metadata.st_uid != 0 or metadata.st_mode & 0o022
-    ):
+    if not config_trust_policy(path):
         raise VerifierConfigurationError("verifier config is not root-owned read-only")
     raw = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "verifier config")
     if set(raw) != _VERIFIER_CONFIG_KEYS or raw.get("schema_version") != "1.0":
@@ -181,8 +189,12 @@ def verifier_code_digest(repository_root: Path) -> str:
     return sha256_text(stable_json(records))
 
 
-def sign_qualification(config_path: Path) -> tuple[Path, str]:
-    config = _load_config(config_path)
+def sign_qualification(
+    config_path: Path,
+    *,
+    config_trust_policy: Callable[[Path], bool] = root_owned_read_only_config,
+) -> tuple[Path, str]:
+    config = _load_config(config_path, config_trust_policy=config_trust_policy)
     private_key = _load_private_key(Path(str(config["private_key_path"])))
     public_key = _public_key_bytes(private_key)
     public_key_digest = hashlib.sha256(public_key).hexdigest()

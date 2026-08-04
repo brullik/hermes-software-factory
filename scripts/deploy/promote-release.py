@@ -37,6 +37,16 @@ OPTIONAL_SERVICES = ("hermes-factory-worker-2.service",)
 CANDIDATE_RUNTIME_LINK = Path("/opt/hermes-factory-candidate/venv")
 
 
+def root_owned_immutable_runtime(path: Path) -> bool:
+    """Return whether a runtime satisfies the production ownership boundary."""
+
+    metadata = path.stat()
+    return os.name == "nt" or (
+        metadata.st_uid == 0
+        and not metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+
+
 def validate_health_url(value: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
@@ -90,6 +100,7 @@ class RuntimeSwitch:
     candidate_release_digest: str
     candidate_runtime_link: Path = CANDIDATE_RUNTIME_LINK
     candidate_runtime_root: Path = Path("/opt/hermes-factory-candidate/venvs")
+    candidate_runtime_trust: Callable[[Path], bool] = root_owned_immutable_runtime
 
     @property
     def runtime_link(self) -> Path:
@@ -113,8 +124,7 @@ class RuntimeSwitch:
             or not (target / "bin" / "python").is_file()
         ):
             raise DeploymentError("Candidate runtime is not bound to the release commit")
-        metadata = target.stat()
-        if os.name != "nt" and (metadata.st_uid != 0 or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        if not self.candidate_runtime_trust(target):
             raise DeploymentError("Candidate runtime is not root-owned immutable data")
         return target
 

@@ -79,7 +79,7 @@ from factory.two_plane import (
 from scripts import qualification_control
 from scripts.qualification_control import initialize_epoch, verify_shadow_batches
 from scripts.qualification_control import status as qualification_status
-from scripts.release_qualify import sign_qualification
+from scripts.release_qualify import VerifierConfigurationError, sign_qualification
 
 _TEST_VERIFIER_PUBLIC_BYTES = b"v" * 32
 _TEST_VERIFIER_PUBLIC_KEY = base64.b64encode(_TEST_VERIFIER_PUBLIC_BYTES).decode("ascii")
@@ -910,6 +910,7 @@ def test_independent_manifest_requires_trusted_ed25519_signature(tmp_path: Path)
             + "\n",
             encoding="ascii",
         )
+        private_path.chmod(0o600)
         request_path = tmp_path / "unsigned-manifest.json"
         request_path.write_text(
             json.dumps(payload, sort_keys=True) + "\n",
@@ -934,7 +935,16 @@ def test_independent_manifest_requires_trusted_ed25519_signature(tmp_path: Path)
             ),
             encoding="utf-8",
         )
-        signed_path, independent_digest = sign_qualification(config_path)
+        config_path.chmod(0o600)
+        with pytest.raises(
+            VerifierConfigurationError,
+            match="verifier config is not root-owned read-only",
+        ):
+            sign_qualification(config_path, config_trust_policy=lambda _path: False)
+        signed_path, independent_digest = sign_qualification(
+            config_path,
+            config_trust_policy=lambda _path: True,
+        )
         assert signed_path == output_path
         assert len(independent_digest) == 64
         assert json.loads(output_path.read_text(encoding="utf-8")) == envelope
