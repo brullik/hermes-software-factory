@@ -14,6 +14,8 @@ SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVICE_USER="${SERVICE_USER:-hermesfactory}"
 CANDIDATE_USER="${CANDIDATE_USER:-hermescandidate}"
 VERIFIER_USER="${VERIFIER_USER:-hermesverifier}"
+BROKER_USER="${BROKER_USER:-hermesgithubbroker}"
+FUNCTIONAL_GROUP="${FUNCTIONAL_GROUP:-hermesfunctional}"
 CANDIDATE_ROOT="${CANDIDATE_ROOT:-/opt/hermes-factory-candidate}"
 VERIFIER_ROOT="${VERIFIER_ROOT:-/opt/hermes-factory-verifier}"
 CANDIDATE_STATE="${CANDIDATE_STATE:-/var/lib/hermes-factory-candidate}"
@@ -22,6 +24,10 @@ CANARY_STATE="${CANARY_STATE:-/var/lib/hermes-factory-canaries}"
 CANARY_LOG_ROOT="${CANARY_LOG_ROOT:-/var/log/hermes-factory-canaries}"
 SHADOW_OUTPUT_ROOT="${SHADOW_OUTPUT_ROOT:-/var/lib/hermes-factory-shadow-output}"
 QUALIFICATION_BACKUP_ROOT="${QUALIFICATION_BACKUP_ROOT:-/var/lib/hermes-factory-qualification-backup}"
+FUNCTIONAL_STATE="${FUNCTIONAL_STATE:-/var/lib/hermes-factory-functional}"
+PRE_Q8_STATE="${PRE_Q8_STATE:-/var/lib/hermes-factory-pre-q8}"
+PRE_Q8_LOG_ROOT="${PRE_Q8_LOG_ROOT:-/var/log/hermes-factory-pre-q8}"
+IMPROVEMENT_STATE="${IMPROVEMENT_STATE:-/var/lib/hermes-factory-improvement-lab}"
 CONFIG_ROOT="${CONFIG_ROOT:-/etc/hermes-factory}"
 CANARY_EXISTING_REPOSITORY_URL="${CANARY_EXISTING_REPOSITORY_URL:-https://github.com/brullik/hermes-path-governor-shadow-20260803}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
@@ -68,6 +74,13 @@ fi
 if ! id "${VERIFIER_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${VERIFIER_STATE}" --create-home --shell /usr/sbin/nologin "${VERIFIER_USER}"
 fi
+if ! getent group "${FUNCTIONAL_GROUP}" >/dev/null 2>&1; then
+  groupadd --system "${FUNCTIONAL_GROUP}"
+fi
+if ! id "${BROKER_USER}" >/dev/null 2>&1; then
+  useradd --system --home-dir /var/lib/hermes-factory-github-broker \
+    --create-home --shell /usr/sbin/nologin "${BROKER_USER}"
+fi
 if [[ "${CANDIDATE_USER}" == "${VERIFIER_USER}" || "${CANDIDATE_USER}" == "${SERVICE_USER}" || "${VERIFIER_USER}" == "${SERVICE_USER}" ]]; then
   printf 'Stable, candidate, and verifier users must be distinct\n' >&2
   exit 78
@@ -77,6 +90,9 @@ if ! getent group hermesshadow >/dev/null 2>&1; then
 fi
 for shadow_member in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}"; do
   usermod --append --groups hermesshadow "${shadow_member}"
+done
+for functional_member in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}" "${BROKER_USER}"; do
+  usermod --append --groups "${FUNCTIONAL_GROUP}" "${functional_member}"
 done
 if ! grep -q "^${CANDIDATE_USER}:" /etc/subuid; then
   usermod --add-subuids 1100000-1165535 "${CANDIDATE_USER}"
@@ -129,6 +145,8 @@ install -d -o "${CANDIDATE_USER}" -g "${CANDIDATE_USER}" -m 0750 \
   "${CANDIDATE_STATE}" "${CANDIDATE_STATE}/evidence" \
   "${CANDIDATE_STATE}/qualification" "${CANDIDATE_STATE}/worktrees" \
   /var/log/hermes-factory-candidate
+chgrp "${FUNCTIONAL_GROUP}" "${CANDIDATE_STATE}" "${CANDIDATE_STATE}/worktrees"
+chmod 2770 "${CANDIDATE_STATE}" "${CANDIDATE_STATE}/worktrees"
 install -d -o "${VERIFIER_USER}" -g "${VERIFIER_USER}" -m 0750 \
   "${VERIFIER_STATE}" "${VERIFIER_STATE}/evidence/${SOURCE_COMMIT}" \
   "${VERIFIER_STATE}/shadow-journal/${SOURCE_COMMIT}" \
@@ -137,6 +155,15 @@ install -d -o "${VERIFIER_USER}" -g "${VERIFIER_USER}" -m 0750 \
 install -d -o "${CANDIDATE_USER}" -g "${CANDIDATE_USER}" -m 0750 \
   "${CANARY_STATE}" "${CANARY_STATE}/${SOURCE_COMMIT}" \
   "${CANARY_LOG_ROOT}" "${CANARY_LOG_ROOT}/${SOURCE_COMMIT}"
+install -d -o "${VERIFIER_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
+  "${FUNCTIONAL_STATE}" "${FUNCTIONAL_STATE}/q6-5" \
+  "${FUNCTIONAL_STATE}/notifications" "${FUNCTIONAL_STATE}/notifications/outbox" \
+  "${FUNCTIONAL_STATE}/notifications/receipts" "${IMPROVEMENT_STATE}"
+install -d -o "${CANDIDATE_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
+  "${PRE_Q8_STATE}" "${PRE_Q8_STATE}/${SOURCE_COMMIT}" \
+  "${PRE_Q8_LOG_ROOT}" "${PRE_Q8_LOG_ROOT}/${SOURCE_COMMIT}"
+install -d -o "${CANDIDATE_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
+  /var/lib/hermes-factory-golden /var/log/hermes-factory-golden
 install -d -o root -g hermesshadow -m 2750 "${SHADOW_OUTPUT_ROOT}"
 install -d -o "${CANDIDATE_USER}" -g hermesshadow -m 2750 \
   "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}"
@@ -147,6 +174,7 @@ install -d -o root -g "${CANDIDATE_USER}" -m 0750 \
 install -d -o root -g root -m 0755 "${CONFIG_ROOT}/qualification-manifests"
 install -d -o root -g root -m 0700 "${QUALIFICATION_BACKUP_ROOT}"
 install -d -o root -g "${CANDIDATE_USER}" -m 0750 "${CONFIG_ROOT}/canaries"
+install -d -o root -g "${CANDIDATE_USER}" -m 0750 "${CONFIG_ROOT}/pre-q8"
 chown root:root "${CONFIG_ROOT}"
 chmod 0711 "${CONFIG_ROOT}"
 
@@ -242,7 +270,7 @@ if (( ALLOW_EPOCH_SWITCH == 1 )); then
   EPOCH_CONFIG_ARCHIVE="${CONFIG_ROOT}/qualification-epochs/${OLD_SOURCE_COMMIT}"
   install -d -o root -g root -m 0711 "${EPOCH_CONFIG_ARCHIVE}"
   for epoch_config in \
-    qualification-control.yaml verifier.yaml candidate.yaml \
+    qualification-control.yaml verifier.yaml candidate.yaml golden.yaml \
     candidate-model-registry.yaml canary-capability-attestation.json \
     q6-capability-attestation.json; do
     if [[ -e "${CONFIG_ROOT}/${epoch_config}" ]]; then
@@ -259,6 +287,19 @@ if (( ALLOW_EPOCH_SWITCH == 1 )); then
       exit 73
     fi
     mv -- "${CONFIG_ROOT}/canaries" "${EPOCH_CONFIG_ARCHIVE}/canaries"
+  fi
+  if [[ -d "${CONFIG_ROOT}/pre-q8" ]]; then
+    if [[ -e "${EPOCH_CONFIG_ARCHIVE}/pre-q8" ]]; then
+      printf 'Previous PRE-Q8 config archive conflicts\n' >&2
+      exit 73
+    fi
+    mv -- "${CONFIG_ROOT}/pre-q8" "${EPOCH_CONFIG_ARCHIVE}/pre-q8"
+  fi
+  if [[ -f "${FUNCTIONAL_STATE}/q6-5/report-index.json" ]]; then
+    install -d -o "${VERIFIER_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
+      "${FUNCTIONAL_STATE}/q6-5/${OLD_SOURCE_COMMIT}"
+    mv -- "${FUNCTIONAL_STATE}/q6-5/report-index.json" \
+      "${FUNCTIONAL_STATE}/q6-5/${OLD_SOURCE_COMMIT}/report-index.json"
   fi
   ln -sfn "${VERIFIER_ROOT}/venvs/${SOURCE_COMMIT}" "${VERIFIER_ROOT}/venv"
   ln -sfn "${VERIFIER_RELEASE}" "${VERIFIER_ROOT}/current"
@@ -459,6 +500,37 @@ chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/canaries"/*.yaml
 chmod 0640 "${CONFIG_ROOT}/canaries"/*.yaml
 chown root:root "${CONFIG_ROOT}/canaries/index.json"
 chmod 0644 "${CONFIG_ROOT}/canaries/index.json"
+"${VERIFIER_ROOT}/venv/bin/python" \
+  "${VERIFIER_ROOT}/current/scripts/bootstrap/build-canary-configs.py" \
+  --base-config "${CONFIG_ROOT}/candidate.yaml" \
+  --catalog "${CANDIDATE_RELEASE}/qualification/canaries/catalog.yaml" \
+  --output-root "${CONFIG_ROOT}/pre-q8" \
+  --state-root "${PRE_Q8_STATE}/${SOURCE_COMMIT}" \
+  --log-root "${PRE_Q8_LOG_ROOT}/${SOURCE_COMMIT}" \
+  --candidate-digest "${CANDIDATE_DIGEST}" \
+  --controller-release-digest "${CONTROLLER_DIGEST}" \
+  --capability-attestation-path "${CANARY_ATTESTATION}" \
+  --capability-attestation-digest "${CANARY_ATTESTATION_DIGEST}" \
+  --first-port 8890 \
+  --existing-repository-url "${CANARY_EXISTING_REPOSITORY_URL}" >/dev/null
+chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/pre-q8"/*.yaml
+chmod 0640 "${CONFIG_ROOT}/pre-q8"/*.yaml
+chown root:root "${CONFIG_ROOT}/pre-q8/index.json"
+chmod 0644 "${CONFIG_ROOT}/pre-q8/index.json"
+"${VERIFIER_ROOT}/venv/bin/python" \
+  "${VERIFIER_ROOT}/current/scripts/bootstrap/build-golden-config.py" \
+  --candidate-config "${CONFIG_ROOT}/candidate.yaml" \
+  --stable-config "${CONFIG_ROOT}/config.yaml" \
+  --output "${CONFIG_ROOT}/golden.yaml" \
+  --state-root /var/lib/hermes-factory-golden \
+  --log-root /var/log/hermes-factory-golden \
+  --admin-port 8990
+chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/golden.yaml"
+chmod 0640 "${CONFIG_ROOT}/golden.yaml"
+install -d -o root -g root -m 0755 /usr/libexec
+install -o root -g root -m 0755 \
+  "${CANDIDATE_RELEASE}/scripts/broker/git-askpass.sh" \
+  /usr/libexec/hermes-github-askpass
 install -o root -g root -m 0700 \
   "${CANDIDATE_RELEASE}/scripts/deploy/release-submit.py" \
   /usr/local/sbin/hermes-qualified-release-submit
@@ -486,7 +558,26 @@ for unit in \
   hermes-factory-shadow-verify.service \
   hermes-factory-shadow-verify.timer \
   hermes-factory-shadow-finalize.service \
-  hermes-factory-shadow-finalize.timer; do
+  hermes-factory-shadow-finalize.timer \
+  hermes-factory-github-broker.service \
+  hermes-factory-capability-probe.service \
+  hermes-factory-capability-reconciler.service \
+  hermes-factory-functional-qualification.service \
+  hermes-factory-functional-qualification.timer \
+  hermes-factory-functional-ready.service \
+  hermes-factory-pre-q8-controller@.service \
+  hermes-factory-pre-q8-worker@.service \
+  hermes-factory-pre-q8@.service \
+  hermes-factory-pre-q8.service \
+  hermes-factory-golden-product.service \
+  hermes-factory-golden-controller.service \
+  hermes-factory-golden-worker.service \
+  hermes-factory-golden-intake.service \
+  hermes-factory-recursive-improvement.service \
+  hermes-factory-recursive-improvement.timer \
+  hermes-factory-owner-notifier.service \
+  hermes-factory-owner-notifier.path \
+  hermes-factory-support-bundle@.service; do
   unit_source="${CANDIDATE_RELEASE}/config/systemd/${unit}"
   unit_destination="/etc/systemd/system/${unit}"
   if [[ "${unit}" == hermes-factory-shadow-evaluate.service ]]; then
@@ -515,6 +606,8 @@ for reset_unit in \
 done
 runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control init
+systemctl enable --now hermes-factory-owner-notifier.path
+systemctl enable --now hermes-factory-recursive-improvement.timer
 systemctl enable hermes-factory-qualification.service
 if ! systemctl start --wait hermes-factory-qualification.service; then
   runuser -u "${VERIFIER_USER}" -- \

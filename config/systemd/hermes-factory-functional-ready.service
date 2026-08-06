@@ -1,0 +1,20 @@
+[Unit]
+Description=Sign and dispatch exact Hermes functional ready result
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-functional-ready.sh
+TimeoutStartSec=30min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-functional /var/lib/hermes-factory-verifier /run/systemd
+ReadOnlyPaths=/opt/hermes-factory-verifier /opt/hermes-factory-candidate /etc/hermes-factory/qualification-control.yaml
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true

@@ -1,0 +1,12 @@
+[Unit]
+Description=Reconcile Hermes functional qualification after boot and external grants
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=10s
+Persistent=true
+Unit=hermes-factory-functional-qualification.service
+
+[Install]
+WantedBy=timers.target

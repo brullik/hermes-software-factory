@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import mimetypes
+import secrets
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -79,3 +81,62 @@ class TelegramApi:
         if not text.strip() or len(text) > 4096:
             raise ValueError("Telegram message must contain 1..4096 characters")
         self._request("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
+
+    def send_document(
+        self,
+        chat_id: str,
+        document: bytes,
+        *,
+        filename: str,
+        caption: str = "",
+    ) -> None:
+        if not document or len(document) > 50 * 1024 * 1024:
+            raise ValueError("Telegram document must contain 1..52428800 bytes")
+        if not filename or any(character in filename for character in ("/", "\\", "\x00")):
+            raise ValueError("Telegram document filename is invalid")
+        if len(caption) > 1024:
+            raise ValueError("Telegram document caption is too long")
+        if self._request_handler is not None:
+            self._request(
+                "sendDocument",
+                {
+                    "chat_id": chat_id,
+                    "filename": filename,
+                    "document_digest": __import__("hashlib").sha256(document).hexdigest(),
+                    "caption": caption,
+                },
+            )
+            return
+        boundary = f"HermesBoundary{secrets.token_hex(16)}"
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        fields = (("chat_id", chat_id), ("caption", caption))
+        body = bytearray()
+        for name, value in fields:
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+            )
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            (
+                'Content-Disposition: form-data; name="document"; '
+                f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'
+            ).encode()
+        )
+        body.extend(document)
+        body.extend(f"\r\n--{boundary}--\r\n".encode())
+        request = urllib.request.Request(
+            f"{self._api_base_url}/bot{self._token}/sendDocument",
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                decoded = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            raise TelegramApiError(
+                f"Telegram document transport failed: {type(error).__name__}"
+            ) from error
+        if not isinstance(decoded, dict) or decoded.get("ok") is not True:
+            raise TelegramApiError("Telegram API returned a document failure")

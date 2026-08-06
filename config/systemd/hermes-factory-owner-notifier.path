@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Hermes typed owner notification outbox
+
+[Path]
+PathExistsGlob=/var/lib/hermes-factory-functional/notifications/outbox/*.json
+Unit=hermes-factory-owner-notifier.service
+
+[Install]
+WantedBy=multi-user.target

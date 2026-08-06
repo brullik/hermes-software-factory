@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-final-status.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "stable_a", "candidate", "factory", "user_action_required"],
+  "properties": {
+    "status": {"enum": ["AUTONOMOUS_FACTORY_BOOTSTRAPPED", "OWNER_ACTION_REQUIRED", "ASSISTANCE_REQUIRED_GPT_CODEX"]},
+    "stable_a": {"type": "object"},
+    "candidate": {"type": "object"},
+    "factory": {"type": "object"},
+    "user_action_required": {"type": "boolean"},
+    "reason_code": {"type": ["string", "null"]},
+    "action_ref": {"type": ["string", "null"]},
+    "support_bundle": {"type": ["string", "null"]}
+  }
+}

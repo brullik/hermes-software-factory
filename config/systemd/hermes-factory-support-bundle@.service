@@ -1,0 +1,19 @@
+[Unit]
+Description=Generate sanitized Hermes support bundle for %i
+
+[Service]
+Type=oneshot
+User=hermesverifier
+Group=hermesfunctional
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.support_bundle %i
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-functional
+ReadOnlyPaths=/var/lib/hermes-factory-verifier /opt/hermes-factory-verifier
+InaccessiblePaths=/etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d /var/lib/hermes-factory/controller.db
+RestrictSUIDSGID=true
+LockPersonality=true

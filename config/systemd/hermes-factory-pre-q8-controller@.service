@@ -1,0 +1,30 @@
+[Unit]
+Description=Hermes PRE-Q8 isolated controller (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermescandidate
+Group=hermescandidate
+WorkingDirectory=/opt/hermes-factory-candidate/current
+Environment=HOME=/var/lib/hermes-factory-candidate
+Environment=XDG_RUNTIME_DIR=/run/hermes-factory-pre-q8-%i
+Environment=PYTHONUNBUFFERED=1
+RuntimeDirectory=hermes-factory-pre-q8-%i
+RuntimeDirectoryMode=0750
+ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m factory.controller --config /etc/hermes-factory/pre-q8/%i.yaml
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-pre-q8 /var/log/hermes-factory-pre-q8 /var/lib/hermes-factory-candidate /run/hermes-factory-pre-q8-%i
+ReadOnlyPaths=/etc/hermes-factory/pre-q8/%i.yaml /etc/hermes-factory/candidate-model-registry.yaml
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=1200M
+TasksMax=256
