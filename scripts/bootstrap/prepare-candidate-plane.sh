@@ -521,6 +521,7 @@ chmod 0644 "${CONFIG_ROOT}/pre-q8/index.json"
   "${VERIFIER_ROOT}/current/scripts/bootstrap/build-golden-config.py" \
   --candidate-config "${CONFIG_ROOT}/candidate.yaml" \
   --stable-config "${CONFIG_ROOT}/config.yaml" \
+  --stable-telegram-environment "${CONFIG_ROOT}/telegram.env" \
   --output "${CONFIG_ROOT}/golden.yaml" \
   --state-root /var/lib/hermes-factory-golden \
   --log-root /var/log/hermes-factory-golden \

@@ -4,6 +4,7 @@ import ast
 import base64
 import hashlib
 import json
+import runpy
 import sqlite3
 import subprocess
 import zipfile
@@ -66,6 +67,31 @@ def _functional_governor() -> FunctionalQualificationGovernor:
         toolchain_digest=TOOLCHAIN,
     )
     return governor
+
+
+def test_golden_builder_reads_single_owner_from_stable_environment(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[1]
+    namespace = runpy.run_path(
+        str(root / "scripts" / "bootstrap" / "build-golden-config.py")
+    )
+    resolve = namespace["_resolve_owner_ids"]
+    environment = tmp_path / "telegram.env"
+    environment.write_text(
+        "# Stable owner binding\nFACTORY_TELEGRAM_OWNER_ID='123456789'\n",
+        encoding="utf-8",
+    )
+    environment.chmod(0o640)
+
+    assert resolve({"telegram": {"allowed_user_ids": []}}, environment) == [
+        "123456789"
+    ]
+    assert resolve(
+        {"telegram": {"allowed_user_ids": [123456789]}}, environment
+    ) == ["123456789"]
+    with pytest.raises(ValueError, match="exactly one"):
+        resolve({"telegram": {"allowed_user_ids": [987654321]}}, environment)
 
 
 def _report(
