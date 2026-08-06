@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -31,6 +32,9 @@ from factory.notifications import NotificationOutbox, NotificationRequest
 
 class FunctionalControlError(RuntimeError):
     """The autonomous functional control plane cannot safely advance."""
+
+
+_CREDENTIAL_EPOCH = re.compile(r"^CE-[A-F0-9]{32}$")
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
@@ -192,7 +196,7 @@ def _archive_stale_index(path: Path) -> None:
     digest = sha256_file(path)
     archive = path.parent / "archive"
     archive.mkdir(parents=True, exist_ok=True)
-    destination = archive / f"report-index-{digest}.json"
+    destination = archive / f"{path.stem}-{digest}{path.suffix}"
     if destination.exists():
         if destination.is_symlink() or sha256_file(destination) != digest:
             raise FunctionalControlError("Q6.5 report index archive conflicts")
@@ -250,6 +254,67 @@ def _missing_report(config: Mapping[str, Any]) -> CapabilityHandshakeReport:
     )
 
 
+def _external_failure_report(
+    path: Path,
+    *,
+    config: Mapping[str, Any],
+    credential_epoch: str,
+) -> CapabilityHandshakeReport | None:
+    if not path.exists():
+        return None
+    if not path.is_file() or path.is_symlink():
+        raise FunctionalControlError("Q6.5 failure index is unsafe")
+    failure = _mapping(json.loads(path.read_text(encoding="utf-8")), "Q6.5 failure index")
+    receipt_digest = str(failure.pop("receipt_digest", ""))
+    if receipt_digest != sha256_text(stable_json(failure)):
+        raise FunctionalControlError("Q6.5 failure index digest differs")
+    expected = {
+        "schema_version",
+        "candidate_digest",
+        "toolchain_digest",
+        "credential_epoch_id",
+        "capability",
+        "operation",
+        "scope",
+        "safe_reason_code",
+        "observed_at",
+    }
+    if set(failure) != expected or failure.get("schema_version") != "1.0":
+        raise FunctionalControlError("Q6.5 failure index schema differs")
+    if (
+        failure.get("candidate_digest") != config["candidate_digest"]
+        or failure.get("toolchain_digest") != config["toolchain_manifest_digest"]
+        or failure.get("credential_epoch_id") != credential_epoch
+    ):
+        raise FunctionalControlError("Q6.5 failure index identity differs")
+    operation = str(failure["operation"])
+    if operation not in set(MANDATORY_Q6_5_OPERATIONS[:8]):
+        raise FunctionalControlError("Q6.5 external failure operation is not allowlisted")
+    if (
+        failure.get("capability") != operation
+        or failure.get("safe_reason_code") != "candidate_github_operation_denied"
+    ):
+        raise FunctionalControlError("Q6.5 external failure classification differs")
+    owner = str(config["factory_repository"]).split("/", 1)[0]
+    expected_scope = {
+        "owner": owner,
+        "repository": f"hermes-canary-q65-{str(config['candidate_digest'])[:10]}",
+        "private": True,
+    }
+    if failure.get("scope") != expected_scope or not str(failure["observed_at"]):
+        raise FunctionalControlError("Q6.5 external failure scope differs")
+    return CapabilityHandshakeReport.create(
+        candidate_digest=str(config["candidate_digest"]),
+        capability=operation,
+        operation=operation,
+        scope=expected_scope,
+        status=CapabilityStatus.MISSING_EXTERNAL,
+        credential_epoch_id=credential_epoch,
+        toolchain_digest=str(config["toolchain_manifest_digest"]),
+        safe_reason_code="candidate_github_operation_denied",
+    )
+
+
 def reconcile(
     config_path: Path,
     *,
@@ -257,6 +322,7 @@ def reconcile(
     credential_source: Path,
     telegram_credential_source: Path,
     report_index: Path,
+    failure_index: Path,
 ) -> dict[str, Any]:
     config = _load_config(config_path)
     epoch_id, release_snapshot = _release_snapshot(config)
@@ -300,29 +366,71 @@ def reconcile(
                 "automatic_resume": True,
                 "epoch_id": epoch_id,
             }
-        previous = governor.connection.execute(
-            "SELECT credential_epoch_id FROM capability_handshake_reports "
-            "WHERE epoch_id=? AND operation='github.identity.read'",
-            (epoch_id,),
-        ).fetchone()
-        previous_epoch = str(previous[0]) if previous and previous[0] else None
         epoch_path = state_root / "credential-epoch"
+        previous_epoch: str | None = None
+        if epoch_path.exists():
+            if not epoch_path.is_file() or epoch_path.is_symlink():
+                raise FunctionalControlError("credential epoch path is unsafe")
+            previous_epoch = epoch_path.read_text(encoding="ascii").strip()
+            if not _CREDENTIAL_EPOCH.fullmatch(previous_epoch):
+                raise FunctionalControlError("credential epoch identity is invalid")
         _install_epoch_file(epoch_path, credential_epoch)
-        if previous is not None and previous_epoch != credential_epoch:
+        if previous_epoch != credential_epoch:
             governor.capability_epoch_changed(
                 epoch_id=epoch_id,
                 old_epoch=previous_epoch,
                 new_epoch=credential_epoch,
             )
             _archive_stale_index(report_index)
+            _archive_stale_index(failure_index)
             _notify(
                 state_root,
                 kind="CAPABILITY_READY",
                 identity=credential_epoch,
                 text="Candidate GitHub capability changed; automatic Q6.5 resume started.",
             )
+            epoch = governor.epoch(epoch_id)
         if str(epoch.get("q6_5_status")) != "PASS":
-            if not report_index.is_file() or report_index.is_symlink():
+            if report_index.exists() and (not report_index.is_file() or report_index.is_symlink()):
+                raise FunctionalControlError("Q6.5 report index is unsafe")
+            if report_index.exists() and failure_index.exists():
+                raise FunctionalControlError("Q6.5 success and failure indexes conflict")
+            if not report_index.exists():
+                external_failure = _external_failure_report(
+                    failure_index,
+                    config=config,
+                    credential_epoch=credential_epoch,
+                )
+                if external_failure is not None:
+                    governor.record_handshake(epoch_id, external_failure)
+                    action_id = governor.ensure_owner_action(
+                        epoch_id=epoch_id,
+                        reason_code="candidate_github_operation_denied",
+                        capability=external_failure.capability,
+                        capability_epoch=credential_epoch,
+                    )
+                    _notify_waiting(
+                        state_root,
+                        epoch_id=epoch_id,
+                        action_id=action_id,
+                        text=(
+                            "Candidate GitHub authentication reached the scoped Q6.5 handshake, "
+                            f"but the required private canary operation "
+                            f"{external_failure.operation} was denied. Replace "
+                            "the protected Candidate credential with one authorized to create, "
+                            "read, update, merge/close, and delete/archive private scoped canary "
+                            f"repositories for {external_failure.scope['owner']}. Do not send the "
+                            "credential in Telegram."
+                        ),
+                    )
+                    return {
+                        "status": "WAITING_CAPABILITY",
+                        "reason_code": "candidate_github_operation_denied",
+                        "operation": external_failure.operation,
+                        "action_ref": f"state://functional-owner-actions/{action_id}",
+                        "automatic_resume": True,
+                        "epoch_id": epoch_id,
+                    }
                 return {
                     "status": "Q6_5_PROBE_REQUIRED",
                     "epoch_id": epoch_id,
@@ -619,6 +727,11 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("/var/lib/hermes-factory-functional/q6-5/report-index.json"),
     )
     parser.add_argument(
+        "--failure-index",
+        type=Path,
+        default=Path("/var/lib/hermes-factory-functional/q6-5/failure-index.json"),
+    )
+    parser.add_argument(
         "--telegram-credential-source",
         type=Path,
         default=Path(
@@ -651,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
                 credential_source=args.credential_source,
                 telegram_credential_source=args.telegram_credential_source,
                 report_index=args.report_index,
+                failure_index=args.failure_index,
             )
         elif args.command == "status":
             result = status(args.config, state_root=args.state_root)

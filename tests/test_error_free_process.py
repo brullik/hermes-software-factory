@@ -2088,6 +2088,20 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     functional_recovery = bootstrap.index("functional-fail")
     terminal_check = bootstrap.index("Previous Candidate B epoch is not terminal")
     assert functional_recovery < terminal_check
+    first_functional_stop = bootstrap.index(
+        "stop_functional_candidate_services", terminal_check
+    )
+    daemon_reload = bootstrap.index("systemctl daemon-reload")
+    second_functional_stop = bootstrap.index(
+        "stop_functional_candidate_services", daemon_reload
+    )
+    qualification_start = bootstrap.index(
+        "systemctl start --wait hermes-factory-qualification.service"
+    )
+    assert terminal_check < first_functional_stop < daemon_reload
+    assert daemon_reload < second_functional_stop < qualification_start
+    assert bootstrap.count("stop_functional_candidate_services") == 3
+    assert "for q65_index in report-index.json failure-index.json; do" in bootstrap
     assert "systemctl is-failed --quiet hermes-factory-functional-handoff.service" in bootstrap
     assert "systemctl is-failed --quiet hermes-factory-functional-qualification.service" in bootstrap
     assert "PYTHONDONTWRITEBYTECODE=1" in bootstrap
@@ -2095,9 +2109,6 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "hermes-factory-owner-notifier.service; do" in bootstrap
     notifier_disable = bootstrap.index(
         "systemctl disable --now hermes-factory-owner-notifier.path"
-    )
-    qualification_start = bootstrap.index(
-        "systemctl start --wait hermes-factory-qualification.service"
     )
     notifier_enable = bootstrap.index(
         "systemctl enable --now hermes-factory-owner-notifier.path"

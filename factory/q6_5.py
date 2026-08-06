@@ -22,6 +22,21 @@ class Q65ProbeError(RuntimeError):
     """A real capability probe could not produce authoritative evidence."""
 
 
+class Q65ExternalCapabilityError(Q65ProbeError):
+    """A broker-authenticated Q6.5 operation needs an external permission."""
+
+    def __init__(self, broker_operation: str, safe_reason_code: str) -> None:
+        self.broker_operation = broker_operation
+        self.operation = (
+            "git.branch.push"
+            if broker_operation == "branch.push"
+            else f"github.{broker_operation}"
+        )
+        self.capability = self.operation
+        self.safe_reason_code = safe_reason_code
+        super().__init__(safe_reason_code)
+
+
 @dataclass(frozen=True)
 class ProbeIdentity:
     candidate_digest: str
@@ -102,15 +117,21 @@ class GitHubOperationHandshake:
     def _request(
         self, operation: str, payload: Mapping[str, Any], *, ordinal: int = 0
     ) -> BrokerReceipt:
-        return self.broker.execute(
-            BrokerRequest(
-                request_id=_request_id(self.epoch_id, operation, ordinal),
-                operation=operation,
-                owner=self.owner,
-                repository=self.repository,
-                payload=dict(payload),
+        try:
+            return self.broker.execute(
+                BrokerRequest(
+                    request_id=_request_id(self.epoch_id, operation, ordinal),
+                    operation=operation,
+                    owner=self.owner,
+                    repository=self.repository,
+                    payload=dict(payload),
+                )
             )
-        )
+        except CredentialBrokerError as error:
+            reason_code = str(error)
+            if reason_code == "candidate_github_operation_denied":
+                raise Q65ExternalCapabilityError(operation, reason_code) from error
+            raise
 
     def _git(self, *argv: str) -> str:
         result = self.git_runner(list(argv), self.workspace)

@@ -28,6 +28,7 @@ from factory.q6_5 import (
     GitHubOperationHandshake,
     ProbeIdentity,
     ProviderOperationHandshake,
+    Q65ExternalCapabilityError,
     Q65ProbeError,
     external_operation_report,
 )
@@ -426,20 +427,62 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if not isinstance(existing, dict):
             raise LiveProbeError("Q6.5 report index is not an object")
         return {str(key): item for key, item in existing.items()}
+    if args.failure_index.exists():
+        existing_failure = json.loads(args.failure_index.read_text(encoding="utf-8"))
+        if not isinstance(existing_failure, dict) or args.failure_index.is_symlink():
+            raise LiveProbeError("Q6.5 failure index is invalid")
+        digest = str(existing_failure.pop("receipt_digest", ""))
+        if digest != sha256_text(stable_json(existing_failure)):
+            raise LiveProbeError("Q6.5 failure index digest differs")
+        if (
+            existing_failure.get("candidate_digest") != identity.candidate_digest
+            or existing_failure.get("toolchain_digest") != identity.toolchain_digest
+            or existing_failure.get("credential_epoch_id") != identity.credential_epoch_id
+        ):
+            raise LiveProbeError("Q6.5 failure index identity differs")
+        return {
+            "status": "WAITING_CAPABILITY",
+            "failure_digest": digest,
+            "operation": str(existing_failure.get("operation", "")),
+            "safe_reason_code": str(existing_failure.get("safe_reason_code", "")),
+        }
     root = args.output.parent / str(control["source_commit"])
     root.mkdir(parents=True, exist_ok=True)
     owner = str(control["factory_repository"]).split("/", 1)[0]
     repository = f"hermes-canary-q65-{identity.candidate_digest[:10]}"
-    reports: list[CapabilityHandshakeReport] = list(
-        GitHubOperationHandshake(
-            broker=BrokerClient(args.broker_socket),
-            identity=identity,
-            epoch_id=str(control["source_commit"]),
-            owner=owner,
-            repository=repository,
-            workspace=root / "github-workspace",
-        ).run()
-    )
+    try:
+        reports: list[CapabilityHandshakeReport] = list(
+            GitHubOperationHandshake(
+                broker=BrokerClient(args.broker_socket),
+                identity=identity,
+                epoch_id=str(control["source_commit"]),
+                owner=owner,
+                repository=repository,
+                workspace=root / "github-workspace",
+            ).run()
+        )
+    except Q65ExternalCapabilityError as error:
+        failure_path = _write_once(
+            args.failure_index,
+            {
+                "schema_version": "1.0",
+                "candidate_digest": identity.candidate_digest,
+                "toolchain_digest": identity.toolchain_digest,
+                "credential_epoch_id": identity.credential_epoch_id,
+                "capability": error.capability,
+                "operation": error.operation,
+                "scope": {"owner": owner, "repository": repository, "private": True},
+                "safe_reason_code": error.safe_reason_code,
+                "observed_at": utc_now(),
+            },
+        )
+        failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        return {
+            "status": "WAITING_CAPABILITY",
+            "failure_digest": str(failure["receipt_digest"]),
+            "operation": error.operation,
+            "safe_reason_code": error.safe_reason_code,
+        }
     provider_workspace = root / "provider-workspace"
     provider_workspace.mkdir(parents=True, exist_ok=True)
     reports.extend(
@@ -496,6 +539,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("/var/lib/hermes-factory-functional/q6-5/report-index.json"),
     )
+    parser.add_argument(
+        "--failure-index",
+        type=Path,
+        default=Path("/var/lib/hermes-factory-functional/q6-5/failure-index.json"),
+    )
     parser.add_argument("--credential-epoch")
     parser.add_argument(
         "--credential-epoch-file",
@@ -522,7 +570,10 @@ def main(argv: list[str] | None = None) -> int:
     ) as error:
         print(stable_json({"status": "FAIL", "error_type": type(error).__name__}), file=sys.stderr)
         return 1
-    print(stable_json({"status": "PASS", "index_digest": result["index_digest"]}))
+    if result.get("status") == "WAITING_CAPABILITY":
+        print(stable_json(result))
+    else:
+        print(stable_json({"status": "PASS", "index_digest": result["index_digest"]}))
     return 0
 
 

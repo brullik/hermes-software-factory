@@ -11,6 +11,7 @@ import stat
 import subprocess
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -43,6 +44,7 @@ from factory.q6_5 import (
     GitHubOperationHandshake,
     ProbeIdentity,
     ProviderOperationHandshake,
+    Q65ExternalCapabilityError,
     external_operation_report,
 )
 from factory.recursive_improvement import (
@@ -56,7 +58,7 @@ from factory.state import StateStore
 from factory.support_bundle import build_support_bundle
 from factory.telegram import TelegramApi
 from factory.worker import HermesRunResult
-from scripts import functional_qualification
+from scripts import functional_qualification, q6_5_live
 
 DIGEST = "a" * 64
 TOOLCHAIN = "b" * 64
@@ -236,6 +238,7 @@ def test_functional_reconcile_retires_checkpointed_failed_release_epoch(
         credential_source=tmp_path / "missing-github-token",
         telegram_credential_source=tmp_path / "missing-telegram-token",
         report_index=state_root / "q6-5" / "report-index.json",
+        failure_index=state_root / "q6-5" / "failure-index.json",
     )
 
     assert result["status"] == "WAITING_CAPABILITY"
@@ -277,6 +280,159 @@ def test_functional_reconcile_retires_checkpointed_failed_release_epoch(
         f"NOTIFY-{current_notification_digest}.json",
         f"WAITING-{current_notification_digest}.json",
     ]
+
+
+def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
+    tmp_path: Path,
+) -> None:
+    epoch_id = "RE-Q65-EXTERNAL"
+    release_database = tmp_path / "release.db"
+    connection = sqlite3.connect(release_database)
+    try:
+        connection.execute(
+            "CREATE TABLE controller_release_epochs ("
+            "epoch_id TEXT PRIMARY KEY,source_commit TEXT,candidate_digest TEXT,"
+            "status TEXT,created_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO controller_release_epochs VALUES (?,?,?,?,?)",
+            (epoch_id, COMMIT, DIGEST, "FUNCTIONAL_PENDING", "2026-08-06T00:00:00Z"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    control = tmp_path / "qualification-control.yaml"
+    control.write_text(
+        yaml.safe_dump(
+            {
+                "governor_database": str(release_database),
+                "source_commit": COMMIT,
+                "candidate_digest": DIGEST,
+                "toolchain_manifest_digest": TOOLCHAIN,
+                "factory_repository": "brullik/hermes-software-factory",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_root = tmp_path / "functional"
+    credential = tmp_path / "github-token"
+    credential.write_text("fixture-token-not-a-real-secret", encoding="utf-8")
+    credential.chmod(0o600)
+    report_index = state_root / "q6-5" / "report-index.json"
+    failure_index = state_root / "q6-5" / "failure-index.json"
+    first = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=credential,
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=report_index,
+        failure_index=failure_index,
+    )
+    assert first["status"] == "Q6_5_PROBE_REQUIRED"
+    credential_epoch = (state_root / "credential-epoch").read_text(encoding="ascii").strip()
+    q6_5_live._write_once(
+        failure_index,
+        {
+            "schema_version": "1.0",
+            "candidate_digest": DIGEST,
+            "toolchain_digest": TOOLCHAIN,
+            "credential_epoch_id": credential_epoch,
+            "capability": "github.repository.create_private",
+            "operation": "github.repository.create_private",
+            "scope": {
+                "owner": "brullik",
+                "repository": f"hermes-canary-q65-{DIGEST[:10]}",
+                "private": True,
+            },
+            "safe_reason_code": "candidate_github_operation_denied",
+            "observed_at": "2026-08-06T00:01:00Z",
+        },
+    )
+
+    result = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=credential,
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=report_index,
+        failure_index=failure_index,
+    )
+    replay = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=credential,
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=report_index,
+        failure_index=failure_index,
+    )
+
+    assert result == replay
+    assert result["status"] == "WAITING_CAPABILITY"
+    assert result["reason_code"] == "candidate_github_operation_denied"
+    assert result["operation"] == "github.repository.create_private"
+    database = sqlite3.connect(state_root / "functional.db")
+    try:
+        epoch = database.execute(
+            "SELECT status,q6_5_status FROM functional_epochs WHERE epoch_id=?", (epoch_id,)
+        ).fetchone()
+        report = database.execute(
+            "SELECT status FROM capability_handshake_reports "
+            "WHERE epoch_id=? AND operation='github.repository.create_private'",
+            (epoch_id,),
+        ).fetchone()
+        action = database.execute(
+            "SELECT action_id,status,reason_code,capability,capability_epoch "
+            "FROM functional_owner_actions WHERE epoch_id=?",
+            (epoch_id,),
+        ).fetchone()
+    finally:
+        database.close()
+    assert epoch == ("WAITING_CAPABILITY", "WAITING_CAPABILITY")
+    assert report == ("MISSING_EXTERNAL",)
+    assert action is not None
+    assert action[1:] == (
+        "OPEN",
+        "candidate_github_operation_denied",
+        "github.repository.create_private",
+        credential_epoch,
+    )
+    notification = json.loads(
+        (state_root / "notifications" / "outbox" / f"NOTIFY-{sha256_text(action[0])[:32]}.json")
+        .read_text(encoding="utf-8")
+    )
+    assert notification["kind"] == "OWNER_ACTION_REQUIRED"
+    assert "github.repository.create_private was denied" in notification["text"]
+    assert "fixture-token" not in notification["text"]
+
+    credential.write_text("replacement-fixture-token-not-a-real-secret", encoding="utf-8")
+    credential.chmod(0o600)
+    if os.name == "nt":
+        (state_root / "credential-epoch").chmod(stat.S_IWRITE)
+    resumed = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=credential,
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=report_index,
+        failure_index=failure_index,
+    )
+    assert resumed["status"] == "Q6_5_PROBE_REQUIRED"
+    assert not failure_index.exists()
+    assert len(list((failure_index.parent / "archive").glob("failure-index-*.json"))) == 1
+    database = sqlite3.connect(state_root / "functional.db")
+    try:
+        resumed_epoch = database.execute(
+            "SELECT status,q6_5_status FROM functional_epochs WHERE epoch_id=?", (epoch_id,)
+        ).fetchone()
+        resolved_action = database.execute(
+            "SELECT status,resolved_at FROM functional_owner_actions WHERE action_id=?",
+            (action[0],),
+        ).fetchone()
+    finally:
+        database.close()
+    assert resumed_epoch == ("Q6_5_PENDING", "PENDING")
+    assert resolved_action is not None and resolved_action[0] == "RESOLVED"
+    assert resolved_action[1]
 
 
 def test_functional_retirement_rejects_nonterminal_release_proof() -> None:
@@ -910,6 +1066,71 @@ def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(
     assert [report.operation for report in replayed] == [report.operation for report in reports]
 
 
+def test_q6_5_github_denial_is_typed_and_written_as_immutable_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class DeniedBroker(_FakeQ65Broker):
+        def execute(self, request: BrokerRequest) -> BrokerReceipt:
+            if request.operation == "repository.create_private":
+                raise CredentialBrokerError("candidate_github_operation_denied")
+            return super().execute(request)
+
+    handshake = GitHubOperationHandshake(
+        broker=DeniedBroker(),  # type: ignore[arg-type]
+        identity=ProbeIdentity(DIGEST, TOOLCHAIN, "CE-" + "A" * 32),
+        epoch_id=COMMIT,
+        owner="brullik",
+        repository=f"hermes-canary-q65-{DIGEST[:10]}",
+        workspace=tmp_path / "workspace",
+    )
+    with pytest.raises(Q65ExternalCapabilityError) as captured:
+        handshake.run()
+    assert captured.value.operation == "github.repository.create_private"
+    assert captured.value.safe_reason_code == "candidate_github_operation_denied"
+
+    class DeniedHandshake:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def run(self) -> tuple[CapabilityHandshakeReport, ...]:
+            raise Q65ExternalCapabilityError(
+                "repository.create_private", "candidate_github_operation_denied"
+            )
+
+    monkeypatch.setattr(q6_5_live, "GitHubOperationHandshake", DeniedHandshake)
+    control = tmp_path / "qualification-control.yaml"
+    control.write_text(
+        yaml.safe_dump(
+            {
+                "source_commit": COMMIT,
+                "candidate_digest": DIGEST,
+                "toolchain_manifest_digest": TOOLCHAIN,
+                "factory_repository": "brullik/hermes-software-factory",
+            }
+        ),
+        encoding="utf-8",
+    )
+    failure_index = tmp_path / "failure-index.json"
+    result = q6_5_live.run(
+        SimpleNamespace(
+            config=control,
+            credential_epoch="CE-" + "A" * 32,
+            credential_epoch_file=None,
+            output=tmp_path / "report-index.json",
+            failure_index=failure_index,
+            broker_socket=tmp_path / "broker.sock",
+            candidate_config=tmp_path / "candidate.yaml",
+            notifications=tmp_path / "notifications",
+        )
+    )
+    assert result["status"] == "WAITING_CAPABILITY"
+    assert result["operation"] == "github.repository.create_private"
+    failure = json.loads(failure_index.read_text(encoding="utf-8"))
+    digest = failure.pop("receipt_digest")
+    assert digest == sha256_text(json.dumps(failure, sort_keys=True, separators=(",", ":")))
+    assert failure["safe_reason_code"] == "candidate_github_operation_denied"
+
+
 class _ProviderRunner:
     def run(
         self,
@@ -1099,6 +1320,9 @@ def test_wf_p0_023_024_025_systemd_autonomy_has_no_codex_runtime() -> None:
         root / "scripts/qualification/reconcile-functional.sh"
     ).read_text(encoding="utf-8")
     assert "systemctl start --no-block hermes-factory-owner-notifier.service" in reconciler
+    assert reconciler.count(
+        "systemctl start --no-block hermes-factory-owner-notifier.service"
+    ) == 2
 
 
 def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:
