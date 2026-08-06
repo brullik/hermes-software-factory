@@ -163,6 +163,8 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
     printf 'Previous Candidate B epoch is not terminal: %s\n' "${OLD_EPOCH_STATUS}" >&2
     exit 73
   fi
+  systemctl disable --now hermes-factory-owner-notifier.path >/dev/null 2>&1 || true
+  systemctl stop hermes-factory-owner-notifier.service >/dev/null 2>&1 || true
   systemctl disable --now \
     hermes-factory-shadow-verify.timer \
     hermes-factory-shadow-finalize.timer >/dev/null 2>&1 || true
@@ -643,7 +645,6 @@ for reset_unit in \
 done
 runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control init
-systemctl enable --now hermes-factory-owner-notifier.path
 systemctl enable --now hermes-factory-recursive-improvement.timer
 systemctl enable hermes-factory-qualification.service
 if ! systemctl start --wait hermes-factory-qualification.service; then
@@ -652,5 +653,6 @@ if ! systemctl start --wait hermes-factory-qualification.service; then
     orchestration-fail
   exit 1
 fi
+systemctl enable --now hermes-factory-owner-notifier.path
 
 printf 'Candidate B prepared at %s; Stable A was not modified.\n' "${SOURCE_COMMIT}"

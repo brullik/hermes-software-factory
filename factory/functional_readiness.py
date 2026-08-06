@@ -395,6 +395,12 @@ class FunctionalQualificationGovernor:
                 result_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS functional_epoch_retirements (
+                epoch_id TEXT PRIMARY KEY REFERENCES functional_epochs(epoch_id),
+                release_status TEXT NOT NULL CHECK(release_status='QUALIFICATION_FAILED'),
+                release_snapshot_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
 
@@ -430,6 +436,65 @@ class FunctionalQualificationGovernor:
                     created_at,updated_at) VALUES (?,?,?,?,'Q6_5_PENDING',?,?)""",
                 (epoch_id, source_commit, candidate_digest, toolchain_digest, now, now),
             )
+
+    def retire_after_release_failure(
+        self,
+        *,
+        epoch_id: str,
+        source_commit: str,
+        candidate_digest: str,
+        release_status: str,
+        release_snapshot_digest: str,
+    ) -> bool:
+        """Mirror a checkpointed terminal release decision into functional state."""
+
+        if release_status != "QUALIFICATION_FAILED" or not _SHA256.fullmatch(
+            release_snapshot_digest
+        ):
+            raise FunctionalReadinessError("functional retirement proof is invalid")
+        epoch = self.epoch(epoch_id)
+        if (
+            str(epoch["source_commit"]) != source_commit
+            or str(epoch["candidate_digest"]) != candidate_digest
+        ):
+            raise FunctionalReadinessError("functional retirement identity differs")
+        expected = (release_status, release_snapshot_digest)
+        existing = self.connection.execute(
+            "SELECT release_status,release_snapshot_digest "
+            "FROM functional_epoch_retirements WHERE epoch_id=?",
+            (epoch_id,),
+        ).fetchone()
+        if existing is not None:
+            if tuple(str(value) for value in existing) != expected:
+                raise FunctionalReadinessError("functional retirement proof conflicts")
+            if str(epoch["status"]) != "QUALIFICATION_FAILED":
+                raise FunctionalReadinessError("retired functional epoch is not terminal")
+            return False
+        if str(epoch["status"]) in {
+            "NON_PROMOTABLE",
+            "QUALIFICATION_FAILED",
+            "Q7_STARTED",
+        }:
+            raise FunctionalReadinessError("functional epoch cannot be retired")
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO functional_epoch_retirements
+                   (epoch_id,release_status,release_snapshot_digest,created_at)
+                   VALUES (?,?,?,?)""",
+                (epoch_id, release_status, release_snapshot_digest, now),
+            )
+            self.connection.execute(
+                """UPDATE functional_owner_actions SET status='RESOLVED',resolved_at=?
+                     WHERE epoch_id=? AND status='OPEN'""",
+                (now, epoch_id),
+            )
+            self.connection.execute(
+                "UPDATE functional_epochs SET status='QUALIFICATION_FAILED',updated_at=? "
+                "WHERE epoch_id=?",
+                (now, epoch_id),
+            )
+        return True
 
     def epoch(self, epoch_id: str) -> dict[str, Any]:
         row = self.connection.execute(

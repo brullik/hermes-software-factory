@@ -2084,6 +2084,23 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "PYTHONDONTWRITEBYTECODE=1" in bootstrap
     assert 'systemctl reset-failed "${reset_unit}"' in bootstrap
     assert "hermes-factory-owner-notifier.service; do" in bootstrap
+    notifier_disable = bootstrap.index(
+        "systemctl disable --now hermes-factory-owner-notifier.path"
+    )
+    qualification_start = bootstrap.index(
+        "systemctl start --wait hermes-factory-qualification.service"
+    )
+    notifier_enable = bootstrap.index(
+        "systemctl enable --now hermes-factory-owner-notifier.path"
+    )
+    assert notifier_disable < qualification_start < notifier_enable
+    owner_notifier = (
+        repository / "config/systemd/hermes-factory-owner-notifier.service"
+    ).read_text(encoding="utf-8")
+    assert "Group=hermesfactory" in owner_notifier
+    assert "SupplementaryGroups=hermesfunctional" in owner_notifier
+    assert "EnvironmentFile=/etc/hermes-factory/telegram.env" in owner_notifier
+    assert "/etc/hermes-factory/telegram.env" in owner_notifier
 
 
 def test_HARD_P0_candidate_tasks_have_no_docker_socket_group_or_apt_get() -> None:

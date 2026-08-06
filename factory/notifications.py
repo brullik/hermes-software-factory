@@ -95,6 +95,7 @@ class NotificationOutbox:
         self.outbox = root / "outbox"
         self.receipts = root / "receipts"
         self.archive = root / "archive"
+        self.retired = root / "retired"
 
     def archive_request(self, path: Path) -> None:
         if path.parent.resolve() != self.outbox.resolve() or path.is_symlink():
@@ -104,6 +105,20 @@ class NotificationOutbox:
         if destination.exists():
             if destination.is_symlink() or destination.read_bytes() != path.read_bytes():
                 raise NotificationError("notification archive conflicts")
+            path.unlink()
+            return
+        path.replace(destination)
+
+    def retire_request(self, path: Path) -> None:
+        """Retain an unsent request after its bound owner action is superseded."""
+
+        if path.parent.resolve() != self.outbox.resolve() or path.is_symlink():
+            raise NotificationError("notification retirement source is invalid")
+        self.retired.mkdir(parents=True, exist_ok=True)
+        destination = self.retired / path.name
+        if destination.exists():
+            if destination.is_symlink() or destination.read_bytes() != path.read_bytes():
+                raise NotificationError("notification retirement conflicts")
             path.unlink()
             return
         path.replace(destination)

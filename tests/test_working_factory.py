@@ -136,6 +136,158 @@ def test_release_governor_functional_failure_is_state_scoped(tmp_path: Path) -> 
     state.close()
 
 
+def test_functional_reconcile_retires_checkpointed_failed_release_epoch(
+    tmp_path: Path,
+) -> None:
+    old_epoch = "RE-OLD-FUNCTIONAL"
+    current_epoch = "RE-CURRENT-FUNCTIONAL"
+    old_commit = "d" * 40
+    current_commit = "e" * 40
+    old_digest = "1" * 64
+    current_digest = "2" * 64
+    release_database = tmp_path / "release.db"
+    connection = sqlite3.connect(release_database)
+    try:
+        connection.execute(
+            "CREATE TABLE controller_release_epochs ("
+            "epoch_id TEXT PRIMARY KEY,source_commit TEXT,candidate_digest TEXT,"
+            "status TEXT,created_at TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO controller_release_epochs VALUES (?,?,?,?,?)",
+            (
+                (
+                    old_epoch,
+                    old_commit,
+                    old_digest,
+                    "QUALIFICATION_FAILED",
+                    "2026-08-06T00:00:00Z",
+                ),
+                (
+                    current_epoch,
+                    current_commit,
+                    current_digest,
+                    "FUNCTIONAL_PENDING",
+                    "2026-08-06T00:01:00Z",
+                ),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    state_root = tmp_path / "functional"
+    state_root.mkdir()
+    governor = FunctionalQualificationGovernor(
+        sqlite3.connect(state_root / "functional.db")
+    )
+    governor.register_epoch(
+        epoch_id=old_epoch,
+        source_commit=old_commit,
+        candidate_digest=old_digest,
+        toolchain_digest=TOOLCHAIN,
+    )
+    governor.record_handshake(
+        old_epoch,
+        CapabilityHandshakeReport.create(
+            candidate_digest=old_digest,
+            capability="github.identity.read",
+            operation="github.identity.read",
+            scope={"owner": "brullik"},
+            status=CapabilityStatus.MISSING_EXTERNAL,
+            credential_epoch_id=None,
+            toolchain_digest=TOOLCHAIN,
+            safe_reason_code="missing_candidate_github_credential",
+        ),
+    )
+    old_action = governor.ensure_owner_action(
+        epoch_id=old_epoch,
+        reason_code="missing_candidate_github_credential",
+        capability="github.identity.read",
+        capability_epoch=None,
+    )
+    functional_qualification._notify_waiting(
+        state_root,
+        epoch_id=old_epoch,
+        action_id=old_action,
+        text="Install the superseded Candidate capability.",
+    )
+    governor.connection.close()
+
+    control = tmp_path / "qualification-control.yaml"
+    control.write_text(
+        yaml.safe_dump(
+            {
+                "governor_database": str(release_database),
+                "source_commit": current_commit,
+                "candidate_digest": current_digest,
+                "toolchain_manifest_digest": TOOLCHAIN,
+                "factory_repository": "brullik/hermes-software-factory",
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=tmp_path / "missing-github-token",
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=state_root / "q6-5" / "report-index.json",
+    )
+
+    assert result["status"] == "WAITING_CAPABILITY"
+    assert result["epoch_id"] == current_epoch
+    readback = sqlite3.connect(state_root / "functional.db")
+    try:
+        old = readback.execute(
+            "SELECT status,q6_5_status FROM functional_epochs WHERE epoch_id=?",
+            (old_epoch,),
+        ).fetchone()
+        current = readback.execute(
+            "SELECT status,q6_5_status FROM functional_epochs WHERE epoch_id=?",
+            (current_epoch,),
+        ).fetchone()
+        action = readback.execute(
+            "SELECT status,resolved_at FROM functional_owner_actions WHERE action_id=?",
+            (old_action,),
+        ).fetchone()
+        retirement = readback.execute(
+            "SELECT release_status,release_snapshot_digest "
+            "FROM functional_epoch_retirements WHERE epoch_id=?",
+            (old_epoch,),
+        ).fetchone()
+    finally:
+        readback.close()
+    assert old == ("QUALIFICATION_FAILED", "WAITING_CAPABILITY")
+    assert current == ("WAITING_CAPABILITY", "WAITING_CAPABILITY")
+    assert action is not None and action[0] == "RESOLVED" and action[1]
+    assert retirement is not None
+    assert retirement[0] == "QUALIFICATION_FAILED"
+    assert len(str(retirement[1])) == 64
+    old_notification_digest = sha256_text(old_action)[:32]
+    assert sorted(path.name for path in (state_root / "notifications" / "retired").iterdir()) == [
+        f"NOTIFY-{old_notification_digest}.json",
+        f"WAITING-{old_notification_digest}.json",
+    ]
+    current_notification_digest = sha256_text(str(result["action_ref"]).rsplit("/", 1)[1])[:32]
+    assert sorted(path.name for path in (state_root / "notifications" / "outbox").iterdir()) == [
+        f"NOTIFY-{current_notification_digest}.json",
+        f"WAITING-{current_notification_digest}.json",
+    ]
+
+
+def test_functional_retirement_rejects_nonterminal_release_proof() -> None:
+    governor = _functional_governor()
+    with pytest.raises(FunctionalReadinessError, match="retirement proof"):
+        governor.retire_after_release_failure(
+            epoch_id="RE-FUNCTIONAL-1",
+            source_commit=COMMIT,
+            candidate_digest=DIGEST,
+            release_status="FUNCTIONAL_PENDING",
+            release_snapshot_digest="d" * 64,
+        )
+
+
 def test_golden_builder_reads_single_owner_from_stable_environment(
     tmp_path: Path,
 ) -> None:

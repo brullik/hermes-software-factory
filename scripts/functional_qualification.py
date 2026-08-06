@@ -55,7 +55,9 @@ def _load_config(path: Path) -> dict[str, Any]:
     return value
 
 
-def _release_epoch(config: Mapping[str, Any]) -> str:
+def _release_snapshot(
+    config: Mapping[str, Any],
+) -> tuple[str, dict[str, tuple[str, str, str]]]:
     database = Path(str(config["governor_database"]))
     # The verifier StateStore uses WAL.  This reader is deliberately mounted
     # read-only by systemd, so it cannot participate in SQLite's mutable WAL
@@ -76,7 +78,18 @@ def _release_epoch(config: Mapping[str, Any]) -> str:
     matches = [str(row[0]) for row in rows if (str(row[1]), str(row[2])) == expected]
     if len(matches) != 1:
         raise FunctionalControlError("exact Candidate release epoch is ambiguous")
-    return matches[0]
+    snapshot: dict[str, tuple[str, str, str]] = {}
+    for row in rows:
+        epoch_id = str(row[0])
+        value = (str(row[1]), str(row[2]), str(row[3]))
+        if epoch_id in snapshot and snapshot[epoch_id] != value:
+            raise FunctionalControlError("release epoch snapshot identity conflicts")
+        snapshot[epoch_id] = value
+    return matches[0], snapshot
+
+
+def _release_epoch(config: Mapping[str, Any]) -> str:
+    return _release_snapshot(config)[0]
 
 
 def _credential_epoch(path: Path, *, label: str) -> str | None:
@@ -97,6 +110,58 @@ def _governor(database: Path) -> FunctionalQualificationGovernor:
     database.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database)
     return FunctionalQualificationGovernor(connection)
+
+
+def _retire_superseded_functional_epochs(
+    governor: FunctionalQualificationGovernor,
+    *,
+    current_epoch_id: str,
+    release_snapshot: Mapping[str, tuple[str, str, str]],
+    state_root: Path,
+) -> int:
+    rows = governor.connection.execute(
+        "SELECT epoch_id,source_commit,candidate_digest FROM functional_epochs "
+        "WHERE epoch_id<>? "
+        "AND status NOT IN ('NON_PROMOTABLE','QUALIFICATION_FAILED','Q7_STARTED')",
+        (current_epoch_id,),
+    ).fetchall()
+    retired = 0
+    for row in rows:
+        epoch_id = str(row[0])
+        release = release_snapshot.get(epoch_id)
+        if release is None:
+            raise FunctionalControlError("active functional epoch lacks release proof")
+        source_commit, candidate_digest, release_status = release
+        proof = {
+            "epoch_id": epoch_id,
+            "source_commit": source_commit,
+            "candidate_digest": candidate_digest,
+            "status": release_status,
+        }
+        action_rows = governor.connection.execute(
+            "SELECT action_id FROM functional_owner_actions "
+            "WHERE epoch_id=? AND status='OPEN'",
+            (epoch_id,),
+        ).fetchall()
+        outbox = NotificationOutbox(
+            state_root / "notifications",
+            attachment_roots=(state_root, Path("/var/lib/hermes-factory-verifier")),
+        )
+        for action_row in action_rows:
+            action_digest = sha256_text(str(action_row[0]))[:32]
+            for prefix in ("WAITING", "NOTIFY"):
+                notification = outbox.outbox / f"{prefix}-{action_digest}.json"
+                if notification.exists():
+                    outbox.retire_request(notification)
+        if governor.retire_after_release_failure(
+            epoch_id=epoch_id,
+            source_commit=source_commit,
+            candidate_digest=candidate_digest,
+            release_status=release_status,
+            release_snapshot_digest=sha256_text(stable_json(proof)),
+        ):
+            retired += 1
+    return retired
 
 
 def _install_epoch_file(path: Path, value: str) -> None:
@@ -194,9 +259,15 @@ def reconcile(
     report_index: Path,
 ) -> dict[str, Any]:
     config = _load_config(config_path)
-    epoch_id = _release_epoch(config)
+    epoch_id, release_snapshot = _release_snapshot(config)
     governor = _governor(state_root / "functional.db")
     try:
+        _retire_superseded_functional_epochs(
+            governor,
+            current_epoch_id=epoch_id,
+            release_snapshot=release_snapshot,
+            state_root=state_root,
+        )
         governor.register_epoch(
             epoch_id=epoch_id,
             source_commit=str(config["source_commit"]),
