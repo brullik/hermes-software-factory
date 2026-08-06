@@ -24,8 +24,6 @@ done
 
 # Q6 finishes in FUNCTIONAL_PENDING.  The durable functional orchestrator owns
 # Q6.5 -> PRE-Q8 -> Golden Product and is the only authority that may enable Q7.
-runuser -u hermesverifier -- \
-  /opt/hermes-factory-verifier/venv/bin/python \
-  -m scripts.qualification_control functional-handoff >/dev/null
+systemctl start --wait hermes-factory-functional-handoff.service
 systemctl enable --now hermes-factory-functional-qualification.timer
 systemctl start --wait hermes-factory-functional-qualification.service
