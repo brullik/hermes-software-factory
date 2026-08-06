@@ -14,7 +14,10 @@ STATUS="$(printf '%s' "${RESULT}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["status"])')"
 
 if [[ "${STATUS}" == WAITING_CAPABILITY ]]; then
-  systemctl start hermes-factory-owner-notifier.service
+  # The durable WAITING state and owner action are already committed.  Delivery
+  # is retried by the path unit and must not convert a network-side notifier
+  # failure into an internal qualification failure.
+  systemctl start --no-block hermes-factory-owner-notifier.service
   exit 0
 fi
 

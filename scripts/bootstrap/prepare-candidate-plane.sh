@@ -637,7 +637,8 @@ for reset_unit in \
   hermes-factory-shadow-verify.service \
   hermes-factory-shadow-finalize.service \
   hermes-factory-clean-canaries.service \
-  hermes-factory-qualification-promote.service; do
+  hermes-factory-qualification-promote.service \
+  hermes-factory-owner-notifier.service; do
   systemctl reset-failed "${reset_unit}" >/dev/null 2>&1 || true
 done
 runuser -u "${VERIFIER_USER}" -- \
