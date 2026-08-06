@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ready-result-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_type", "status", "subject", "release_identity", "mandatory_obligations", "evidence_refs", "open_blockers", "verifier", "manifest_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "manifest_type": {"enum": ["FACTORY_FUNCTIONALLY_READY", "FACTORY_PRODUCTION_READY", "FACTORY_LTS_READY", "PRODUCT_READY_RESULT"]},
+    "status": {"const": "PASS"},
+    "subject": {"type": "object"},
+    "release_identity": {"type": "object", "required": ["version", "commit", "digest"], "properties": {"version": {"type": "string"}, "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"}, "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+    "mandatory_obligations": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["obligation_id", "status", "evidence_ref"], "properties": {"obligation_id": {"type": "string"}, "status": {"const": "PASS"}, "evidence_ref": {"type": "string"}}}},
+    "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "open_blockers": {"type": "array", "maxItems": 0},
+    "verifier": {"type": "object", "required": ["digest", "signature"], "properties": {"digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "signature": {"type": "string"}}},
+    "manifest_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

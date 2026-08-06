@@ -34,6 +34,7 @@ class ReleaseEpochState(StrEnum):
     STATIC_QUALIFIED = "STATIC_QUALIFIED"
     MODEL_CHECKED = "MODEL_CHECKED"
     MIGRATION_REPLAYED = "MIGRATION_REPLAYED"
+    FUNCTIONAL_PENDING = "FUNCTIONAL_PENDING"
     SHADOW_RUNNING = "SHADOW_RUNNING"
     CLEAN_CANARY = "CLEAN_CANARY"
     PROMOTION_READY = "PROMOTION_READY"
@@ -431,6 +432,11 @@ class ReleaseQualificationGovernor:
             QUALIFICATION_STAGES[:stage_index]
         ):
             raise QualificationError("qualification stages must pass in exact order")
+        if (
+            stage == "Q7_SHADOW_DIFFERENTIAL"
+            and str(epoch["status"]) != ReleaseEpochState.SHADOW_RUNNING.value
+        ):
+            raise QualificationError("Q7 cannot run before functional readiness")
         self._validate_stage_metrics(epoch_id, stage, metrics, passed)
         now = utc_now()
         run_digest = sha256_text(
@@ -470,13 +476,42 @@ class ReleaseQualificationGovernor:
                 "UPDATE controller_release_epochs SET shadow_completed_at=? WHERE epoch_id=?",
                 (now, epoch_id),
             )
-        elif stage == "Q6_SERVICE_E2E":
-            self.connection.execute(
-                "UPDATE controller_release_epochs SET shadow_started_at=? WHERE epoch_id=?",
-                (now, epoch_id),
-            )
         _ = epoch
         return run_id
+
+    def authorize_shadow_after_functional_ready(
+        self,
+        *,
+        epoch_id: str,
+        readiness_manifest_digest: str,
+        caller_plane: str,
+    ) -> None:
+        """Start Q7 once, only from the independent functional governor."""
+
+        epoch = self._assert_live(epoch_id)
+        digest = _digest("functional readiness manifest", readiness_manifest_digest)
+        existing_digest = str(epoch.get("functional_ready_manifest_digest") or "")
+        if str(epoch["status"]) == ReleaseEpochState.SHADOW_RUNNING.value:
+            if existing_digest != digest:
+                raise QualificationError("functional readiness manifest conflicts")
+            return
+        if str(epoch["status"]) != ReleaseEpochState.FUNCTIONAL_PENDING.value:
+            raise QualificationError("Q7 requires Q0-Q6 and functional gates")
+        if caller_plane != "INDEPENDENT_FUNCTIONAL_GOVERNOR":
+            raise QualificationError("Candidate cannot authorize its own Q7")
+        runs = self.qualification_runs(epoch_id)
+        if [str(row["stage"]) for row in runs] != list(QUALIFICATION_STAGES[:7]) or any(
+            str(row["status"]) != "PASS" for row in runs
+        ):
+            raise QualificationError("Q7 requires exact Q0-Q6 PASS evidence")
+        now = utc_now()
+        self.connection.execute(
+            """UPDATE controller_release_epochs
+                  SET status='SHADOW_RUNNING',functional_ready_manifest_digest=?,
+                      functional_ready_at=?,shadow_started_at=?,updated_at=?
+                WHERE epoch_id=?""",
+            (digest, now, now, now, epoch_id),
+        )
 
     def _validate_stage_metrics(
         self,
@@ -648,7 +683,7 @@ class ReleaseQualificationGovernor:
             "Q3_PROPERTY_AND_MUTATION": ReleaseEpochState.MODEL_CHECKED,
             "Q4_HISTORICAL_REPLAY": ReleaseEpochState.MODEL_CHECKED,
             "Q5_MIGRATION_MATRIX": ReleaseEpochState.MIGRATION_REPLAYED,
-            "Q6_SERVICE_E2E": ReleaseEpochState.SHADOW_RUNNING,
+            "Q6_SERVICE_E2E": ReleaseEpochState.FUNCTIONAL_PENDING,
             "Q7_SHADOW_DIFFERENTIAL": ReleaseEpochState.CLEAN_CANARY,
         }[stage]
 

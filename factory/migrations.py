@@ -2032,6 +2032,19 @@ def _migrate_legacy_rows(connection: sqlite3.Connection) -> None:
             previous_task_id = task_id
 
 
+def _migration_019_functional_first_release(connection: sqlite3.Connection) -> None:
+    """Bind Q7 start to independently verified functional readiness."""
+
+    _add_columns(
+        connection,
+        "controller_release_epochs",
+        (
+            ("functional_ready_manifest_digest", "TEXT"),
+            ("functional_ready_at", "TEXT"),
+        ),
+    )
+
+
 MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
     (1, "legacy-schema-baseline", _migration_001_baseline),
     (2, "autonomy-v2-durable-graph", _migration_002_autonomy_v2),
@@ -2106,6 +2119,11 @@ MIGRATIONS: tuple[tuple[int, str, Migration], ...] = (
         18,
         "error-free-process-control-plane",
         _migration_018_error_free_process_control_plane,
+    ),
+    (
+        19,
+        "functional-first-release-order",
+        _migration_019_functional_first_release,
     ),
 )
 
