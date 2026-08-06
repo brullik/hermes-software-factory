@@ -125,6 +125,14 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
   OLD_EPOCH_STATUS="$(OLD_STATUS_JSON="${OLD_STATUS_JSON}" \
     "${VERIFIER_ROOT}/venv/bin/python" -c \
     'import json,os; print(json.loads(os.environ["OLD_STATUS_JSON"])["status"])')"
+  OLD_EPOCH_SOURCE_COMMIT="$(OLD_STATUS_JSON="${OLD_STATUS_JSON}" \
+    "${VERIFIER_ROOT}/venv/bin/python" -c \
+    'import json,os; print(json.loads(os.environ["OLD_STATUS_JSON"])["source_commit"])')"
+  if [[ "${OLD_EPOCH_SOURCE_COMMIT}" != "${OLD_SOURCE_COMMIT}" ]]; then
+    printf 'Previous Candidate B epoch status identity differs: %s\n' \
+      "${OLD_EPOCH_SOURCE_COMMIT}" >&2
+    exit 73
+  fi
   if [[ "${OLD_EPOCH_STATUS}" != QUALIFICATION_FAILED && "${OLD_EPOCH_STATUS}" != LTS ]]; then
     printf 'Previous Candidate B epoch is not terminal: %s\n' "${OLD_EPOCH_STATUS}" >&2
     exit 73

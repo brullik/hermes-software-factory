@@ -824,3 +824,13 @@ def test_wf_p0_023_024_025_systemd_autonomy_has_no_codex_runtime() -> None:
         encoding="utf-8"
     )
     assert "shadow-verify.timer" not in initial
+
+
+def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:
+    root = Path(__file__).parents[1]
+    bootstrap = (
+        root / "scripts" / "bootstrap" / "prepare-candidate-plane.sh"
+    ).read_text(encoding="utf-8")
+    assert 'OLD_EPOCH_SOURCE_COMMIT="$(OLD_STATUS_JSON=' in bootstrap
+    assert '"${OLD_EPOCH_SOURCE_COMMIT}" != "${OLD_SOURCE_COMMIT}"' in bootstrap
+    assert "Previous Candidate B epoch status identity differs" in bootstrap
