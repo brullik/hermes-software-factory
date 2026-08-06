@@ -11,7 +11,6 @@ WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=FACTORY_CONFIG=/etc/hermes-factory/candidate.yaml
 Environment=HOME=/var/lib/hermes-factory-candidate
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory-candidate
-Environment=CREDENTIALS_DIRECTORY=/etc/hermes-factory/candidate-credentials.d
 Environment=PYTHONUNBUFFERED=1
 RuntimeDirectory=hermes-factory-candidate
 RuntimeDirectoryMode=0750
@@ -23,8 +22,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory-candidate /var/log/hermes-factory-candidate /run/hermes-factory-candidate
-ReadOnlyPaths=/etc/hermes-factory/candidate.yaml /etc/hermes-factory/candidate-model-registry.yaml /etc/hermes-factory/candidate-credentials.d
-InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/verifier.yaml /usr/local/sbin/hermes-factory-release-submit
+ReadOnlyPaths=/etc/hermes-factory/candidate.yaml /etc/hermes-factory/candidate-model-registry.yaml
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d /etc/hermes-factory/verifier.yaml /usr/local/sbin/hermes-factory-release-submit
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryMax=1200M

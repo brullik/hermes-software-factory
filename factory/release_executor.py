@@ -30,7 +30,9 @@ from scripts.verify_version_consistency import (
     verify_version_consistency,
 )
 
+from .common import sha256_text, stable_json
 from .config import FactoryConfig
+from .credential_broker import BrokerClient, BrokerRequest, CredentialBrokerError
 from .deployment import DeploymentGuard, TransactionalDeployer, TransactionResult
 from .github import GitHubAdapter, GitHubCommandError, RequiredChecksStatus
 from .providers import ExternalBlocker
@@ -182,11 +184,24 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             str(governance.get("mode", "")) == "single_owner"
             and bool(governance.get("owner_override_enabled", False))
         )
-        self.github = github or GitHubAdapter(
-            self.owner,
-            str(github_config["factory_repository"]),
-            single_owner_mode=self.single_owner_mode,
-        )
+        broker_socket = str(os.environ.get("HERMES_GITHUB_BROKER_SOCKET") or "").strip()
+        if github is not None:
+            self.github = github
+        elif broker_socket:
+            from .github_broker_adapter import BrokerGitHubAdapter
+
+            self.github = BrokerGitHubAdapter(
+                self.owner,
+                str(github_config["factory_repository"]),
+                socket_path=Path(broker_socket),
+                single_owner_mode=self.single_owner_mode,
+            )
+        else:
+            self.github = GitHubAdapter(
+                self.owner,
+                str(github_config["factory_repository"]),
+                single_owner_mode=self.single_owner_mode,
+            )
         self.github_factory = github_factory
         configured_staging = deployment_config.get("staging_root")
         self.staging_root = Path(str(configured_staging)) if configured_staging else config.state_dir / "staging"
@@ -213,6 +228,16 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             raise ExternalBlocker("product repository is outside the configured GitHub owner")
         if self.github_factory is not None:
             return self.github_factory(owner, name)
+        broker_socket = str(os.environ.get("HERMES_GITHUB_BROKER_SOCKET") or "").strip()
+        if broker_socket:
+            from .github_broker_adapter import BrokerGitHubAdapter
+
+            return BrokerGitHubAdapter(
+                owner,
+                name,
+                socket_path=Path(broker_socket),
+                single_owner_mode=self.single_owner_mode,
+            )
         return GitHubAdapter(owner, name, single_owner_mode=self.single_owner_mode)
 
     @staticmethod
@@ -515,10 +540,37 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         candidate_sha = self._command(["git", "rev-parse", "HEAD"], workspace).stdout.strip()
         if not _SHA.fullmatch(candidate_sha):
             raise ReleaseAdapterError("published candidate SHA is invalid")
-        self._command(
-            ["git", "push", "--set-upstream", "origin", f"{candidate_sha}:refs/heads/{branch}"],
-            workspace,
-        )
+        broker_socket = str(os.environ.get("HERMES_GITHUB_BROKER_SOCKET") or "").strip()
+        if broker_socket:
+            owner, name = repository.split("/", 1)
+            request_id = "REL-" + sha256_text(
+                stable_json([repository, candidate_sha, branch, "branch.push"])
+            )[:40]
+            try:
+                BrokerClient(Path(broker_socket)).execute(
+                    BrokerRequest(
+                        request_id=request_id,
+                        operation="branch.push",
+                        owner=owner,
+                        repository=name,
+                        payload={"workspace": str(workspace.resolve()), "branch": branch},
+                    )
+                )
+            except CredentialBrokerError as error:
+                failure_reason = (
+                    "missing_credential"
+                    if "credential" in str(error)
+                    else "internal_blocker"
+                )
+                raise ExternalBlocker(
+                    "Candidate GitHub branch push was rejected",
+                    reason_code=failure_reason,
+                ) from error
+        else:
+            self._command(
+                ["git", "push", "--set-upstream", "origin", f"{candidate_sha}:refs/heads/{branch}"],
+                workspace,
+            )
         try:
             pull_request = github.pull_request_for_head_sha(candidate_sha)
         except GitHubCommandError:
@@ -812,11 +864,19 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         staging_digest: str,
     ) -> dict[str, str]:
         helper = self._validate_production_helper()
+        isolated = (
+            str(
+                self.config.raw.get("deployment", {})
+                .get("production_target", {})
+                .get("mode", "")
+            )
+            == "isolated_candidate"
+        )
         sudo = shutil.which("sudo") or "/usr/bin/sudo"
+        prefix = [] if isolated else [sudo, "-n"]
         result = self.command_runner(
             [
-                sudo,
-                "-n",
+                *prefix,
                 str(helper),
                 "--repository",
                 repository,

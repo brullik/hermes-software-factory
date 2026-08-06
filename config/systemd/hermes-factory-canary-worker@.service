@@ -1,8 +1,8 @@
 [Unit]
 Description=Hermes clean-canary worker (%i)
-After=network-online.target hermes-factory-canary-controller@%i.service
+After=network-online.target hermes-factory-canary-controller@%i.service hermes-factory-github-broker.service
 Wants=network-online.target
-Requires=hermes-factory-canary-controller@%i.service
+Requires=hermes-factory-canary-controller@%i.service hermes-factory-github-broker.service
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=FACTORY_CONFIG=/etc/hermes-factory/canaries/%i.yaml
 Environment=HOME=/var/lib/hermes-factory-candidate
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory-canary-%i
-Environment=CREDENTIALS_DIRECTORY=/etc/hermes-factory/candidate-credentials.d
+Environment=HERMES_GITHUB_BROKER_SOCKET=/run/hermes-factory-github-broker/broker.sock
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m scripts.canary_candidate --config /etc/hermes-factory/canaries/%i.yaml worker --worker-id clean-canary-%i-worker-1
 Restart=on-failure
@@ -24,8 +24,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory-canaries /var/log/hermes-factory-canaries /var/lib/hermes-factory-candidate /run/hermes-factory-canary-%i
-ReadOnlyPaths=/etc/hermes-factory/canaries/%i.yaml /etc/hermes-factory/candidate-model-registry.yaml /etc/hermes-factory/candidate-credentials.d
-InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/verifier.yaml /usr/local/sbin/hermes-factory-release-submit
+ReadOnlyPaths=/etc/hermes-factory/canaries/%i.yaml /etc/hermes-factory/candidate-model-registry.yaml /run/hermes-factory-github-broker/broker.sock
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d /etc/hermes-factory/verifier.yaml /usr/local/sbin/hermes-factory-release-submit
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryMax=2400M
