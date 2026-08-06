@@ -1964,6 +1964,14 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "Immutable release mode/content differs from Git" in bootstrap
     assert "Candidate source must be a complete Git checkout" in bootstrap
     assert "remote.origin.promisor" in bootstrap
+    assert (
+        'chown root:"${FUNCTIONAL_GROUP}" '
+        '"${CONFIG_ROOT}/qualification-control.yaml"' in bootstrap
+    )
+    assert (
+        'chown root:"${VERIFIER_USER}" '
+        '"${CONFIG_ROOT}/qualification-control.yaml"' not in bootstrap
+    )
     assert 'venv_ready_marker="${venv_root}/.hermes-bootstrap-complete"' in bootstrap
     assert 'rm -rf -- "${venv_root}"' in bootstrap
     assert "Refusing to rebuild the active incomplete environment" in bootstrap

@@ -492,7 +492,7 @@ if [[ ! -f "${CONFIG_ROOT}/qualification-control.yaml" ]]; then
     --trusted-verifier-public-key-digest "${VERIFIER_KEY_DIGEST}" \
     --verifier-digest "${VERIFIER_DIGEST}" \
     --verifier-public-key "${VERIFIER_PUBLIC_KEY}"
-  chown root:"${VERIFIER_USER}" "${CONFIG_ROOT}/qualification-control.yaml"
+  chown root:"${FUNCTIONAL_GROUP}" "${CONFIG_ROOT}/qualification-control.yaml"
   chmod 0640 "${CONFIG_ROOT}/qualification-control.yaml"
 fi
 if [[ ! -f "${CONFIG_ROOT}/verifier.yaml" ]]; then
