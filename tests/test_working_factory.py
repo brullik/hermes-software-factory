@@ -892,6 +892,15 @@ def test_wf_p0_023_024_025_systemd_autonomy_has_no_codex_runtime() -> None:
         encoding="utf-8"
     )
     assert "shadow-verify.timer" not in initial
+    notifier = (
+        root / "config/systemd/hermes-factory-owner-notifier.service"
+    ).read_text(encoding="utf-8")
+    assert "Group=hermesfactory" in notifier
+    assert "SupplementaryGroups=hermesfunctional" in notifier
+    reconciler = (
+        root / "scripts/qualification/reconcile-functional.sh"
+    ).read_text(encoding="utf-8")
+    assert "systemctl start --no-block hermes-factory-owner-notifier.service" in reconciler
 
 
 def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:

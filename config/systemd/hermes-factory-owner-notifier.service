@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=hermesfactory
-Group=hermesfunctional
+Group=hermesfactory
+SupplementaryGroups=hermesfunctional
 WorkingDirectory=/opt/hermes-factory-verifier/current
 Environment=FACTORY_CONFIG=/etc/hermes-factory/config.yaml
 LoadCredential=telegram-token:/etc/hermes-factory/credentials.d/telegram-token
