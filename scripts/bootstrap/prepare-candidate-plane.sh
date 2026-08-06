@@ -105,6 +105,16 @@ install -d -o root -g root -m 0755 \
   "${CANDIDATE_ROOT}" "${CANDIDATE_ROOT}/releases" "${CANDIDATE_ROOT}/venvs" \
   "${VERIFIER_ROOT}" "${VERIFIER_ROOT}/releases" "${VERIFIER_ROOT}/venvs"
 
+stop_functional_candidate_services() {
+  systemctl disable --now hermes-factory-functional-qualification.timer \
+    >/dev/null 2>&1 || true
+  systemctl stop \
+    hermes-factory-functional-qualification.service \
+    hermes-factory-capability-reconciler.service \
+    hermes-factory-capability-probe.service \
+    hermes-factory-github-broker.service >/dev/null 2>&1 || true
+}
+
 ALLOW_EPOCH_SWITCH=0
 if [[ -L "${CANDIDATE_ROOT}/current" ]] \
   && [[ "$(basename "$(readlink -f "${CANDIDATE_ROOT}/current")")" != "${SOURCE_COMMIT}" ]]; then
@@ -163,6 +173,7 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
     printf 'Previous Candidate B epoch is not terminal: %s\n' "${OLD_EPOCH_STATUS}" >&2
     exit 73
   fi
+  stop_functional_candidate_services
   systemctl disable --now hermes-factory-owner-notifier.path >/dev/null 2>&1 || true
   systemctl stop hermes-factory-owner-notifier.service >/dev/null 2>&1 || true
   systemctl disable --now \
@@ -331,12 +342,15 @@ if (( ALLOW_EPOCH_SWITCH == 1 )); then
     fi
     mv -- "${CONFIG_ROOT}/pre-q8" "${EPOCH_CONFIG_ARCHIVE}/pre-q8"
   fi
-  if [[ -f "${FUNCTIONAL_STATE}/q6-5/report-index.json" ]]; then
+  for q65_index in report-index.json failure-index.json; do
+    if [[ ! -f "${FUNCTIONAL_STATE}/q6-5/${q65_index}" ]]; then
+      continue
+    fi
     install -d -o "${VERIFIER_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
       "${FUNCTIONAL_STATE}/q6-5/${OLD_SOURCE_COMMIT}"
-    mv -- "${FUNCTIONAL_STATE}/q6-5/report-index.json" \
-      "${FUNCTIONAL_STATE}/q6-5/${OLD_SOURCE_COMMIT}/report-index.json"
-  fi
+    mv -- "${FUNCTIONAL_STATE}/q6-5/${q65_index}" \
+      "${FUNCTIONAL_STATE}/q6-5/${OLD_SOURCE_COMMIT}/${q65_index}"
+  done
   ln -sfn "${VERIFIER_ROOT}/venvs/${SOURCE_COMMIT}" "${VERIFIER_ROOT}/venv"
   ln -sfn "${VERIFIER_RELEASE}" "${VERIFIER_ROOT}/current"
   ln -sfn "${CANDIDATE_ROOT}/venvs/${SOURCE_COMMIT}" "${CANDIDATE_ROOT}/venv"
@@ -633,6 +647,7 @@ for unit in \
   fi
 done
 systemctl daemon-reload
+stop_functional_candidate_services
 for reset_unit in \
   hermes-factory-shadow-export.service \
   hermes-factory-shadow-evaluate.service \

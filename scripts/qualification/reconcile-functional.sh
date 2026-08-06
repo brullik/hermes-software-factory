@@ -27,6 +27,10 @@ if [[ "${STATUS}" == Q6_5_PROBE_REQUIRED ]]; then
   RESULT="$("${CONTROL[@]}" reconcile)"
   STATUS="$(printf '%s' "${RESULT}" | "${PYTHON}" -c \
     'import json,sys; print(json.load(sys.stdin)["status"])')"
+  if [[ "${STATUS}" == WAITING_CAPABILITY ]]; then
+    systemctl start --no-block hermes-factory-owner-notifier.service
+    exit 0
+  fi
 fi
 
 if [[ "${STATUS}" == PRE_Q8_PENDING ]]; then

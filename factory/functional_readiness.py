@@ -579,6 +579,7 @@ class FunctionalQualificationGovernor:
         capability_epoch: str | None,
     ) -> str:
         if reason_code not in {
+            "candidate_github_operation_denied",
             "missing_candidate_github_credential",
             "missing_candidate_telegram_credential",
         }:
