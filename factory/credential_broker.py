@@ -144,6 +144,31 @@ def _default_runner(
     )
 
 
+def _is_private_systemd_credential_view(path: Path, metadata: os.stat_result) -> bool:
+    """Accept systemd's root-owned, ACL-scoped read-only credential projection."""
+
+    raw_directory = os.environ.get("CREDENTIALS_DIRECTORY", "")
+    if not raw_directory:
+        return False
+    directory = Path(raw_directory)
+    try:
+        if (
+            not directory.is_absolute()
+            or directory.is_symlink()
+            or path.parent.resolve() != directory.resolve()
+        ):
+            return False
+        directory_metadata = directory.stat()
+    except OSError:
+        return False
+    return (
+        stat.S_IMODE(metadata.st_mode) == 0o440
+        and stat.S_IMODE(directory_metadata.st_mode) == 0o550
+        and metadata.st_uid == directory_metadata.st_uid == 0
+        and metadata.st_gid == directory_metadata.st_gid == 0
+    )
+
+
 class GitHubCredentialBroker:
     """Execute a closed set of GitHub operations without returning a token."""
 
@@ -170,7 +195,11 @@ class GitHubCredentialBroker:
         if not path.is_file() or path.is_symlink():
             raise CredentialBrokerError("missing_candidate_github_credential")
         metadata = path.stat()
-        if os.name != "nt" and metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        if (
+            os.name != "nt"
+            and metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+            and not _is_private_systemd_credential_view(path, metadata)
+        ):
             raise CredentialBrokerError("candidate_github_credential_permissions")
         value = path.read_text(encoding="utf-8").strip()
         if not value or "\n" in value or "\x00" in value:
