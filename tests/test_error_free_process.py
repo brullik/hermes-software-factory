@@ -1991,6 +1991,7 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         "hermes-factory-qualification.service",
         "hermes-factory-qualification-stage@.service",
         "hermes-factory-shadow-verify.service",
+        "hermes-factory-github-broker.service",
     ):
         text = (repository / "config/systemd" / unit).read_text(encoding="utf-8")
         assert optional_candidate_database in text
