@@ -4,8 +4,10 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import runpy
 import sqlite3
+import stat
 import subprocess
 import zipfile
 from pathlib import Path
@@ -22,6 +24,7 @@ from factory.credential_broker import (
     BrokerRequest,
     CredentialBrokerError,
     GitHubCredentialBroker,
+    _is_private_systemd_credential_view,
 )
 from factory.functional_readiness import (
     MANDATORY_Q6_5_OPERATIONS,
@@ -476,6 +479,49 @@ def test_wf_p0_002_003_broker_hides_token_and_enforces_allowlist(tmp_path: Path)
                 payload={"visibility": "public"},
             )
         )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX credential modes are required")
+def test_broker_accepts_only_private_systemd_credential_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential_directory = tmp_path / "credentials"
+    credential_directory.mkdir()
+    credential = credential_directory / "github-token"
+    credential.write_text("fixture-token-not-a-real-secret", encoding="utf-8")
+    file_metadata = os.stat_result((stat.S_IFREG | 0o440, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    directory_metadata = os.stat_result(
+        (stat.S_IFDIR | 0o550, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+    )
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, **_kwargs: (
+            file_metadata if path == credential else directory_metadata
+        ),
+    )
+    broker = GitHubCredentialBroker(
+        policy=BrokerPolicy(owner="brullik"),
+        credential_path=credential,
+        receipt_root=tmp_path / "receipts",
+        credential_epoch_id="CE-1",
+    )
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credential_directory))
+    assert _is_private_systemd_credential_view(credential, file_metadata)
+    assert not _is_private_systemd_credential_view(
+        credential,
+        os.stat_result((stat.S_IFREG | 0o640, 0, 0, 1, 0, 0, 0, 0, 0, 0)),
+    )
+    assert not _is_private_systemd_credential_view(
+        credential,
+        os.stat_result((stat.S_IFREG | 0o444, 0, 0, 1, 0, 0, 0, 0, 0, 0)),
+    )
+    assert broker._credential() == "fixture-token-not-a-real-secret"
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "different"))
+    with pytest.raises(CredentialBrokerError, match="credential_permissions"):
+        broker._credential()
 
 
 def test_wf_p0_014_015_016_q7_rejected_until_all_functional_gates() -> None:
