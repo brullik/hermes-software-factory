@@ -873,6 +873,7 @@ def test_wf_p0_023_024_025_systemd_autonomy_has_no_codex_runtime() -> None:
     root = Path(__file__).parents[1]
     required = (
         "hermes-factory-capability-reconciler.service",
+        "hermes-factory-functional-handoff.service",
         "hermes-factory-functional-qualification.service",
         "hermes-factory-functional-qualification.timer",
         "hermes-factory-golden-product.service",

@@ -2061,17 +2061,25 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     initial_qualification = (
         repository / "scripts/qualification/run-initial-qualification.sh"
     ).read_text(encoding="utf-8")
+    functional_handoff_unit = (
+        repository / "config/systemd/hermes-factory-functional-handoff.service"
+    ).read_text(encoding="utf-8")
     assert "hermes-factory-functional-qualification.timer" in initial_qualification
     assert "hermes-factory-functional-qualification.service" in initial_qualification
-    assert "scripts.qualification_control functional-handoff" in initial_qualification
-    assert initial_qualification.index("functional-handoff") < initial_qualification.index(
-        "hermes-factory-functional-qualification.timer"
-    )
+    assert "hermes-factory-functional-handoff.service" in initial_qualification
+    assert initial_qualification.index(
+        "hermes-factory-functional-handoff.service"
+    ) < initial_qualification.index("hermes-factory-functional-qualification.timer")
+    assert "User=hermesverifier" in functional_handoff_unit
+    assert "scripts.qualification_control functional-handoff" in functional_handoff_unit
+    assert "ReadWritePaths=/var/lib/hermes-factory-verifier" in functional_handoff_unit
+    assert "/etc/hermes-factory/candidate-credentials.d" in functional_handoff_unit
     assert "hermes-factory-shadow-verify.service" not in initial_qualification
     assert "hermes-factory-shadow-finalize.service" not in initial_qualification
     functional_recovery = bootstrap.index("functional-fail")
     terminal_check = bootstrap.index("Previous Candidate B epoch is not terminal")
     assert functional_recovery < terminal_check
+    assert "systemctl is-failed --quiet hermes-factory-functional-handoff.service" in bootstrap
     assert "systemctl is-failed --quiet hermes-factory-functional-qualification.service" in bootstrap
     assert "PYTHONDONTWRITEBYTECODE=1" in bootstrap
 

@@ -134,7 +134,8 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
     exit 73
   fi
   if [[ "${OLD_EPOCH_STATUS}" == FUNCTIONAL_PENDING ]] \
-    && systemctl is-failed --quiet hermes-factory-functional-qualification.service; then
+    && { systemctl is-failed --quiet hermes-factory-functional-handoff.service \
+      || systemctl is-failed --quiet hermes-factory-functional-qualification.service; }; then
     systemctl disable --now hermes-factory-functional-qualification.timer \
       >/dev/null 2>&1 || true
     (
@@ -596,6 +597,7 @@ for unit in \
   hermes-factory-github-broker.service \
   hermes-factory-capability-probe.service \
   hermes-factory-capability-reconciler.service \
+  hermes-factory-functional-handoff.service \
   hermes-factory-functional-qualification.service \
   hermes-factory-functional-qualification.timer \
   hermes-factory-functional-ready.service \
