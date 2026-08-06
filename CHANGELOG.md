@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.5.0 - 2026-08-06
+
+- Add operation-specific Q6.5 handshakes for GitHub, all three provider tiers,
+  rootless container build, isolated deployment/rollback, Telegram delivery,
+  and backup/restore, all bound to immutable Candidate and credential epochs.
+- Add a least-privilege GitHub credential broker with request-bound receipts,
+  exact repository/workspace allowlists, `LoadCredential`, and no token access
+  from Candidate workers or model processes.
+- Insert a durable functional-first gate between Q6 and Q7: PRE-Q8 must pass
+  10/10 on first run and a real Telegram-originated Golden Product must reach
+  `COMPLETED` before an independent Ed25519 ready result can authorize Q7.
+- Add restart-safe systemd reconcilers, owner notifications, sanitized support
+  bundles, authoritative Candidate truth classification, and automatic resume
+  after external credential epochs change.
+- Add an isolated, finite recursive-improvement governor with one active
+  experiment, depth three, two attempts per cycle, independent scorecards,
+  no-progress rejection, forbidden authority boundaries, and mandatory full
+  qualification for every accepted Candidate.
+
 ## 2.4.14 - 2026-08-04
 
 - Complete the audit P0 capability matrix with pre-mutation rejection of
