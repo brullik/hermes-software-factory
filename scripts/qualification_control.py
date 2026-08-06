@@ -644,6 +644,85 @@ def fail_qualification_orchestration(
         state.close()
 
 
+def fail_functional_orchestration(config: Mapping[str, Any]) -> tuple[str, str]:
+    """Terminally close a failed post-Q6 functional handoff with safe evidence."""
+
+    state = _store(config)
+    try:
+        governor = _governor(state, config)
+        latest = governor.connection.execute(
+            "SELECT * FROM controller_release_epochs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if latest is None:
+            raise QualificationControlError("qualification epoch is unavailable")
+        epoch_id = str(latest["epoch_id"])
+        if (
+            str(latest["source_commit"]) != str(config["source_commit"])
+            or str(latest["candidate_digest"]) != str(config["candidate_digest"])
+        ):
+            raise QualificationControlError("functional failure identity differs")
+        if str(latest["status"]) == "QUALIFICATION_FAILED":
+            existing_ref = str(latest["failure_evidence_ref"] or "")
+            if not existing_ref:
+                raise QualificationControlError("failed epoch lacks immutable evidence")
+            return epoch_id, existing_ref
+        if str(latest["status"]) != "FUNCTIONAL_PENDING":
+            raise QualificationControlError(
+                "functional failure requires Q0-Q6 FUNCTIONAL_PENDING"
+            )
+        payload = {
+            "schema_version": "1.0",
+            "epoch_id": epoch_id,
+            "stage": "Q6_5_FUNCTIONAL_HANDOFF",
+            "status": "FAIL",
+            "reason_code": "functional_qualification_orchestrator_failed",
+            "failure_coordinate": "functional-qualification-service",
+            "source_commit": str(config["source_commit"]),
+            "candidate_digest": str(config["candidate_digest"]),
+            "created_at": utc_now(),
+        }
+        digest = sha256_text(stable_json(payload))
+        envelope = {**payload, "report_digest": digest}
+        encoded = json.dumps(
+            envelope,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        evidence_root = Path(str(config["evidence_root"])).resolve()
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        failure_path = evidence_root / f"functional-orchestration-failure-{digest}.json"
+        try:
+            descriptor = os.open(
+                failure_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o440,
+            )
+        except FileExistsError:
+            if (
+                failure_path.is_symlink()
+                or not failure_path.is_file()
+                or failure_path.read_text(encoding="utf-8") != encoded
+            ):
+                raise QualificationControlError(
+                    "functional failure evidence conflicts"
+                ) from None
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+        evidence_ref = f"artifact://qualification/functional-orchestration-failure/{digest}"
+        governor.fail_functional_orchestration(
+            epoch_id=epoch_id,
+            evidence_ref=evidence_ref,
+        )
+        state._connection.commit()
+        return epoch_id, evidence_ref
+    finally:
+        state.close()
+
+
 _SHADOW_FAILURE_COMPONENTS = frozenset(
     {"export", "evaluate", "verify", "finalize"}
 )
@@ -1364,6 +1443,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("functional-handoff")
+    commands.add_parser("functional-fail")
     commands.add_parser("orchestration-fail")
     shadow_fail = commands.add_parser("shadow-fail")
     shadow_fail.add_argument("component", choices=sorted(_SHADOW_FAILURE_COMPONENTS))
@@ -1405,6 +1485,12 @@ def main(argv: list[str] | None = None) -> int:
             result: dict[str, Any] = {"epoch_id": initialize_epoch(config)}
         elif args.command == "functional-handoff":
             result = {"epoch_id": checkpoint_functional_handoff(config)}
+        elif args.command == "functional-fail":
+            epoch_id, evidence_ref = fail_functional_orchestration(config)
+            result = {
+                "epoch_id": epoch_id,
+                "failure_evidence_ref": evidence_ref,
+            }
         elif args.command == "orchestration-fail":
             epoch_id, evidence_ref = fail_qualification_orchestration(config)
             result = {

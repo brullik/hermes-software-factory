@@ -48,6 +48,8 @@ from factory.recursive_improvement import (
     ImprovementProposal,
     RecursiveImprovementGovernor,
 )
+from factory.release_qualification import QualificationError, ReleaseQualificationGovernor
+from factory.state import StateStore
 from factory.support_bundle import build_support_bundle
 from factory.telegram import TelegramApi
 from factory.worker import HermesRunResult
@@ -104,6 +106,34 @@ def test_functional_epoch_reader_uses_checkpointed_immutable_snapshot(
         }
     ) == "RE-IMMUTABLE"
     assert observed == [f"file:{database.resolve().as_posix()}?mode=ro&immutable=1"]
+
+
+def test_release_governor_functional_failure_is_state_scoped(tmp_path: Path) -> None:
+    state = StateStore(tmp_path / "governor.db")
+    governor = ReleaseQualificationGovernor(state._connection)
+    epoch_id = governor.create_epoch(
+        source_commit=COMMIT,
+        stable_release_digest="1" * 64,
+        controller_release_digest="2" * 64,
+        candidate_digest=DIGEST,
+        policy_digest="3" * 64,
+        toolchain_manifest_digest=TOOLCHAIN,
+    )
+    with pytest.raises(QualificationError, match="FUNCTIONAL_PENDING"):
+        governor.fail_functional_orchestration(
+            epoch_id=epoch_id,
+            evidence_ref="artifact://qualification/functional-orchestration-failure/" + "4" * 64,
+        )
+    state._connection.execute(
+        "UPDATE controller_release_epochs SET status='FUNCTIONAL_PENDING' WHERE epoch_id=?",
+        (epoch_id,),
+    )
+    governor.fail_functional_orchestration(
+        epoch_id=epoch_id,
+        evidence_ref="artifact://qualification/functional-orchestration-failure/" + "4" * 64,
+    )
+    assert governor.epoch(epoch_id)["status"] == "QUALIFICATION_FAILED"
+    state.close()
 
 
 def test_golden_builder_reads_single_owner_from_stable_environment(
