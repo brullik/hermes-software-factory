@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes bounded isolated recursive improvement governor
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hermesverifier
+Group=hermesfunctional
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.recursive_improvement_control
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/hermes-factory/current /opt/hermes-factory-verifier
+ReadWritePaths=/var/lib/hermes-factory-functional /var/lib/hermes-factory-improvement-lab
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=1200M
+TasksMax=256

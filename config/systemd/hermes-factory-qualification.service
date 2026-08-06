@@ -1,5 +1,5 @@
 [Unit]
-Description=Run Hermes Q0-Q6 and activate the isolated 72-hour shadow gate
+Description=Run Hermes Q0-Q6 and hand off to functional-first qualification
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/hermes-factory/qualification-control.yaml

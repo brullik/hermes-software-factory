@@ -515,6 +515,26 @@ def finalize_shadow(
         state.close()
 
 
+def authorize_shadow(
+    config: Mapping[str, Any], readiness_manifest_digest: str
+) -> tuple[str, str]:
+    """Persist the functional gate binding and open Q7 exactly once."""
+
+    state = _store(config)
+    try:
+        governor = _governor(state, config)
+        epoch_id = _active_epoch(governor)
+        governor.authorize_shadow_after_functional_ready(
+            epoch_id=epoch_id,
+            readiness_manifest_digest=readiness_manifest_digest,
+            caller_plane="INDEPENDENT_FUNCTIONAL_GOVERNOR",
+        )
+        state._connection.commit()
+        return epoch_id, readiness_manifest_digest
+    finally:
+        state.close()
+
+
 def fail_qualification_orchestration(
     config: Mapping[str, Any],
 ) -> tuple[str, str]:
@@ -1296,6 +1316,8 @@ def _parser() -> argparse.ArgumentParser:
     stage = commands.add_parser("stage")
     stage.add_argument("stage", choices=QUALIFICATION_STAGES[:7])
     commands.add_parser("shadow-verify")
+    functional_ready = commands.add_parser("functional-ready")
+    functional_ready.add_argument("readiness_manifest_digest")
     commands.add_parser("shadow-ready")
     commands.add_parser("shadow-finalize")
     commands.add_parser("canary-ready")
@@ -1348,6 +1370,14 @@ def main(argv: list[str] | None = None) -> int:
                 "epoch_id": epoch_id,
                 "verified_batch_count": batch_count,
                 "verified_event_count": event_count,
+            }
+        elif args.command == "functional-ready":
+            epoch_id, manifest_digest = authorize_shadow(
+                config, args.readiness_manifest_digest
+            )
+            result = {
+                "epoch_id": epoch_id,
+                "readiness_manifest_digest": manifest_digest,
             }
         elif args.command == "shadow-ready":
             epoch_id, ready = shadow_finalization_ready(config)

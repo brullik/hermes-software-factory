@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recursive-improvement-cycle.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "cycle_id", "objective_id", "cycle_number", "candidate_identity", "baseline_scorecard", "candidate_scorecard", "safety_regressions", "measurable_improvement", "decision", "evidence_refs", "cycle_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"}, "cycle_id": {"type": "string", "minLength": 1}, "objective_id": {"type": "string", "minLength": 1}, "cycle_number": {"type": "integer", "minimum": 1, "maximum": 3}, "candidate_identity": {"type": "object"}, "baseline_scorecard": {"type": "object"}, "candidate_scorecard": {"type": "object"}, "safety_regressions": {"type": "array", "items": {"type": "string", "minLength": 1}}, "measurable_improvement": {"type": "boolean"}, "decision": {"enum": ["ACCEPT", "REJECT", "NEXT_BOUNDED_CYCLE"]}, "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "cycle_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "allOf": [
+    {"if": {"properties": {"decision": {"const": "ACCEPT"}}}, "then": {"properties": {"measurable_improvement": {"const": true}, "safety_regressions": {"maxItems": 0}}}},
+    {"if": {"properties": {"decision": {"const": "NEXT_BOUNDED_CYCLE"}}}, "then": {"properties": {"measurable_improvement": {"const": true}, "safety_regressions": {"maxItems": 0}, "cycle_number": {"maximum": 2}}}}
+  ]
+}

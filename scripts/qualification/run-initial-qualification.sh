@@ -22,13 +22,7 @@ for stage in "${STAGES[@]}"; do
   systemctl start --wait "hermes-factory-qualification-stage@${stage}.service"
 done
 
-# Q7 starts only after all preceding gates have durably passed. The timers
-# survive reboot while Candidate B remains isolated from Stable A authority.
-systemctl enable --now hermes-factory-shadow-verify.timer
-systemctl enable --now hermes-factory-shadow-finalize.timer
-
-# Prime both epoch-scoped schedules after enabling them. Persistent timer stamps
-# from an earlier terminal epoch can otherwise leave a newly enabled timer in
-# active (elapsed) with no next trigger. The early finalizer is condition-safe.
-systemctl start --wait hermes-factory-shadow-verify.service
-systemctl start --wait hermes-factory-shadow-finalize.service
+# Q6 finishes in FUNCTIONAL_PENDING.  The durable functional orchestrator owns
+# Q6.5 -> PRE-Q8 -> Golden Product and is the only authority that may enable Q7.
+systemctl enable --now hermes-factory-functional-qualification.timer
+systemctl start --wait hermes-factory-functional-qualification.service

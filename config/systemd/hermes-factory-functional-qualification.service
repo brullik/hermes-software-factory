@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes functional-first qualification orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/reconcile-functional.sh
+TimeoutStartSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-functional /var/lib/hermes-factory-pre-q8 /var/log/hermes-factory-pre-q8 /var/lib/hermes-factory-candidate /run/systemd
+ReadOnlyPaths=/opt/hermes-factory-verifier /opt/hermes-factory-candidate /etc/hermes-factory /var/lib/hermes-factory-verifier
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /etc/hermes-factory/credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true

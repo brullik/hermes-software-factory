@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from .common import redact_text, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
+from .credential_broker import BrokerClient, BrokerRequest, CredentialBrokerError
 from .github import GitHubAdapter, GitHubCommandError
 from .proof_obligations import SideEffectProtocol
 from .providers import ExternalBlocker
@@ -52,6 +53,40 @@ class ConfiguredRepositoryAdapter:
         self.owner = str(config.raw.get("github", {}).get("owner", "")).strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.owner):
             raise ValueError("configured GitHub owner is invalid")
+        broker_socket = str(os.environ.get("HERMES_GITHUB_BROKER_SOCKET") or "").strip()
+        self.broker = BrokerClient(Path(broker_socket)) if broker_socket else None
+
+    def _broker_execute(
+        self,
+        *,
+        operation: str,
+        repository: str,
+        idempotency_key: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        if self.broker is None:
+            raise RuntimeError("Candidate GitHub broker is not configured")
+        request_id = "BR-" + sha256_text(
+            stable_json([operation, repository, idempotency_key, dict(payload)])
+        )[:40]
+        try:
+            self.broker.execute(
+                BrokerRequest(
+                    request_id=request_id,
+                    operation=operation,
+                    owner=self.owner,
+                    repository=repository,
+                    payload=dict(payload),
+                )
+            )
+        except CredentialBrokerError as error:
+            reason = str(error)
+            if reason == "missing_candidate_github_credential":
+                raise ExternalBlocker(
+                    "Candidate GitHub credential is unavailable",
+                    reason_code="missing_credential",
+                ) from error
+            raise RuntimeError(f"Candidate GitHub broker rejected {operation}: {reason}") from error
 
     @staticmethod
     def _run(argv: list[str], *, cwd: Path | None = None) -> str:
@@ -91,6 +126,14 @@ class ConfiguredRepositoryAdapter:
         description: str,
         idempotency_key: str,
     ) -> str:
+        if self.broker is not None:
+            self._broker_execute(
+                operation="repository.create_private",
+                repository=name,
+                idempotency_key=idempotency_key,
+                payload={"visibility": visibility, "description": description},
+            )
+            return f"https://github.com/{self.owner}/{name}"
         adapter = GitHubAdapter(self.owner, name)
         adapter.require_authentication()
         try:
@@ -120,6 +163,29 @@ class ConfiguredRepositoryAdapter:
         if destination.exists() and any(destination.iterdir()):
             raise RuntimeError("repository clone destination is not empty")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if self.broker is not None:
+            match = re.fullmatch(
+                rf"https://github\.com/{re.escape(self.owner)}/([A-Za-z0-9_.-]+)(?:\.git)?",
+                repository_url,
+            )
+            if match is None:
+                raise RuntimeError("Candidate repository URL is outside broker owner")
+            self._broker_execute(
+                operation="repository.read",
+                repository=match.group(1),
+                idempotency_key=idempotency_key,
+                payload={"workspace": str(destination.resolve())},
+            )
+            default_branch = self._run(
+                ["git", "-C", str(destination), "branch", "--show-current"]
+            ) or "main"
+            try:
+                starting_sha = self._run(
+                    ["git", "-C", str(destination), "rev-parse", "HEAD"]
+                )
+            except RuntimeError:
+                starting_sha = ""
+            return default_branch, starting_sha
         self._run(
             [
                 "gh",
@@ -209,9 +275,23 @@ class ConfiguredRepositoryAdapter:
                 "Initialize product repository",
             ]
         )
-        self._run(
-            ["git", "-C", str(workspace), "push", "-u", "origin", default_branch]
-        )
+        if self.broker is not None:
+            remote = self._run(
+                ["git", "-C", str(workspace), "remote", "get-url", "origin"]
+            )
+            match = re.search(r"github\.com[/:][^/]+/([A-Za-z0-9_.-]+?)(?:\.git)?$", remote)
+            if match is None:
+                raise RuntimeError("Candidate repository remote is invalid")
+            self._broker_execute(
+                operation="branch.push",
+                repository=match.group(1),
+                idempotency_key=idempotency_key,
+                payload={"workspace": str(workspace.resolve()), "branch": default_branch},
+            )
+        else:
+            self._run(
+                ["git", "-C", str(workspace), "push", "-u", "origin", default_branch]
+            )
         return self._run(["git", "-C", str(workspace), "rev-parse", "HEAD"])
 
 

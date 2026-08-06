@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule bounded Hermes improvement detection
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=1h
+AccuracySec=5min
+Persistent=true
+Unit=hermes-factory-recursive-improvement.service
+
+[Install]
+WantedBy=timers.target

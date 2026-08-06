@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "capability-handshake-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_digest", "capability", "operation", "scope", "status", "credential_epoch_id", "toolchain_digest", "receipts", "report_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "candidate_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "capability": {"type": "string", "minLength": 1},
+    "operation": {"type": "string", "minLength": 1},
+    "scope": {"type": "object"},
+    "status": {"enum": ["AVAILABLE", "MISSING_EXTERNAL", "DENIED_POLICY", "EXPIRED", "BROKEN_INTERNAL"]},
+    "credential_epoch_id": {"type": ["string", "null"]},
+    "toolchain_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "receipts": {"type": "array", "items": {"type": "string"}},
+    "safe_reason_code": {"type": ["string", "null"]},
+    "report_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

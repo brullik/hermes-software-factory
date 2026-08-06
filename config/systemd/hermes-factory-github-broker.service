@@ -1,0 +1,33 @@
+[Unit]
+Description=Hermes Candidate operation-scoped GitHub credential broker
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/hermes-factory/candidate-credentials.d/github-token
+ConditionPathExists=/var/lib/hermes-factory-functional/credential-epoch
+
+[Service]
+Type=simple
+User=hermesgithubbroker
+Group=hermesfunctional
+WorkingDirectory=/opt/hermes-factory-candidate/current
+Environment=HOME=/var/lib/hermes-factory-github-broker
+LoadCredential=github-token:/etc/hermes-factory/candidate-credentials.d/github-token
+RuntimeDirectory=hermes-factory-github-broker
+RuntimeDirectoryMode=0750
+ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m scripts.github_credential_broker --owner brullik --repository-prefix hermes-canary- --repository-prefix hermes-golden- --repository hermes-path-governor-shadow-20260803 --workspace-root /var/lib/hermes-factory-candidate/worktrees --workspace-root /var/lib/hermes-factory-pre-q8 --workspace-root /var/lib/hermes-factory-functional --socket /run/hermes-factory-github-broker/broker.sock --receipt-root /var/lib/hermes-factory-functional/github-receipts --credential-epoch-file /var/lib/hermes-factory-functional/credential-epoch --askpass /usr/libexec/hermes-github-askpass
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-functional /var/lib/hermes-factory-candidate/worktrees /var/lib/hermes-factory-pre-q8 /run/hermes-factory-github-broker
+ReadOnlyPaths=/opt/hermes-factory-candidate /usr/libexec/hermes-github-askpass /var/lib/hermes-factory-functional/credential-epoch
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /var/lib/hermes-factory-candidate/controller.db /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

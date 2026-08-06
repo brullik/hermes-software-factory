@@ -1,0 +1,28 @@
+[Unit]
+Description=Hermes PRE-Q8 isolated worker (%i)
+After=network-online.target hermes-factory-pre-q8-controller@%i.service hermes-factory-github-broker.service
+Requires=hermes-factory-pre-q8-controller@%i.service hermes-factory-github-broker.service
+
+[Service]
+Type=simple
+User=hermescandidate
+Group=hermescandidate
+WorkingDirectory=/opt/hermes-factory-candidate/current
+Environment=HOME=/var/lib/hermes-factory-candidate
+Environment=XDG_RUNTIME_DIR=/run/hermes-factory-pre-q8-%i
+Environment=HERMES_GITHUB_BROKER_SOCKET=/run/hermes-factory-github-broker/broker.sock
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m scripts.canary_candidate --config /etc/hermes-factory/pre-q8/%i.yaml worker --worker-id pre-q8-%i-worker-1
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-pre-q8 /var/log/hermes-factory-pre-q8 /var/lib/hermes-factory-candidate /run/hermes-factory-pre-q8-%i
+ReadOnlyPaths=/etc/hermes-factory/pre-q8/%i.yaml /etc/hermes-factory/candidate-model-registry.yaml /run/hermes-factory-github-broker/broker.sock
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=2400M
+TasksMax=512

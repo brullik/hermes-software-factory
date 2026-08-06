@@ -216,6 +216,12 @@ def _qualify_to_clean_canary(
             metrics=stage_metrics,
             passed=True,
         )
+        if stage == "Q6_SERVICE_E2E":
+            governor.authorize_shadow_after_functional_ready(
+                epoch_id=epoch_id,
+                readiness_manifest_digest="a" * 64,
+                caller_plane="INDEPENDENT_FUNCTIONAL_GOVERNOR",
+            )
 
 
 def test_p0_unknown_reason_is_controller_quarantine() -> None:
@@ -812,8 +818,8 @@ def test_all_schema_versions_upgrade_crash_replay_and_restore(tmp_path: Path) ->
         include_production_shape=False,
     )
 
-    assert report.fixture_count == 18
-    assert report.passed_count == 18
+    assert report.fixture_count == 19
+    assert report.passed_count == 19
     assert report.failed_count == 0
     assert report.migration_matrix_percent == 100
     assert report.migration_fixup_count == 0
@@ -832,8 +838,8 @@ def test_audited_production_shape_migrates_with_exact_cardinality(
         include_production_shape=True,
     )
 
-    assert report.fixture_count == 19
-    assert report.passed_count == 19
+    assert report.fixture_count == 20
+    assert report.passed_count == 20
     assert report.production_shape_passed
     assert report.production_shape_counts == {
         "products": 12,
@@ -1418,7 +1424,7 @@ def test_clean_canary_catalog_is_exact_and_fresh_state_is_observed(tmp_path: Pat
     state = StateStore(database)
     state.close()
     proof = prove_fresh_state(database, tmp_path / "evidence")
-    assert proof.schema_version == 18
+    assert proof.schema_version == 19
     assert not any(proof.row_counts.values())
     assert len(proof.initial_state_digest) == 64
 
@@ -1959,13 +1965,10 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     initial_qualification = (
         repository / "scripts/qualification/run-initial-qualification.sh"
     ).read_text(encoding="utf-8")
-    verify_prime = initial_qualification.index(
-        "systemctl start --wait hermes-factory-shadow-verify.service"
-    )
-    finalize_prime = initial_qualification.index(
-        "systemctl start --wait hermes-factory-shadow-finalize.service"
-    )
-    assert verify_prime < finalize_prime
+    assert "hermes-factory-functional-qualification.timer" in initial_qualification
+    assert "hermes-factory-functional-qualification.service" in initial_qualification
+    assert "hermes-factory-shadow-verify.service" not in initial_qualification
+    assert "hermes-factory-shadow-finalize.service" not in initial_qualification
 
 
 def test_HARD_P0_candidate_tasks_have_no_docker_socket_group_or_apt_get() -> None:

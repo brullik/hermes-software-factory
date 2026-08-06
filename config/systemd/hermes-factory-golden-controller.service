@@ -1,0 +1,23 @@
+[Unit]
+Description=Hermes Golden Product isolated controller
+After=network-online.target
+
+[Service]
+Type=simple
+User=hermescandidate
+Group=hermesfunctional
+WorkingDirectory=/opt/hermes-factory-candidate/current
+Environment=HOME=/var/lib/hermes-factory-candidate
+Environment=XDG_RUNTIME_DIR=/run/hermes-factory-golden
+RuntimeDirectory=hermes-factory-golden
+ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m factory.controller --config /etc/hermes-factory/golden.yaml
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-golden /var/lib/hermes-factory-candidate /run/hermes-factory-golden
+ReadOnlyPaths=/etc/hermes-factory/golden.yaml /etc/hermes-factory/candidate-model-registry.yaml
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true

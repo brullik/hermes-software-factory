@@ -1,0 +1,26 @@
+[Unit]
+Description=Hermes Golden Product isolated worker
+After=hermes-factory-golden-controller.service hermes-factory-github-broker.service
+Requires=hermes-factory-golden-controller.service hermes-factory-github-broker.service
+
+[Service]
+Type=simple
+User=hermescandidate
+Group=hermesfunctional
+WorkingDirectory=/opt/hermes-factory-candidate/current
+Environment=HOME=/var/lib/hermes-factory-candidate
+Environment=XDG_RUNTIME_DIR=/run/hermes-factory-golden
+Environment=HERMES_GITHUB_BROKER_SOCKET=/run/hermes-factory-github-broker/broker.sock
+ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m factory.worker --config /etc/hermes-factory/golden.yaml --worker-id golden-worker-1
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-golden /var/lib/hermes-factory-candidate /run/hermes-factory-golden
+ReadOnlyPaths=/etc/hermes-factory/golden.yaml /etc/hermes-factory/candidate-model-registry.yaml /run/hermes-factory-github-broker/broker.sock
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=2400M
+TasksMax=512
