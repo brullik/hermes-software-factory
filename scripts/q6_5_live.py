@@ -50,13 +50,19 @@ def _prepare_shared_workspace_root(path: Path) -> Path:
         raise LiveProbeError("Q6.5 shared workspace root is not a directory")
     if os.name == "nt":
         return path
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    cloexec_flag = getattr(os, "O_CLOEXEC", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    fchmod = getattr(os, "fchmod", None)
+    if not directory_flag or not nofollow_flag or fchmod is None:
+        raise LiveProbeError("Q6.5 shared workspace hardening is unavailable")
+    flags = os.O_RDONLY | directory_flag | cloexec_flag | nofollow_flag
     descriptor = os.open(path, flags)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISDIR(metadata.st_mode):
             raise LiveProbeError("Q6.5 shared workspace root is not a directory")
-        os.fchmod(descriptor, 0o2770)
+        fchmod(descriptor, 0o2770)
         if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o2770:
             raise LiveProbeError("Q6.5 shared workspace root mode differs")
     finally:
