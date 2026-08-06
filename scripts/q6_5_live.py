@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -37,6 +38,30 @@ from factory.worker import SubprocessHermesRunner
 
 class LiveProbeError(RuntimeError):
     """A concrete Q6.5 adapter did not satisfy its real operation contract."""
+
+
+def _prepare_shared_workspace_root(path: Path) -> Path:
+    """Create one broker/Candidate workspace without widening the evidence root."""
+
+    if path.is_symlink():
+        raise LiveProbeError("Q6.5 shared workspace root is a symlink")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise LiveProbeError("Q6.5 shared workspace root is not a directory")
+    if os.name == "nt":
+        return path
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise LiveProbeError("Q6.5 shared workspace root is not a directory")
+        os.fchmod(descriptor, 0o2770)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o2770:
+            raise LiveProbeError("Q6.5 shared workspace root mode differs")
+    finally:
+        os.close(descriptor)
+    return path
 
 
 def _load_control(path: Path) -> dict[str, Any]:
@@ -448,6 +473,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     root = args.output.parent / str(control["source_commit"])
     root.mkdir(parents=True, exist_ok=True)
+    shared_workspace = _prepare_shared_workspace_root(root / "github-shared")
     owner = str(control["factory_repository"]).split("/", 1)[0]
     repository = f"hermes-canary-q65-{identity.candidate_digest[:10]}"
     try:
@@ -458,7 +484,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 epoch_id=str(control["source_commit"]),
                 owner=owner,
                 repository=repository,
-                workspace=root / "github-workspace",
+                workspace=shared_workspace / "checkout",
             ).run()
         )
     except Q65ExternalCapabilityError as error:

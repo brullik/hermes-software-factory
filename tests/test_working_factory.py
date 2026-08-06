@@ -435,6 +435,32 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
     assert resolved_action[1]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shared workspace modes are required")
+def test_q6_5_shared_workspace_is_group_writable_and_rejects_symlinks(
+    tmp_path: Path,
+) -> None:
+    shared = q6_5_live._prepare_shared_workspace_root(tmp_path / "github-shared")
+
+    assert shared == tmp_path / "github-shared"
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o2770
+    target = tmp_path / "target"
+    target.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(target, target_is_directory=True)
+    with pytest.raises(q6_5_live.LiveProbeError, match="symlink"):
+        q6_5_live._prepare_shared_workspace_root(linked)
+
+
+def test_github_broker_preserves_shared_group_write_umask() -> None:
+    repository = Path(__file__).parents[1]
+    unit = (
+        repository / "config/systemd/hermes-factory-github-broker.service"
+    ).read_text(encoding="utf-8")
+
+    assert "Group=hermesfunctional" in unit
+    assert "UMask=0007" in unit
+
+
 def test_functional_retirement_rejects_nonterminal_release_proof() -> None:
     governor = _functional_governor()
     with pytest.raises(FunctionalReadinessError, match="retirement proof"):
