@@ -51,6 +51,7 @@ from factory.recursive_improvement import (
 from factory.support_bundle import build_support_bundle
 from factory.telegram import TelegramApi
 from factory.worker import HermesRunResult
+from scripts import functional_qualification
 
 DIGEST = "a" * 64
 TOOLCHAIN = "b" * 64
@@ -67,6 +68,42 @@ def _functional_governor() -> FunctionalQualificationGovernor:
         toolchain_digest=TOOLCHAIN,
     )
     return governor
+
+
+def test_functional_epoch_reader_uses_checkpointed_immutable_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "governor.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE controller_release_epochs ("
+            "epoch_id TEXT, source_commit TEXT, candidate_digest TEXT, status TEXT, "
+            "created_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO controller_release_epochs VALUES (?,?,?,?,?)",
+            ("RE-IMMUTABLE", COMMIT, DIGEST, "FUNCTIONAL_PENDING", "2026-08-06T00:00:00Z"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    observed: list[str] = []
+    real_connect = sqlite3.connect
+
+    def recording_connect(database_uri: str, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+        observed.append(str(database_uri))
+        return real_connect(database_uri, *args, **kwargs)
+
+    monkeypatch.setattr(functional_qualification.sqlite3, "connect", recording_connect)
+    assert functional_qualification._release_epoch(
+        {
+            "governor_database": str(database),
+            "source_commit": COMMIT,
+            "candidate_digest": DIGEST,
+        }
+    ) == "RE-IMMUTABLE"
+    assert observed == [f"file:{database.resolve().as_posix()}?mode=ro&immutable=1"]
 
 
 def test_golden_builder_reads_single_owner_from_stable_environment(

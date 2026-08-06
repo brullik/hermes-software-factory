@@ -1537,6 +1537,46 @@ def test_qualification_control_initializes_one_idempotent_epoch(tmp_path: Path) 
     assert result["qualification_stages"] == []
 
 
+def test_functional_handoff_checkpoints_exact_q0_q6_epoch(tmp_path: Path) -> None:
+    repository = Path(__file__).parents[1]
+    config = {
+        "governor_database": str((tmp_path / "verifier" / "governor.db").resolve()),
+        "candidate_repository_root": str(repository.resolve()),
+        "evidence_root": str((tmp_path / "evidence").resolve()),
+        "source_commit": "0" * 40,
+        "stable_release_digest": "1" * 64,
+        "controller_release_digest": "2" * 64,
+        "candidate_digest": "3" * 64,
+        "policy_digest": "4" * 64,
+        "toolchain_manifest_digest": "5" * 64,
+        "trusted_verifier_public_key_digest": _TEST_VERIFIER_KEY_DIGEST,
+    }
+    epoch_id = initialize_epoch(config)
+    state = StateStore(Path(str(config["governor_database"])))
+    try:
+        with state._connection:
+            state._connection.execute(
+                "UPDATE controller_release_epochs SET status='FUNCTIONAL_PENDING' "
+                "WHERE epoch_id=?",
+                (epoch_id,),
+            )
+    finally:
+        state.close()
+
+    assert qualification_control.checkpoint_functional_handoff(config) == epoch_id
+    immutable = sqlite3.connect(
+        f"file:{Path(str(config['governor_database'])).resolve().as_posix()}"
+        "?mode=ro&immutable=1",
+        uri=True,
+    )
+    try:
+        assert immutable.execute(
+            "SELECT epoch_id,status FROM controller_release_epochs"
+        ).fetchone() == (epoch_id, "FUNCTIONAL_PENDING")
+    finally:
+        immutable.close()
+
+
 def test_candidate_snapshot_digest_uses_manifest_canonical_shape() -> None:
     digest = _immutable_release_tree_digest(Path(__file__).parents[1])
     assert len(digest) == 64
@@ -1967,6 +2007,10 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     ).read_text(encoding="utf-8")
     assert "hermes-factory-functional-qualification.timer" in initial_qualification
     assert "hermes-factory-functional-qualification.service" in initial_qualification
+    assert "scripts.qualification_control functional-handoff" in initial_qualification
+    assert initial_qualification.index("functional-handoff") < initial_qualification.index(
+        "hermes-factory-functional-qualification.timer"
+    )
     assert "hermes-factory-shadow-verify.service" not in initial_qualification
     assert "hermes-factory-shadow-finalize.service" not in initial_qualification
 
