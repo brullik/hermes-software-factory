@@ -1813,6 +1813,62 @@ def test_qualification_orchestration_failure_is_terminal_and_idempotent(
         state.close()
 
 
+def test_functional_orchestration_failure_is_terminal_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).parents[1]
+    config = {
+        "governor_database": str((tmp_path / "verifier" / "governor.db").resolve()),
+        "candidate_repository_root": str(repository.resolve()),
+        "evidence_root": str((tmp_path / "evidence").resolve()),
+        "source_commit": "0" * 40,
+        "stable_release_digest": "1" * 64,
+        "controller_release_digest": "2" * 64,
+        "candidate_digest": "3" * 64,
+        "policy_digest": "4" * 64,
+        "toolchain_manifest_digest": "5" * 64,
+        "trusted_verifier_public_key_digest": _TEST_VERIFIER_KEY_DIGEST,
+    }
+    epoch_id = initialize_epoch(config)
+    state = StateStore(Path(str(config["governor_database"])))
+    try:
+        with state._connection:
+            state._connection.execute(
+                "UPDATE controller_release_epochs SET status='FUNCTIONAL_PENDING' "
+                "WHERE epoch_id=?",
+                (epoch_id,),
+            )
+    finally:
+        state.close()
+
+    first = qualification_control.fail_functional_orchestration(config)
+    second = qualification_control.fail_functional_orchestration(config)
+    assert first == second
+    assert first[0] == epoch_id
+    evidence_files = list(
+        (tmp_path / "evidence").glob("functional-orchestration-failure-*.json")
+    )
+    assert len(evidence_files) == 1
+    evidence = json.loads(evidence_files[0].read_text(encoding="utf-8"))
+    assert evidence["reason_code"] == "functional_qualification_orchestrator_failed"
+    assert evidence["failure_coordinate"] == "functional-qualification-service"
+
+    state = StateStore(Path(str(config["governor_database"])))
+    try:
+        epoch = state._connection.execute(
+            "SELECT status,failure_reason,failure_evidence_ref "
+            "FROM controller_release_epochs WHERE epoch_id=?",
+            (epoch_id,),
+        ).fetchone()
+        assert tuple(epoch) == (
+            "QUALIFICATION_FAILED",
+            "functional_qualification_orchestrator_failed",
+            first[1],
+        )
+    finally:
+        state.close()
+
+
 def test_shadow_pipeline_failure_is_terminal_sanitized_and_idempotent(
     tmp_path: Path,
 ) -> None:
@@ -2013,6 +2069,11 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     )
     assert "hermes-factory-shadow-verify.service" not in initial_qualification
     assert "hermes-factory-shadow-finalize.service" not in initial_qualification
+    functional_recovery = bootstrap.index("functional-fail")
+    terminal_check = bootstrap.index("Previous Candidate B epoch is not terminal")
+    assert functional_recovery < terminal_check
+    assert "systemctl is-failed --quiet hermes-factory-functional-qualification.service" in bootstrap
+    assert "PYTHONDONTWRITEBYTECODE=1" in bootstrap
 
 
 def test_HARD_P0_candidate_tasks_have_no_docker_socket_group_or_apt_get() -> None:
