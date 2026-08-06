@@ -57,8 +57,15 @@ def _load_config(path: Path) -> dict[str, Any]:
 
 def _release_epoch(config: Mapping[str, Any]) -> str:
     database = Path(str(config["governor_database"]))
-    connection = sqlite3.connect(f"file:{database.resolve().as_posix()}?mode=ro", uri=True)
+    # The verifier StateStore uses WAL.  This reader is deliberately mounted
+    # read-only by systemd, so it cannot participate in SQLite's mutable WAL
+    # shared-memory protocol.  Q0-Q6 therefore checkpoints and validates an
+    # immutable handoff before this reader is enabled.
+    connection = sqlite3.connect(
+        f"file:{database.resolve().as_posix()}?mode=ro&immutable=1", uri=True
+    )
     try:
+        connection.execute("PRAGMA query_only=ON")
         rows = connection.execute(
             "SELECT epoch_id,source_commit,candidate_digest,status "
             "FROM controller_release_epochs ORDER BY created_at DESC"

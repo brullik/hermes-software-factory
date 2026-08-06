@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -388,6 +389,58 @@ def initialize_epoch(config: Mapping[str, Any]) -> str:
         return epoch_id
     finally:
         state.close()
+
+
+def checkpoint_functional_handoff(config: Mapping[str, Any]) -> str:
+    """Checkpoint the exact Q0-Q6 epoch for a read-only functional reader."""
+
+    database = Path(str(config["governor_database"]))
+    state = _store(config)
+    try:
+        governor = _governor(state, config)
+        epoch_id = _active_epoch(governor)
+        epoch = governor.epoch(epoch_id)
+        expected_identity = (
+            str(config["source_commit"]),
+            str(config["candidate_digest"]),
+        )
+        actual_identity = (
+            str(epoch["source_commit"]),
+            str(epoch["candidate_digest"]),
+        )
+        if actual_identity != expected_identity:
+            raise QualificationControlError("functional handoff identity differs")
+        if str(epoch["status"]) != "FUNCTIONAL_PENDING":
+            raise QualificationControlError(
+                "functional handoff requires Q0-Q6 FUNCTIONAL_PENDING"
+            )
+        state._connection.commit()
+        checkpoint = state._connection.execute(
+            "PRAGMA wal_checkpoint(TRUNCATE)"
+        ).fetchone()
+        if checkpoint is None or tuple(int(value) for value in checkpoint) != (0, 0, 0):
+            raise QualificationControlError("functional handoff WAL checkpoint failed")
+    finally:
+        state.close()
+
+    snapshot = sqlite3.connect(
+        f"file:{database.resolve().as_posix()}?mode=ro&immutable=1", uri=True
+    )
+    try:
+        snapshot.execute("PRAGMA query_only=ON")
+        integrity = snapshot.execute("PRAGMA quick_check").fetchone()
+        if integrity is None or str(integrity[0]) != "ok":
+            raise QualificationControlError("functional handoff snapshot is corrupt")
+        rows = snapshot.execute(
+            "SELECT epoch_id,source_commit,candidate_digest,status "
+            "FROM controller_release_epochs WHERE source_commit=? AND candidate_digest=?",
+            expected_identity,
+        ).fetchall()
+    finally:
+        snapshot.close()
+    if len(rows) != 1 or str(rows[0][0]) != epoch_id or str(rows[0][3]) != "FUNCTIONAL_PENDING":
+        raise QualificationControlError("functional handoff snapshot identity differs")
+    return epoch_id
 
 
 def run_and_record_stage(config: Mapping[str, Any], stage: str) -> tuple[str, str]:
@@ -1310,6 +1363,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
+    commands.add_parser("functional-handoff")
     commands.add_parser("orchestration-fail")
     shadow_fail = commands.add_parser("shadow-fail")
     shadow_fail.add_argument("component", choices=sorted(_SHADOW_FAILURE_COMPONENTS))
@@ -1349,6 +1403,8 @@ def main(argv: list[str] | None = None) -> int:
         config = _load_config(args.config)
         if args.command == "init":
             result: dict[str, Any] = {"epoch_id": initialize_epoch(config)}
+        elif args.command == "functional-handoff":
+            result = {"epoch_id": checkpoint_functional_handoff(config)}
         elif args.command == "orchestration-fail":
             epoch_id, evidence_ref = fail_qualification_orchestration(config)
             result = {
