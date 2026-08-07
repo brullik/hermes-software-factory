@@ -2158,6 +2158,24 @@ def test_functional_orchestration_primes_notifier_and_uses_setpriv() -> None:
         assert "HOME=/var/lib/hermes-factory-verifier" in script
     assert "HOME=/var/lib/hermes-factory-candidate" in run_scenario
 
+    identity_switching_units = (
+        "hermes-factory-pre-q8.service",
+        "hermes-factory-pre-q8@.service",
+        "hermes-factory-clean-canary@.service",
+        "hermes-factory-golden-product.service",
+        "hermes-factory-functional-ready.service",
+    )
+    for unit_name in identity_switching_units:
+        unit = (repository / "config/systemd" / unit_name).read_text(
+            encoding="utf-8"
+        )
+        assert "User=root" in unit
+        assert "NoNewPrivileges=true" in unit
+        assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID" in unit
+        assert "AmbientCapabilities=CAP_SETUID CAP_SETGID" in unit
+        assert "RestrictSUIDSGID=true" in unit
+        assert "LockPersonality=true" in unit
+
 
 def test_HARD_P0_candidate_tasks_have_no_docker_socket_group_or_apt_get() -> None:
     repository = Path(__file__).parents[1]

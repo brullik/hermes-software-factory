@@ -17,5 +17,7 @@ ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory-pre-q8 /var/log/hermes-factory-pre-q8 /var/lib/hermes-factory-functional /var/lib/hermes-factory-candidate /run/systemd
 ReadOnlyPaths=/etc/hermes-factory/pre-q8 /etc/hermes-factory/qualification-control.yaml /opt/hermes-factory-candidate /opt/hermes-factory-verifier
 InaccessiblePaths=/var/lib/hermes-factory /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID CAP_SETGID
 RestrictSUIDSGID=true
 LockPersonality=true
