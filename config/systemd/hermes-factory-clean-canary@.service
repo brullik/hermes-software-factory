@@ -18,5 +18,7 @@ ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory-canaries /var/log/hermes-factory-canaries /var/lib/hermes-factory-verifier /var/lib/hermes-factory-candidate /run/systemd
 ReadOnlyPaths=/etc/hermes-factory/canaries /etc/hermes-factory/qualification-control.yaml /etc/hermes-factory/candidate-model-registry.yaml /etc/hermes-factory/candidate-credentials.d /opt/hermes-factory-candidate /opt/hermes-factory-verifier
 InaccessiblePaths=/var/lib/hermes-factory /etc/hermes-factory/credentials.d /usr/local/sbin/hermes-factory-release-submit
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID CAP_SETGID
 RestrictSUIDSGID=true
 LockPersonality=true
