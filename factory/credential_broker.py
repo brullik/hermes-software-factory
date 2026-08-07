@@ -527,7 +527,10 @@ class GitHubCredentialBroker:
         path = (workspace / relative).resolve()
         if workspace.resolve() not in path.parents or path.is_symlink() or not path.is_file():
             raise CredentialBrokerError("evidence manifest is outside workspace")
-        encoded = path.read_bytes()
+        try:
+            encoded = path.read_bytes()
+        except OSError as error:
+            raise CredentialBrokerError("evidence manifest is unreadable") from error
         if not encoded or len(encoded) > 1_048_576:
             raise CredentialBrokerError("evidence manifest size is invalid")
         actual_digest = sha256(encoded).hexdigest()

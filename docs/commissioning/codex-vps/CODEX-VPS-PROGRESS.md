@@ -107,6 +107,13 @@
   production paths, used a deterministic unauthenticated `gh` probe and allowed
   only IPv4/IPv6 loopback: 590 collected, 590 PASS in 299.92 seconds. Pilot,
   compileall, full ruff and strict mypy (129 source files) also passed.
+- The first commissioning merge attempt stopped before any GitHub mutation
+  because the broker identity could not read an owner-mode `0600` evidence
+  manifest. That unhandled `PermissionError` terminated and restarted the
+  broker, while PR #165 correctly remained open. The broker now catches any
+  manifest-read `OSError` and returns a typed fail-closed error without a merge
+  call. A dedicated negative regression test asserts both the error and absence
+  of a `PUT`; 17 focused tests, ruff and strict mypy pass.
 
 Next checkpoint: commit/push the governance evidence, merge PR #165 through the
 strict exact-head broker, deploy the merged immutable runtime and run disposable

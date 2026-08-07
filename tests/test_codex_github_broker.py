@@ -267,6 +267,22 @@ def test_strict_merge_rejects_negative_preconditions(
         )
 
 
+def test_strict_merge_rejects_unreadable_manifest_without_mutation(
+    tmp_path: Path,
+) -> None:
+    runner = StrictRunner()
+    broker = _broker(tmp_path, runner)
+    request = _merge_request(tmp_path, "CODEX-NEGATIVE-UNREADABLE-MANIFEST")
+    workspace = Path(str(request.payload["workspace"]))
+    manifest = workspace / str(request.payload["evidence_manifest"])
+    manifest.chmod(0)
+
+    with pytest.raises(CredentialBrokerError, match="manifest is unreadable"):
+        broker.execute(request)
+
+    assert not any("PUT" in argv for argv in runner.calls)
+
+
 def test_core_policy_rejects_main_push_wrong_pr_and_unrelated_repository(
     tmp_path: Path,
 ) -> None:

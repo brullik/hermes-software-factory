@@ -63,6 +63,18 @@
     "test_network": "loopback-only",
     "production_paths_visible_in_test_namespace": false
   },
+  "commissioning_findings": [
+    {
+      "finding": "broker process terminated when an evidence manifest passed path checks but was unreadable by the broker identity",
+      "observed_before_github_mutation": true,
+      "pull_request_remained_open": true,
+      "fix": "catch evidence-manifest read OSError and return a typed fail-closed CredentialBrokerError",
+      "regression_test": "test_strict_merge_rejects_unreadable_manifest_without_mutation",
+      "focused_tests": "17 passed",
+      "ruff": "PASS",
+      "mypy": "PASS"
+    }
+  ],
   "evidence_sha256": {
     "GITHUB-EFFECTIVE-MAIN-RULES-BEFORE.json": "8a23a8601efc5985dc33ccf624ec0c9ab6575cc2593960f5064b77c5141b03da",
     "GITHUB-EFFECTIVE-MAIN-RULES-AFTER.json": "dd7de96a95bfe7a190def1bebfb15a670a49d1577ce84423b37fde2185eeba52",
