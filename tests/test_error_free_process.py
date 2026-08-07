@@ -2114,6 +2114,15 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         "systemctl enable --now hermes-factory-owner-notifier.path"
     )
     assert notifier_disable < qualification_start < notifier_enable
+    legacy_retirement = bootstrap.index("retire_legacy_candidate_notifier")
+    candidate_switch = bootstrap.index('if [[ -L "${CANDIDATE_ROOT}/current" ]]')
+    assert legacy_retirement < candidate_switch < notifier_enable
+    assert (
+        "systemctl disable --now hermes-factory-qualification-notifier.timer"
+        in bootstrap
+    )
+    assert "hermes-factory-qualification-code-freeze-guard.service" in bootstrap
+    assert bootstrap.count("retire_legacy_candidate_notifier") == 2
     owner_notifier = (
         repository / "config/systemd/hermes-factory-owner-notifier.service"
     ).read_text(encoding="utf-8")

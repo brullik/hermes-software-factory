@@ -115,6 +115,31 @@ stop_functional_candidate_services() {
     hermes-factory-github-broker.service >/dev/null 2>&1 || true
 }
 
+retire_legacy_candidate_notifier() {
+  # Candidate releases before the typed owner-notification outbox installed a
+  # separate notifier whose immutable config remained bound to the old epoch.
+  # Leaving its timer enabled makes every later Candidate look like a code
+  # freeze violation.  Retire only that legacy Candidate timer and its active
+  # jobs; the current owner-notifier path is installed and enabled below after
+  # the new epoch passes its initial qualification handoff.
+  systemctl disable --now hermes-factory-qualification-notifier.timer \
+    >/dev/null 2>&1 || true
+  systemctl stop \
+    hermes-factory-qualification-notifier.service \
+    hermes-factory-qualification-notifier-watchdog.service \
+    hermes-factory-qualification-status-export.service \
+    hermes-factory-qualification-code-freeze-guard.service >/dev/null 2>&1 || true
+  for legacy_unit in \
+    hermes-factory-qualification-notifier.service \
+    hermes-factory-qualification-notifier-watchdog.service \
+    hermes-factory-qualification-status-export.service \
+    hermes-factory-qualification-code-freeze-guard.service; do
+    systemctl reset-failed "${legacy_unit}" >/dev/null 2>&1 || true
+  done
+}
+
+retire_legacy_candidate_notifier
+
 ALLOW_EPOCH_SWITCH=0
 if [[ -L "${CANDIDATE_ROOT}/current" ]] \
   && [[ "$(basename "$(readlink -f "${CANDIDATE_ROOT}/current")")" != "${SOURCE_COMMIT}" ]]; then
