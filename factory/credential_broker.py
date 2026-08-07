@@ -278,6 +278,19 @@ class GitHubCredentialBroker:
             lowered = safe.lower()
             if "bad credentials" in lowered or "http 401" in lowered:
                 raise CredentialBrokerError("candidate_github_credential_expired")
+            workflow_write_denied = (
+                "refusing to allow a personal access token to create or update workflow"
+                in lowered
+                and "workflow" in lowered
+                and "scope" in lowered
+            ) or (
+                "not permitted to create or update workflow" in lowered
+                and "workflows permission" in lowered
+            )
+            if workflow_write_denied:
+                raise CredentialBrokerError(
+                    "candidate_github_workflow_permission_denied"
+                )
             if "http 403" in lowered or "resource not accessible" in lowered:
                 raise CredentialBrokerError("candidate_github_operation_denied")
             raise CredentialBrokerError(

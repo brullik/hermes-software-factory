@@ -170,7 +170,10 @@ class GitHubOperationHandshake:
             )
         except CredentialBrokerError as error:
             reason_code = str(error)
-            if reason_code == "candidate_github_operation_denied":
+            if reason_code in {
+                "candidate_github_operation_denied",
+                "candidate_github_workflow_permission_denied",
+            }:
                 raise Q65ExternalCapabilityError(operation, reason_code) from error
             raise
 
