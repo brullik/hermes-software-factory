@@ -199,7 +199,15 @@ def _host_capacity_snapshot(
         missing.append("cpu.load_average")
     if memory_total <= 0 or not 0 <= memory_available <= memory_total:
         missing.append("memory")
-    if disk_total <= 0 or min(disk_used, disk_free) < 0 or disk_used + disk_free != disk_total:
+    # POSIX ``f_bavail`` excludes blocks reserved for privileged processes,
+    # while ``f_bfree`` (used by the used-space calculation) includes them.
+    # Consequently, a healthy filesystem may report used + free < total.
+    if (
+        disk_total <= 0
+        or min(disk_used, disk_free) < 0
+        or max(disk_used, disk_free) > disk_total
+        or disk_used + disk_free > disk_total
+    ):
         missing.append("filesystem")
 
     controller = config.raw.get("controller")
