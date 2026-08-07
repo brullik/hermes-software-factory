@@ -160,7 +160,9 @@ def test_host_capacity_snapshot_reports_current_allocations() -> None:
             "MemTotal:       16384000 kB\nMemAvailable:    8192000 kB\n",
             encoding="utf-8",
         )
-        disk = Mock(total=1_000_000, used=400_000, free=600_000)
+        # Linux filesystems may reserve blocks: shutil.disk_usage() then
+        # reports used + free < total even though every measurement is valid.
+        disk = Mock(total=1_000_000, used=350_000, free=600_000)
 
         with (
             patch("factory.worker.os.cpu_count", return_value=8),
@@ -187,7 +189,7 @@ def test_host_capacity_snapshot_reports_current_allocations() -> None:
         }
         assert snapshot["controller_state_filesystem_bytes"] == {
             "total": 1_000_000,
-            "used": 400_000,
+            "used": 350_000,
             "free": 600_000,
         }
         assert snapshot["controller_limits"] == {
@@ -195,6 +197,35 @@ def test_host_capacity_snapshot_reports_current_allocations() -> None:
             "max_active_workers": 2,
         }
         assert snapshot["missing_fields"] == []
+
+
+def test_host_capacity_snapshot_rejects_impossible_filesystem_measurements() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        meminfo = root / "meminfo"
+        meminfo.write_text(
+            "MemTotal:       16384000 kB\nMemAvailable:    8192000 kB\n",
+            encoding="utf-8",
+        )
+        disk = Mock(total=1_000_000, used=700_000, free=400_000)
+
+        with (
+            patch("factory.worker.os.cpu_count", return_value=8),
+            patch(
+                "factory.worker.os.getloadavg",
+                return_value=(1.25, 0.75, 0.5),
+                create=True,
+            ),
+            patch("factory.worker.shutil.disk_usage", return_value=disk),
+        ):
+            snapshot = _host_capacity_snapshot(config, meminfo_path=meminfo)
+
+        assert snapshot["status"] == "PARTIAL"
+        assert snapshot["missing_fields"] == ["filesystem"]
 
 
 def test_solution_architect_gets_trusted_capacity_evidence() -> None:
