@@ -45,6 +45,7 @@ from factory.q6_5 import (
     ProbeIdentity,
     ProviderOperationHandshake,
     Q65ExternalCapabilityError,
+    Q65ProbeError,
     external_operation_report,
 )
 from factory.recursive_improvement import (
@@ -1066,6 +1067,38 @@ class _FakeQ65Broker:
             request_digest=request.digest(),
             receipt_digest=sha256_text(request.request_id),
         )
+
+
+def test_q6_5_local_git_runner_trusts_only_the_exact_shared_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        observed["argv"] = argv
+        observed["cwd"] = kwargs["cwd"]
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("factory.q6_5.subprocess.run", fake_run)
+    workspace = tmp_path / "broker-owned-checkout"
+    result = GitHubOperationHandshake._default_git_runner(
+        ["git", "status", "--short"], workspace
+    )
+
+    assert result.returncode == 0
+    assert observed == {
+        "argv": [
+            "git",
+            "-c",
+            f"safe.directory={workspace.resolve()}",
+            "status",
+            "--short",
+        ],
+        "cwd": workspace.resolve(),
+    }
+    assert "safe.directory=*" not in observed["argv"]
+    with pytest.raises(Q65ProbeError, match="command is invalid"):
+        GitHubOperationHandshake._default_git_runner(["sh", "-c", "true"], workspace)
 
 
 def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(

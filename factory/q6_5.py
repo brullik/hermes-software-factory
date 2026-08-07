@@ -98,9 +98,12 @@ class GitHubOperationHandshake:
 
     @staticmethod
     def _default_git_runner(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if not argv or argv[0] != "git":
+            raise Q65ProbeError("local git runner command is invalid")
+        trusted_workspace = cwd.resolve()
         return subprocess.run(
-            argv,
-            cwd=cwd,
+            ["git", "-c", f"safe.directory={trusted_workspace}", *argv[1:]],
+            cwd=trusted_workspace,
             env={
                 "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
                 "HOME": os.environ.get("HOME", "/var/lib/hermes-factory-candidate"),
