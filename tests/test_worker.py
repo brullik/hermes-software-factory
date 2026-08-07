@@ -3848,6 +3848,32 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result.reason_code, "agent_execution_timeout")
         self.assertIn("1800 seconds", result.output)
         self.assertIn("not retained", result.output)
+
+    def test_subprocess_runner_types_missing_hermes_oauth_without_exposing_it(self) -> None:
+        runner = SubprocessHermesRunner(binary="hermes")
+        completed = subprocess.CompletedProcess(
+            ["hermes"],
+            1,
+            stdout="",
+            stderr="No Codex credentials stored. Run `hermes auth` to authenticate.\n",
+        )
+
+        with patch("factory.worker.subprocess.run", return_value=completed):
+            result = runner.run(
+                selection=ModelSelection(
+                    "openai_codex_subscription",
+                    "economy",
+                    "gpt-5.6-luna",
+                    "luna",
+                    "openai-codex",
+                ),
+                prompt="Return one safe JSON object.",
+                cwd=Path.cwd(),
+            )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.reason_code, "missing_credential")
+        self.assertNotIn("sk-", result.output)
         self.assertNotIn("hermes_stdin", result.output)
 
     def test_worker_uses_distinct_bounded_execution_timeouts(self) -> None:

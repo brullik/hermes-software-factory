@@ -37,6 +37,31 @@ class Q65ExternalCapabilityError(Q65ProbeError):
         super().__init__(safe_reason_code)
 
 
+class Q65ProviderCapabilityError(Q65ProbeError):
+    """A real provider invocation needs Candidate-scoped external authentication."""
+
+    def __init__(
+        self,
+        *,
+        tier: str,
+        alias: str,
+        selection: ModelSelection,
+        semantic_id: str,
+    ) -> None:
+        self.operation = f"provider.{tier}.invoke"
+        self.capability = self.operation
+        self.safe_reason_code = "missing_candidate_provider_credential"
+        self.scope = {
+            "alias": alias,
+            "provider": selection.provider,
+            "model": selection.model,
+            "credential_provider": selection.cli_provider or selection.provider,
+            "semantic_id": semantic_id,
+            "stdout_contract": "json-only",
+        }
+        super().__init__(self.safe_reason_code)
+
+
 @dataclass(frozen=True)
 class ProbeIdentity:
     candidate_digest: str
@@ -348,6 +373,13 @@ class ProviderOperationHandshake:
                 usage_path=usage_path,
             )
             if result.status != "PASS":
+                if result.reason_code == "missing_credential":
+                    raise Q65ProviderCapabilityError(
+                        tier=tier,
+                        alias=alias,
+                        selection=selection,
+                        semantic_id=semantic_id,
+                    )
                 raise Q65ProbeError(f"provider {tier} real invocation failed:{result.reason_code}")
             try:
                 value = json.loads(result.output)

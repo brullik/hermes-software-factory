@@ -288,19 +288,49 @@ def _external_failure_report(
     ):
         raise FunctionalControlError("Q6.5 failure index identity differs")
     operation = str(failure["operation"])
-    if operation not in set(MANDATORY_Q6_5_OPERATIONS[:8]):
-        raise FunctionalControlError("Q6.5 external failure operation is not allowlisted")
-    if (
-        failure.get("capability") != operation
-        or failure.get("safe_reason_code") != "candidate_github_operation_denied"
-    ):
-        raise FunctionalControlError("Q6.5 external failure classification differs")
-    owner = str(config["factory_repository"]).split("/", 1)[0]
-    expected_scope = {
-        "owner": owner,
-        "repository": f"hermes-canary-q65-{str(config['candidate_digest'])[:10]}",
-        "private": True,
+    github_operations = set(MANDATORY_Q6_5_OPERATIONS[:8])
+    provider_aliases = {
+        "provider.luna.invoke": "economy",
+        "provider.terra.invoke": "standard",
+        "provider.sol.invoke": "expert",
     }
+    reason_code = str(failure.get("safe_reason_code", ""))
+    if failure.get("capability") != operation:
+        raise FunctionalControlError("Q6.5 external failure classification differs")
+    if operation in github_operations and reason_code == "candidate_github_operation_denied":
+        owner = str(config["factory_repository"]).split("/", 1)[0]
+        expected_scope = {
+            "owner": owner,
+            "repository": f"hermes-canary-q65-{str(config['candidate_digest'])[:10]}",
+            "private": True,
+        }
+    elif (
+        operation in provider_aliases
+        and reason_code == "missing_candidate_provider_credential"
+    ):
+        expected_scope = _mapping(failure.get("scope"), "Q6.5 provider failure scope")
+        if (
+            set(expected_scope)
+            != {
+                "alias",
+                "provider",
+                "model",
+                "credential_provider",
+                "semantic_id",
+                "stdout_contract",
+            }
+            or expected_scope.get("alias") != provider_aliases[operation]
+            or expected_scope.get("stdout_contract") != "json-only"
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", str(expected_scope.get("provider", "")))
+            or not re.fullmatch(
+                r"[A-Za-z0-9._-]+", str(expected_scope.get("credential_provider", ""))
+            )
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", str(expected_scope.get("model", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(expected_scope.get("semantic_id", "")))
+        ):
+            raise FunctionalControlError("Q6.5 provider failure scope differs")
+    else:
+        raise FunctionalControlError("Q6.5 external failure operation is not allowlisted")
     if failure.get("scope") != expected_scope or not str(failure["observed_at"]):
         raise FunctionalControlError("Q6.5 external failure scope differs")
     return CapabilityHandshakeReport.create(
@@ -311,7 +341,7 @@ def _external_failure_report(
         status=CapabilityStatus.MISSING_EXTERNAL,
         credential_epoch_id=credential_epoch,
         toolchain_digest=str(config["toolchain_manifest_digest"]),
-        safe_reason_code="candidate_github_operation_denied",
+        safe_reason_code=reason_code,
     )
 
 
@@ -403,17 +433,25 @@ def reconcile(
                 )
                 if external_failure is not None:
                     governor.record_handshake(epoch_id, external_failure)
+                    reason_code = str(external_failure.safe_reason_code or "")
                     action_id = governor.ensure_owner_action(
                         epoch_id=epoch_id,
-                        reason_code="candidate_github_operation_denied",
+                        reason_code=reason_code,
                         capability=external_failure.capability,
-                        capability_epoch=credential_epoch,
+                        capability_epoch=(
+                            None
+                            if reason_code == "missing_candidate_provider_credential"
+                            else credential_epoch
+                        ),
                     )
-                    _notify_waiting(
-                        state_root,
-                        epoch_id=epoch_id,
-                        action_id=action_id,
-                        text=(
+                    if reason_code == "missing_candidate_provider_credential":
+                        notification_text = (
+                            "Authenticate the isolated Candidate provider "
+                            f"{external_failure.scope['credential_provider']} through its secure "
+                            "OAuth device flow. Do not send credentials or device codes in Telegram."
+                        )
+                    else:
+                        notification_text = (
                             "Candidate GitHub authentication reached the scoped Q6.5 handshake, "
                             f"but the required private canary operation "
                             f"{external_failure.operation} was denied. Replace "
@@ -421,11 +459,16 @@ def reconcile(
                             "read, update, merge/close, and delete/archive private scoped canary "
                             f"repositories for {external_failure.scope['owner']}. Do not send the "
                             "credential in Telegram."
-                        ),
+                        )
+                    _notify_waiting(
+                        state_root,
+                        epoch_id=epoch_id,
+                        action_id=action_id,
+                        text=notification_text,
                     )
                     return {
                         "status": "WAITING_CAPABILITY",
-                        "reason_code": "candidate_github_operation_denied",
+                        "reason_code": reason_code,
                         "operation": external_failure.operation,
                         "action_ref": f"state://functional-owner-actions/{action_id}",
                         "automatic_resume": True,
@@ -463,6 +506,10 @@ def reconcile(
             if any(report.credential_epoch_id not in {None, credential_epoch} for report in reports):
                 raise FunctionalControlError("Q6.5 report credential epoch differs")
             for report in reports:
+                if report.status == CapabilityStatus.AVAILABLE:
+                    governor.recover_external_capability(
+                        epoch_id=epoch_id, capability=report.capability
+                    )
                 governor.record_handshake(epoch_id, report)
         current = governor.epoch(epoch_id)
         if str(current["status"]) == "PRE_Q8_PENDING":

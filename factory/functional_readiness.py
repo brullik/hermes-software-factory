@@ -581,6 +581,7 @@ class FunctionalQualificationGovernor:
         if reason_code not in {
             "candidate_github_operation_denied",
             "missing_candidate_github_credential",
+            "missing_candidate_provider_credential",
             "missing_candidate_telegram_credential",
         }:
             raise FunctionalReadinessError("owner action reason is not external")
@@ -603,6 +604,35 @@ class FunctionalQualificationGovernor:
                 ),
             )
         return action_id
+
+    def recover_external_capability(self, *, epoch_id: str, capability: str) -> bool:
+        """Replace one immutable missing-external observation after a real recovery probe."""
+
+        existing = self.connection.execute(
+            "SELECT status FROM capability_handshake_reports WHERE epoch_id=? AND operation=?",
+            (epoch_id, capability),
+        ).fetchone()
+        if existing is None:
+            return False
+        if str(existing[0]) != CapabilityStatus.MISSING_EXTERNAL.value:
+            raise FunctionalReadinessError("recovered capability was not missing externally")
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM capability_handshake_reports WHERE epoch_id=? AND operation=?",
+                (epoch_id, capability),
+            )
+            self.connection.execute(
+                "UPDATE functional_owner_actions SET status='RESOLVED',resolved_at=? "
+                "WHERE epoch_id=? AND capability=? AND status='OPEN'",
+                (now, epoch_id, capability),
+            )
+            self.connection.execute(
+                "UPDATE functional_epochs SET status='Q6_5_PENDING',q6_5_status='PENDING',"
+                "updated_at=? WHERE epoch_id=?",
+                (now, epoch_id),
+            )
+        return True
 
     def resolve_owner_action(self, *, epoch_id: str, capability: str) -> int:
         with self.connection:

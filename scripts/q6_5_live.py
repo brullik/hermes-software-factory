@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -31,6 +32,7 @@ from factory.q6_5 import (
     ProviderOperationHandshake,
     Q65ExternalCapabilityError,
     Q65ProbeError,
+    Q65ProviderCapabilityError,
     external_operation_report,
 )
 from factory.worker import SubprocessHermesRunner
@@ -38,6 +40,9 @@ from factory.worker import SubprocessHermesRunner
 
 class LiveProbeError(RuntimeError):
     """A concrete Q6.5 adapter did not satisfy its real operation contract."""
+
+
+_SAFE_PROVIDER = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _prepare_shared_workspace_root(path: Path) -> Path:
@@ -130,6 +135,42 @@ def _write_once(path: Path, payload: dict[str, Any]) -> Path:
         handle.flush()
         os.fsync(handle.fileno())
     return path
+
+
+def _provider_credential_available(provider: str) -> bool:
+    if not _SAFE_PROVIDER.fullmatch(provider):
+        raise LiveProbeError("Q6.5 provider credential identity is invalid")
+    executable = Path(sys.executable).resolve().with_name("hermes")
+    try:
+        result = subprocess.run(
+            [str(executable), "auth", "status", provider],
+            env={
+                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", "/var/lib/hermes-factory-candidate"),
+                "NO_COLOR": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip().startswith(
+        f"{provider}: logged in"
+    )
+
+
+def _archive_external_failure(path: Path, receipt_digest: str) -> None:
+    archive = path.parent / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    target = archive / f"failure-index-{receipt_digest}.json"
+    if target.exists():
+        if not target.is_file() or target.is_symlink() or sha256_file(target) != sha256_file(path):
+            raise LiveProbeError("Q6.5 archived failure index conflicts")
+        path.unlink()
+        return
+    os.replace(path, target)
 
 
 def _provider_reports(
@@ -474,12 +515,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             or existing_failure.get("credential_epoch_id") != identity.credential_epoch_id
         ):
             raise LiveProbeError("Q6.5 failure index identity differs")
-        return {
-            "status": "WAITING_CAPABILITY",
-            "failure_digest": digest,
-            "operation": str(existing_failure.get("operation", "")),
-            "safe_reason_code": str(existing_failure.get("safe_reason_code", "")),
-        }
+        safe_reason_code = str(existing_failure.get("safe_reason_code", ""))
+        scope = existing_failure.get("scope")
+        credential_provider = (
+            str(scope.get("credential_provider", "")) if isinstance(scope, dict) else ""
+        )
+        if safe_reason_code == "missing_candidate_provider_credential" and (
+            _provider_credential_available(credential_provider)
+        ):
+            _archive_external_failure(args.failure_index, digest)
+        else:
+            return {
+                "status": "WAITING_CAPABILITY",
+                "failure_digest": digest,
+                "operation": str(existing_failure.get("operation", "")),
+                "safe_reason_code": safe_reason_code,
+            }
     root = args.output.parent / str(control["source_commit"])
     root.mkdir(parents=True, exist_ok=True)
     shared_workspace = _prepare_shared_workspace_root(root / "github-shared")
@@ -520,14 +571,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     provider_workspace = root / "provider-workspace"
     provider_workspace.mkdir(parents=True, exist_ok=True)
-    reports.extend(
-        _provider_reports(
-            identity,
-            candidate_config=args.candidate_config,
-            workspace=provider_workspace,
-            evidence_root=root,
+    try:
+        reports.extend(
+            _provider_reports(
+                identity,
+                candidate_config=args.candidate_config,
+                workspace=provider_workspace,
+                evidence_root=root,
+            )
         )
-    )
+    except Q65ProviderCapabilityError as error:
+        failure_path = _write_once(
+            args.failure_index,
+            {
+                "schema_version": "1.0",
+                "candidate_digest": identity.candidate_digest,
+                "toolchain_digest": identity.toolchain_digest,
+                "credential_epoch_id": identity.credential_epoch_id,
+                "capability": error.capability,
+                "operation": error.operation,
+                "scope": error.scope,
+                "safe_reason_code": error.safe_reason_code,
+                "observed_at": utc_now(),
+            },
+        )
+        failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        return {
+            "status": "WAITING_CAPABILITY",
+            "failure_digest": str(failure["receipt_digest"]),
+            "operation": error.operation,
+            "safe_reason_code": error.safe_reason_code,
+        }
     reports.extend(_container_and_deployment(identity, root))
     reports.extend(_telegram_reports(identity, root=root, notifications_root=args.notifications))
     reports.extend(_backup_reports(identity, root))

@@ -864,7 +864,15 @@ class SubprocessHermesRunner:
         raw = (completed.stdout + "\n" + completed.stderr).strip()
         safe, _ = redact_text(raw)
         safe = safe[: self.max_output_chars]
-        return HermesRunResult("FAIL", safe, sha256_text(safe), "process_crash_before_result")
+        normalized = safe.casefold()
+        missing_credential = (
+            "run `hermes auth` to authenticate" in normalized
+            or "no codex credentials stored" in normalized
+        )
+        reason_code = (
+            "missing_credential" if missing_credential else "process_crash_before_result"
+        )
+        return HermesRunResult("FAIL", safe, sha256_text(safe), reason_code)
 
 
 @dataclass(frozen=True)
