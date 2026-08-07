@@ -7,6 +7,7 @@ Requires=hermes-factory-golden-controller.service hermes-factory-github-broker.s
 Type=simple
 User=hermescandidate
 Group=hermesfunctional
+SupplementaryGroups=hermescandidate
 WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=HOME=/var/lib/hermes-factory-candidate
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory-golden
