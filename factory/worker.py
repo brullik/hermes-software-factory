@@ -153,6 +153,89 @@ _WORKSPACE_COPY_IGNORES = (
 )
 
 
+def _host_capacity_snapshot(
+    config: FactoryConfig,
+    *,
+    meminfo_path: Path = Path("/proc/meminfo"),
+) -> dict[str, Any]:
+    """Return bounded controller-owned host measurements without payload data."""
+
+    logical_cpus = int(os.cpu_count() or 0)
+    try:
+        getloadavg = getattr(os, "getloadavg", None)
+        if not callable(getloadavg):
+            raise OSError("load average is unavailable")
+        load_1m, load_5m, load_15m = (round(value, 3) for value in getloadavg())
+    except (AttributeError, OSError):
+        load_1m = load_5m = load_15m = None
+
+    memory: dict[str, int] = {}
+    try:
+        for line in meminfo_path.read_text(encoding="utf-8").splitlines():
+            key, separator, raw_value = line.partition(":")
+            parts = raw_value.split()
+            if separator and len(parts) == 2 and parts[1] == "kB":
+                memory[key] = int(parts[0]) * 1024
+    except (OSError, ValueError):
+        memory = {}
+    memory_total = int(memory.get("MemTotal", 0))
+    memory_available = int(memory.get("MemAvailable", 0))
+
+    disk_root = config.state_dir
+    while not disk_root.exists() and disk_root != disk_root.parent:
+        disk_root = disk_root.parent
+    try:
+        disk = shutil.disk_usage(disk_root)
+        disk_total = int(disk.total)
+        disk_used = int(disk.used)
+        disk_free = int(disk.free)
+    except OSError:
+        disk_total = disk_used = disk_free = 0
+
+    missing = []
+    if logical_cpus <= 0:
+        missing.append("cpu.logical_count")
+    if load_1m is None:
+        missing.append("cpu.load_average")
+    if memory_total <= 0 or not 0 <= memory_available <= memory_total:
+        missing.append("memory")
+    if disk_total <= 0 or min(disk_used, disk_free) < 0 or disk_used + disk_free != disk_total:
+        missing.append("filesystem")
+
+    controller = config.raw.get("controller")
+    controller_limits = controller if isinstance(controller, dict) else {}
+    return {
+        "schema_version": "1.0",
+        "status": "AVAILABLE" if not missing else "PARTIAL",
+        "observed_at": datetime.now(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "cpu": {
+            "logical_count": logical_cpus,
+            "load_1m": load_1m,
+            "load_5m": load_5m,
+            "load_15m": load_15m,
+        },
+        "memory_bytes": {
+            "total": memory_total,
+            "available": memory_available,
+            "used": max(0, memory_total - memory_available),
+        },
+        "controller_state_filesystem_bytes": {
+            "total": disk_total,
+            "used": disk_used,
+            "free": disk_free,
+        },
+        "controller_limits": {
+            "max_active_products": int(controller_limits.get("max_active_products") or 0),
+            "max_active_workers": int(controller_limits.get("max_active_workers") or 0),
+        },
+        "missing_fields": missing,
+        "measurement_semantics": "point_in_time_observation_not_resource_reservation",
+    }
+
+
 def _plan_contract_repair_findings(
     error: PlanContractViolation,
     safe_message: str,
@@ -1495,6 +1578,22 @@ class AgentWorker:
             evidence.extend(self._dependency_evidence(task))
         else:
             evidence.extend(self._dependency_evidence(task))
+        if prompt_role == "solution-architect":
+            capacity_snapshot = _host_capacity_snapshot(self.config)
+            capacity_payload = stable_json(capacity_snapshot)
+            evidence.append(
+                {
+                    "type": "controller-host-capacity",
+                    "summary": (
+                        "TRUSTED_CONTROLLER_EVIDENCE: point-in-time host capacity facts: "
+                        f"{capacity_payload}. These measurements are not a reservation; require "
+                        "a fresh runtime capacity admission check immediately before deployment."
+                    ),
+                    "artifact_ref": (
+                        "controller://host-capacity/" + sha256_text(capacity_payload)
+                    ),
+                }
+            )
         decisions = ["Use safe defaults for unspecified reversible product details."]
         if prompt_role == "builder":
             decisions.append(
@@ -1527,6 +1626,12 @@ class AgentWorker:
             decisions.append(
                 "Planning execution is enforced read-only: terminal and file tools are unavailable. "
                 "Use only the supplied Context Pack and return the required schema JSON."
+            )
+        if prompt_role == "solution-architect":
+            decisions.append(
+                "Capacity acceptance must use the controller-host-capacity measurements. "
+                "Fail closed if their status is not AVAILABLE, do not invent missing values, "
+                "and preserve a fresh pre-deployment capacity admission requirement."
             )
         if prompt_role == "replanner":
             decisions.append(
