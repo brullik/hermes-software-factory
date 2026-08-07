@@ -629,6 +629,20 @@ def test_github_broker_preserves_shared_group_write_umask() -> None:
     assert "RestrictSUIDSGID=true" in probe_unit
 
 
+def test_candidate_workspace_workers_create_group_writable_setgid_parents() -> None:
+    repository = Path(__file__).parents[1]
+
+    for name in (
+        "hermes-factory-candidate-worker.service",
+        "hermes-factory-canary-worker@.service",
+        "hermes-factory-pre-q8-worker@.service",
+        "hermes-factory-golden-worker.service",
+    ):
+        unit = (repository / "config/systemd" / name).read_text(encoding="utf-8")
+        assert "UMask=0007" in unit
+        assert "RestrictSUIDSGID=true" in unit
+
+
 def test_candidate_functional_units_retain_candidate_config_group() -> None:
     repository = Path(__file__).parents[1]
 
