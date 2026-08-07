@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "canary": "codex-vps-governed-merge",
+  "timestamp": "2026-08-08T01:30:00+03:00",
+  "base_sha": "9709f6a3d8bd2370e638cc4bdff9cd1a750eab0a",
+  "production_semantics_changed": false,
+  "purpose": [
+    "exact-head checks classification",
+    "pending and stale merge rejection",
+    "unresolved review thread rejection",
+    "SHA-bound broker squash merge",
+    "single-parent and branch-cleanup proof"
+  ],
+  "rollback": "Revert the single-parent docs-only canary commit through the same governed PR path."
+}
