@@ -115,6 +115,7 @@ def build_configs(
         )
         payload["qualification"] = {
             "plane": "CLEAN_CANARY",
+            "release_adapter": "IsolatedCanaryReleaseExecutor",
             "capability_attestation_path": str(capability_attestation_path),
             "capability_attestation_digest": capability_attestation_digest,
             "scenario_id": scenario.scenario_id,

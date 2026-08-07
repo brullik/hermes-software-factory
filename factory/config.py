@@ -139,6 +139,89 @@ class FactoryConfig:
         return self.source.parent / "schemas"
 
 
+def clean_canary_capability_context(config: FactoryConfig) -> dict[str, str] | None:
+    """Return the exact isolated release boundary, or fail closed."""
+
+    qualification = config.raw.get("qualification")
+    deployment = config.raw.get("deployment")
+    backup = config.raw.get("backup")
+    if (
+        not isinstance(qualification, dict)
+        or qualification.get("plane") != "CLEAN_CANARY"
+        or qualification.get("release_adapter")
+        != "IsolatedCanaryReleaseExecutor"
+        or not isinstance(deployment, dict)
+        or not isinstance(backup, dict)
+    ):
+        return None
+    target = deployment.get("production_target")
+    if not isinstance(target, dict):
+        return None
+    digests = {
+        name: str(qualification.get(name) or "")
+        for name in (
+            "scenario_digest",
+            "candidate_digest",
+            "controller_release_digest",
+        )
+    }
+    if any(
+        len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in digests.values()
+    ):
+        return None
+    scenario_id = str(qualification.get("scenario_id") or "")
+    faults = qualification.get("faults")
+    if (
+        not scenario_id
+        or not isinstance(faults, list)
+        or any(not isinstance(fault, str) or not fault for fault in faults)
+    ):
+        return None
+    try:
+        state_root = config.state_dir.resolve()
+        target_path = Path(str(qualification.get("isolated_target_root") or ""))
+        receipt_path = Path(str(qualification.get("fault_receipt_root") or ""))
+        install_path = Path(str(target.get("install_root") or ""))
+        resolved_target = target_path.resolve()
+        resolved_receipts = receipt_path.resolve()
+        resolved_install = install_path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if (
+        not state_root.is_absolute()
+        or not target_path.is_absolute()
+        or not receipt_path.is_absolute()
+        or not install_path.is_absolute()
+        or target_path.is_symlink()
+        or receipt_path.is_symlink()
+        or resolved_target != resolved_install
+        or resolved_target != (state_root / "isolated-target").resolve()
+        or resolved_receipts != (state_root / "fault-receipts").resolve()
+        or state_root not in resolved_target.parents
+        or state_root not in resolved_receipts.parents
+        or deployment.get("current_vps_high_risk_production") is not False
+        or deployment.get("production_helper")
+        or deployment.get("rollback_helper")
+        or target.get("mode") != "isolated_candidate"
+        or target.get("host") != "clean-canary.invalid"
+        or target.get("entrypoint") != "disabled"
+        or backup.get("offsite_configured") is not False
+    ):
+        return None
+    return {
+        "adapter": "IsolatedCanaryReleaseExecutor",
+        "qualification_plane": "CLEAN_CANARY",
+        "scenario_id": scenario_id,
+        **digests,
+        "isolated_state_root": str(state_root),
+        "isolated_target_root": str(resolved_target),
+        "fault_receipt_root": str(resolved_receipts),
+        "config_digest": sha256_text(stable_json(config.raw)),
+    }
+
+
 def load_config(path: Path | None = None) -> FactoryConfig:
     source = Path(path or os.environ.get("FACTORY_CONFIG", "config/factory-config.example.yaml"))
     if not source.is_absolute():
@@ -237,6 +320,7 @@ def validate_config(config: FactoryConfig) -> list[str]:
             }
             canary_keys = {
                 *q6_keys,
+                "release_adapter",
                 "scenario_id",
                 "scenario_digest",
                 "controller_release_digest",
@@ -306,6 +390,8 @@ def validate_config(config: FactoryConfig) -> list[str]:
                     errors.append("clean canary roots must be absolute")
                 if deployment.get("production_helper"):
                     errors.append("clean canary cannot configure production helper")
+                if clean_canary_capability_context(config) is None:
+                    errors.append("clean canary capability boundary is invalid")
                 existing_url = str(qualification.get("existing_repository_url") or "")
                 if existing_url and not existing_url.startswith("https://github.com/"):
                     errors.append("clean canary existing repository URL is invalid")
