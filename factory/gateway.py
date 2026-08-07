@@ -13,6 +13,7 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .capabilities import CapabilityBroker
+from .codex_owner_actions import CodexOwnerActionStore, OwnerApprovalRejected
 from .config import FactoryConfig, load_config
 from .gateway_commands import GatewayCommandError, parse_command
 from .intake import IntakeService
@@ -63,6 +64,7 @@ class TelegramGateway:
         *,
         offset_path: Path | None = None,
         capability_broker: CapabilityBroker | None = None,
+        codex_action_store: CodexOwnerActionStore | None = None,
     ) -> None:
         self.config = config
         self.state = state
@@ -72,6 +74,7 @@ class TelegramGateway:
         self.offset_path.parent.mkdir(parents=True, exist_ok=True)
         self.outbox_worker_id = "telegram-gateway"
         self.capability_broker = capability_broker
+        self.codex_action_store = codex_action_store
 
     def _read_offset(self) -> int | None:
         if not self.offset_path.is_file():
@@ -112,10 +115,18 @@ class TelegramGateway:
 
     def _owner_actions_text(self) -> str:
         actions = self.state.open_capability_blocks()
-        if not actions:
+        codex_actions = (
+            self.codex_action_store.pending_actions() if self.codex_action_store is not None else []
+        )
+        if not actions and not codex_actions:
             return "Ожидающих OWNER_ACTION нет."
         names = list(dict.fromkeys(Path(str(item["owner_action_ref"])).name for item in actions))
-        return "OWNER_ACTION:\n" + "\n".join(f"- {name}" for name in names[:10])
+        lines = [f"- {name}" for name in names[:10]]
+        lines.extend(
+            f"- {item['action_id']}: {item['action_type']} -> {item['target']}"
+            for item in codex_actions[:10]
+        )
+        return "OWNER_ACTION:\n" + "\n".join(lines)
 
     @staticmethod
     def _product_id(argument: str | None) -> str:
@@ -125,13 +136,38 @@ class TelegramGateway:
 
     def _dispatch(self, command: str, argument: str | None, owner_id: int, update_id: int) -> str:
         if command == "help":
-            return "/idea <текст>, /status, /projects, /kanban, /pause <product>, /resume <product>, /cancel <product>, /owner_action"
+            return (
+                "/idea <текст>, /status, /projects, /kanban, /pause <product>, "
+                "/resume <product>, /cancel <product>, /owner_action, "
+                "/approve <action_id> <code>, /deny <action_id>"
+            )
         if command in {"status", "projects"}:
             return self._products_text()
         if command == "kanban":
             return format_telegram_summary(build_kanban_snapshot(self.state))
         if command == "owner_action":
             return self._owner_actions_text()
+        if command in {"approve", "deny"}:
+            if self.codex_action_store is None or argument is None:
+                raise GatewayCommandError("Codex owner-action store is unavailable")
+            if len(self.config.allowed_telegram_user_ids) != 1:
+                raise GatewayCommandError("Codex approvals require exactly one configured owner")
+            expected_owner = next(iter(self.config.allowed_telegram_user_ids))
+            if command == "approve":
+                action_id, confirmation_code = argument.split()
+                return self.codex_action_store.approve(
+                    action_id=action_id,
+                    confirmation_code=confirmation_code,
+                    approved_by=str(owner_id),
+                    expected_owner_id=expected_owner,
+                    update_id=update_id,
+                ).response
+            return self.codex_action_store.deny(
+                action_id=argument,
+                denied_by=str(owner_id),
+                expected_owner_id=expected_owner,
+                update_id=update_id,
+            ).response
         if command == "idea":
             assert argument is not None
             result = IntakeService(
@@ -174,7 +210,7 @@ class TelegramGateway:
             parsed = parse_command(command_text)
             command_name = parsed.name
             response = self._dispatch(parsed.name, parsed.argument, owner_id, update_id)
-        except (GatewayCommandError, ValueError, KeyError) as error:
+        except (GatewayCommandError, OwnerApprovalRejected, ValueError, KeyError) as error:
             response = f"Команда отклонена: {error}"
         self.api.send_message(chat_id, response)
         LOGGER.info("telegram update processed update_id=%s command=%s", update_id, command_name)
@@ -234,8 +270,37 @@ class TelegramGateway:
                 break
         return delivered
 
+    def deliver_codex_outbox(self, limit: int = 10) -> int:
+        if self.codex_action_store is None:
+            return 0
+        recipients = sorted(self.config.allowed_telegram_user_ids)
+        if not recipients:
+            return 0
+        delivered = 0
+        for item in self.codex_action_store.pending_notifications(limit):
+            try:
+                for chat_id in recipients:
+                    self.api.send_message(chat_id, item.text)
+                self.codex_action_store.mark_notification_delivered(item.event_id)
+                LOGGER.info(
+                    "codex telegram outbox delivered event_id=%s kind=%s",
+                    item.event_id,
+                    item.kind,
+                )
+                delivered += 1
+            except (TelegramApiError, OSError, ValueError) as error:
+                self.codex_action_store.mark_notification_failed(item.event_id, type(error).__name__)
+                LOGGER.warning(
+                    "codex telegram outbox delivery failed event_id=%s reason=%s",
+                    item.event_id,
+                    type(error).__name__,
+                )
+                break
+        return delivered
+
     def poll_once(self) -> int:
         self.deliver_outbox()
+        self.deliver_codex_outbox()
         if self.state.maintenance_active():
             return 0
         offset = self._read_offset()
@@ -287,6 +352,15 @@ def main() -> int:
         max_active_workers=config.max_active_workers,
         max_active_products=config.max_active_products,
     )
+    codex_store: CodexOwnerActionStore | None = None
+    codex_store_path = os.environ.get("HERMES_CODEX_OWNER_ACTION_DB")
+    if codex_store_path:
+        expected_path = Path("/var/lib/hermes-codex-owner-actions/actions.sqlite3")
+        if Path(codex_store_path) != expected_path:
+            print("gateway configuration rejected: invalid Codex owner-action path", flush=True)
+            state.close()
+            return 78
+        codex_store = CodexOwnerActionStore(expected_path)
     try:
         TelegramGateway(
             config,
@@ -300,8 +374,11 @@ def main() -> int:
                     )
                 ),
             ),
+            codex_action_store=codex_store,
         ).run_forever()
     finally:
+        if codex_store is not None:
+            codex_store.close()
         state.close()
     return 0
 

@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0",
+  "checkpoint": "telegram-supervisor-boundary",
+  "timestamp": "2026-08-07T20:40:10Z",
+  "baseline": {
+    "repository": "brullik/hermes-software-factory",
+    "main_sha": "1514525a076190983f6dc13ffb6ec1c9c260c2ca",
+    "candidate_sha": "1514525a076190983f6dc13ffb6ec1c9c260c2ca",
+    "task_branch": "codex/vps-bootstrap-20260807-goal1",
+    "open_pull_request": 165,
+    "pre_checkpoint_head_sha": "8e2d49c7c9f2e484c00c8a49d002e7bdbe8f18cb"
+  },
+  "implementation": {
+    "typed_approval_store": "factory/codex_owner_actions.py",
+    "supervisor": "factory/codex_supervisor.py",
+    "supervisor_entrypoint": "scripts/codex_vps_supervisor.py",
+    "supervisor_unit": "config/systemd/hermes-codex-vps@.service",
+    "gateway_unit": "config/systemd/hermes-factory-gateway.service",
+    "permission_profile": "config/codex-vps/config.toml",
+    "apparmor_profile": "config/apparmor/hermes-codex-bwrap",
+    "raw_github_token_in_supervisor": false,
+    "second_telegram_bot": false,
+    "supervisor_enabled": false,
+    "production_gateway_restarted": false
+  },
+  "sandbox": {
+    "codex_version": "codex-cli 0.147.0",
+    "permission_profile": "codex-vps-workspace",
+    "workspace_write_semantics": true,
+    "production_paths_denied": true,
+    "auth_json_denied_to_sandbox_commands": true,
+    "github_broker_socket_allowlisted_exactly": true,
+    "arbitrary_egress_allowed": false,
+    "apparmor_profile_loaded": "hermes-codex-bwrap"
+  },
+  "gates": [
+    {
+      "probe": "focused pytest: owner approvals, supervisor and gateway regression",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "25 tests passed"
+    },
+    {
+      "probe": "full pytest in one-shot private mount namespace",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "590 collected; 590 passed in 360.6 seconds"
+    },
+    {
+      "probe": "version, manifest, SBOM, package, secret, pilot and compile gates",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "manifest verifies 459 files"
+    },
+    {
+      "probe": "full ruff and mypy",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "mypy found no issues in 129 source files"
+    },
+    {
+      "probe": "wheel build and source/wheel version consistency",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "hermes_software_factory_spec-2.5.0-py3-none-any.whl"
+    },
+    {
+      "probe": "systemd-analyze verify supervisor and gateway units",
+      "exit_code": 0,
+      "result": "PASS"
+    }
+  ],
+  "postconditions": {
+    "host_namespace_mounts_remaining": false,
+    "controller_active": true,
+    "gateway_active": true,
+    "pre_q8_state": "failed_fail_closed",
+    "candidate_clean": true,
+    "candidate_sha_unchanged": true,
+    "secrets_exposed": false
+  }
+}

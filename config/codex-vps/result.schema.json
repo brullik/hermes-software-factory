@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "evidence_paths": {
+      "items": {
+        "pattern": "^[A-Za-z0-9_.][A-Za-z0-9_./-]{0,255}$",
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "owner_action": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "additionalProperties": false,
+          "properties": {
+            "action_id": {"pattern": "^owner-action-[a-f0-9]{20}$", "type": "string"},
+            "reason": {
+              "enum": [
+                "missing_credential",
+                "oauth_device_code",
+                "two_factor_authentication",
+                "captcha",
+                "external_account_creation",
+                "paid_resource_purchase",
+                "dns_action_without_access",
+                "legal_decision",
+                "unapproved_irreversible_production_action"
+              ],
+              "type": "string"
+            }
+          },
+          "required": ["action_id", "reason"],
+          "type": "object"
+        }
+      ]
+    },
+    "status": {
+      "enum": ["COMPLETED", "WAITING_OWNER_ACTION", "TERMINAL_BLOCKED"],
+      "type": "string"
+    },
+    "summary": {"maxLength": 4000, "minLength": 1, "type": "string"}
+  },
+  "required": ["status", "summary", "evidence_paths", "owner_action"],
+  "type": "object"
+}

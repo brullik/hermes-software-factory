@@ -1,0 +1,63 @@
+[
+  {
+    "ruleset_id": 19798586,
+    "ruleset_source": "brullik/hermes-software-factory",
+    "ruleset_source_type": "Repository",
+    "type": "deletion"
+  },
+  {
+    "ruleset_id": 19798586,
+    "ruleset_source": "brullik/hermes-software-factory",
+    "ruleset_source_type": "Repository",
+    "type": "non_fast_forward"
+  },
+  {
+    "parameters": {
+      "allowed_merge_methods": [
+        "squash"
+      ],
+      "dismiss_stale_reviews_on_push": true,
+      "require_code_owner_review": false,
+      "require_last_push_approval": false,
+      "required_approving_review_count": 0,
+      "required_review_thread_resolution": true,
+      "required_reviewers": []
+    },
+    "ruleset_id": 19798586,
+    "ruleset_source": "brullik/hermes-software-factory",
+    "ruleset_source_type": "Repository",
+    "type": "pull_request"
+  },
+  {
+    "parameters": {
+      "do_not_enforce_on_create": false,
+      "required_status_checks": [
+        {
+          "context": "factory/package-integrity",
+          "integration_id": 15368
+        },
+        {
+          "context": "factory/scope-guard",
+          "integration_id": 15368
+        },
+        {
+          "context": "factory/quality",
+          "integration_id": 15368
+        },
+        {
+          "context": "factory/security",
+          "integration_id": 15368
+        },
+        {
+          "context": "factory/release-readiness",
+          "integration_id": 15368
+        }
+      ],
+      "strict_required_status_checks_policy": true
+    },
+    "ruleset_id": 19798586,
+    "ruleset_source": "brullik/hermes-software-factory",
+    "ruleset_source_type": "Repository",
+    "type": "required_status_checks"
+  }
+]

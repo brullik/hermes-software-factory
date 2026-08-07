@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from pathlib import Path
 
 from .common import sha256_text, stable_json
@@ -18,11 +19,17 @@ class BrokerGitHubAdapter:
         *,
         socket_path: Path,
         single_owner_mode: bool,
+        workspace: Path | None = None,
+        evidence_manifest: Path | None = None,
+        policy_digest: str | None = None,
     ) -> None:
         self.owner = owner
         self.repository = repository
         self.client = BrokerClient(socket_path)
         self.single_owner_mode = single_owner_mode
+        self.workspace = workspace
+        self.evidence_manifest = evidence_manifest
+        self.policy_digest = policy_digest
         self._read_counter = 0
 
     def _request(
@@ -112,6 +119,20 @@ class BrokerGitHubAdapter:
         )
         return GitHubResult("PASS", receipt.receipt_digest)
 
+    def review_threads(self, pull_request: str) -> GitHubResult:
+        receipt = self._request(
+            "review_threads.read",
+            {"number": int(pull_request)},
+            read=True,
+        )
+        unresolved = self._value(receipt, "unresolved_threads:")
+        if unresolved is None or not unresolved.isdigit():
+            raise GitHubCommandError("broker review thread result is invalid")
+        return GitHubResult(
+            "PASS" if unresolved == "0" else "BLOCKED",
+            receipt.receipt_digest,
+        )
+
     def verify_pull_request(
         self,
         pull_request: str,
@@ -156,10 +177,32 @@ class BrokerGitHubAdapter:
             owner_override=owner_override,
             owner_override_reason=owner_override_reason,
         )
-        receipt = self._request(
-            "pull_request.merge_or_close",
-            {"number": int(pull_request), "action": "merge"},
-        )
+        payload: dict[str, object] = {
+            "number": int(pull_request),
+            "action": "merge",
+            "expected_head_sha": expected_sha,
+            "merge_method": "squash",
+        }
+        if self.policy_digest is not None:
+            payload["policy_digest"] = self.policy_digest
+        if self.workspace is not None and self.evidence_manifest is not None:
+            try:
+                relative = self.evidence_manifest.resolve().relative_to(
+                    self.workspace.resolve()
+                )
+            except ValueError as error:
+                raise GitHubCommandError(
+                    "broker evidence manifest is outside workspace"
+                ) from error
+            encoded = self.evidence_manifest.read_bytes()
+            payload.update(
+                {
+                    "workspace": str(self.workspace.resolve()),
+                    "evidence_manifest": relative.as_posix(),
+                    "evidence_manifest_digest": sha256(encoded).hexdigest(),
+                }
+            )
+        receipt = self._request("pull_request.merge_or_close", payload)
         return GitHubResult("PASS", receipt.receipt_digest)
 
     def merged_commit(self, pull_request: str) -> str:

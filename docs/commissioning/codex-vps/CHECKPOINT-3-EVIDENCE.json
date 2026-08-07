@@ -1,0 +1,101 @@
+{
+  "schema_version": "1.0",
+  "checkpoint": "github-governance-squash-only",
+  "timestamp": "2026-08-07T20:58:31Z",
+  "repository": "brullik/hermes-software-factory",
+  "pull_request": 165,
+  "task_branch": "codex/vps-bootstrap-20260807-goal1",
+  "head_sha": "e0709c9f34944aff0b77fb9297f65ffb6bf9ce3e",
+  "exact_head_checks": {
+    "factory/independent-review": "SUCCESS",
+    "factory/package-integrity": "SUCCESS",
+    "factory/quality": "SUCCESS",
+    "factory/release-readiness": "SUCCESS",
+    "factory/scope-guard": "SUCCESS",
+    "factory/security": "SUCCESS"
+  },
+  "ruleset": {
+    "id": 19798586,
+    "name": "Hermes main governance",
+    "enforcement": "active",
+    "bypass_actors": [],
+    "current_user_can_bypass": "never",
+    "allowed_merge_methods": ["squash"],
+    "required_review_thread_resolution": true,
+    "strict_required_status_checks_policy": true,
+    "required_status_checks": [
+      "factory/package-integrity",
+      "factory/quality",
+      "factory/release-readiness",
+      "factory/scope-guard",
+      "factory/security"
+    ]
+  },
+  "repository_settings_after": {
+    "allow_squash_merge": true,
+    "allow_merge_commit": false,
+    "allow_rebase_merge": false,
+    "delete_branch_on_merge": true
+  },
+  "gates": {
+    "source_version": "2.5.0",
+    "manifest_files": 468,
+    "manifest": "PASS",
+    "sbom": "PASS",
+    "package_validation": "PASS",
+    "secret_scan": "PASS",
+    "wheel": {
+      "name": "hermes_software_factory_spec-2.5.0-py3-none-any.whl",
+      "sha256": "fd3e670ee15ccaad00aa0f33d65a3b87c02ddddf917d7983c11d257b04120bb2",
+      "version_consistency": "PASS"
+    },
+    "pytest": {
+      "collected": 590,
+      "passed": 590,
+      "seconds": 299.92,
+      "result": "PASS"
+    },
+    "pilot_tests": 2,
+    "compileall": "PASS",
+    "ruff": "PASS",
+    "mypy_source_files": 129,
+    "mypy": "PASS",
+    "test_network": "loopback-only",
+    "production_paths_visible_in_test_namespace": false
+  },
+  "commissioning_findings": [
+    {
+      "finding": "broker process terminated when an evidence manifest passed path checks but was unreadable by the broker identity",
+      "observed_before_github_mutation": true,
+      "pull_request_remained_open": true,
+      "fix": "catch evidence-manifest read OSError and return a typed fail-closed CredentialBrokerError",
+      "regression_test": "test_strict_merge_rejects_unreadable_manifest_without_mutation",
+      "focused_tests": "17 passed",
+      "ruff": "PASS",
+      "mypy": "PASS"
+    }
+  ],
+  "evidence_sha256": {
+    "GITHUB-EFFECTIVE-MAIN-RULES-BEFORE.json": "8a23a8601efc5985dc33ccf624ec0c9ab6575cc2593960f5064b77c5141b03da",
+    "GITHUB-EFFECTIVE-MAIN-RULES-AFTER.json": "dd7de96a95bfe7a190def1bebfb15a670a49d1577ce84423b37fde2185eeba52",
+    "GITHUB-REPOSITORY-BEFORE.json": "3e2922e2fa04b5c3742af82764abc58e39452ab9f6350e7b2169d042f27d4121",
+    "GITHUB-REPOSITORY-AFTER.json": "ef8244da91fde0175dc4bcf7e7bf4647bce4cfc03d53783c01dc0f82ab2632c8",
+    "GITHUB-RULESET-BEFORE.json": "ad08eb5534b37812124b92093cb04a11c9444256f909a0f5741496a9c823c285",
+    "GITHUB-RULESET-AFTER.json": "09fb3a8328b2b1b38c09447216c5c2efb39250229ed567fb7bf84e595f57419b",
+    "GITHUB-GOVERNANCE-AFTER-SHA256SUMS.txt": "ae6e915ecd6acfe2d2f3b09810f0ec2f7bd08d6d7ac7acddb0bdf4a5399256f4",
+    "GITHUB-GOVERNANCE-ROLLBACK-COMMAND.txt": "a360b2852b774b377aa678ed4be1059145eba5d4c90ee00125f86512b86341a9"
+  },
+  "rollback": {
+    "automatic_rollback_armed_before_mutation": true,
+    "stored_payloads_sha256_verified": true,
+    "exact_live_after_state_verified": true,
+    "validate_only_result": "PASS",
+    "executed": false
+  },
+  "safety": {
+    "q7_q8_jobs_active_before_mutation": false,
+    "candidate_sha": "1514525a076190983f6dc13ffb6ec1c9c260c2ca",
+    "candidate_clean": true,
+    "secrets_exposed": false
+  }
+}

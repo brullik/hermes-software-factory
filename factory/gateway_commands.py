@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .common import SECRET_PATTERNS
@@ -17,7 +18,22 @@ class GatewayCommandError(ValueError):
     pass
 
 
-ALLOWED_COMMANDS = {"idea", "status", "projects", "kanban", "pause", "resume", "cancel", "owner_action", "help"}
+ALLOWED_COMMANDS = {
+    "approve",
+    "cancel",
+    "deny",
+    "help",
+    "idea",
+    "kanban",
+    "owner_action",
+    "pause",
+    "projects",
+    "resume",
+    "status",
+}
+_ACTION_ID = r"owner-action-[a-f0-9]{20}"
+_APPROVE_ARGUMENT = re.compile(rf"{_ACTION_ID} [A-F0-9]{{8}}\Z")
+_DENY_ARGUMENT = re.compile(rf"{_ACTION_ID}\Z")
 
 
 def parse_command(text: str) -> GatewayCommand:
@@ -38,4 +54,10 @@ def parse_command(text: str) -> GatewayCommand:
         raise GatewayCommandError(f"/{name} requires a product id")
     if name == "idea" and not argument:
         raise GatewayCommandError("/idea requires text")
+    if name == "approve" and (
+        argument is None or _APPROVE_ARGUMENT.fullmatch(argument) is None
+    ):
+        raise GatewayCommandError("/approve requires exact action_id and confirmation code")
+    if name == "deny" and (argument is None or _DENY_ARGUMENT.fullmatch(argument) is None):
+        raise GatewayCommandError("/deny requires exact action_id")
     return GatewayCommand(name, argument)
