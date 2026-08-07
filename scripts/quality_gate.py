@@ -189,13 +189,25 @@ def load_catalog(path: Path) -> dict[str, Any]:
 
 
 def _git_changed_paths(cwd: Path) -> list[str]:
+    repository = cwd.resolve(strict=True)
+    git = ["git", "-c", f"safe.directory={repository.as_posix()}"]
     commands: list[list[str]] = [
-        ["git", "diff", "--name-only", "-z", "--diff-filter=ACMR", "HEAD", "--"],
-        ["git", "ls-files", "-z", "--others", "--exclude-standard"],
+        [
+            *git,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMR",
+            "HEAD",
+            "--",
+        ],
+        [*git, "ls-files", "-z", "--others", "--exclude-standard"],
     ]
     remote_head = subprocess.run(
-        ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
-        cwd=cwd,
+        [*git, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd=repository,
         capture_output=True,
         timeout=120,
         check=False,
@@ -206,8 +218,10 @@ def _git_changed_paths(cwd: Path) -> list[str]:
             raise RuntimeError("git remote default branch is unsafe")
         commands.append(
             [
-                "git",
+                *git,
                 "diff",
+                "--no-ext-diff",
+                "--no-textconv",
                 "--name-only",
                 "-z",
                 "--diff-filter=ACMR",
@@ -219,7 +233,7 @@ def _git_changed_paths(cwd: Path) -> list[str]:
     for argv in commands:
         completed = subprocess.run(
             argv,
-            cwd=cwd,
+            cwd=repository,
             capture_output=True,
             timeout=120,
             check=False,
