@@ -297,7 +297,16 @@ def _external_failure_report(
     reason_code = str(failure.get("safe_reason_code", ""))
     if failure.get("capability") != operation:
         raise FunctionalControlError("Q6.5 external failure classification differs")
-    if operation in github_operations and reason_code == "candidate_github_operation_denied":
+    github_reason_codes = {
+        "candidate_github_operation_denied",
+        "candidate_github_workflow_permission_denied",
+    }
+    if operation in github_operations and reason_code in github_reason_codes:
+        if (
+            reason_code == "candidate_github_workflow_permission_denied"
+            and operation != "git.branch.push"
+        ):
+            raise FunctionalControlError("Q6.5 workflow permission classification differs")
         owner = str(config["factory_repository"]).split("/", 1)[0]
         expected_scope = {
             "owner": owner,
@@ -449,6 +458,14 @@ def reconcile(
                             "Authenticate the isolated Candidate provider "
                             f"{external_failure.scope['credential_provider']} through its secure "
                             "OAuth device flow. Do not send credentials or device codes in Telegram."
+                        )
+                    elif reason_code == "candidate_github_workflow_permission_denied":
+                        notification_text = (
+                            "Candidate GitHub authentication reached the scoped Q6.5 handshake, "
+                            "but GitHub denied the required workflow-file write. Replace the "
+                            "protected Candidate classic personal access token with one authorized "
+                            "for private repository operations and workflow-file writes (repo and "
+                            "workflow scopes). Do not send the credential in Telegram."
                         )
                     else:
                         notification_text = (
