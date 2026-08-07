@@ -98,14 +98,14 @@ class ConfiguredCapabilityProbe:
         self._q6_5_report_index = q6_5_report_index or Path(
             "/var/lib/hermes-factory-functional/q6-5/report-index.json"
         )
-        self._q6_5_github_cache: dict[str, Any] | None = None
+        self._q6_5_evidence_cache: dict[str, Any] | None = None
         self._isolated_attestations = self._load_isolated_attestations()
 
-    def _q6_5_github_evidence(self) -> dict[str, Any]:
+    def _q6_5_evidence(self) -> dict[str, Any]:
         """Load the exact 18/18 functional proof without trusting credential presence."""
 
-        if self._q6_5_github_cache is not None:
-            return self._q6_5_github_cache
+        if self._q6_5_evidence_cache is not None:
+            return self._q6_5_evidence_cache
         path = self._q6_5_report_index
         try:
             metadata = path.stat()
@@ -190,13 +190,13 @@ class ConfiguredCapabilityProbe:
             or branch_proof.scope.get("workflow_write") != "verified"
         ):
             raise ValueError("Q6.5 GitHub configuration proof is incomplete")
-        self._q6_5_github_cache = {
+        self._q6_5_evidence_cache = {
             "credential_epoch_id": credential_epoch,
             "index_digest": index_digest,
             "receipt_digest": receipt_digest,
             "reports": by_operation,
         }
-        return self._q6_5_github_cache
+        return self._q6_5_evidence_cache
 
     def _clean_canary_github_check(
         self,
@@ -270,7 +270,7 @@ class ConfiguredCapabilityProbe:
                 scope,
             )
         try:
-            evidence = self._q6_5_github_evidence()
+            evidence = self._q6_5_evidence()
             request = BrokerRequest(
                 request_id="CCP-" + sha256_text(
                     stable_json(
@@ -353,6 +353,55 @@ class ConfiguredCapabilityProbe:
             capability,
             "AVAILABLE",
             "candidate-github-broker",
+            scope=scope,
+        )
+
+    def _clean_canary_container_builder_check(self) -> CapabilityCheck:
+        capability = "toolchain.container_builder"
+        assert self._clean_canary_context is not None
+        scope: dict[str, Any] = {
+            "allowed_operations": [capability],
+            "qualification_plane": "CLEAN_CANARY",
+        }
+        try:
+            evidence = self._q6_5_evidence()
+            report = evidence["reports"][capability]
+        except (KeyError, TypeError, ValueError):
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-q6-5-proof",
+                "controller_q6_5_evidence_invalid",
+                scope,
+            )
+        if (
+            report.capability != capability
+            or report.operation != capability
+            or report.scope.get("runtime") != "rootless-podman"
+            or report.scope.get("network") != "isolated"
+            or not report.receipts
+        ):
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-q6-5-proof",
+                "controller_q6_5_evidence_invalid",
+                scope,
+            )
+        scope.update(
+            {
+                "runtime": "rootless-podman",
+                "network": "isolated",
+                "q6_5_index_digest": evidence["index_digest"],
+                "q6_5_receipt_digest": evidence["receipt_digest"],
+                "q6_5_report_digest": report.report_digest,
+                **self._clean_canary_context,
+            }
+        )
+        return CapabilityCheck(
+            capability,
+            "AVAILABLE",
+            "candidate-q6-5-proof",
             scope=scope,
         )
 
@@ -999,6 +1048,11 @@ class ConfiguredCapabilityProbe:
     ) -> CapabilityCheck:
         if capability in self._isolated_attestations:
             return self._isolated_attestations[capability]
+        if (
+            capability == "toolchain.container_builder"
+            and self._clean_canary_context is not None
+        ):
+            return self._clean_canary_container_builder_check()
         isolated_operation = {
             "backup.verify": "content-addressed-release-snapshot",
             "production.deploy_transactional": "transactional-isolated-copy",
@@ -1118,10 +1172,7 @@ class CapabilityBroker:
         )
 
     def _required_for_product(self, product: dict[str, Any]) -> tuple[str, ...]:
-        return self.required_for_product(
-            product,
-            include_container_builder=self._clean_canary_context is None,
-        )
+        return self.required_for_product(product)
 
     def _controller_incident(
         self,
