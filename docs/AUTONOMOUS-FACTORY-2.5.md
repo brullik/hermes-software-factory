@@ -29,7 +29,8 @@ credential. Requests are limited by operation, owner, repository namespace,
 and workspace root, and immutable receipts bind the entire request digest.
 The protected installer accepts a classic personal access token; Q6.5 requires
 both the `repo` and `workflow` scopes and proves a real private workflow-file
-push before the credential is admitted.
+push before the credential is admitted. The ephemeral Q6.5 canary is archived,
+not deleted, so the credential does not require the broad `delete_repo` scope.
 
 Golden Product intake uses a separate bot credential at
 `/etc/hermes-factory/candidate-credentials.d/candidate-telegram-token`. This

@@ -1310,9 +1310,11 @@ def test_wf_p0_043_ready_manifest_signature_and_digests_verify_independently() -
 class _FakeQ65Broker:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.requests: list[BrokerRequest] = []
 
     def execute(self, request: BrokerRequest) -> BrokerReceipt:
         self.calls.append(request.operation)
+        self.requests.append(request)
         if request.repository.startswith("outside-") or request.payload.get("visibility") == "public":
             raise CredentialBrokerError("denied_policy")
         if request.operation == "repository.read" and request.payload.get("workspace"):
@@ -1394,6 +1396,12 @@ def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(
         "pull_request.merge_or_close",
     ]
     assert "repository.archive_or_delete" in broker.calls
+    cleanup = next(
+        request
+        for request in broker.requests
+        if request.operation == "repository.archive_or_delete"
+    )
+    assert cleanup.payload == {"action": "archive"}
     by_operation = {report.operation: report for report in reports}
     assert (
         by_operation["github.repository.read"].scope["repository_configuration"]
