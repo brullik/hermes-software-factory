@@ -100,7 +100,7 @@ class StrictRunner:
             value = {"sha": MERGE, "parents": [{"sha": "d" * 40}]}
         elif (
             "DELETE" in argv and "/git/refs/heads/" in argv[-1]
-        ) or argv[:2] == ["git", "-C"]:
+        ) or (argv and argv[0] == "git"):
             value = {}
         else:  # pragma: no cover - makes a new untyped command immediately visible
             raise AssertionError(argv)
@@ -335,7 +335,9 @@ def test_core_branch_push_and_delete_have_closed_arguments(tmp_path: Path) -> No
                 },
             )
         )
-    git_calls = [argv for argv in runner.calls if argv[:2] == ["git", "-C"]]
+    git_calls = [argv for argv in runner.calls if argv and argv[0] == "git"]
     assert "HEAD:refs/heads/codex/task" in git_calls[0]
     assert "--set-upstream" not in git_calls[0]
+    assert f"safe.directory={workspace}" in git_calls[0]
     assert git_calls[1][-2:] == ["--delete", "codex/task"]
+    assert f"safe.directory={workspace}" in git_calls[1]

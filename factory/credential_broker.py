@@ -826,6 +826,8 @@ class GitHubCredentialBroker:
                     return self._run(
                         [
                             "git",
+                            "-c",
+                            f"safe.directory={workspace}",
                             "-C",
                             str(workspace),
                             "-c",
@@ -842,6 +844,8 @@ class GitHubCredentialBroker:
                 return self._run(
                     [
                         "git",
+                        "-c",
+                        f"safe.directory={workspace}",
                         "-C",
                         str(workspace),
                         "-c",
