@@ -46,6 +46,7 @@ from factory.q6_5 import (
     ProviderOperationHandshake,
     Q65ExternalCapabilityError,
     Q65ProbeError,
+    Q65ProviderCapabilityError,
     external_operation_report,
 )
 from factory.recursive_improvement import (
@@ -434,6 +435,148 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
     assert resumed_epoch == ("Q6_5_PENDING", "PENDING")
     assert resolved_action is not None and resolved_action[0] == "RESOLVED"
     assert resolved_action[1]
+
+
+def test_functional_reconcile_durably_waits_on_candidate_provider_oauth(
+    tmp_path: Path,
+) -> None:
+    epoch_id = "RE-Q65-PROVIDER"
+    release_database = tmp_path / "release.db"
+    connection = sqlite3.connect(release_database)
+    try:
+        connection.execute(
+            "CREATE TABLE controller_release_epochs ("
+            "epoch_id TEXT PRIMARY KEY,source_commit TEXT,candidate_digest TEXT,"
+            "status TEXT,created_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO controller_release_epochs VALUES (?,?,?,?,?)",
+            (epoch_id, COMMIT, DIGEST, "FUNCTIONAL_PENDING", "2026-08-07T00:00:00Z"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    control = tmp_path / "qualification-control.yaml"
+    control.write_text(
+        yaml.safe_dump(
+            {
+                "governor_database": str(release_database),
+                "source_commit": COMMIT,
+                "candidate_digest": DIGEST,
+                "toolchain_manifest_digest": TOOLCHAIN,
+                "factory_repository": "brullik/hermes-software-factory",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_root = tmp_path / "functional"
+    credential = tmp_path / "github-token"
+    credential.write_text("fixture-token-not-a-real-secret", encoding="utf-8")
+    credential.chmod(0o600)
+    report_index = state_root / "q6-5" / "report-index.json"
+    failure_index = state_root / "q6-5" / "failure-index.json"
+    first = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=credential,
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=report_index,
+        failure_index=failure_index,
+    )
+    credential_epoch = (state_root / "credential-epoch").read_text(encoding="ascii").strip()
+    assert first["status"] == "Q6_5_PROBE_REQUIRED"
+    q6_5_live._write_once(
+        failure_index,
+        {
+            "schema_version": "1.0",
+            "candidate_digest": DIGEST,
+            "toolchain_digest": TOOLCHAIN,
+            "credential_epoch_id": credential_epoch,
+            "capability": "provider.luna.invoke",
+            "operation": "provider.luna.invoke",
+            "scope": {
+                "alias": "economy",
+                "provider": "openai_codex_subscription",
+                "model": "gpt-5.6-luna",
+                "credential_provider": "openai-codex",
+                "semantic_id": sha256_text("q6.5-provider-no-side-effect-v1"),
+                "stdout_contract": "json-only",
+            },
+            "safe_reason_code": "missing_candidate_provider_credential",
+            "observed_at": "2026-08-07T00:01:00Z",
+        },
+    )
+
+    result = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=credential,
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=report_index,
+        failure_index=failure_index,
+    )
+    replay = functional_qualification.reconcile(
+        control,
+        state_root=state_root,
+        credential_source=credential,
+        telegram_credential_source=tmp_path / "missing-telegram-token",
+        report_index=report_index,
+        failure_index=failure_index,
+    )
+
+    assert result == replay
+    assert result["status"] == "WAITING_CAPABILITY"
+    assert result["reason_code"] == "missing_candidate_provider_credential"
+    assert result["operation"] == "provider.luna.invoke"
+    database = sqlite3.connect(state_root / "functional.db")
+    try:
+        action = database.execute(
+            "SELECT action_id,status,reason_code,capability,capability_epoch "
+            "FROM functional_owner_actions WHERE epoch_id=?",
+            (epoch_id,),
+        ).fetchone()
+    finally:
+        database.close()
+    assert action is not None
+    assert action[1:] == (
+        "OPEN",
+        "missing_candidate_provider_credential",
+        "provider.luna.invoke",
+        None,
+    )
+    notification = json.loads(
+        (state_root / "notifications" / "outbox" / f"NOTIFY-{sha256_text(action[0])[:32]}.json")
+        .read_text(encoding="utf-8")
+    )
+    assert notification["kind"] == "OWNER_ACTION_REQUIRED"
+    assert "openai-codex" in notification["text"]
+    assert "fixture-token" not in notification["text"]
+
+    governor = FunctionalQualificationGovernor(sqlite3.connect(state_root / "functional.db"))
+    try:
+        assert governor.recover_external_capability(
+            epoch_id=epoch_id, capability="provider.luna.invoke"
+        )
+        governor.record_handshake(
+            epoch_id,
+            CapabilityHandshakeReport.create(
+                candidate_digest=DIGEST,
+                capability="provider.luna.invoke",
+                operation="provider.luna.invoke",
+                scope={"provider": "openai_codex_subscription"},
+                status=CapabilityStatus.AVAILABLE,
+                credential_epoch_id=None,
+                toolchain_digest=TOOLCHAIN,
+                receipts=("d" * 64,),
+            ),
+        )
+        resolved = governor.connection.execute(
+            "SELECT status,resolved_at FROM functional_owner_actions WHERE action_id=?",
+            (action[0],),
+        ).fetchone()
+    finally:
+        governor.connection.close()
+    assert resolved is not None and resolved[0] == "RESOLVED" and resolved[1]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shared workspace modes are required")
@@ -1236,6 +1379,119 @@ class _ProviderRunner:
             usage_path.parent.mkdir(parents=True, exist_ok=True)
             usage_path.write_text("{}\n", encoding="utf-8")
         return HermesRunResult("PASS", output, sha256_text(output), None)
+
+
+class _MissingProviderRunner:
+    def run(
+        self,
+        *,
+        selection: ModelSelection,
+        prompt: str,
+        cwd: Path,
+        usage_path: Path | None = None,
+    ) -> HermesRunResult:
+        del selection, prompt, cwd, usage_path
+        return HermesRunResult(
+            "FAIL", "authentication required", "d" * 64, "missing_credential"
+        )
+
+
+def test_q6_5_provider_missing_oauth_is_typed_without_raw_output(tmp_path: Path) -> None:
+    selections = {
+        tier: ModelSelection(
+            "openai_codex_subscription", alias, f"model-{tier}", tier, "openai-codex"
+        )
+        for tier, alias in ProviderOperationHandshake.ROUTES
+    }
+
+    with pytest.raises(Q65ProviderCapabilityError) as captured:
+        ProviderOperationHandshake(
+            identity=ProbeIdentity(DIGEST, TOOLCHAIN, None),
+            runner=_MissingProviderRunner(),
+            selections=selections,
+            workspace=tmp_path,
+            evidence_root=tmp_path / "evidence",
+        ).run()
+
+    assert captured.value.operation == "provider.luna.invoke"
+    assert captured.value.safe_reason_code == "missing_candidate_provider_credential"
+    assert captured.value.scope["credential_provider"] == "openai-codex"
+    assert "authentication required" not in str(captured.value)
+
+
+def test_q6_5_provider_failure_index_resumes_only_after_safe_auth_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class EmptyGitHubHandshake:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def run(self) -> tuple[CapabilityHandshakeReport, ...]:
+            return ()
+
+    error = Q65ProviderCapabilityError(
+        tier="luna",
+        alias="economy",
+        selection=ModelSelection(
+            "openai_codex_subscription",
+            "economy",
+            "gpt-5.6-luna",
+            "luna",
+            "openai-codex",
+        ),
+        semantic_id=sha256_text("q6.5-provider-no-side-effect-v1"),
+    )
+
+    def missing_provider(*_: Any, **__: Any) -> tuple[CapabilityHandshakeReport, ...]:
+        raise error
+
+    monkeypatch.setattr(q6_5_live, "GitHubOperationHandshake", EmptyGitHubHandshake)
+    monkeypatch.setattr(q6_5_live, "_provider_reports", missing_provider)
+    control = tmp_path / "qualification-control.yaml"
+    control.write_text(
+        yaml.safe_dump(
+            {
+                "source_commit": COMMIT,
+                "candidate_digest": DIGEST,
+                "toolchain_manifest_digest": TOOLCHAIN,
+                "factory_repository": "brullik/hermes-software-factory",
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        config=control,
+        credential_epoch="CE-" + "A" * 32,
+        credential_epoch_file=None,
+        output=tmp_path / "report-index.json",
+        failure_index=tmp_path / "failure-index.json",
+        broker_socket=tmp_path / "broker.sock",
+        candidate_config=tmp_path / "candidate.yaml",
+        notifications=tmp_path / "notifications",
+    )
+    first = q6_5_live.run(args)
+    assert first["status"] == "WAITING_CAPABILITY"
+    assert args.failure_index.is_file()
+
+    monkeypatch.setattr(q6_5_live, "_provider_credential_available", lambda provider: False)
+    assert q6_5_live.run(args) == first
+
+    class ResumeReached(RuntimeError):
+        pass
+
+    class ResumeHandshake:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def run(self) -> tuple[CapabilityHandshakeReport, ...]:
+            raise ResumeReached
+
+    monkeypatch.setattr(q6_5_live, "_provider_credential_available", lambda provider: True)
+    monkeypatch.setattr(q6_5_live, "GitHubOperationHandshake", ResumeHandshake)
+    with pytest.raises(ResumeReached):
+        q6_5_live.run(args)
+    assert not args.failure_index.exists()
+    assert len(list((tmp_path / "archive").glob("failure-index-*.json"))) == 1
 
 
 def test_wf_p0_006_007_provider_three_tier_schema_and_semantic_identity(
