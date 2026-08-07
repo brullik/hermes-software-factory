@@ -839,6 +839,21 @@ class GitHubCredentialBroker:
                         ],
                         environment=environment,
                     )
+                return self._run(
+                    [
+                        "git",
+                        "-C",
+                        str(workspace),
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "protocol.file.allow=never",
+                        "push",
+                        "origin",
+                        f"HEAD:refs/heads/{branch}",
+                    ],
+                    environment=environment,
+                )
             return self._run(
                 [
                     "git",

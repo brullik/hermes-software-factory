@@ -337,4 +337,5 @@ def test_core_branch_push_and_delete_have_closed_arguments(tmp_path: Path) -> No
         )
     git_calls = [argv for argv in runner.calls if argv[:2] == ["git", "-C"]]
     assert "HEAD:refs/heads/codex/task" in git_calls[0]
+    assert "--set-upstream" not in git_calls[0]
     assert git_calls[1][-2:] == ["--delete", "codex/task"]
