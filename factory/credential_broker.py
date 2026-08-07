@@ -10,6 +10,7 @@ import stat
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Final
 
@@ -27,10 +28,17 @@ GITHUB_BROKER_OPERATIONS: Final[frozenset[str]] = frozenset(
         "repository.read",
         "branch.push",
         "pull_request.create",
+        "pull_request.read",
         "checks.read",
+        "review_threads.read",
         "pull_request.merge_or_close",
         "repository.archive_or_delete",
     }
+)
+
+CORE_TASK_BRANCH_PATTERN: Final[str] = (
+    r"(?:codex|canary|chore|docs|feat|feature|fix|refactor|test)/"
+    r"[A-Za-z0-9][A-Za-z0-9._/-]{0,118}"
 )
 
 
@@ -43,11 +51,19 @@ class BrokerPolicy:
     allow_delete: bool = True
     allow_archive: bool = True
     allow_merge: bool = True
+    allowed_operations: frozenset[str] = GITHUB_BROKER_OPERATIONS
+    strict_merge_contract: bool = False
+    base_branch: str = "main"
+    task_branch_pattern: str = CORE_TASK_BRANCH_PATTERN
+    required_checks: tuple[str, ...] = ()
+    policy_digest: str | None = None
 
     def validate(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.owner):
             raise CredentialBrokerError("broker owner is invalid")
-        if not self.repository_prefixes or any(
+        if not self.repository_prefixes and not self.repository_names:
+            raise CredentialBrokerError("broker repository allowlist is empty")
+        if any(
             not re.fullmatch(r"[A-Za-z0-9_.-]+", value)
             for value in self.repository_prefixes
         ):
@@ -59,6 +75,28 @@ class BrokerPolicy:
             raise CredentialBrokerError("broker repository names are invalid")
         if any(not root.is_absolute() for root in self.workspace_roots):
             raise CredentialBrokerError("broker workspace roots must be absolute")
+        if not self.allowed_operations or not self.allowed_operations.issubset(
+            GITHUB_BROKER_OPERATIONS
+        ):
+            raise CredentialBrokerError("broker operation allowlist is invalid")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", self.base_branch):
+            raise CredentialBrokerError("broker base branch is invalid")
+        try:
+            re.compile(self.task_branch_pattern)
+        except re.error as error:
+            raise CredentialBrokerError("broker task branch policy is invalid") from error
+        if any(
+            not value or len(value) > 160 or "\n" in value
+            for value in self.required_checks
+        ):
+            raise CredentialBrokerError("broker required checks are invalid")
+        if self.strict_merge_contract:
+            if not self.required_checks:
+                raise CredentialBrokerError("strict broker requires status checks")
+            if self.policy_digest is None or not re.fullmatch(
+                r"[a-f0-9]{64}", self.policy_digest
+            ):
+                raise CredentialBrokerError("strict broker policy digest is invalid")
 
 
 @dataclass(frozen=True)
@@ -209,7 +247,7 @@ class GitHubCredentialBroker:
     def _validate_request(self, request: BrokerRequest) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,160}", request.request_id):
             raise CredentialBrokerError("broker request id is invalid")
-        if request.operation not in GITHUB_BROKER_OPERATIONS:
+        if request.operation not in self.policy.allowed_operations:
             raise CredentialBrokerError("broker operation is not allowlisted")
         if request.owner != self.policy.owner:
             raise CredentialBrokerError("broker owner is outside allowlist")
@@ -235,6 +273,18 @@ class GitHubCredentialBroker:
                 raise CredentialBrokerError("pull request merge is denied by policy")
             if action not in {"merge", "close"}:
                 raise CredentialBrokerError("pull request terminal action is invalid")
+
+    def _task_branch(self, value: object) -> str:
+        branch = str(value or "")
+        if (
+            branch == self.policy.base_branch
+            or ".." in branch
+            or branch.startswith("/")
+            or branch.endswith("/")
+            or re.fullmatch(self.policy.task_branch_pattern, branch) is None
+        ):
+            raise CredentialBrokerError("broker task branch is outside policy")
+        return branch
 
     def _workspace(self, request: BrokerRequest) -> Path:
         raw = str(request.payload.get("workspace") or "")
@@ -333,6 +383,292 @@ class GitHubCredentialBroker:
                 and re.fullmatch(r"[A-Za-z0-9_.:/ -]{1,240}", item)
             )
         return tuple(identifiers)
+
+    def _pull_request(
+        self,
+        endpoint: str,
+        number: int,
+        environment: Mapping[str, str],
+    ) -> dict[str, Any]:
+        value = self._run(
+            ["gh", "api", f"{endpoint}/pulls/{number}"],
+            environment=environment,
+        )
+        if not isinstance(value, dict):
+            raise CredentialBrokerError("pull request response is invalid")
+        return value
+
+    def _checks(
+        self,
+        endpoint: str,
+        commit_sha: str,
+        environment: Mapping[str, str],
+    ) -> dict[str, Any]:
+        checks = self._run(
+            ["gh", "api", f"{endpoint}/commits/{commit_sha}/check-runs"],
+            environment=environment,
+        )
+        combined = self._run(
+            ["gh", "api", f"{endpoint}/commits/{commit_sha}/status"],
+            environment=environment,
+        )
+        check_object_ids: list[str] = []
+        if isinstance(checks, dict) and isinstance(checks.get("check_runs"), list):
+            for item in checks["check_runs"]:
+                if not isinstance(item, dict):
+                    continue
+                name = re.sub(
+                    r"[^A-Za-z0-9_. /-]", "", str(item.get("name") or "")
+                )[:120]
+                state = str(
+                    item.get("conclusion") or item.get("status") or "PENDING"
+                ).upper()
+                if name:
+                    check_object_ids.append(f"check:{name}:{state}")
+        if isinstance(combined, dict) and isinstance(combined.get("statuses"), list):
+            for item in combined["statuses"]:
+                if not isinstance(item, dict):
+                    continue
+                name = re.sub(
+                    r"[^A-Za-z0-9_. /-]", "", str(item.get("context") or "")
+                )[:120]
+                state = str(item.get("state") or "PENDING").upper()
+                if name:
+                    check_object_ids.append(f"check:{name}:{state}")
+        return {
+            "sha": commit_sha,
+            "check_runs_digest": sha256_text(stable_json(checks)),
+            "combined_status": (
+                str(combined.get("state") or "")
+                if isinstance(combined, dict)
+                else ""
+            ),
+            "object_ids": sorted(set(check_object_ids)),
+        }
+
+    def _review_threads(
+        self,
+        request: BrokerRequest,
+        number: int,
+        environment: Mapping[str, str],
+    ) -> dict[str, Any]:
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+            "reviewThreads(first:100){nodes{isResolved}pageInfo{hasNextPage}}}}}"
+        )
+        value = self._run(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={request.owner}",
+                "-F",
+                f"name={request.repository}",
+                "-F",
+                f"number={number}",
+            ],
+            environment=environment,
+        )
+        try:
+            threads = value["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = threads["nodes"]
+            has_next_page = threads["pageInfo"]["hasNextPage"]
+        except (KeyError, TypeError) as error:
+            raise CredentialBrokerError("review thread response is invalid") from error
+        if has_next_page is not False or not isinstance(nodes, list):
+            raise CredentialBrokerError("review thread result is incomplete")
+        if not all(isinstance(item, dict) for item in nodes):
+            raise CredentialBrokerError("review thread response is invalid")
+        unresolved = sum(item.get("isResolved") is not True for item in nodes)
+        return {
+            "number": number,
+            "state": "threads_verified",
+            "object_ids": [
+                f"review_threads:{len(nodes)}",
+                f"unresolved_threads:{unresolved}",
+            ],
+        }
+
+    def _evidence_manifest(
+        self,
+        request: BrokerRequest,
+        *,
+        expected_head_sha: str,
+        branch: str,
+    ) -> str:
+        workspace = self._workspace(request)
+        raw_relative = str(request.payload.get("evidence_manifest") or "")
+        relative = Path(raw_relative)
+        if (
+            not raw_relative
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or "\\" in raw_relative
+        ):
+            raise CredentialBrokerError("evidence manifest path is invalid")
+        path = (workspace / relative).resolve()
+        if workspace.resolve() not in path.parents or path.is_symlink() or not path.is_file():
+            raise CredentialBrokerError("evidence manifest is outside workspace")
+        encoded = path.read_bytes()
+        if not encoded or len(encoded) > 1_048_576:
+            raise CredentialBrokerError("evidence manifest size is invalid")
+        actual_digest = sha256(encoded).hexdigest()
+        supplied_digest = str(request.payload.get("evidence_manifest_digest") or "")
+        if supplied_digest != actual_digest:
+            raise CredentialBrokerError("evidence manifest digest differs")
+        try:
+            value = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise CredentialBrokerError("evidence manifest is invalid") from error
+        if not isinstance(value, dict):
+            raise CredentialBrokerError("evidence manifest is invalid")
+        secret_scan = value.get("secret_scan")
+        tests = value.get("tests")
+        expected = {
+            "repository": f"{request.owner}/{request.repository}",
+            "base": self.policy.base_branch,
+            "branch": branch,
+            "head_sha": expected_head_sha,
+            "policy_digest": self.policy.policy_digest,
+        }
+        if any(value.get(key) != expected_value for key, expected_value in expected.items()):
+            raise CredentialBrokerError("evidence manifest target differs")
+        if not isinstance(secret_scan, dict) or (
+            secret_scan.get("status") != "PASS"
+            or secret_scan.get("findings") != 0
+            or secret_scan.get("head_sha") != expected_head_sha
+        ):
+            raise CredentialBrokerError("evidence manifest secret scan is not passing")
+        if not isinstance(tests, dict) or tests.get("status") != "PASS":
+            raise CredentialBrokerError("evidence manifest tests are not passing")
+        return actual_digest
+
+    def _delete_branch_after_merge(
+        self,
+        endpoint: str,
+        branch: str,
+        environment: Mapping[str, str],
+    ) -> str:
+        argv = ["gh", "api", "-X", "DELETE", f"{endpoint}/git/refs/heads/{branch}"]
+        try:
+            result = self.command_runner(argv, environment, None)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CredentialBrokerError("broker branch cleanup unavailable") from error
+        if result.returncode == 0:
+            return "deleted"
+        safe, _ = redact_text((result.stdout + "\n" + result.stderr).strip())
+        lowered = safe.lower()
+        if "http 404" in lowered or (
+            "http 422" in lowered and "reference does not exist" in lowered
+        ):
+            return "already_absent"
+        raise CredentialBrokerError("broker post-merge branch cleanup failed")
+
+    def _strict_merge(
+        self,
+        request: BrokerRequest,
+        endpoint: str,
+        number: int,
+        environment: Mapping[str, str],
+    ) -> dict[str, Any]:
+        expected_head_sha = str(request.payload.get("expected_head_sha") or "")
+        if not re.fullmatch(r"[a-f0-9]{40}", expected_head_sha):
+            raise CredentialBrokerError("merge expected head SHA is invalid")
+        if request.payload.get("merge_method") != "squash":
+            raise CredentialBrokerError("merge method must be squash")
+        if request.payload.get("policy_digest") != self.policy.policy_digest:
+            raise CredentialBrokerError("merge policy digest differs")
+
+        pull = self._pull_request(endpoint, number, environment)
+        head = pull.get("head")
+        base = pull.get("base")
+        branch = self._task_branch(head.get("ref") if isinstance(head, dict) else "")
+        if pull.get("state") != "open":
+            raise CredentialBrokerError("merge pull request is not open")
+        if pull.get("draft") is not False:
+            raise CredentialBrokerError("merge pull request is draft")
+        if not isinstance(base, dict) or base.get("ref") != self.policy.base_branch:
+            raise CredentialBrokerError("merge pull request base differs")
+        if not isinstance(head, dict) or head.get("sha") != expected_head_sha:
+            raise CredentialBrokerError("merge pull request head differs")
+
+        checks = self._checks(endpoint, expected_head_sha, environment)
+        states: dict[str, str] = {}
+        for item in checks["object_ids"]:
+            if not item.startswith("check:"):
+                continue
+            name, separator, state = item.removeprefix("check:").rpartition(":")
+            if separator:
+                states[name] = state.upper()
+        if any(states.get(name) != "SUCCESS" for name in self.policy.required_checks):
+            raise CredentialBrokerError("merge required checks are not passing")
+
+        threads = self._review_threads(request, number, environment)
+        if "unresolved_threads:0" not in threads["object_ids"]:
+            raise CredentialBrokerError("merge has unresolved review threads")
+        manifest_digest = self._evidence_manifest(
+            request,
+            expected_head_sha=expected_head_sha,
+            branch=branch,
+        )
+
+        result = self._run(
+            [
+                "gh",
+                "api",
+                "-X",
+                "PUT",
+                f"{endpoint}/pulls/{number}/merge",
+                "-f",
+                f"sha={expected_head_sha}",
+                "-f",
+                "merge_method=squash",
+            ],
+            environment=environment,
+        )
+        merge_sha = str(result.get("sha") or "") if isinstance(result, dict) else ""
+        if (
+            not isinstance(result, dict)
+            or result.get("merged") is not True
+            or not re.fullmatch(r"[a-f0-9]{40}", merge_sha)
+        ):
+            raise CredentialBrokerError("merge API did not confirm merge")
+
+        live = self._pull_request(endpoint, number, environment)
+        if (
+            live.get("state") != "closed"
+            or live.get("merged") is not True
+            or live.get("merge_commit_sha") != merge_sha
+        ):
+            raise CredentialBrokerError("merge postcondition differs from live PR")
+        commit = self._run(
+            ["gh", "api", f"{endpoint}/commits/{merge_sha}"],
+            environment=environment,
+        )
+        parents = commit.get("parents") if isinstance(commit, dict) else None
+        if not isinstance(parents, list) or len(parents) != 1:
+            raise CredentialBrokerError("squash commit is not single-parent")
+        branch_state = self._delete_branch_after_merge(endpoint, branch, environment)
+        return {
+            "number": number,
+            "state": "squash_merge_verified",
+            "head_sha": expected_head_sha,
+            "merge_sha": merge_sha,
+            "merged": True,
+            "object_ids": [
+                f"branch:{branch}",
+                f"branch_cleanup:{branch_state}",
+                f"policy_digest:{self.policy.policy_digest}",
+                f"evidence_manifest_digest:{manifest_digest}",
+                "merge_method:squash",
+                "parents:1",
+                "unresolved_threads:0",
+            ],
+        }
 
     def _execute(self, request: BrokerRequest, environment: Mapping[str, str]) -> Any:
         slug = f"{request.owner}/{request.repository}"
@@ -445,12 +781,7 @@ class GitHubCredentialBroker:
                 number = int(payload.get("number") or 0)
                 if number < 1:
                     raise CredentialBrokerError("pull request number is invalid")
-                pull = self._run(
-                    ["gh", "api", f"{endpoint}/pulls/{number}"],
-                    environment=environment,
-                )
-                if not isinstance(pull, dict):
-                    raise CredentialBrokerError("pull request response is invalid")
+                pull = self._pull_request(endpoint, number, environment)
                 head = pull.get("head")
                 return {
                     "number": number,
@@ -486,6 +817,28 @@ class GitHubCredentialBroker:
             branch = str(payload.get("branch") or "")
             if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or ".." in branch:
                 raise CredentialBrokerError("broker branch is invalid")
+            action = str(payload.get("action") or "push")
+            if self.policy.strict_merge_contract:
+                branch = self._task_branch(branch)
+                if action not in {"push", "delete"}:
+                    raise CredentialBrokerError("broker branch action is invalid")
+                if action == "delete":
+                    return self._run(
+                        [
+                            "git",
+                            "-C",
+                            str(workspace),
+                            "-c",
+                            "core.hooksPath=/dev/null",
+                            "-c",
+                            "protocol.file.allow=never",
+                            "push",
+                            "origin",
+                            "--delete",
+                            branch,
+                        ],
+                        environment=environment,
+                    )
             return self._run(
                 [
                     "git",
@@ -503,6 +856,12 @@ class GitHubCredentialBroker:
                 environment=environment,
             )
         if operation == "pull_request.create":
+            head = str(payload.get("head") or "")
+            base = str(payload.get("base") or self.policy.base_branch)
+            if self.policy.strict_merge_contract:
+                head = self._task_branch(head)
+                if base != self.policy.base_branch:
+                    raise CredentialBrokerError("pull request base is outside policy")
             return self._run(
                 [
                     "gh",
@@ -513,61 +872,52 @@ class GitHubCredentialBroker:
                     "-f",
                     f"title={str(payload.get('title') or 'Hermes Candidate probe')[:120]}",
                     "-f",
-                    f"head={payload.get('head') or ''!s}",
+                    f"head={head}",
                     "-f",
-                    f"base={payload.get('base') or 'main'!s}",
+                    f"base={base}",
                     "-f",
                     "body=Operation-specific Hermes Q6.5 canary",
                 ],
                 environment=environment,
             )
+        if operation == "pull_request.read":
+            number = int(payload.get("number") or 0)
+            if number < 1:
+                raise CredentialBrokerError("pull request number is invalid")
+            pull = self._pull_request(endpoint, number, environment)
+            pull_head = pull.get("head")
+            pull_base = pull.get("base")
+            return {
+                "number": number,
+                "state": pull.get("state"),
+                "head_sha": (
+                    pull_head.get("sha") if isinstance(pull_head, dict) else None
+                ),
+                "merged": pull.get("merged"),
+                "object_ids": [
+                    f"base:{pull_base.get('ref') if isinstance(pull_base, dict) else ''}",
+                    f"head_ref:{pull_head.get('ref') if isinstance(pull_head, dict) else ''}",
+                    f"draft:{pull.get('draft')}",
+                ],
+            }
         if operation == "checks.read":
             sha = str(payload.get("sha") or "")
             if not re.fullmatch(r"[a-f0-9]{40}", sha):
                 raise CredentialBrokerError("checks commit SHA is invalid")
-            checks = self._run(
-                ["gh", "api", f"{endpoint}/commits/{sha}/check-runs"],
-                environment=environment,
-            )
-            combined = self._run(
-                ["gh", "api", f"{endpoint}/commits/{sha}/status"],
-                environment=environment,
-            )
-            check_object_ids: list[str] = []
-            if isinstance(checks, dict) and isinstance(checks.get("check_runs"), list):
-                for item in checks["check_runs"]:
-                    if not isinstance(item, dict):
-                        continue
-                    name = re.sub(r"[^A-Za-z0-9_. /-]", "", str(item.get("name") or ""))[:120]
-                    state = str(
-                        item.get("conclusion") or item.get("status") or "PENDING"
-                    ).upper()
-                    if name:
-                        check_object_ids.append(f"check:{name}:{state}")
-            if isinstance(combined, dict) and isinstance(combined.get("statuses"), list):
-                for item in combined["statuses"]:
-                    if not isinstance(item, dict):
-                        continue
-                    name = re.sub(r"[^A-Za-z0-9_. /-]", "", str(item.get("context") or ""))[:120]
-                    state = str(item.get("state") or "PENDING").upper()
-                    if name:
-                        check_object_ids.append(f"check:{name}:{state}")
-            return {
-                "sha": sha,
-                "check_runs_digest": sha256_text(stable_json(checks)),
-                "combined_status": (
-                    str(combined.get("state") or "")
-                    if isinstance(combined, dict)
-                    else ""
-                ),
-                "object_ids": sorted(set(check_object_ids)),
-            }
+            return self._checks(endpoint, sha, environment)
+        if operation == "review_threads.read":
+            number = int(payload.get("number") or 0)
+            if number < 1:
+                raise CredentialBrokerError("pull request number is invalid")
+            return self._review_threads(request, number, environment)
         if operation == "pull_request.merge_or_close":
             number = int(payload.get("number") or 0)
             if number < 1:
                 raise CredentialBrokerError("pull request number is invalid")
             action = str(payload["action"])
             if action == "merge":
+                if self.policy.strict_merge_contract:
+                    return self._strict_merge(request, endpoint, number, environment)
                 return self._run(
                     ["gh", "api", "-X", "PUT", f"{endpoint}/pulls/{number}/merge"],
                     environment=environment,

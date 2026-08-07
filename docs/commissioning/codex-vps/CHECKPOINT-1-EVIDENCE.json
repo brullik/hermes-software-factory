@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "checkpoint": "broker-boundary",
+  "timestamp": "2026-08-07T19:20:17Z",
+  "baseline": {
+    "repository": "brullik/hermes-software-factory",
+    "main_sha": "1514525a076190983f6dc13ffb6ec1c9c260c2ca",
+    "candidate_sha": "1514525a076190983f6dc13ffb6ec1c9c260c2ca",
+    "task_branch": "codex/vps-bootstrap-20260807-goal1"
+  },
+  "runtime": {
+    "user": "hermescodex",
+    "uid": 1001,
+    "supplementary_groups": [],
+    "codex_version": "codex-cli 0.147.0",
+    "codex_binary_sha256": "cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40",
+    "installer_sha256": "ba92dd27e5c06f0d3bbc58bfa4b9cfb6599cd2742fbb1f92a2765e6c07dedb5a",
+    "desktop_credentials_copied": false,
+    "auth_json_present": false
+  },
+  "gates": [
+    {
+      "probe": "focused pytest: strict broker plus existing broker regression",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "21 tests passed"
+    },
+    {
+      "probe": "ruff check changed broker files",
+      "exit_code": 0,
+      "result": "PASS"
+    },
+    {
+      "probe": "mypy --strict changed broker modules",
+      "exit_code": 0,
+      "result": "PASS"
+    },
+    {
+      "probe": "initial full pytest in host namespace",
+      "exit_code": 1,
+      "result": "ENVIRONMENT_COLLISION",
+      "summary": "Seven failures traced to umask 0002, real /opt and /etc fallback paths, and symlink-venv executable resolution"
+    },
+    {
+      "probe": "full pytest in one-shot private mount namespace with copied venv and umask 0022",
+      "exit_code": 0,
+      "result": "PASS",
+      "summary": "100 percent of collected tests passed"
+    }
+  ],
+  "postconditions": {
+    "host_namespace_mounts_remaining": false,
+    "controller_active": true,
+    "gateway_active": true,
+    "pre_q8_state": "failed_fail_closed",
+    "candidate_clean": true,
+    "candidate_sha_unchanged": true,
+    "secrets_exposed": false
+  }
+}

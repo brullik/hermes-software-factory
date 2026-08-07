@@ -1,0 +1,35 @@
+[Unit]
+Description=Hermes Codex exact-core operation-scoped GitHub credential broker
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/hermes-factory/candidate-credentials.d/github-token
+ConditionPathExists=/var/lib/hermes-codex-github-broker/credential-epoch
+
+[Service]
+Type=simple
+User=hermescodexgithubbroker
+Group=hermescodexops
+UMask=0007
+WorkingDirectory=/opt/hermes-codex-runtime/current
+Environment=HOME=/var/lib/hermes-codex-github-broker
+LoadCredential=github-token:/etc/hermes-factory/candidate-credentials.d/github-token
+RuntimeDirectory=hermes-codex-github-broker
+RuntimeDirectoryMode=0750
+ExecStart=/opt/hermes-codex-runtime/current/.venv/bin/python -m scripts.github_credential_broker --owner brullik --repository hermes-software-factory --operation identity.read --operation repository.read --operation branch.push --operation pull_request.create --operation pull_request.read --operation checks.read --operation review_threads.read --operation pull_request.merge_or_close --workspace-root /var/lib/hermes-codex/worktrees --socket /run/hermes-codex-github-broker/broker.sock --receipt-root /var/lib/hermes-codex-github-broker/receipts --credential-epoch-file /var/lib/hermes-codex-github-broker/credential-epoch --askpass /usr/libexec/hermes-github-askpass --strict-merge-contract --base-branch main --required-check factory/package-integrity --required-check factory/scope-guard --required-check factory/quality --policy-file /opt/hermes-codex-runtime/current/policies/github-policy.yaml --deny-delete --deny-archive
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-codex-github-broker /var/lib/hermes-codex/worktrees /run/hermes-codex-github-broker
+ReadOnlyPaths=/opt/hermes-codex-runtime /usr/libexec/hermes-github-askpass
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-candidate /var/lib/hermes-factory-functional /var/lib/hermes-factory-pre-q8 /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=512M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
