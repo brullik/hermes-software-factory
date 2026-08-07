@@ -404,10 +404,15 @@ def test_clean_canary_repository_initializer_keeps_prepared_setgid_parent(
     prepared_parent.chmod(0o2770)
     original_chmod = os.chmod
 
-    def guarded_chmod(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], mode: int) -> None:
-        if Path(path).resolve() == prepared_parent.resolve():
+    def guarded_chmod(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        mode: int,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        if Path(os.fsdecode(path)).resolve() == prepared_parent.resolve():
             pytest.fail("prepared setgid parent must not be chmodded inside the worker sandbox")
-        original_chmod(path, mode)
+        original_chmod(path, mode, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr("factory.worker.os.chmod", guarded_chmod)
     monkeypatch.setenv(
