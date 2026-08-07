@@ -42,6 +42,7 @@ from factory.worker import (
     TaskExecutionSpec,
     WorkerResult,
     _current_replan_frontier,
+    _host_capacity_snapshot,
     _local_file_reference,
     _mandatory_gate_failure_data,
     _normalized_output_status,
@@ -144,6 +145,106 @@ def test_default_spec_falls_back_when_optional_subject_manifest_is_inaccessible(
 
         local_file.assert_called_once_with(str(repository_root / "SHA256SUMS"))
         assert spec.subject_sha == sha256_text(stable_json(spec.task_contract))
+        state.close()
+
+
+def test_host_capacity_snapshot_reports_current_allocations() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        meminfo = root / "meminfo"
+        meminfo.write_text(
+            "MemTotal:       16384000 kB\nMemAvailable:    8192000 kB\n",
+            encoding="utf-8",
+        )
+        disk = Mock(total=1_000_000, used=400_000, free=600_000)
+
+        with (
+            patch("factory.worker.os.cpu_count", return_value=8),
+            patch(
+                "factory.worker.os.getloadavg",
+                return_value=(1.25, 0.75, 0.5),
+                create=True,
+            ),
+            patch("factory.worker.shutil.disk_usage", return_value=disk),
+        ):
+            snapshot = _host_capacity_snapshot(config, meminfo_path=meminfo)
+
+        assert snapshot["status"] == "AVAILABLE"
+        assert snapshot["cpu"] == {
+            "logical_count": 8,
+            "load_1m": 1.25,
+            "load_5m": 0.75,
+            "load_15m": 0.5,
+        }
+        assert snapshot["memory_bytes"] == {
+            "total": 16_777_216_000,
+            "available": 8_388_608_000,
+            "used": 8_388_608_000,
+        }
+        assert snapshot["controller_state_filesystem_bytes"] == {
+            "total": 1_000_000,
+            "used": 400_000,
+            "free": 600_000,
+        }
+        assert snapshot["controller_limits"] == {
+            "max_active_products": 2,
+            "max_active_workers": 2,
+        }
+        assert snapshot["missing_fields"] == []
+
+
+def test_solution_architect_gets_trusted_capacity_evidence() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-terra"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-CAPACITY-CONTEXT"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Design a capacity-bound staging service",
+            idempotency_key="capacity-context",
+        )
+        task_path = PipelineCoordinator(config, state, ArtifactStore(config)).create_task(
+            product_id,
+            "solution-architect",
+        )
+        task_id = json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
+        task = state.get_task(task_id)
+        assert task is not None
+        worker = AgentWorker(config, state, runner=FakeRunner("{}"), repository_root=ROOT)
+        snapshot = {
+            "schema_version": "1.0",
+            "status": "AVAILABLE",
+            "cpu": {"logical_count": 8, "load_1m": 1.0},
+            "memory_bytes": {"total": 16_000, "available": 8_000, "used": 8_000},
+            "controller_state_filesystem_bytes": {
+                "total": 100_000,
+                "used": 40_000,
+                "free": 60_000,
+            },
+        }
+
+        with patch("factory.worker._host_capacity_snapshot", return_value=snapshot):
+            spec = worker.default_spec(task)
+
+        capacity = next(item for item in spec.evidence if item["type"] == "controller-host-capacity")
+        payload = stable_json(snapshot)
+        assert payload in capacity["summary"]
+        assert capacity["artifact_ref"] == "controller://host-capacity/" + sha256_text(payload)
+        assert any(
+            "Fail closed if their status is not AVAILABLE" in decision
+            and "fresh pre-deployment capacity admission" in decision
+            for decision in spec.decisions
+        )
         state.close()
 
 
