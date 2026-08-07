@@ -369,6 +369,61 @@ def test_clean_canary_repository_initializer_opens_only_shared_broker_group(
     state.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX group boundary is required")
+def test_clean_canary_repository_initializer_keeps_prepared_setgid_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    state = StateStore(config.database_path)
+    intake = IntakeService(config, state, ArtifactStore(config)).submit(
+        source="cli",
+        owner_id="owner",
+        goal_text="Build an isolated service",
+        delivery_mode="new_repository",
+        repository_name="hermes-canary-prepared-workspace",
+    )
+
+    class Bootstrap:
+        def ensure(self, product_id: str, destination: Path) -> dict[str, str]:
+            assert product_id == intake.product_id
+            destination.mkdir(mode=0o770)
+            destination.chmod(0o770)
+            return {}
+
+    worker = AgentWorker(
+        config,
+        state,
+        runner=FakeRunner("{}"),
+        health_probe=lambda _: True,
+        repository_bootstrapper=Bootstrap(),  # type: ignore[arg-type]
+    )
+    worker.workspace.root.chmod(0o2775)
+    prepared_parent = worker.workspace.root / intake.product_id
+    prepared_parent.mkdir(mode=0o770)
+    prepared_parent.chmod(0o2770)
+    original_chmod = os.chmod
+
+    def guarded_chmod(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], mode: int) -> None:
+        if Path(path).resolve() == prepared_parent.resolve():
+            pytest.fail("prepared setgid parent must not be chmodded inside the worker sandbox")
+        original_chmod(path, mode)
+
+    monkeypatch.setattr("factory.worker.os.chmod", guarded_chmod)
+    monkeypatch.setenv(
+        "HERMES_GITHUB_BROKER_SOCKET",
+        "/run/hermes-factory-github-broker/broker.sock",
+    )
+    lease = worker.workspace.acquire(
+        product_id=intake.product_id,
+        task_id="T-CLEAN-CANARY-PREPARED",
+        worker_id="worker-1",
+    )
+    assert stat.S_IMODE(lease.path.parent.stat().st_mode) == 0o2770
+    assert stat.S_IMODE(lease.path.stat().st_mode) == 0o770
+    state.close()
+
+
 def contract(tmp_path: Path, *faults: str) -> CanaryFaultContract:
     return CanaryFaultContract(
         scenario_id="qualification-scenario",
