@@ -225,6 +225,7 @@ def accept_path_arbiter_and_prepare_replanner(
     successor_id = str(prepared.successors[0]["task_id"])
     successor = state.get_task(successor_id)
     assert successor is not None and successor["role"] == "replanner"
+    assert successor["root_problem_signature"] == task["root_problem_signature"]
     return successor_id
 
 
@@ -501,6 +502,79 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
             )
         assert len(state.list_tasks("product-autonomy")) == tasks_before
         assert state.get_product("product-autonomy")["active_plan_revision"] == 1
+    finally:
+        state.close()
+
+
+def test_accepted_pipeline_successor_does_not_inherit_resolved_problem_signature(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    signature = "e" * 64
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-RESOLVED-PREDECESSOR",
+            product_id="product-autonomy",
+            title="Accepted predecessor with resolved diagnostics",
+            role="product-analyst",
+            root_problem_signature=signature,
+        )
+        claimed = state.claim_task(worker_id="resolved-lineage-worker")
+        assert claimed is not None
+        assert claimed["task_id"] == "T-RESOLVED-PREDECESSOR"
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-RESOLVED-PREDECESSOR",
+                worker_id="resolved-lineage-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=0,
+                idempotency_key=sha256_text("resolved-lineage-outcome"),
+                result_ref="internal://resolved-lineage",
+                result_digest=sha256_text("resolved-lineage"),
+                status="ACCEPTED",
+                successors=(
+                    {
+                        "task_id": "T-NORMAL-PLAN-CREATOR",
+                        "title": "Create the initial product plan",
+                        "role": "task-specifier",
+                        "output_schema": "plan-proposal-v1.schema.json",
+                        "contract_ref": "evidence/task-T-NORMAL-PLAN-CREATOR.json",
+                        "graph_status": "DRAFT",
+                        "dependencies": ["T-RESOLVED-PREDECESSOR"],
+                    },
+                ),
+            )
+        )
+        creator = state.get_task("T-NORMAL-PLAN-CREATOR")
+        assert creator is not None
+        assert creator["root_problem_signature"] is None
+
+        plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-NORMAL-AFTER-RESOLVED-FAILURE",
+            root_task_id="T-NORMAL-PLAN-CREATOR",
+        )
+        for node in plan["nodes"]:
+            node["task_contract"]["lifecycle_stage"] = "implementation-slice"
+        task_ids = persist_and_ingest_plan(
+            config,
+            state,
+            plan,
+            created_by_task_id="T-NORMAL-PLAN-CREATOR",
+        )
+        assert len(task_ids) == 4
+        assert {
+            state.get_task(task_id)["root_problem_signature"]
+            for task_id in task_ids
+        } == {None}
+        assert state._connection.execute(
+            "SELECT COUNT(*) FROM problem_budgets WHERE product_id=?",
+            ("product-autonomy",),
+        ).fetchone()[0] == 0
     finally:
         state.close()
 

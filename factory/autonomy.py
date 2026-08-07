@@ -1677,8 +1677,9 @@ class AutonomyStore:
                 ),
                 successor.get("supersedes_task_id"),
                 graph_status,
-                successor.get("root_problem_signature")
-                or predecessor["root_problem_signature"],
+                # A problem signature is an explicit recovery coordinate, not
+                # ordinary pipeline ancestry. Recovery successors provide it.
+                successor.get("root_problem_signature"),
                 stable_json(successor.get("required_capabilities", [])),
                 int(bool(successor.get("mandatory", True))),
                 int(successor.get("critical_path_rank", 0)),
