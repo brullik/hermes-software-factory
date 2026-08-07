@@ -335,7 +335,7 @@ class GitHubOperationHandshake:
             "pull_request.merge_or_close",
             {"number": int(number_values[0]), "action": "close"},
         )
-        cleaned = self._request("repository.archive_or_delete", {"action": "delete"})
+        cleaned = self._request("repository.archive_or_delete", {"action": "archive"})
 
         # Exact negative policy calls must fail before any adapter subprocess.
         forbidden_requests = (
