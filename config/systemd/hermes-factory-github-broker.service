@@ -9,6 +9,7 @@ ConditionPathExists=/var/lib/hermes-factory-functional/credential-epoch
 Type=simple
 User=hermesgithubbroker
 Group=hermesfunctional
+UMask=0007
 WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=HOME=/var/lib/hermes-factory-github-broker
 LoadCredential=github-token:/etc/hermes-factory/candidate-credentials.d/github-token
