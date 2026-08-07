@@ -60,7 +60,7 @@ from factory.repository import ConfiguredRepositoryAdapter
 from factory.state import StateStore
 from factory.support_bundle import build_support_bundle
 from factory.telegram import TelegramApi
-from factory.worker import HermesRunResult
+from factory.worker import HermesRunResult, _workspace_snapshot
 from scripts import functional_qualification, q6_5_live
 
 DIGEST = "a" * 64
@@ -1415,6 +1415,44 @@ def test_repository_adapter_trusts_only_the_exact_broker_workspace(
             "--show-current",
         ],
         "cwd": None,
+    }
+    assert "safe.directory=*" not in observed["argv"]
+
+
+def test_workspace_snapshot_trusts_only_the_exact_broker_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        observed["argv"] = argv
+        observed["capture_output"] = kwargs["capture_output"]
+        observed["check"] = kwargs["check"]
+        observed["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("factory.worker.subprocess.run", fake_run)
+    workspace = tmp_path / "broker-owned-snapshot"
+    (workspace / ".git").mkdir(parents=True)
+
+    assert _workspace_snapshot(workspace) == {}
+    resolved = workspace.resolve()
+    assert observed == {
+        "argv": [
+            "git",
+            "-c",
+            f"safe.directory={resolved}",
+            "-C",
+            str(resolved),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        "capture_output": True,
+        "check": False,
+        "timeout": 30,
     }
     assert "safe.directory=*" not in observed["argv"]
 

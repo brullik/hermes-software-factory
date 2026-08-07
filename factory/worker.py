@@ -990,12 +990,15 @@ def _incident_recovery_has_bounded_handoff(
 def _workspace_snapshot(root: Path) -> dict[str, str]:
     repository_marker = root / ".git"
     if repository_marker.exists():
+        resolved_root = root.resolve()
         try:
             listed = subprocess.run(
                 [
                     "git",
+                    "-c",
+                    f"safe.directory={resolved_root}",
                     "-C",
-                    str(root),
+                    str(resolved_root),
                     "ls-files",
                     "-z",
                     "--cached",
