@@ -56,6 +56,7 @@ from factory.recursive_improvement import (
     RecursiveImprovementGovernor,
 )
 from factory.release_qualification import QualificationError, ReleaseQualificationGovernor
+from factory.repository import ConfiguredRepositoryAdapter
 from factory.state import StateStore
 from factory.support_bundle import build_support_bundle
 from factory.telegram import TelegramApi
@@ -1382,6 +1383,40 @@ def test_q6_5_local_git_runner_trusts_only_the_exact_shared_workspace(
     assert "safe.directory=*" not in observed["argv"]
     with pytest.raises(Q65ProbeError, match="command is invalid"):
         GitHubOperationHandshake._default_git_runner(["sh", "-c", "true"], workspace)
+
+
+def test_repository_adapter_trusts_only_the_exact_broker_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        observed["argv"] = argv
+        observed["cwd"] = kwargs["cwd"]
+        return subprocess.CompletedProcess(argv, 0, stdout="main\n", stderr="")
+
+    monkeypatch.setattr("factory.repository.subprocess.run", fake_run)
+    workspace = tmp_path / "broker-owned-checkout"
+    workspace.mkdir()
+    result = ConfiguredRepositoryAdapter._git_run(
+        workspace, "branch", "--show-current"
+    )
+
+    resolved = workspace.resolve()
+    assert result == "main"
+    assert observed == {
+        "argv": [
+            "git",
+            "-c",
+            f"safe.directory={resolved}",
+            "-C",
+            str(resolved),
+            "branch",
+            "--show-current",
+        ],
+        "cwd": None,
+    }
+    assert "safe.directory=*" not in observed["argv"]
 
 
 def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(

@@ -118,6 +118,22 @@ class ConfiguredRepositoryAdapter:
             )
         return result.stdout.strip()
 
+    @classmethod
+    def _git_run(cls, workspace: Path, *arguments: str) -> str:
+        """Run Git with trust scoped to one controller-selected workspace."""
+
+        resolved = workspace.resolve()
+        return cls._run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={resolved}",
+                "-C",
+                str(resolved),
+                *arguments,
+            ]
+        )
+
     def create_repository(
         self,
         *,
@@ -150,13 +166,11 @@ class ConfiguredRepositoryAdapter:
         idempotency_key: str,
     ) -> tuple[str, str]:
         if destination.exists() and (destination / ".git").is_dir():
-            default_branch = self._run(
-                ["git", "-C", str(destination), "branch", "--show-current"]
+            default_branch = self._git_run(
+                destination, "branch", "--show-current"
             ) or "main"
             try:
-                starting_sha = self._run(
-                    ["git", "-C", str(destination), "rev-parse", "HEAD"]
-                )
+                starting_sha = self._git_run(destination, "rev-parse", "HEAD")
             except RuntimeError:
                 starting_sha = ""
             return default_branch, starting_sha
@@ -176,13 +190,11 @@ class ConfiguredRepositoryAdapter:
                 idempotency_key=idempotency_key,
                 payload={"workspace": str(destination.resolve())},
             )
-            default_branch = self._run(
-                ["git", "-C", str(destination), "branch", "--show-current"]
+            default_branch = self._git_run(
+                destination, "branch", "--show-current"
             ) or "main"
             try:
-                starting_sha = self._run(
-                    ["git", "-C", str(destination), "rev-parse", "HEAD"]
-                )
+                starting_sha = self._git_run(destination, "rev-parse", "HEAD")
             except RuntimeError:
                 starting_sha = ""
             return default_branch, starting_sha
@@ -198,13 +210,11 @@ class ConfiguredRepositoryAdapter:
             ],
             cwd=destination.parent,
         )
-        default_branch = self._run(
-            ["git", "-C", str(destination), "branch", "--show-current"]
+        default_branch = self._git_run(
+            destination, "branch", "--show-current"
         ) or "main"
         try:
-            starting_sha = self._run(
-                ["git", "-C", str(destination), "rev-parse", "HEAD"]
-            )
+            starting_sha = self._git_run(destination, "rev-parse", "HEAD")
         except RuntimeError:
             # A newly created remote is valid but has no HEAD until the neutral
             # bootstrap commit is pushed.
@@ -219,9 +229,7 @@ class ConfiguredRepositoryAdapter:
         idempotency_key: str,
     ) -> str:
         try:
-            existing = self._run(
-                ["git", "-C", str(workspace), "rev-parse", "HEAD"]
-            )
+            existing = self._git_run(workspace, "rev-parse", "HEAD")
         except RuntimeError:
             existing = ""
         if re.fullmatch(r"[a-f0-9]{40}", existing):
@@ -246,39 +254,27 @@ class ConfiguredRepositoryAdapter:
             encoding="utf-8",
             newline="\n",
         )
-        self._run(
-            ["git", "-C", str(workspace), "checkout", "-B", default_branch]
+        self._git_run(workspace, "checkout", "-B", default_branch)
+        self._git_run(
+            workspace,
+            "add",
+            "--",
+            ".gitignore",
+            "README.md",
+            "LICENSE-DECISION.md",
         )
-        self._run(
-            [
-                "git",
-                "-C",
-                str(workspace),
-                "add",
-                "--",
-                ".gitignore",
-                "README.md",
-                "LICENSE-DECISION.md",
-            ]
-        )
-        self._run(
-            [
-                "git",
-                "-C",
-                str(workspace),
-                "-c",
-                "user.name=Hermes Software Factory",
-                "-c",
-                "user.email=hermes-factory@localhost",
-                "commit",
-                "-m",
-                "Initialize product repository",
-            ]
+        self._git_run(
+            workspace,
+            "-c",
+            "user.name=Hermes Software Factory",
+            "-c",
+            "user.email=hermes-factory@localhost",
+            "commit",
+            "-m",
+            "Initialize product repository",
         )
         if self.broker is not None:
-            remote = self._run(
-                ["git", "-C", str(workspace), "remote", "get-url", "origin"]
-            )
+            remote = self._git_run(workspace, "remote", "get-url", "origin")
             match = re.search(r"github\.com[/:][^/]+/([A-Za-z0-9_.-]+?)(?:\.git)?$", remote)
             if match is None:
                 raise RuntimeError("Candidate repository remote is invalid")
@@ -289,10 +285,8 @@ class ConfiguredRepositoryAdapter:
                 payload={"workspace": str(workspace.resolve()), "branch": default_branch},
             )
         else:
-            self._run(
-                ["git", "-C", str(workspace), "push", "-u", "origin", default_branch]
-            )
-        return self._run(["git", "-C", str(workspace), "rev-parse", "HEAD"])
+            self._git_run(workspace, "push", "-u", "origin", default_branch)
+        return self._git_run(workspace, "rev-parse", "HEAD")
 
 
 class RepositoryBootstrapper:
