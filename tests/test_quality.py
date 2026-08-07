@@ -16,10 +16,37 @@ from test_worker import make_config, selected_registry
 from factory.artifacts import ArtifactStore
 from factory.config import FactoryConfig
 from factory.quality import QualityGateEngine, UnknownQualityGatesError
-from scripts.quality_gate import run_gate
+from scripts.quality_gate import _git_changed_paths, run_gate
 
 
 class QualityGateTests(unittest.TestCase):
+    def test_changed_target_paths_trusts_only_the_exact_resolved_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "target"
+            repository.mkdir()
+            calls: list[list[str]] = []
+
+            def run_git(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                calls.append(argv)
+                return subprocess.CompletedProcess(
+                    argv,
+                    1 if "symbolic-ref" in argv else 0,
+                    stdout=b"",
+                    stderr=b"",
+                )
+
+            with patch("scripts.quality_gate.subprocess.run", side_effect=run_git):
+                self.assertEqual(_git_changed_paths(repository), [])
+
+            exact_trust = f"safe.directory={repository.resolve().as_posix()}"
+            self.assertEqual(len(calls), 3)
+            for argv in calls:
+                self.assertEqual(argv[:3], ["git", "-c", exact_trust])
+                self.assertNotIn("--global", argv)
+            for argv in (calls[1],):
+                self.assertIn("--no-ext-diff", argv)
+                self.assertIn("--no-textconv", argv)
+
     def test_compile_gate_redirects_bytecode_outside_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -171,6 +198,60 @@ class QualityGateTests(unittest.TestCase):
             self.assertEqual(evidence["status"], "FAIL")
             self.assertIn("changed.py", evidence["summary"])
             self.assertNotIn(secret_marker, evidence["summary"])
+
+    def test_target_secret_scan_accepts_an_exact_broker_owned_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "target"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "factory-tests@example.invalid"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Factory Tests"],
+                cwd=repository,
+                check=True,
+            )
+            (repository / "baseline.py").write_text("BASELINE = True\n", encoding="utf-8")
+            subprocess.run(["git", "add", "baseline.py"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repository, check=True)
+            (repository / "changed.py").write_text("CHANGED = True\n", encoding="utf-8")
+
+            different_owner_environment = os.environ.copy()
+            different_owner_environment["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+            probe = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=repository,
+                env=different_owner_environment,
+                capture_output=True,
+                check=False,
+            )
+            if probe.returncode == 0:
+                self.skipTest("Git cannot simulate a broker-owned worktree on this platform")
+
+            with patch.dict(
+                os.environ,
+                {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"},
+            ):
+                result = run_gate(
+                    {
+                        "id": "target-secret-scan",
+                        "adapter": "target_changed_secret_scan",
+                        "command": "controller:target-changed-secret-scan",
+                        "allowlist_prefixes": ["controller:target-changed-secret-scan"],
+                        "mandatory": True,
+                    },
+                    repository,
+                    "d" * 64,
+                )
+
+            self.assertEqual(result["status"], "PASS", result)
+            self.assertEqual(
+                result["summary"],
+                "no secret-like content detected in changed target files",
+            )
 
     def test_target_sast_scans_only_changed_source_and_fails_on_bandit_rule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
