@@ -18,6 +18,7 @@ from test_worker import (
 )
 
 from factory.artifacts import ArtifactStore
+from factory.autonomy import CAPABILITY_PROFILES
 from factory.canary_faults import (
     CanaryFaultContract,
     CanaryFaultError,
@@ -29,6 +30,7 @@ from factory.canary_qualification import load_canary_catalog
 from factory.canary_release import IsolatedCanaryReleaseExecutor
 from factory.capabilities import (
     CapabilityBroker,
+    CapabilityCheck,
     ConfiguredCapabilityProbe,
     ProbeCommandResult,
 )
@@ -137,7 +139,7 @@ def test_clean_canary_preflight_uses_only_bound_release_substitutes(
         )
     finally:
         state.close()
-    assert "toolchain.container_builder" not in required
+    assert "toolchain.container_builder" in required
     assert "toolchain.python" in required
     assert "toolchain.scanners" in required
     assert "production.deploy_transactional" in required
@@ -198,6 +200,8 @@ def q6_5_report_index(path: Path, *, credential_epoch: str) -> Path:
             scope["repository_configuration"] = "verified"
         if operation == "git.branch.push":
             scope["workflow_write"] = "verified"
+        if operation == "toolchain.container_builder":
+            scope.update({"runtime": "rootless-podman", "network": "isolated"})
         reports.append(
             CapabilityHandshakeReport.create(
                 candidate_digest="3" * 64,
@@ -292,6 +296,160 @@ def test_clean_canary_github_preflight_binds_q6_5_and_live_broker(
         assert check.scope["q6_5_index_digest"]
         assert check.scope["q6_5_report_digests"]
     assert {request.operation for request in broker.calls} == {"identity.read"}
+
+
+def test_clean_canary_container_builder_binds_exact_q6_5_proof(
+    tmp_path: Path,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    credential_epoch = "CE-" + "C" * 32
+    report_index = q6_5_report_index(
+        tmp_path / "report-index.json",
+        credential_epoch=credential_epoch,
+    )
+    check = ConfiguredCapabilityProbe(
+        config,
+        command_runner=lambda _argv: pytest.fail(
+            "clean canary container grant must use immutable Q6.5 evidence"
+        ),
+        q6_5_report_index=report_index,
+    ).check(
+        "toolchain.container_builder",
+        product={"product_id": "clean-canary-product"},
+    )
+
+    assert check.status == "AVAILABLE"
+    assert check.provider == "candidate-q6-5-proof"
+    assert check.scope is not None
+    assert check.scope["allowed_operations"] == ["toolchain.container_builder"]
+    assert check.scope["runtime"] == "rootless-podman"
+    assert check.scope["network"] == "isolated"
+    assert check.scope["candidate_digest"] == "3" * 64
+    assert check.scope["q6_5_index_digest"]
+    assert check.scope["q6_5_report_digest"]
+
+
+def test_clean_canary_q6_5_container_grant_resumes_builder_frontier(
+    tmp_path: Path,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    credential_epoch = "CE-" + "E" * 32
+    report_index = q6_5_report_index(
+        tmp_path / "report-index.json",
+        credential_epoch=credential_epoch,
+    )
+    exact_probe = ConfiguredCapabilityProbe(
+        config,
+        command_runner=lambda _argv: pytest.fail(
+            "clean canary container grant must use immutable Q6.5 evidence"
+        ),
+        q6_5_report_index=report_index,
+    )
+
+    class ProductProbe:
+        def check(
+            self,
+            capability: str,
+            *,
+            product: dict[str, Any],
+        ) -> CapabilityCheck:
+            if capability == "toolchain.container_builder":
+                return exact_probe.check(capability, product=product)
+            return CapabilityCheck(
+                capability,
+                "AVAILABLE",
+                "bounded-test-provider",
+                scope={"allowed_operations": [capability]},
+            )
+
+    state = StateStore(config.database_path)
+    try:
+        intake = IntakeService(config, state, ArtifactStore(config)).submit(
+            source="cli",
+            owner_id="owner",
+            goal_text="Build the clean canary product",
+            delivery_mode="new_repository",
+            repository_name="hermes-canary-q65-container-grant",
+            repository_visibility="private",
+        )
+        task_id = "T-CLEAN-CANARY-Q65-BUILDER"
+        state.add_task(
+            task_id=task_id,
+            product_id=intake.product_id,
+            title="Build the isolated product",
+            role="builder",
+            output_schema="attempt-result.schema.json",
+            stage_key="implementation-slice",
+            capability_profile="builder_workspace",
+            required_capabilities=[
+                *CAPABILITY_PROFILES["builder_workspace"],
+                "toolchain.container_builder",
+            ],
+            graph_status="BLOCKED_CAPABILITY",
+        )
+        CapabilityBroker(config, state, probe=ProductProbe()).preflight_product(
+            intake.product_id
+        )
+
+        task = state.get_task(task_id)
+        assert task is not None
+        assert task["graph_status"] == "READY"
+        grants = state.available_capabilities(
+            intake.product_id,
+            task_id,
+            ["toolchain.container_builder"],
+        )
+        assert len(grants) == 1
+        assert grants[0]["provider"] == "candidate-q6-5-proof"
+    finally:
+        state.close()
+
+
+def test_clean_canary_container_builder_rejects_unscoped_q6_5_proof(
+    tmp_path: Path,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    credential_epoch = "CE-" + "D" * 32
+    report_index = q6_5_report_index(
+        tmp_path / "report-index.json",
+        credential_epoch=credential_epoch,
+    )
+    payload = json.loads(report_index.read_text(encoding="utf-8"))
+    for report in payload["reports"]:
+        if report["operation"] == "toolchain.container_builder":
+            report["scope"] = {"runtime": "unscoped", "network": "unknown"}
+            report_without_digest = {
+                key: value for key, value in report.items() if key != "report_digest"
+            }
+            report["report_digest"] = sha256_text(
+                json.dumps(report_without_digest, sort_keys=True, separators=(",", ":"))
+            )
+            break
+    index_without_digests = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"index_digest", "receipt_digest"}
+    }
+    payload["index_digest"] = sha256_text(
+        json.dumps(index_without_digests, sort_keys=True, separators=(",", ":"))
+    )
+    receipt_payload = {
+        key: value for key, value in payload.items() if key != "receipt_digest"
+    }
+    payload["receipt_digest"] = sha256_text(
+        json.dumps(receipt_payload, sort_keys=True, separators=(",", ":"))
+    )
+    report_index.write_text(json.dumps(payload), encoding="utf-8")
+
+    check = ConfiguredCapabilityProbe(
+        config,
+        q6_5_report_index=report_index,
+    ).check(
+        "toolchain.container_builder",
+        product={"product_id": "unscoped-container-proof"},
+    )
+    assert check.status == "DENIED_POLICY"
+    assert check.reason_code == "controller_q6_5_evidence_invalid"
 
 
 def test_clean_canary_github_preflight_rejects_tampered_q6_5_evidence(
