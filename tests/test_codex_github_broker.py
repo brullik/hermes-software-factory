@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Mapping
 from hashlib import sha256
@@ -19,6 +20,7 @@ from factory.credential_broker import (
 HEAD = "a" * 40
 MERGE = "b" * 40
 POLICY_DIGEST = "c" * 64
+ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_CHECKS = (
     "factory/package-integrity",
     "factory/scope-guard",
@@ -281,6 +283,20 @@ def test_strict_merge_rejects_unreadable_manifest_without_mutation(
         broker.execute(request)
 
     assert not any("PUT" in argv for argv in runner.calls)
+
+
+def test_codex_broker_unit_requires_exact_main_checks() -> None:
+    unit = (
+        ROOT / "config" / "systemd" / "hermes-codex-github-broker.service"
+    ).read_text(encoding="utf-8")
+
+    assert re.findall(r"--required-check ([^ ]+)", unit) == [
+        "factory/package-integrity",
+        "factory/quality",
+        "factory/release-readiness",
+        "factory/scope-guard",
+        "factory/security",
+    ]
 
 
 def test_core_policy_rejects_main_push_wrong_pr_and_unrelated_repository(
