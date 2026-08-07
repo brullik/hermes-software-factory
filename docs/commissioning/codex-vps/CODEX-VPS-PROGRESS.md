@@ -77,6 +77,37 @@
   been restarted. Live Telegram approval and controlled Codex crash/resume await
   governed merge, immutable deployment and separate VPS device authentication.
 
-Next checkpoint: commit/push checkpoint 2, refresh PR #165, prepare immutable
-GitHub governance rollback, enforce squash-only, merge through the strict broker,
-then run canary and commissioning probes.
+## Checkpoint 3 - exact-head CI and squash-only GitHub governance
+
+- Checkpoint 2 was committed as
+  `e0709c9f34944aff0b77fb9297f65ffb6bf9ce3e` and pushed only through the
+  typed broker. PR #165 remained open against `main` with the exact task branch.
+- The exact-head broker read reported SUCCESS for independent review and all
+  five required checks: package integrity, quality, release readiness, scope
+  guard and security.
+- Captured immutable before-state for repository settings, the active main
+  ruleset and effective main rules. The active ruleset has no bypass actors,
+  `current_user_can_bypass=never`, strict required checks and required review
+  thread resolution.
+- Immediately before mutation, the launcher verified that no Q7/Q8/PRE-Q8 unit
+  or systemd job was running and that Candidate remained clean at
+  `1514525a076190983f6dc13ffb6ec1c9c260c2ca`.
+- Enforced squash-only both at repository settings and ruleset ID `19798586`:
+  merge commits and rebase merges are disabled, squash is enabled, and branch
+  deletion after merge remains enabled. The exact five required checks were
+  preserved.
+- The one-time transition stored precondition projections, API responses,
+  rollback payloads and SHA-256 checksums. Automatic rollback was armed before
+  each mutation. A separate `--validate-only` run verified every stored digest
+  and exact live after-state without executing the rollback.
+- Sanitized before/after repository, ruleset and effective-main evidence is
+  included in this directory. No credential or secret value is present.
+- After evidence capture, package/version/manifest/SBOM/secret/wheel gates
+  passed. The full regression ran in a private mount namespace that hid all
+  production paths, used a deterministic unauthenticated `gh` probe and allowed
+  only IPv4/IPv6 loopback: 590 collected, 590 PASS in 299.92 seconds. Pilot,
+  compileall, full ruff and strict mypy (129 source files) also passed.
+
+Next checkpoint: commit/push the governance evidence, merge PR #165 through the
+strict exact-head broker, deploy the merged immutable runtime and run disposable
+canary commissioning.

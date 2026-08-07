@@ -1,0 +1,1 @@
+sudo /usr/local/sbin/hermes-github-governance-rollback-squash-only

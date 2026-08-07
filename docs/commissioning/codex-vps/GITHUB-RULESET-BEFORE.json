@@ -1,0 +1,82 @@
+{
+  "_links": {
+    "html": {
+      "href": "https://github.com/brullik/hermes-software-factory/rules/19798586"
+    },
+    "self": {
+      "href": "https://api.github.com/repos/brullik/hermes-software-factory/rulesets/19798586"
+    }
+  },
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/heads/main"
+      ]
+    }
+  },
+  "created_at": "2026-07-27T07:32:59.374Z",
+  "current_user_can_bypass": "never",
+  "enforcement": "active",
+  "id": 19798586,
+  "name": "Hermes main governance",
+  "node_id": "RRS_lACqUmVwb3NpdG9yec5OSxmfzgEuGjo",
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "parameters": {
+        "allowed_merge_methods": [
+          "merge",
+          "squash",
+          "rebase"
+        ],
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": true,
+        "required_reviewers": []
+      },
+      "type": "pull_request"
+    },
+    {
+      "parameters": {
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "factory/package-integrity",
+            "integration_id": 15368
+          },
+          {
+            "context": "factory/scope-guard",
+            "integration_id": 15368
+          },
+          {
+            "context": "factory/quality",
+            "integration_id": 15368
+          },
+          {
+            "context": "factory/security",
+            "integration_id": 15368
+          },
+          {
+            "context": "factory/release-readiness",
+            "integration_id": 15368
+          }
+        ],
+        "strict_required_status_checks_policy": true
+      },
+      "type": "required_status_checks"
+    }
+  ],
+  "source": "brullik/hermes-software-factory",
+  "source_type": "Repository",
+  "target": "branch",
+  "updated_at": "2026-07-28T05:30:49.069Z"
+}
