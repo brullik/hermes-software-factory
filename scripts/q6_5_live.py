@@ -62,8 +62,11 @@ def _prepare_shared_workspace_root(path: Path) -> Path:
         metadata = os.fstat(descriptor)
         if not stat.S_ISDIR(metadata.st_mode):
             raise LiveProbeError("Q6.5 shared workspace root is not a directory")
-        fchmod(descriptor, 0o2770)
-        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o2770:
+        # Both principals have hermesfunctional as their primary group and the
+        # broker runs with UMask=0007.  A setgid directory is unnecessary and
+        # cannot be created inside the probe's RestrictSUIDSGID sandbox.
+        fchmod(descriptor, 0o0770)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o0770:
             raise LiveProbeError("Q6.5 shared workspace root mode differs")
     finally:
         os.close(descriptor)
