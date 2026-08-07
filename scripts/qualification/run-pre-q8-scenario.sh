@@ -14,12 +14,25 @@ fi
 
 CANDIDATE_PYTHON=/opt/hermes-factory-candidate/venv/bin/python
 VERIFIER_PYTHON=/opt/hermes-factory-verifier/venv/bin/python
+SETPRIV=/usr/bin/setpriv
 CANDIDATE_CONFIG="/etc/hermes-factory/pre-q8/${SCENARIO_ID}.yaml"
 CANDIDATE_DATABASE="$("${VERIFIER_PYTHON}" -c \
   'import sys,yaml; value=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); print(value["controller"]["database_url"].removeprefix("sqlite:///"))' \
   "${CANDIDATE_CONFIG}")"
 TIMEOUT_SECONDS="${PRE_Q8_TIMEOUT_SECONDS:-172800}"
 PRODUCT_ID=""
+
+run_as_candidate() {
+  "${SETPRIV}" --reuid=hermescandidate --regid=hermescandidate --init-groups \
+    --no-new-privs -- /usr/bin/env HOME=/var/lib/hermes-factory-candidate \
+    USER=hermescandidate LOGNAME=hermescandidate "$@"
+}
+
+run_as_verifier() {
+  "${SETPRIV}" --reuid=hermesverifier --regid=hermesverifier --init-groups \
+    --no-new-privs -- /usr/bin/env HOME=/var/lib/hermes-factory-verifier \
+    USER=hermesverifier LOGNAME=hermesverifier "$@"
+}
 
 cleanup() {
   exit_status=$?
@@ -35,10 +48,10 @@ if [[ -e "${CANDIDATE_DATABASE}" ]]; then
   exit 73
 fi
 
-runuser -u hermescandidate -- "${CANDIDATE_PYTHON}" -m scripts.canary_candidate \
+run_as_candidate "${CANDIDATE_PYTHON}" -m scripts.canary_candidate \
   --config "${CANDIDATE_CONFIG}" prepare
 systemctl start "hermes-factory-pre-q8-controller@${SCENARIO_ID}.service"
-SUBMIT_JSON="$(runuser -u hermescandidate -- "${CANDIDATE_PYTHON}" \
+SUBMIT_JSON="$(run_as_candidate "${CANDIDATE_PYTHON}" \
   -m scripts.canary_candidate --config "${CANDIDATE_CONFIG}" submit)"
 PRODUCT_ID="$(printf '%s' "${SUBMIT_JSON}" | "${VERIFIER_PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["product_id"])')"
@@ -46,7 +59,7 @@ systemctl start "hermes-factory-pre-q8-worker@${SCENARIO_ID}.service"
 
 STARTED_AT="$(date +%s)"
 while true; do
-  TRUTH_JSON="$(runuser -u hermesverifier -- "${VERIFIER_PYTHON}" \
+  TRUTH_JSON="$(run_as_verifier "${VERIFIER_PYTHON}" \
     -m scripts.candidate_truth "${CANDIDATE_DATABASE}" --worker-idle)"
   SCENARIO_STATUS="$(printf '%s' "${TRUTH_JSON}" | "${VERIFIER_PYTHON}" -c \
     'import json,sys; print(json.load(sys.stdin)["scenario_status"])')"
@@ -74,5 +87,5 @@ while true; do
   sleep 15
 done
 
-runuser -u hermesverifier -- "${VERIFIER_PYTHON}" -m scripts.functional_qualification \
+run_as_verifier "${VERIFIER_PYTHON}" -m scripts.functional_qualification \
   pre-q8-pass "${SCENARIO_ID}" "${PRODUCT_ID}" "${CANDIDATE_CONFIG}"

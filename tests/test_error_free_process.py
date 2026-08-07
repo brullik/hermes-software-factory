@@ -2132,6 +2132,33 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "/etc/hermes-factory/telegram.env" in owner_notifier
 
 
+def test_functional_orchestration_primes_notifier_and_uses_setpriv() -> None:
+    repository = Path(__file__).parents[1]
+    reconciler = (
+        repository / "scripts/qualification/reconcile-functional.sh"
+    ).read_text(encoding="utf-8")
+    notifier_start = reconciler.index(
+        "systemctl start hermes-factory-owner-notifier.path"
+    )
+    probe_start = reconciler.index(
+        "systemctl start --wait hermes-factory-capability-probe.service"
+    )
+    assert notifier_start < probe_start
+
+    run_all = (
+        repository / "scripts/qualification/run-all-pre-q8.sh"
+    ).read_text(encoding="utf-8")
+    run_scenario = (
+        repository / "scripts/qualification/run-pre-q8-scenario.sh"
+    ).read_text(encoding="utf-8")
+    for script in (run_all, run_scenario):
+        assert "/usr/bin/setpriv" in script
+        assert "--no-new-privs" in script
+        assert "runuser" not in script
+        assert "HOME=/var/lib/hermes-factory-verifier" in script
+    assert "HOME=/var/lib/hermes-factory-candidate" in run_scenario
+
+
 def test_HARD_P0_candidate_tasks_have_no_docker_socket_group_or_apt_get() -> None:
     repository = Path(__file__).parents[1]
     candidate_units = sorted(
