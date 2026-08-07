@@ -464,7 +464,25 @@ def test_github_broker_preserves_shared_group_write_umask() -> None:
         repository / "config/systemd/hermes-factory-capability-probe.service"
     ).read_text(encoding="utf-8")
     assert "Group=hermesfunctional" in probe_unit
+    assert "SupplementaryGroups=hermescandidate" in probe_unit
     assert "RestrictSUIDSGID=true" in probe_unit
+
+
+def test_candidate_functional_units_retain_candidate_config_group() -> None:
+    repository = Path(__file__).parents[1]
+
+    for name in (
+        "hermes-factory-capability-probe.service",
+        "hermes-factory-golden-controller.service",
+        "hermes-factory-golden-intake.service",
+        "hermes-factory-golden-worker.service",
+    ):
+        unit = (repository / "config/systemd" / name).read_text(encoding="utf-8")
+        assert "User=hermescandidate" in unit
+        assert "Group=hermesfunctional" in unit
+        assert "SupplementaryGroups=hermescandidate" in unit
+        assert "InaccessiblePaths=" in unit
+        assert "/etc/hermes-factory/candidate-credentials.d" in unit
 
 
 def test_functional_retirement_rejects_nonterminal_release_proof() -> None:
