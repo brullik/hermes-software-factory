@@ -1205,7 +1205,8 @@ class AgentWorker:
             or not root_metadata.st_mode & stat.S_ISGID
         ):
             raise RuntimeError("clean canary workspace parent is outside shared boundary")
-        os.chmod(resolved_parent, 0o2770)
+        if stat.S_IMODE(parent_metadata.st_mode) != 0o2770:
+            os.chmod(resolved_parent, 0o2770)
         updated = resolved_parent.stat()
         if (
             stat.S_IMODE(updated.st_mode) != 0o2770
