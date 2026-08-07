@@ -8,6 +8,7 @@ Type=simple
 User=hermescandidate
 Group=hermesfunctional
 SupplementaryGroups=hermescandidate
+UMask=0007
 WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=HOME=/var/lib/hermes-factory-candidate
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory-golden
