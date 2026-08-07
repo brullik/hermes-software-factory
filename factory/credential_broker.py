@@ -342,11 +342,68 @@ class GitHubCredentialBroker:
                     "private=true",
                     "-f",
                     "auto_init=false",
+                    "-F",
+                    "has_issues=true",
+                    "-F",
+                    "has_projects=false",
+                    "-F",
+                    "has_wiki=false",
+                    "-F",
+                    "allow_merge_commit=true",
+                    "-F",
+                    "allow_squash_merge=true",
+                    "-F",
+                    "allow_rebase_merge=true",
+                    "-F",
+                    "delete_branch_on_merge=true",
                 ],
                 environment=environment,
             )
         if operation == "repository.read":
             query = str(payload.get("query") or "")
+            if query == "configuration":
+                repository = self._run(
+                    ["gh", "api", endpoint],
+                    environment=environment,
+                )
+                if not isinstance(repository, dict):
+                    raise CredentialBrokerError(
+                        "repository configuration response is invalid"
+                    )
+                expected = {
+                    "private": True,
+                    "has_issues": True,
+                    "has_projects": False,
+                    "has_wiki": False,
+                    "delete_branch_on_merge": True,
+                }
+                if any(repository.get(key) is not value for key, value in expected.items()):
+                    raise CredentialBrokerError(
+                        "candidate_github_repository_configuration_unverified"
+                    )
+                if not any(
+                    repository.get(key) is True
+                    for key in (
+                        "allow_merge_commit",
+                        "allow_squash_merge",
+                        "allow_rebase_merge",
+                    )
+                ):
+                    raise CredentialBrokerError(
+                        "candidate_github_repository_merge_method_unavailable"
+                    )
+                return {
+                    "full_name": repository.get("full_name"),
+                    "state": "configuration_verified",
+                    "object_ids": [
+                        "private:true",
+                        "issues:true",
+                        "projects:false",
+                        "wiki:false",
+                        "delete_branch_on_merge:true",
+                        "merge_method:available",
+                    ],
+                }
             if query == "pull_request_for_head_sha":
                 expected_sha = str(payload.get("sha") or "")
                 if not re.fullmatch(r"[a-f0-9]{40}", expected_sha):

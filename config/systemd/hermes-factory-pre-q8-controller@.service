@@ -1,7 +1,8 @@
 [Unit]
 Description=Hermes PRE-Q8 isolated controller (%i)
-After=network-online.target
+After=network-online.target hermes-factory-github-broker.service
 Wants=network-online.target
+Requires=hermes-factory-github-broker.service
 
 [Service]
 Type=simple
@@ -10,6 +11,7 @@ Group=hermescandidate
 WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=HOME=/var/lib/hermes-factory-candidate
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory-pre-q8-%i
+Environment=HERMES_GITHUB_BROKER_SOCKET=/run/hermes-factory-github-broker/broker.sock
 Environment=PYTHONUNBUFFERED=1
 RuntimeDirectory=hermes-factory-pre-q8-%i
 RuntimeDirectoryMode=0750
@@ -21,7 +23,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory-pre-q8 /var/log/hermes-factory-pre-q8 /var/lib/hermes-factory-candidate /run/hermes-factory-pre-q8-%i
-ReadOnlyPaths=/etc/hermes-factory/pre-q8/%i.yaml /etc/hermes-factory/candidate-model-registry.yaml
+ReadOnlyPaths=/etc/hermes-factory/pre-q8/%i.yaml /etc/hermes-factory/candidate-model-registry.yaml /run/hermes-factory-github-broker/broker.sock /var/lib/hermes-factory-functional/q6-5/report-index.json
 InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
 NoNewPrivileges=true
 RestrictSUIDSGID=true

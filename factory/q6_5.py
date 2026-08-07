@@ -100,6 +100,19 @@ def _receipt_digest(receipt: BrokerReceipt) -> str:
 class GitHubOperationHandshake:
     """Exercise the complete canary repository lifecycle through the broker."""
 
+    WORKFLOW_PROOF = (
+        "name: Hermes Q6.5 broker proof\n"
+        "on:\n"
+        "  push:\n"
+        "    branches: [main, q6-5-proof]\n"
+        "  pull_request:\n"
+        "jobs:\n"
+        "  proof:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: printf 'Q6.5 workflow write PASS\\n'\n"
+    )
+
     def __init__(
         self,
         *,
@@ -184,6 +197,13 @@ class GitHubOperationHandshake:
             return None
         return str(value.get("phase") or "") if isinstance(value, dict) else None
 
+    def _workflow_is_bound(self, ref: str) -> bool:
+        result = self.git_runner(
+            ["git", "show", f"{ref}:.github/workflows/q6-5-proof.yml"],
+            self.workspace,
+        )
+        return result.returncode == 0 and result.stdout == self.WORKFLOW_PROOF
+
     def _report(
         self,
         operation: str,
@@ -220,11 +240,18 @@ class GitHubOperationHandshake:
         created = self._request(
             "repository.create_private", {"visibility": "private"}
         )
+        configured = self._request(
+            "repository.read", {"query": "configuration"}, ordinal=0
+        )
         cloned = self._request(
-            "repository.read", {"workspace": str(self.workspace)}
+            "repository.read", {"workspace": str(self.workspace)}, ordinal=1
         )
         fixture = self.workspace / "q6_5_fixture.json"
-        if self._fixture_phase("refs/heads/main") != "main":
+        workflow = self.workspace / ".github" / "workflows" / "q6-5-proof.yml"
+        if (
+            self._fixture_phase("refs/heads/main") != "main"
+            or not self._workflow_is_bound("refs/heads/main")
+        ):
             self._git("git", "checkout", "-B", "main")
             fixture.write_text(
                 stable_json({"schema_version": "1.0", "status": "PASS", "phase": "main"})
@@ -232,7 +259,19 @@ class GitHubOperationHandshake:
                 encoding="utf-8",
                 newline="\n",
             )
-            self._git("git", "add", "--", fixture.name)
+            workflow.parent.mkdir(parents=True, exist_ok=True)
+            workflow.write_text(
+                self.WORKFLOW_PROOF,
+                encoding="utf-8",
+                newline="\n",
+            )
+            self._git(
+                "git",
+                "add",
+                "--",
+                fixture.name,
+                str(workflow.relative_to(self.workspace)),
+            )
             self._git(
                 "git",
                 "-c",
@@ -322,8 +361,16 @@ class GitHubOperationHandshake:
         return (
             self._report("identity.read", (identity,), scope={"subject": identity.subject_identity}),
             self._report("repository.create_private", (created,)),
-            self._report("repository.read", (cloned,)),
-            self._report("branch.push", (push_main, push_branch)),
+            self._report(
+                "repository.read",
+                (configured, cloned),
+                scope={"repository_configuration": "verified"},
+            ),
+            self._report(
+                "branch.push",
+                (push_main, push_branch),
+                scope={"workflow_write": "verified"},
+            ),
             self._report("pull_request.create", (pull_request,)),
             self._report("checks.read", (checks,), scope={"commit": commit}),
             self._report("pull_request.merge_or_close", (terminal,)),
