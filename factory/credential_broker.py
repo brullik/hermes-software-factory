@@ -341,6 +341,20 @@ class GitHubCredentialBroker:
                 raise CredentialBrokerError(
                     "candidate_github_workflow_permission_denied"
                 )
+            if "dubious ownership" in lowered:
+                raise CredentialBrokerError("broker_workspace_ownership_denied")
+            if "permission denied" in lowered and any(
+                marker in lowered
+                for marker in (
+                    "cannot change to",
+                    "loose object",
+                    "object database",
+                    "unable to create",
+                )
+            ):
+                raise CredentialBrokerError("broker_workspace_permission_denied")
+            if "bad object head" in lowered:
+                raise CredentialBrokerError("broker_workspace_object_unreadable")
             if "http 403" in lowered or "resource not accessible" in lowered:
                 raise CredentialBrokerError("candidate_github_operation_denied")
             raise CredentialBrokerError(

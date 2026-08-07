@@ -341,3 +341,31 @@ def test_core_branch_push_and_delete_have_closed_arguments(tmp_path: Path) -> No
     assert f"safe.directory={workspace}" in git_calls[0]
     assert git_calls[1][-2:] == ["--delete", "codex/task"]
     assert f"safe.directory={workspace}" in git_calls[1]
+
+
+@pytest.mark.parametrize(
+    ("stderr", "reason"),
+    [
+        (
+            "fatal: detected dubious ownership in repository",
+            "broker_workspace_ownership_denied",
+        ),
+        (
+            "error: unable to open loose object: Permission denied",
+            "broker_workspace_permission_denied",
+        ),
+        ("fatal: bad object HEAD", "broker_workspace_object_unreadable"),
+    ],
+)
+def test_broker_types_workspace_failures_without_returning_git_output(
+    tmp_path: Path,
+    stderr: str,
+    reason: str,
+) -> None:
+    runner = StrictRunner()
+    broker = _broker(tmp_path, runner)
+    broker.command_runner = lambda argv, environment, cwd: subprocess.CompletedProcess(
+        argv, 1, "", stderr
+    )
+    with pytest.raises(CredentialBrokerError, match=f"^{reason}$"):
+        broker._run(["git", "push"], environment={})
