@@ -22,6 +22,11 @@ if [[ "${STATUS}" == WAITING_CAPABILITY ]]; then
 fi
 
 if [[ "${STATUS}" == Q6_5_PROBE_REQUIRED ]]; then
+  # Q6.5 proves both Telegram delivery operations and waits for their typed
+  # receipts.  Bootstrap deliberately leaves the path disabled until the
+  # initial qualification returns, so activate it for this boot before the
+  # probe starts.  The final bootstrap step still owns persistent enablement.
+  systemctl start hermes-factory-owner-notifier.path
   systemctl start hermes-factory-github-broker.service
   systemctl start --wait hermes-factory-capability-probe.service
   RESULT="$("${CONTROL[@]}" reconcile)"

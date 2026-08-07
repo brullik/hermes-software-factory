@@ -8,6 +8,14 @@ fi
 
 INDEX=/etc/hermes-factory/pre-q8/index.json
 PYTHON=/opt/hermes-factory-verifier/venv/bin/python
+SETPRIV=/usr/bin/setpriv
+
+run_as_verifier() {
+  "${SETPRIV}" --reuid=hermesverifier --regid=hermesverifier --init-groups \
+    --no-new-privs -- /usr/bin/env HOME=/var/lib/hermes-factory-verifier \
+    USER=hermesverifier LOGNAME=hermesverifier "$@"
+}
+
 mapfile -t SCENARIOS < <("${PYTHON}" -c \
   'import json,sys; value=json.load(open(sys.argv[1],encoding="utf-8")); print("\n".join(item["scenario_id"] for item in value["scenarios"]))' \
   "${INDEX}")
@@ -17,7 +25,7 @@ if (( ${#SCENARIOS[@]} != 10 )); then
 fi
 
 for scenario_id in "${SCENARIOS[@]}"; do
-  STATUS_JSON="$(runuser -u hermesverifier -- "${PYTHON}" -m scripts.functional_qualification status)"
+  STATUS_JSON="$(run_as_verifier "${PYTHON}" -m scripts.functional_qualification status)"
   EXISTING="$(printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c \
     'import json,sys; v=json.load(sys.stdin); s=sys.argv[1]; print(next((x["status"] for x in v.get("pre_q8",[]) if x["scenario_id"]==s),"MISSING"))' \
     "${scenario_id}")"
