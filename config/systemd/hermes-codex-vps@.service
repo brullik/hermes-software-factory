@@ -1,0 +1,50 @@
+[Unit]
+Description=Hermes Codex VPS durable goal supervisor (%i)
+After=network-online.target hermes-codex-github-broker.service hermes-factory-gateway.service
+Wants=network-online.target hermes-codex-github-broker.service
+
+[Service]
+Type=simple
+User=hermescodex
+Group=hermescodex
+SupplementaryGroups=hermescodexops
+WorkingDirectory=/var/lib/hermes-codex
+Environment=CODEX_HOME=/home/hermescodex/.codex
+Environment=HOME=/home/hermescodex
+Environment=PYTHONPATH=/opt/hermes-codex-runtime/current
+Environment=GIT_CONFIG_NOSYSTEM=1
+Environment=GIT_TERMINAL_PROMPT=0
+ExecStart=/usr/bin/python3 /opt/hermes-codex-runtime/current/scripts/codex_vps_supervisor.py --config /var/lib/hermes-codex/state/%i/supervisor.json
+Restart=on-failure
+RestartSec=60s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/home/hermescodex/.codex
+ReadWritePaths=/var/lib/hermes-codex/state
+ReadWritePaths=/var/lib/hermes-codex/worktrees
+ReadWritePaths=/var/lib/hermes-codex-owner-actions
+ReadOnlyPaths=/opt/hermes-codex-runtime
+InaccessiblePaths=/etc/hermes-factory
+InaccessiblePaths=/opt/hermes-factory
+InaccessiblePaths=/var/lib/hermes-factory
+InaccessiblePaths=/var/log/hermes-factory
+
+[Install]
+WantedBy=multi-user.target

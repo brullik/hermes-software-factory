@@ -11,7 +11,7 @@
   "runtime": {
     "user": "hermescodex",
     "uid": 1001,
-    "supplementary_groups": [],
+    "supplementary_groups": ["hermescodexops"],
     "codex_version": "codex-cli 0.147.0",
     "codex_binary_sha256": "cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40",
     "installer_sha256": "ba92dd27e5c06f0d3bbc58bfa4b9cfb6599cd2742fbb1f92a2765e6c07dedb5a",
@@ -23,7 +23,7 @@
       "probe": "focused pytest: strict broker plus existing broker regression",
       "exit_code": 0,
       "result": "PASS",
-      "summary": "21 tests passed"
+      "summary": "24 tests passed"
     },
     {
       "probe": "ruff check changed broker files",

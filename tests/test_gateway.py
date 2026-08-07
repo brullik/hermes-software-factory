@@ -114,7 +114,9 @@ class GatewayTests(unittest.TestCase):
                 self.assertTrue(gateway.process_update(update(30, 42, "/help")))
             self.assertEqual(
                 api.sent[0][1],
-                "/idea <текст>, /status, /projects, /kanban, /pause <product>, /resume <product>, /cancel <product>, /owner_action",
+                "/idea <текст>, /status, /projects, /kanban, /pause <product>, "
+                "/resume <product>, /cancel <product>, /owner_action, "
+                "/approve <action_id> <code>, /deny <action_id>",
             )
             self.assertNotIn("Р", api.sent[0][1])
             self.assertIn("telegram update processed update_id=30 command=help", "\n".join(logs.output))

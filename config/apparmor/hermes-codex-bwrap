@@ -1,0 +1,10 @@
+# Allow only the standalone Codex bubblewrap helper to create its sandbox
+# namespace on Ubuntu 24.04 with apparmor_restrict_unprivileged_userns=1.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile hermes-codex-bwrap /home/hermescodex/.codex/packages/standalone/releases/0.147.0-x86_64-unknown-linux-musl/codex-resources/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/hermes-codex-bwrap>
+}

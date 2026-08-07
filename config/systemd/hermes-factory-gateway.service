@@ -7,18 +7,22 @@ Wants=network-online.target
 Type=simple
 User=hermesfactory
 Group=hermesfactory
+SupplementaryGroups=hermescodexops
 WorkingDirectory=/opt/hermes-factory/current
 Environment=FACTORY_CONFIG=/etc/hermes-factory/config.yaml
+Environment=HERMES_CODEX_OWNER_ACTION_DB=/var/lib/hermes-codex-owner-actions/actions.sqlite3
 EnvironmentFile=-/etc/hermes-factory/telegram.env
 LoadCredential=telegram-token:/etc/hermes-factory/credentials.d/telegram-token
 ExecStart=/opt/hermes-factory/venv/bin/python -m factory.gateway
 Restart=on-failure
 RestartSec=10
+UMask=0007
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory /var/log/hermes-factory /run/hermes-factory
+ReadWritePaths=/var/lib/hermes-codex-owner-actions
 ReadOnlyPaths=/etc/hermes-factory
 RestrictSUIDSGID=true
 MemoryMax=500M

@@ -1,0 +1,45 @@
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+default_permissions = "codex-vps-workspace"
+
+[features]
+goals = true
+
+[shell_environment_policy]
+inherit = "none"
+ignore_default_excludes = false
+
+[shell_environment_policy.set]
+LANG = "C.UTF-8"
+LC_ALL = "C.UTF-8"
+PATH = "/usr/local/bin:/usr/bin:/bin"
+
+[permissions.codex-vps-workspace]
+description = "Workspace-write semantics with credential, production, and egress isolation."
+extends = ":workspace"
+
+[permissions.codex-vps-workspace.filesystem]
+glob_scan_max_depth = 8
+"/home/hermescodex/.codex/auth.json" = "deny"
+"~/.codex/auth.json" = "deny"
+"/etc/hermes-factory" = "deny"
+"/opt/hermes-factory" = "deny"
+"/var/lib/hermes-factory" = "deny"
+"/var/log/hermes-factory" = "deny"
+
+[permissions.codex-vps-workspace.filesystem.":workspace_roots"]
+"." = "write"
+".codex" = "read"
+".git" = "read"
+"**/*.env" = "deny"
+"**/*credential*" = "deny"
+"**/*secret*" = "deny"
+
+[permissions.codex-vps-workspace.network]
+enabled = true
+allow_local_binding = false
+dangerously_allow_all_unix_sockets = false
+dangerously_allow_non_loopback_proxy = false
+
+[permissions.codex-vps-workspace.network.unix_sockets]
+"/run/hermes-codex-github-broker/broker.sock" = "allow"
