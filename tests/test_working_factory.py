@@ -830,6 +830,63 @@ def test_wf_p0_002_003_broker_hides_token_and_enforces_allowlist(tmp_path: Path)
         )
 
 
+def test_candidate_broker_verifies_private_repository_configuration(
+    tmp_path: Path,
+) -> None:
+    credential = tmp_path / "github-token"
+    credential.write_text("fixture-token-not-a-real-secret", encoding="utf-8")
+    credential.chmod(0o600)
+
+    def runner(
+        argv: list[str], environment: Any, cwd: Path | None
+    ) -> subprocess.CompletedProcess[str]:
+        del environment, cwd
+        if argv == ["gh", "api", "user"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps({"login": "brullik", "id": 1}),
+                "",
+            )
+        assert argv == ["gh", "api", "repos/brullik/hermes-canary-configured"]
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "full_name": "brullik/hermes-canary-configured",
+                    "private": True,
+                    "has_issues": True,
+                    "has_projects": False,
+                    "has_wiki": False,
+                    "delete_branch_on_merge": True,
+                    "allow_merge_commit": True,
+                    "allow_squash_merge": True,
+                    "allow_rebase_merge": True,
+                }
+            ),
+            "",
+        )
+
+    receipt = GitHubCredentialBroker(
+        policy=BrokerPolicy(owner="brullik", repository_prefixes=("hermes-canary-",)),
+        credential_path=credential,
+        receipt_root=tmp_path / "receipts",
+        credential_epoch_id="CE-1",
+        command_runner=runner,
+    ).execute(
+        BrokerRequest(
+            request_id="request-config-0001",
+            operation="repository.read",
+            owner="brullik",
+            repository="hermes-canary-configured",
+            payload={"query": "configuration"},
+        )
+    )
+    assert "state:configuration_verified" in receipt.object_ids
+    assert "private:true" in receipt.object_ids
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX credential modes are required")
 def test_broker_accepts_only_private_systemd_credential_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1276,9 +1333,10 @@ def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(
     )
     reports = handshake.run()
     assert {report.operation for report in reports} == set(MANDATORY_Q6_5_OPERATIONS[:8])
-    assert broker.calls[:8] == [
+    assert broker.calls[:9] == [
         "identity.read",
         "repository.create_private",
+        "repository.read",
         "repository.read",
         "branch.push",
         "branch.push",
@@ -1287,6 +1345,15 @@ def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(
         "pull_request.merge_or_close",
     ]
     assert "repository.archive_or_delete" in broker.calls
+    by_operation = {report.operation: report for report in reports}
+    assert (
+        by_operation["github.repository.read"].scope["repository_configuration"]
+        == "verified"
+    )
+    assert by_operation["git.branch.push"].scope["workflow_write"] == "verified"
+    assert (
+        tmp_path / "workspace" / ".github" / "workflows" / "q6-5-proof.yml"
+    ).is_file()
     replayed = handshake.run()
     assert [report.operation for report in replayed] == [report.operation for report in reports]
 

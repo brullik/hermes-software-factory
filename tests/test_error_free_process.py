@@ -2130,6 +2130,19 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "SupplementaryGroups=hermesfunctional" in owner_notifier
     assert "EnvironmentFile=/etc/hermes-factory/telegram.env" in owner_notifier
     assert "/etc/hermes-factory/telegram.env" in owner_notifier
+    q6_5_index = "/var/lib/hermes-factory-functional/q6-5/report-index.json"
+    broker_socket = "/run/hermes-factory-github-broker/broker.sock"
+    for unit_name in (
+        "hermes-factory-pre-q8-controller@.service",
+        "hermes-factory-pre-q8-worker@.service",
+    ):
+        unit = (repository / "config/systemd" / unit_name).read_text(
+            encoding="utf-8"
+        )
+        assert "Requires=" in unit and "hermes-factory-github-broker.service" in unit
+        assert f"Environment=HERMES_GITHUB_BROKER_SOCKET={broker_socket}" in unit
+        assert broker_socket in unit
+        assert q6_5_index in unit
 
 
 def test_functional_orchestration_primes_notifier_and_uses_setpriv() -> None:

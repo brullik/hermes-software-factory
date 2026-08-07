@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -39,7 +40,7 @@ from .autonomy import (
 )
 from .capabilities import CapabilityBroker
 from .common import new_id, redact_text, sha256_file, sha256_text, stable_json
-from .config import FactoryConfig, load_config
+from .config import FactoryConfig, clean_canary_capability_context, load_config
 from .context_builder import ContextBuilder, ContextPackResult
 from .path_governor import (
     PathGovernor,
@@ -1122,6 +1123,7 @@ class AgentWorker:
         self.repository_root = (repository_root or Path.cwd()).resolve()
         self.release_executor = release_executor
         self.repository_bootstrapper = repository_bootstrapper
+        self._clean_canary_context = clean_canary_capability_context(config)
         configured_worktrees = Path(str(config.raw["paths"]["worktrees"]))
         if os.name == "nt" and str(configured_worktrees).replace("\\", "/").startswith("/var/"):
             configured_worktrees = config.state_dir / "worktrees"
@@ -1164,6 +1166,73 @@ class AgentWorker:
             self.planning_runner = runner
         self.health_probe = health_probe or self._live_health_probe
 
+    def _prepare_clean_canary_broker_parent(self, destination: Path) -> None:
+        """Grant only the isolated broker group access to one initializer parent."""
+
+        if self._clean_canary_context is None:
+            return
+        if (
+            os.environ.get("HERMES_GITHUB_BROKER_SOCKET", "").strip()
+            != "/run/hermes-factory-github-broker/broker.sock"
+        ):
+            raise RuntimeError("clean canary GitHub broker boundary is unavailable")
+        if os.name != "posix":
+            return
+        root = self.workspace.root
+        parent = destination.parent
+        try:
+            resolved_root = root.resolve(strict=True)
+            resolved_parent = parent.resolve(strict=True)
+            root_metadata = resolved_root.stat()
+            parent_metadata = resolved_parent.stat()
+        except OSError as error:
+            raise RuntimeError("clean canary workspace parent is unavailable") from error
+        geteuid = getattr(os, "geteuid", None)
+        if not callable(geteuid):
+            raise TypeError("clean canary POSIX identity is unavailable")
+        current_uid = int(geteuid())
+        if (
+            root.is_symlink()
+            or parent.is_symlink()
+            or not resolved_root.is_dir()
+            or not resolved_parent.is_dir()
+            or resolved_root not in resolved_parent.parents
+            or destination.exists()
+            or destination.is_symlink()
+            or root_metadata.st_uid != current_uid
+            or parent_metadata.st_uid != current_uid
+            or root_metadata.st_gid != parent_metadata.st_gid
+            or not root_metadata.st_mode & stat.S_ISGID
+        ):
+            raise RuntimeError("clean canary workspace parent is outside shared boundary")
+        os.chmod(resolved_parent, 0o2770)
+        updated = resolved_parent.stat()
+        if (
+            stat.S_IMODE(updated.st_mode) != 0o2770
+            or updated.st_uid != current_uid
+            or updated.st_gid != root_metadata.st_gid
+        ):
+            raise RuntimeError("clean canary workspace group boundary differs")
+
+    def _verify_clean_canary_broker_workspace(self, destination: Path) -> None:
+        if self._clean_canary_context is None or os.name != "posix":
+            return
+        try:
+            resolved = destination.resolve(strict=True)
+            metadata = resolved.stat()
+            parent_metadata = resolved.parent.stat()
+        except OSError as error:
+            raise RuntimeError("clean canary broker workspace is unavailable") from error
+        if (
+            destination.is_symlink()
+            or not resolved.is_dir()
+            or self.workspace.root not in resolved.parents
+            or metadata.st_gid != parent_metadata.st_gid
+            or metadata.st_mode & stat.S_IRWXG != stat.S_IRWXG
+            or metadata.st_mode & stat.S_IWOTH
+        ):
+            raise RuntimeError("clean canary broker workspace permissions differ")
+
     def _initialize_product_workspace(self, product_id: str, destination: Path) -> None:
         product = self.state.get_product(product_id)
         if product is None:
@@ -1174,7 +1243,9 @@ class AgentWorker:
         }:
             if self.repository_bootstrapper is None:
                 raise RuntimeError("repository bootstrap capability is not configured")
+            self._prepare_clean_canary_broker_parent(destination)
             self.repository_bootstrapper.ensure(product_id, destination)
+            self._verify_clean_canary_broker_workspace(destination)
             return
         repository_url = None
         if product.get("delivery_mode") == "existing_repository":

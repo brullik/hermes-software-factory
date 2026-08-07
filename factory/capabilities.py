@@ -20,6 +20,13 @@ from urllib.request import Request, urlopen
 from .autonomy import CAPABILITY_PROFILES, OWNER_ACTION_REASONS
 from .common import sha256_file, sha256_text, stable_json, utc_now
 from .config import FactoryConfig, clean_canary_capability_context
+from .credential_broker import BrokerClient, BrokerRequest, CredentialBrokerError
+from .functional_readiness import (
+    MANDATORY_Q6_5_OPERATIONS,
+    CapabilityHandshakeReport,
+    CapabilityStatus,
+    FunctionalReadinessError,
+)
 from .owner_actions import OwnerActionService
 from .proof_obligations import ToolchainManifest
 from .state import StateStore
@@ -69,13 +76,285 @@ class ConfiguredCapabilityProbe:
         config: FactoryConfig,
         *,
         command_runner: Any | None = None,
+        broker_client: Any | None = None,
+        q6_5_report_index: Path | None = None,
     ) -> None:
         self.config = config
         self.command_runner = command_runner or self._run
         self._github_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
         self._production_cache: tuple[datetime, dict[str, bool]] | None = None
         self._clean_canary_context = clean_canary_capability_context(config)
+        self._broker_socket = str(
+            os.environ.get("HERMES_GITHUB_BROKER_SOCKET") or ""
+        ).strip()
+        self._broker_client = broker_client
+        if (
+            self._broker_client is None
+            and self._clean_canary_context is not None
+            and self._broker_socket
+            == "/run/hermes-factory-github-broker/broker.sock"
+        ):
+            self._broker_client = BrokerClient(Path(self._broker_socket))
+        self._q6_5_report_index = q6_5_report_index or Path(
+            "/var/lib/hermes-factory-functional/q6-5/report-index.json"
+        )
+        self._q6_5_github_cache: dict[str, Any] | None = None
         self._isolated_attestations = self._load_isolated_attestations()
+
+    def _q6_5_github_evidence(self) -> dict[str, Any]:
+        """Load the exact 18/18 functional proof without trusting credential presence."""
+
+        if self._q6_5_github_cache is not None:
+            return self._q6_5_github_cache
+        path = self._q6_5_report_index
+        try:
+            metadata = path.stat()
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or (
+                    os.name == "posix"
+                    and metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                )
+            ):
+                raise ValueError("Q6.5 report index path is unsafe")
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError) as error:
+            raise ValueError("Q6.5 report index is unavailable") from error
+        if not isinstance(value, dict):
+            raise TypeError("Q6.5 report index is invalid")
+        index = dict(value)
+        receipt_digest = str(index.pop("receipt_digest", ""))
+        if receipt_digest != sha256_text(stable_json(index)):
+            raise ValueError("Q6.5 report receipt digest differs")
+        index_digest = str(index.pop("index_digest", ""))
+        if index_digest != sha256_text(stable_json(index)):
+            raise ValueError("Q6.5 report index digest differs")
+        if set(index) != {
+            "schema_version",
+            "candidate_digest",
+            "toolchain_digest",
+            "credential_epoch_id",
+            "reports",
+        }:
+            raise ValueError("Q6.5 report index schema differs")
+        credential_epoch = str(index["credential_epoch_id"] or "")
+        if (
+            index["schema_version"] != "1.0"
+            or self._clean_canary_context is None
+            or index["candidate_digest"]
+            != self._clean_canary_context["candidate_digest"]
+            or not re.fullmatch(r"[a-f0-9]{64}", str(index["toolchain_digest"]))
+            or not re.fullmatch(r"CE-[A-F0-9]{16,64}", credential_epoch)
+            or not isinstance(index["reports"], list)
+        ):
+            raise ValueError("Q6.5 report identity differs")
+        try:
+            reports = tuple(
+                CapabilityHandshakeReport.from_dict(report)
+                for report in index["reports"]
+                if isinstance(report, dict)
+            )
+        except (FunctionalReadinessError, KeyError, TypeError, ValueError) as error:
+            raise ValueError("Q6.5 operation report is invalid") from error
+        if (
+            len(reports) != len(index["reports"])
+            or {report.operation for report in reports}
+            != set(MANDATORY_Q6_5_OPERATIONS)
+            or any(
+                report.status != CapabilityStatus.AVAILABLE
+                or report.candidate_digest != index["candidate_digest"]
+                or report.toolchain_digest != index["toolchain_digest"]
+                for report in reports
+            )
+        ):
+            raise ValueError("Q6.5 operation proof is incomplete")
+        by_operation = {report.operation: report for report in reports}
+        github_operations = set(MANDATORY_Q6_5_OPERATIONS[:8])
+        owner = str(self.config.raw.get("github", {}).get("owner") or "")
+        for operation in github_operations:
+            report = by_operation[operation]
+            if (
+                report.credential_epoch_id != credential_epoch
+                or report.scope.get("owner") != owner
+                or report.scope.get("private") is not True
+                or not str(report.scope.get("repository") or "").startswith(
+                    "hermes-canary-q65-"
+                )
+            ):
+                raise ValueError("Q6.5 GitHub proof scope differs")
+        repository_proof = by_operation["github.repository.read"]
+        branch_proof = by_operation["git.branch.push"]
+        if (
+            repository_proof.scope.get("repository_configuration") != "verified"
+            or branch_proof.scope.get("workflow_write") != "verified"
+        ):
+            raise ValueError("Q6.5 GitHub configuration proof is incomplete")
+        self._q6_5_github_cache = {
+            "credential_epoch_id": credential_epoch,
+            "index_digest": index_digest,
+            "receipt_digest": receipt_digest,
+            "reports": by_operation,
+        }
+        return self._q6_5_github_cache
+
+    def _clean_canary_github_check(
+        self,
+        capability: str,
+        product: dict[str, Any],
+    ) -> CapabilityCheck:
+        owner, repository = self._repository_scope(product, self.config)
+        qualification = self.config.raw.get("qualification", {})
+        existing_url = str(
+            qualification.get("existing_repository_url") or ""
+        ) if isinstance(qualification, dict) else ""
+        existing_name = ""
+        if existing_url:
+            parsed = urlparse(existing_url)
+            parts = [part for part in parsed.path.strip("/").split("/") if part]
+            if parsed.hostname == "github.com" and len(parts) == 2 and parts[0] == owner:
+                existing_name = parts[1].removesuffix(".git")
+        scope: dict[str, Any] = {
+            "owner": owner,
+            "repository": repository,
+            "allowed_operations": [capability],
+            "qualification_plane": "CLEAN_CANARY",
+        }
+        if (
+            self._clean_canary_context is None
+            or not (repository.startswith("hermes-canary-") or repository == existing_name)
+            or str(product.get("repository_visibility") or "private") != "private"
+        ):
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-github-broker",
+                "controller_github_scope_denied",
+                scope,
+            )
+        operation_map: dict[str, tuple[str, ...]] = {
+            "repository.read": ("github.repository.read",),
+            "repository.read_bounded": ("github.repository.read",),
+            "github.repository.create": ("github.repository.create_private",),
+            "github.repository.configure": ("github.repository.read",),
+            "github.workflow.write": ("git.branch.push",),
+            "git.initial_commit": (
+                "github.repository.create_private",
+                "github.repository.read",
+                "git.branch.push",
+            ),
+            "git.push_branch": ("git.branch.push",),
+            "github.pull_request.create": ("github.pull_request.create",),
+            "github.checks.read": ("github.checks.read",),
+            "github.pull_request.verify": (
+                "github.checks.read",
+                "github.pull_request.create",
+            ),
+            "github.pull_request.merge": ("github.pull_request.merge_or_close",),
+        }
+        required_operations = operation_map.get(capability)
+        if required_operations is None:
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-github-broker",
+                "controller_github_capability_unverifiable",
+                scope,
+            )
+        if self._broker_client is None:
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-github-broker",
+                "controller_github_broker_unavailable",
+                scope,
+            )
+        try:
+            evidence = self._q6_5_github_evidence()
+            request = BrokerRequest(
+                request_id="CCP-" + sha256_text(
+                    stable_json(
+                        [
+                            self._clean_canary_context["config_digest"],
+                            evidence["credential_epoch_id"],
+                            owner,
+                            repository,
+                            "identity.read",
+                        ]
+                    )
+                )[:40],
+                operation="identity.read",
+                owner=owner,
+                repository=repository,
+                payload={},
+            )
+            receipt = self._broker_client.execute(request)
+        except CredentialBrokerError as error:
+            reason = str(error)
+            if reason in {
+                "missing_candidate_github_credential",
+                "candidate_github_credential_expired",
+            }:
+                return CapabilityCheck(
+                    capability,
+                    "MISSING_EXTERNAL",
+                    "candidate-github-broker",
+                    "missing_credential",
+                    scope,
+                )
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-github-broker",
+                "controller_github_broker_unverifiable",
+                scope,
+            )
+        except (KeyError, TypeError, ValueError):
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-github-broker",
+                "controller_q6_5_evidence_invalid",
+                scope,
+            )
+        if (
+            receipt.operation != "identity.read"
+            or receipt.target_slug != f"{owner}/{repository}"
+            or receipt.subject_identity.lower() != owner.lower()
+            or receipt.credential_epoch_id != evidence["credential_epoch_id"]
+            or receipt.result != "PASS"
+        ):
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "candidate-github-broker",
+                "controller_github_broker_identity_differs",
+                scope,
+            )
+        reports = evidence["reports"]
+        scope.update(
+            {
+                "identity": receipt.subject_identity,
+                "credential_type": "operation-scoped-broker",
+                "credential_epoch_id": evidence["credential_epoch_id"],
+                "broker_operation": "identity.read",
+                "broker_receipt_digest": receipt.receipt_digest,
+                "q6_5_index_digest": evidence["index_digest"],
+                "q6_5_receipt_digest": evidence["receipt_digest"],
+                "q6_5_operations": list(required_operations),
+                "q6_5_report_digests": [
+                    reports[operation].report_digest
+                    for operation in required_operations
+                ],
+                **self._clean_canary_context,
+            }
+        )
+        return CapabilityCheck(
+            capability,
+            "AVAILABLE",
+            "candidate-github-broker",
+            scope=scope,
+        )
 
     def _load_isolated_attestations(self) -> dict[str, CapabilityCheck]:
         qualification = self.config.raw.get("qualification")
@@ -369,7 +648,7 @@ class ConfiguredCapabilityProbe:
         capability: str,
         product: dict[str, Any],
     ) -> CapabilityCheck:
-        if shutil.which("git") is None or shutil.which("gh") is None:
+        if shutil.which("git") is None:
             return CapabilityCheck(
                 capability,
                 "DENIED_POLICY",
@@ -382,6 +661,15 @@ class ConfiguredCapabilityProbe:
                 "AVAILABLE",
                 "configured-host",
                 scope={"allowed_operations": [capability]},
+            )
+        if self._clean_canary_context is not None:
+            return self._clean_canary_github_check(capability, product)
+        if shutil.which("gh") is None:
+            return CapabilityCheck(
+                capability,
+                "DENIED_POLICY",
+                "configured-host",
+                "controller_tool_missing",
             )
         context = self._github_context(product)
         scope = self._github_scope_payload(context, capability)

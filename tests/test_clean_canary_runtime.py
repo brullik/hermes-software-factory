@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +34,13 @@ from factory.capabilities import (
 )
 from factory.common import sha256_file, sha256_text, utc_now
 from factory.config import validate_config
+from factory.credential_broker import BrokerReceipt, BrokerRequest
+from factory.functional_readiness import (
+    MANDATORY_Q6_5_OPERATIONS,
+    CapabilityHandshakeReport,
+    CapabilityStatus,
+)
+from factory.intake import IntakeService
 from factory.quality import QualityGateRun
 from factory.release import ReleaseOperationFailed
 from factory.release_executor import _release_digest
@@ -169,6 +178,195 @@ def test_clean_canary_substitutes_fail_closed_outside_state_root(
     finally:
         state.close()
     assert "toolchain.container_builder" in required
+
+
+def q6_5_report_index(path: Path, *, credential_epoch: str) -> Path:
+    reports: list[CapabilityHandshakeReport] = []
+    for index, operation in enumerate(MANDATORY_Q6_5_OPERATIONS):
+        scope: dict[str, Any] = {"proof": "operation-specific"}
+        operation_credential: str | None = None
+        if index < 8:
+            scope.update(
+                {
+                    "owner": "brullik",
+                    "repository": "hermes-canary-q65-boundary",
+                    "private": True,
+                }
+            )
+            operation_credential = credential_epoch
+        if operation == "github.repository.read":
+            scope["repository_configuration"] = "verified"
+        if operation == "git.branch.push":
+            scope["workflow_write"] = "verified"
+        reports.append(
+            CapabilityHandshakeReport.create(
+                candidate_digest="3" * 64,
+                capability=operation,
+                operation=operation,
+                scope=scope,
+                status=CapabilityStatus.AVAILABLE,
+                credential_epoch_id=operation_credential,
+                toolchain_digest="4" * 64,
+                receipts=(sha256_text(operation),),
+            )
+        )
+    payload: dict[str, Any] = {
+        "schema_version": "1.0",
+        "candidate_digest": "3" * 64,
+        "toolchain_digest": "4" * 64,
+        "credential_epoch_id": credential_epoch,
+        "reports": [report.as_dict() for report in reports],
+    }
+    payload["index_digest"] = sha256_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
+    payload["receipt_digest"] = sha256_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+class Q65IdentityBroker:
+    def __init__(self, credential_epoch: str) -> None:
+        self.credential_epoch = credential_epoch
+        self.calls: list[BrokerRequest] = []
+
+    def execute(self, request: BrokerRequest) -> BrokerReceipt:
+        self.calls.append(request)
+        return BrokerReceipt(
+            request_id=request.request_id,
+            operation=request.operation,
+            target_slug=f"{request.owner}/{request.repository}",
+            subject_identity=request.owner,
+            result="PASS",
+            object_ids=(f"login:{request.owner}",),
+            credential_epoch_id=self.credential_epoch,
+            timestamp="2026-08-07T00:00:00Z",
+            request_digest=request.digest(),
+            receipt_digest=sha256_text(request.digest()),
+        )
+
+
+def test_clean_canary_github_preflight_binds_q6_5_and_live_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    credential_epoch = "CE-" + "A" * 32
+    report_index = q6_5_report_index(
+        tmp_path / "report-index.json",
+        credential_epoch=credential_epoch,
+    )
+    broker = Q65IdentityBroker(credential_epoch)
+    monkeypatch.setattr("factory.capabilities.shutil.which", lambda _name: "/safe/tool")
+    probe = ConfiguredCapabilityProbe(
+        config,
+        command_runner=lambda _argv: pytest.fail("direct gh probe crossed broker boundary"),
+        broker_client=broker,
+        q6_5_report_index=report_index,
+    )
+    product = {
+        "product_id": "clean-canary-product",
+        "repository_name": "hermes-canary-deploy-rollback-boundary",
+        "repository_visibility": "private",
+    }
+
+    for capability in (
+        "repository.read",
+        "github.repository.create",
+        "github.repository.configure",
+        "github.workflow.write",
+        "git.initial_commit",
+        "git.push_branch",
+        "github.pull_request.create",
+        "github.checks.read",
+        "github.pull_request.verify",
+        "github.pull_request.merge",
+    ):
+        check = probe.check(capability, product=product)
+        assert check.status == "AVAILABLE"
+        assert check.provider == "candidate-github-broker"
+        assert check.scope is not None
+        assert check.scope["credential_epoch_id"] == credential_epoch
+        assert check.scope["q6_5_index_digest"]
+        assert check.scope["q6_5_report_digests"]
+    assert {request.operation for request in broker.calls} == {"identity.read"}
+
+
+def test_clean_canary_github_preflight_rejects_tampered_q6_5_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    credential_epoch = "CE-" + "B" * 32
+    report_index = q6_5_report_index(
+        tmp_path / "report-index.json",
+        credential_epoch=credential_epoch,
+    )
+    payload = json.loads(report_index.read_text(encoding="utf-8"))
+    payload["candidate_digest"] = "9" * 64
+    report_index.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr("factory.capabilities.shutil.which", lambda _name: "/safe/tool")
+    check = ConfiguredCapabilityProbe(
+        config,
+        broker_client=Q65IdentityBroker(credential_epoch),
+        q6_5_report_index=report_index,
+    ).check(
+        "github.repository.create",
+        product={
+            "product_id": "tampered-proof",
+            "repository_name": "hermes-canary-tampered-proof",
+            "repository_visibility": "private",
+        },
+    )
+    assert check.status == "DENIED_POLICY"
+    assert check.reason_code == "controller_q6_5_evidence_invalid"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX group boundary is required")
+def test_clean_canary_repository_initializer_opens_only_shared_broker_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    state = StateStore(config.database_path)
+    intake = IntakeService(config, state, ArtifactStore(config)).submit(
+        source="cli",
+        owner_id="owner",
+        goal_text="Build an isolated service",
+        delivery_mode="new_repository",
+        repository_name="hermes-canary-shared-workspace",
+    )
+
+    class Bootstrap:
+        def ensure(self, product_id: str, destination: Path) -> dict[str, str]:
+            assert product_id == intake.product_id
+            assert stat.S_IMODE(destination.parent.stat().st_mode) == 0o2770
+            destination.mkdir(mode=0o770)
+            destination.chmod(0o770)
+            return {}
+
+    worker = AgentWorker(
+        config,
+        state,
+        runner=FakeRunner("{}"),
+        health_probe=lambda _: True,
+        repository_bootstrapper=Bootstrap(),  # type: ignore[arg-type]
+    )
+    worker.workspace.root.chmod(0o2775)
+    monkeypatch.setenv(
+        "HERMES_GITHUB_BROKER_SOCKET",
+        "/run/hermes-factory-github-broker/broker.sock",
+    )
+    lease = worker.workspace.acquire(
+        product_id=intake.product_id,
+        task_id="T-CLEAN-CANARY-WORKSPACE",
+        worker_id="worker-1",
+    )
+    assert stat.S_IMODE(lease.path.parent.stat().st_mode) == 0o2770
+    assert stat.S_IMODE(lease.path.stat().st_mode) == 0o770
+    state.close()
 
 
 def contract(tmp_path: Path, *faults: str) -> CanaryFaultContract:
