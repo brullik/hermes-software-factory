@@ -8,6 +8,7 @@ Requires=hermes-factory-canary-controller@%i.service hermes-factory-github-broke
 Type=simple
 User=hermescandidate
 Group=hermescandidate
+UMask=0007
 WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=FACTORY_CONFIG=/etc/hermes-factory/canaries/%i.yaml
 Environment=HOME=/var/lib/hermes-factory-candidate
