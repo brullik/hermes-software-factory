@@ -23,8 +23,15 @@ from factory.canary_faults import (
     FaultInjectingHermesRunner,
     FaultInjectingQualityGate,
 )
+from factory.canary_qualification import load_canary_catalog
 from factory.canary_release import IsolatedCanaryReleaseExecutor
-from factory.common import sha256_text, utc_now
+from factory.capabilities import (
+    CapabilityBroker,
+    ConfiguredCapabilityProbe,
+    ProbeCommandResult,
+)
+from factory.common import sha256_file, sha256_text, utc_now
+from factory.config import validate_config
 from factory.quality import QualityGateRun
 from factory.release import ReleaseOperationFailed
 from factory.release_executor import _release_digest
@@ -32,6 +39,136 @@ from factory.state import StateStore
 from factory.worker import AgentWorker
 
 ROOT = Path(__file__).parents[1]
+
+
+def clean_canary_config(tmp_path: Path):
+    state_root = tmp_path / "state"
+    config = make_config(
+        state_root,
+        selected_registry(tmp_path / "registry.yaml", selected="gpt-5.6-luna"),
+    )
+    catalog_path = ROOT / "qualification" / "canaries" / "catalog.yaml"
+    scenario = load_canary_catalog(catalog_path)["deploy-rollback"]
+    attestation = tmp_path / "canary-capability-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "plane": "CLEAN_CANARY",
+                "capabilities": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config.raw["paths"]["canary_catalog"] = str(catalog_path)
+    config.raw["deployment"].update(
+        {
+            "current_vps_high_risk_production": False,
+            "production_helper": "",
+            "rollback_helper": "",
+            "production_target": {
+                "mode": "isolated_candidate",
+                "host": "clean-canary.invalid",
+                "install_root": str(state_root / "isolated-target"),
+                "entrypoint": "disabled",
+            },
+        }
+    )
+    config.raw["backup"].update(
+        {
+            "offsite_configured": False,
+            "proof_path": str(state_root / "qualification" / "backup-proof.json"),
+        }
+    )
+    config.raw["qualification"] = {
+        "plane": "CLEAN_CANARY",
+        "release_adapter": "IsolatedCanaryReleaseExecutor",
+        "capability_attestation_path": str(attestation),
+        "capability_attestation_digest": sha256_file(attestation),
+        "scenario_id": scenario.scenario_id,
+        "scenario_digest": scenario.scenario_digest,
+        "controller_release_digest": "2" * 64,
+        "candidate_digest": "3" * 64,
+        "faults": list(scenario.injected_faults),
+        "fault_receipt_root": str(state_root / "fault-receipts"),
+        "isolated_target_root": str(state_root / "isolated-target"),
+        "existing_repository_url": "",
+    }
+    return config
+
+
+def test_clean_canary_preflight_uses_only_bound_release_substitutes(
+    tmp_path: Path,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    assert validate_config(config) == []
+    probe = ConfiguredCapabilityProbe(config)
+
+    for capability, expected_operation in {
+        "backup.verify": "content-addressed-release-snapshot",
+        "production.deploy_transactional": "transactional-isolated-copy",
+        "rollback.execute": "transactional-isolated-copy",
+    }.items():
+        check = probe.check(capability, product={"product_id": "canary-product"})
+        assert check.status == "AVAILABLE"
+        assert check.provider == "clean-canary-release-adapter"
+        assert check.scope is not None
+        assert check.scope["adapter"] == "IsolatedCanaryReleaseExecutor"
+        assert check.scope["isolated_operation"] == expected_operation
+        assert check.scope["allowed_operations"] == [capability]
+        assert check.scope["scenario_id"] == "deploy-rollback"
+
+    state = StateStore(config.database_path)
+    try:
+        required = CapabilityBroker(config, state)._required_for_product(
+            {
+                "delivery_profile": "DEPLOYED_SERVICE",
+                "delivery_mode": "new_repository",
+            }
+        )
+    finally:
+        state.close()
+    assert "toolchain.container_builder" not in required
+    assert "toolchain.python" in required
+    assert "toolchain.scanners" in required
+    assert "production.deploy_transactional" in required
+    assert "github.pull_request.merge" in required
+
+
+def test_clean_canary_substitutes_fail_closed_outside_state_root(
+    tmp_path: Path,
+) -> None:
+    config = clean_canary_config(tmp_path)
+    outside = tmp_path / "outside-target"
+    config.raw["qualification"]["isolated_target_root"] = str(outside)
+    config.raw["deployment"]["production_target"]["install_root"] = str(outside)
+    config.raw["deployment"]["health_probe_url"] = (
+        "https://clean-canary.invalid/healthz"
+    )
+
+    assert "clean canary capability boundary is invalid" in validate_config(config)
+    probe = ConfiguredCapabilityProbe(
+        config,
+        command_runner=lambda _argv: ProbeCommandResult(127),
+    )
+    denied = probe.check(
+        "production.deploy_transactional",
+        product={"product_id": "escaped-canary-product"},
+    )
+    assert denied.status == "DENIED_POLICY"
+    assert denied.provider == "production-boundary"
+
+    state = StateStore(config.database_path)
+    try:
+        required = CapabilityBroker(config, state)._required_for_product(
+            {
+                "delivery_profile": "DEPLOYED_SERVICE",
+                "delivery_mode": "new_repository",
+            }
+        )
+    finally:
+        state.close()
+    assert "toolchain.container_builder" in required
 
 
 def contract(tmp_path: Path, *faults: str) -> CanaryFaultContract:

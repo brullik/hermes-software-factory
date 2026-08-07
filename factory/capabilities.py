@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 from .autonomy import CAPABILITY_PROFILES, OWNER_ACTION_REASONS
 from .common import sha256_file, sha256_text, stable_json, utc_now
-from .config import FactoryConfig
+from .config import FactoryConfig, clean_canary_capability_context
 from .owner_actions import OwnerActionService
 from .proof_obligations import ToolchainManifest
 from .state import StateStore
@@ -74,6 +74,7 @@ class ConfiguredCapabilityProbe:
         self.command_runner = command_runner or self._run
         self._github_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
         self._production_cache: tuple[datetime, dict[str, bool]] | None = None
+        self._clean_canary_context = clean_canary_capability_context(config)
         self._isolated_attestations = self._load_isolated_attestations()
 
     def _load_isolated_attestations(self) -> dict[str, CapabilityCheck]:
@@ -710,6 +711,22 @@ class ConfiguredCapabilityProbe:
     ) -> CapabilityCheck:
         if capability in self._isolated_attestations:
             return self._isolated_attestations[capability]
+        isolated_operation = {
+            "backup.verify": "content-addressed-release-snapshot",
+            "production.deploy_transactional": "transactional-isolated-copy",
+            "rollback.execute": "transactional-isolated-copy",
+        }.get(capability)
+        if isolated_operation is not None and self._clean_canary_context is not None:
+            return CapabilityCheck(
+                capability,
+                "AVAILABLE",
+                "clean-canary-release-adapter",
+                scope={
+                    "allowed_operations": [capability],
+                    "isolated_operation": isolated_operation,
+                    **self._clean_canary_context,
+                },
+            )
         if capability.startswith("toolchain."):
             return self._toolchain_check(capability)
         if capability.startswith(("github.", "git.")) or capability in {
@@ -775,9 +792,14 @@ class CapabilityBroker:
         self.state = state
         self.probe = probe or ConfiguredCapabilityProbe(config)
         self.owner_actions = OwnerActionService(config)
+        self._clean_canary_context = clean_canary_capability_context(config)
 
     @staticmethod
-    def required_for_product(product: dict[str, Any]) -> tuple[str, ...]:
+    def required_for_product(
+        product: dict[str, Any],
+        *,
+        include_container_builder: bool = True,
+    ) -> tuple[str, ...]:
         from .delivery_profiles import delivery_profile
         from .lifecycle import stage_contract
 
@@ -795,13 +817,9 @@ class CapabilityBroker:
             for profile in profiles
             for capability in CAPABILITY_PROFILES[profile]
         ]
-        capabilities.extend(
-            (
-                "toolchain.python",
-                "toolchain.container_builder",
-                "toolchain.scanners",
-            )
-        )
+        capabilities.extend(("toolchain.python", "toolchain.scanners"))
+        if include_container_builder:
+            capabilities.append("toolchain.container_builder")
         if str(product.get("delivery_mode") or "") in {
             "new_repository",
             "existing_repository",
@@ -809,6 +827,12 @@ class CapabilityBroker:
             capabilities.append("toolchain.make")
         return tuple(
             dict.fromkeys(capabilities)
+        )
+
+    def _required_for_product(self, product: dict[str, Any]) -> tuple[str, ...]:
+        return self.required_for_product(
+            product,
+            include_container_builder=self._clean_canary_context is None,
         )
 
     def _controller_incident(
@@ -1117,7 +1141,7 @@ class CapabilityBroker:
             raise KeyError(product_id)
         results: list[CapabilityCheck] = []
         changed_external: dict[str, list[CapabilityCheck]] = {}
-        for capability in self.required_for_product(product):
+        for capability in self._required_for_product(product):
             check = self.probe.check(capability, product=product)
             check.validate()
             results.append(check)
@@ -1254,7 +1278,7 @@ class CapabilityReconciler:
                     "FAILED_SAFE",
                 }:
                     continue
-                expected = self.broker.required_for_product(product)
+                expected = self.broker._required_for_product(product)
                 checks = self.state._connection.execute(
                     """SELECT capability, status, checked_at
                          FROM capability_check_results
