@@ -284,8 +284,26 @@ def test_functional_reconcile_retires_checkpointed_failed_release_epoch(
     ]
 
 
+@pytest.mark.parametrize(
+    ("reason_code", "operation", "message"),
+    (
+        (
+            "candidate_github_operation_denied",
+            "github.repository.create_private",
+            "github.repository.create_private was denied",
+        ),
+        (
+            "candidate_github_workflow_permission_denied",
+            "git.branch.push",
+            "workflow-file write",
+        ),
+    ),
+)
 def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
     tmp_path: Path,
+    reason_code: str,
+    operation: str,
+    message: str,
 ) -> None:
     epoch_id = "RE-Q65-EXTERNAL"
     release_database = tmp_path / "release.db"
@@ -339,14 +357,14 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
             "candidate_digest": DIGEST,
             "toolchain_digest": TOOLCHAIN,
             "credential_epoch_id": credential_epoch,
-            "capability": "github.repository.create_private",
-            "operation": "github.repository.create_private",
+            "capability": operation,
+            "operation": operation,
             "scope": {
                 "owner": "brullik",
                 "repository": f"hermes-canary-q65-{DIGEST[:10]}",
                 "private": True,
             },
-            "safe_reason_code": "candidate_github_operation_denied",
+            "safe_reason_code": reason_code,
             "observed_at": "2026-08-06T00:01:00Z",
         },
     )
@@ -370,8 +388,8 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
 
     assert result == replay
     assert result["status"] == "WAITING_CAPABILITY"
-    assert result["reason_code"] == "candidate_github_operation_denied"
-    assert result["operation"] == "github.repository.create_private"
+    assert result["reason_code"] == reason_code
+    assert result["operation"] == operation
     database = sqlite3.connect(state_root / "functional.db")
     try:
         epoch = database.execute(
@@ -379,8 +397,8 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
         ).fetchone()
         report = database.execute(
             "SELECT status FROM capability_handshake_reports "
-            "WHERE epoch_id=? AND operation='github.repository.create_private'",
-            (epoch_id,),
+            "WHERE epoch_id=? AND operation=?",
+            (epoch_id, operation),
         ).fetchone()
         action = database.execute(
             "SELECT action_id,status,reason_code,capability,capability_epoch "
@@ -394,8 +412,8 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
     assert action is not None
     assert action[1:] == (
         "OPEN",
-        "candidate_github_operation_denied",
-        "github.repository.create_private",
+        reason_code,
+        operation,
         credential_epoch,
     )
     notification = json.loads(
@@ -403,7 +421,7 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
         .read_text(encoding="utf-8")
     )
     assert notification["kind"] == "OWNER_ACTION_REQUIRED"
-    assert "github.repository.create_private was denied" in notification["text"]
+    assert message in notification["text"]
     assert "fixture-token" not in notification["text"]
 
     credential.write_text("replacement-fixture-token-not-a-real-secret", encoding="utf-8")
@@ -885,6 +903,37 @@ def test_candidate_broker_verifies_private_repository_configuration(
     )
     assert "state:configuration_verified" in receipt.object_ids
     assert "private:true" in receipt.object_ids
+
+
+def test_candidate_broker_types_missing_workflow_scope_without_exposing_output(
+    tmp_path: Path,
+) -> None:
+    credential = tmp_path / "github-token"
+    credential.write_text("fixture-token-not-a-real-secret", encoding="utf-8")
+    credential.chmod(0o600)
+    error = (
+        "remote: refusing to allow a Personal Access Token to create or update workflow "
+        "'.github/workflows/q6-5-proof.yml' without `workflow` scope"
+    )
+
+    broker = GitHubCredentialBroker(
+        policy=BrokerPolicy(owner="brullik"),
+        credential_path=credential,
+        receipt_root=tmp_path / "receipts",
+        credential_epoch_id="CE-1",
+        command_runner=lambda argv, environment, cwd: subprocess.CompletedProcess(
+            argv, 1, "", error
+        ),
+    )
+
+    with pytest.raises(
+        CredentialBrokerError,
+        match="^candidate_github_workflow_permission_denied$",
+    ):
+        broker._run(
+            ["git", "push"],
+            environment={"GH_TOKEN": "fixture-token-not-a-real-secret"},
+        )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX credential modes are required")
@@ -1421,6 +1470,33 @@ def test_q6_5_github_denial_is_typed_and_written_as_immutable_wait(
     digest = failure.pop("receipt_digest")
     assert digest == sha256_text(json.dumps(failure, sort_keys=True, separators=(",", ":")))
     assert failure["safe_reason_code"] == "candidate_github_operation_denied"
+
+
+def test_q6_5_workflow_permission_denial_is_typed_for_branch_push(tmp_path: Path) -> None:
+    class DeniedBroker(_FakeQ65Broker):
+        def execute(self, request: BrokerRequest) -> BrokerReceipt:
+            if request.operation == "branch.push":
+                raise CredentialBrokerError(
+                    "candidate_github_workflow_permission_denied"
+                )
+            return super().execute(request)
+
+    handshake = GitHubOperationHandshake(
+        broker=DeniedBroker(),  # type: ignore[arg-type]
+        identity=ProbeIdentity(DIGEST, TOOLCHAIN, "CE-" + "A" * 32),
+        epoch_id=COMMIT,
+        owner="brullik",
+        repository=f"hermes-canary-q65-{DIGEST[:10]}",
+        workspace=tmp_path / "workspace",
+    )
+
+    with pytest.raises(Q65ExternalCapabilityError) as captured:
+        handshake.run()
+    assert captured.value.operation == "git.branch.push"
+    assert (
+        captured.value.safe_reason_code
+        == "candidate_github_workflow_permission_denied"
+    )
 
 
 class _ProviderRunner:
