@@ -3031,6 +3031,12 @@ class WorkerTests(unittest.TestCase):
             dependencies.assert_called_once_with(task)
             self.assertIn(upstream, spec.evidence)
             self.assertIn(dependency, spec.evidence)
+            self.assertTrue(
+                any(
+                    "not a Git commit ID" in item and "git rev-parse HEAD" in item
+                    for item in spec.decisions
+                )
+            )
             state.close()
 
     def test_deferred_builder_output_is_accepted_by_test_engineer(self) -> None:

@@ -1503,6 +1503,7 @@ class AgentWorker:
                 "allowed_paths. When the repository's task-local acceptance command passes, "
                 "report that evidence and complete the implementation."
             )
+        if prompt_role in {"builder", "security-reviewer", "independent-reviewer"}:
             decisions.append(
                 "Context Pack subject_sha is the controller's SHA-256 digest of the exact "
                 "leased workspace snapshot, not a Git commit ID. Do not compare it with "
