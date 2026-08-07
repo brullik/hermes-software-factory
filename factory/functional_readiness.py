@@ -580,6 +580,7 @@ class FunctionalQualificationGovernor:
     ) -> str:
         if reason_code not in {
             "candidate_github_operation_denied",
+            "candidate_github_workflow_permission_denied",
             "missing_candidate_github_credential",
             "missing_candidate_provider_credential",
             "missing_candidate_telegram_credential",
