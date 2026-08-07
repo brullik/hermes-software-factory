@@ -1494,6 +1494,18 @@ def test_q6_5_provider_failure_index_resumes_only_after_safe_auth_probe(
     assert len(list((tmp_path / "archive").glob("failure-index-*.json"))) == 1
 
 
+def test_q6_5_canonicalizes_supported_podman_sha256_image_ids() -> None:
+    raw = "a" * 64
+    canonical = f"sha256:{raw}"
+
+    assert q6_5_live._canonical_sha256_image_id(raw) == canonical
+    assert q6_5_live._canonical_sha256_image_id(canonical) == canonical
+    with pytest.raises(q6_5_live.LiveProbeError, match="SHA-256 image digest"):
+        q6_5_live._canonical_sha256_image_id("a" * 63)
+    with pytest.raises(q6_5_live.LiveProbeError, match="SHA-256 image digest"):
+        q6_5_live._canonical_sha256_image_id(f"sha512:{raw}")
+
+
 def test_wf_p0_006_007_provider_three_tier_schema_and_semantic_identity(
     tmp_path: Path,
 ) -> None:

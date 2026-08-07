@@ -43,6 +43,7 @@ class LiveProbeError(RuntimeError):
 
 
 _SAFE_PROVIDER = re.compile(r"^[A-Za-z0-9._-]+$")
+_SHA256_IMAGE_ID = re.compile(r"^(?:sha256:)?([a-f0-9]{64})$")
 
 
 def _prepare_shared_workspace_root(path: Path) -> Path:
@@ -107,6 +108,15 @@ def _run(argv: list[str], *, cwd: Path, timeout: int = 1800) -> str:
     if result.returncode != 0:
         raise LiveProbeError(f"Q6.5 adapter failed:{Path(argv[0]).name}:{result.returncode}")
     return result.stdout.strip()
+
+
+def _canonical_sha256_image_id(value: str) -> str:
+    """Normalize the two image-ID forms emitted by supported Podman releases."""
+
+    matched = _SHA256_IMAGE_ID.fullmatch(value.strip())
+    if matched is None:
+        raise LiveProbeError("rootless runtime did not return a SHA-256 image digest")
+    return f"sha256:{matched.group(1)}"
 
 
 def _write_once(path: Path, payload: dict[str, Any]) -> Path:
@@ -253,9 +263,9 @@ def _container_and_deployment(
     )
     tag = f"localhost/hermes-q65:{identity.candidate_digest[:12]}"
     _run(["podman", "build", "--pull=missing", "-t", tag, "."], cwd=build_root)
-    image = _run(["podman", "image", "inspect", tag, "--format", "{{.Id}}"], cwd=root)
-    if not image.startswith("sha256:"):
-        raise LiveProbeError("rootless builder did not return an image digest")
+    image = _canonical_sha256_image_id(
+        _run(["podman", "image", "inspect", tag, "--format", "{{.Id}}"], cwd=root)
+    )
     inspect = json.loads(_run(["podman", "image", "inspect", tag], cwd=root))
     image_user = (
         str(inspect[0].get("Config", {}).get("User") or "")
@@ -297,15 +307,15 @@ def _container_and_deployment(
                 raise
         else:
             raise LiveProbeError("isolated failed-health proof did not fail")
-        deployed_digest = _run(
-            ["podman", "inspect", name, "--format", "{{.Image}}"], cwd=root
+        deployed_digest = _canonical_sha256_image_id(
+            _run(["podman", "inspect", name, "--format", "{{.Image}}"], cwd=root)
         )
     finally:
         _run(["podman", "rm", "-f", name], cwd=root)
     _run(["podman", "run", "-d", "--name", name, tag], cwd=root)
     try:
-        restored_digest = _run(
-            ["podman", "inspect", name, "--format", "{{.Image}}"], cwd=root
+        restored_digest = _canonical_sha256_image_id(
+            _run(["podman", "inspect", name, "--format", "{{.Image}}"], cwd=root)
         )
     finally:
         _run(["podman", "rm", "-f", name], cwd=root)
