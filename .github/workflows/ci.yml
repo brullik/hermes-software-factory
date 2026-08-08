@@ -32,16 +32,25 @@ jobs:
 
   scope-guard:
     name: factory/scope-guard
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
+      - name: Checkout exact pull request head with base history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.12"
-      - name: Run scope and command policy tests
-        run: python -m unittest tests.test_policy_guard -v
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Fetch exact protected base
+        run: git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}"
+      - name: Enforce frozen merge-base task scope
+        run: |
+          python scripts/task_scope_guard.py \
+            --base-ref "refs/remotes/origin/${{ github.event.pull_request.base.ref }}" \
+            --head-ref "${{ github.event.pull_request.head.sha }}" \
+            --branch "${{ github.head_ref }}" \
+            --original-goal-digest "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497"
+      - name: Exercise fail-closed scope fixtures
+        run: python -m unittest tests.test_task_scope_guard -v
 
   quality:
     name: factory/quality

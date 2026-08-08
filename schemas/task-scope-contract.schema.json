@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task-scope-contract.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_id",
+    "original_goal_digest",
+    "product_id",
+    "task_id",
+    "branch",
+    "trusted_base_sha",
+    "allowed_paths",
+    "forbidden_paths",
+    "max_changed_files",
+    "max_additions",
+    "max_deletions",
+    "rationale",
+    "approved_by",
+    "approval_evidence_ref",
+    "approval_evidence_digest",
+    "created_at",
+    "expires_at",
+    "parent_contract_digest",
+    "contract_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "contract_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{8,160}$"
+    },
+    "original_goal_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "product_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "branch": {
+      "type": "string",
+      "pattern": "^codex/[A-Za-z0-9][A-Za-z0-9._/-]{1,118}$"
+    },
+    "trusted_base_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "allowed_paths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      }
+    },
+    "forbidden_paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      }
+    },
+    "max_changed_files": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "max_additions": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20000
+    },
+    "max_deletions": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20000
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 4000
+    },
+    "approved_by": {
+      "enum": [
+        "desktop-bootstrap",
+        "hermes-path-arbiter"
+      ]
+    },
+    "approval_evidence_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "approval_evidence_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "parent_contract_digest": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      ]
+    },
+    "contract_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}
