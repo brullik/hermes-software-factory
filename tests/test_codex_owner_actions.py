@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from factory.codex_owner_actions import CodexOwnerActionStore, OwnerApprovalRejected
 from factory.common import sha256_text
@@ -196,6 +197,18 @@ class CodexOwnerActionTests(unittest.TestCase):
         with sqlite3.connect(self.store.path) as connection:
             count = connection.execute("SELECT COUNT(*) FROM codex_owner_actions").fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_existing_shared_mode_does_not_require_owner_chmod(self) -> None:
+        path = self.store.path
+        self.store.close()
+        with patch(
+            "factory.codex_owner_actions.os.chmod",
+            side_effect=PermissionError("not file owner"),
+        ) as chmod:
+            self.store = CodexOwnerActionStore(path)
+        chmod.assert_not_called()
+        self.assertEqual(path.stat().st_mode & 0o777, 0o660)
+        self.assertEqual(self.store.pending_notifications(), [])
 
     def test_gateway_parser_accepts_only_typed_approval_arguments(self) -> None:
         action_id = "owner-action-0123456789abcdef0123"
