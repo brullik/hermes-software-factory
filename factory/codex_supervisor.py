@@ -405,6 +405,64 @@ class CodexSupervisor:
             state.session_id = session_id
         self._save_state(state)
 
+    def _continuation_prompt(self, state: SupervisorState) -> str:
+        path = self.config.goal_path.with_name("continuation-handoff.json")
+        if not path.exists():
+            return _RESUME_PROMPT
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32_768:
+            raise SupervisorConfigurationError("continuation handoff path is unsafe")
+        try:
+            value: Any = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as error:
+            raise SupervisorConfigurationError("continuation handoff is unreadable") from error
+        required = {
+            "schema_version",
+            "goal_id",
+            "original_goal_digest",
+            "session_id",
+            "active_obligation",
+            "instructions",
+            "replay_guard",
+            "handoff_digest",
+        }
+        if not isinstance(value, dict) or set(value) != required:
+            raise SupervisorConfigurationError("continuation handoff schema differs")
+        unsigned = dict(value)
+        supplied_digest = str(unsigned.pop("handoff_digest"))
+        if supplied_digest != sha256_text(stable_json(unsigned)):
+            raise SupervisorConfigurationError("continuation handoff digest differs")
+        if (
+            value["schema_version"] != "1.0"
+            or value["goal_id"] != state.goal_id
+            or value["original_goal_digest"] != state.prompt_digest
+            or value["session_id"] != state.session_id
+        ):
+            raise SupervisorConfigurationError("continuation handoff identity differs")
+        obligation = value["active_obligation"]
+        replay_guard = value["replay_guard"]
+        instructions = value["instructions"]
+        if (
+            not isinstance(obligation, str)
+            or not obligation
+            or not isinstance(replay_guard, str)
+            or not replay_guard
+            or not isinstance(instructions, list)
+            or not 1 <= len(instructions) <= 20
+            or not all(
+                isinstance(instruction, str) and 1 <= len(instruction) <= 2_000
+                for instruction in instructions
+            )
+        ):
+            raise SupervisorConfigurationError("continuation handoff content is invalid")
+        rendered = "\n".join(f"- {instruction}" for instruction in instructions)
+        return (
+            _RESUME_PROMPT
+            + "\n\nDurable recovery handoff "
+            + supplied_digest
+            + f" (replay guard {replay_guard}). Active obligation: {obligation}.\n"
+            + rendered
+        )
+
     def _command(self, state: SupervisorState) -> tuple[list[str], str]:
         base = [
             str(self.config.codex_binary),
@@ -428,7 +486,7 @@ class CodexSupervisor:
             )
             return command, prompt
         command = [*base, "resume", *common, state.session_id, "-"]
-        return command, _RESUME_PROMPT
+        return command, self._continuation_prompt(state)
 
     @staticmethod
     def _environment() -> dict[str, str]:
@@ -453,7 +511,20 @@ class CodexSupervisor:
         if not isinstance(value, dict):
             return None
         status = value.get("status")
-        return str(status) if status in _TERMINAL_STATES | {"WAITING_OWNER_ACTION"} else None
+        if status == "OWNER_ACTION_REQUIRED":
+            return "WAITING_OWNER_ACTION"
+        if status != "AUTONOMOUS_FACTORY_READY":
+            return None
+        factory = value.get("factory")
+        manifest = factory.get("ready_result_manifest") if isinstance(factory, dict) else None
+        if (
+            not isinstance(manifest, str)
+            or not manifest
+            or manifest == "<immutable reference>"
+            or manifest.startswith("WORK_IN_PROGRESS")
+        ):
+            return None
+        return "COMPLETED"
 
     @staticmethod
     def _failure_class(diagnostics: str, returncode: int) -> str:
@@ -518,14 +589,15 @@ class CodexSupervisor:
             on_event=lambda event: self._on_event(state, event),
         )
         structured_status = self._structured_result()
-        if result.returncode == 0 and (
-            state.last_event_type == "turn.completed" or structured_status is not None
-        ):
-            final_status = structured_status or "COMPLETED"
-            self._transition(state, final_status, None)
+        if result.returncode == 0 and structured_status is not None:
+            self._transition(state, structured_status, None)
             return state
 
-        failure_class = self._failure_class(result.diagnostics, result.returncode)
+        failure_class = (
+            "missing_structured_terminal_result"
+            if result.returncode == 0
+            else self._failure_class(result.diagnostics, result.returncode)
+        )
         failure_digest = sha256_text(
             stable_json(
                 {

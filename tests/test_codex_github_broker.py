@@ -33,6 +33,7 @@ CORE_OPERATIONS = frozenset(
         "branch.push",
         "pull_request.create",
         "pull_request.read",
+        "pull_request.update",
         "checks.read",
         "review_threads.read",
         "pull_request.merge_or_close",
@@ -49,6 +50,7 @@ class StrictRunner:
         self.draft = False
         self.check_states = {name: "success" for name in REQUIRED_CHECKS}
         self.unresolved = 0
+        self.merged = False
 
     def __call__(
         self,
@@ -64,8 +66,9 @@ class StrictRunner:
             self.pull_reads += 1
             value = {
                 "number": 17,
-                "state": "open" if self.pull_reads == 1 else "closed",
+                "state": "closed" if self.merged else "open",
                 "draft": self.draft,
+                "node_id": "PR_node_fixture",
                 "head": {"sha": self.head, "ref": "codex/canary-commissioning"},
                 "base": {"ref": self.base},
                 "merged": self.pull_reads > 1,
@@ -80,6 +83,25 @@ class StrictRunner:
             }
         elif argv[-1].endswith(f"/commits/{HEAD}/status"):
             value = {"state": "success", "statuses": []}
+        elif "convertPullRequestToDraft" in " ".join(argv):
+            self.draft = True
+            value = {
+                "data": {
+                    "convertPullRequestToDraft": {
+                        "pullRequest": {"number": 17, "isDraft": True}
+                    }
+                }
+            }
+        elif any(arg.endswith("/issues/17/comments") for arg in argv) and "POST" in argv:
+            value = {"id": 4242}
+        elif any(arg.endswith("/pulls") for arg in argv) and "POST" in argv:
+            value = {
+                "number": 18,
+                "state": "open",
+                "draft": "draft=true" in argv,
+                "head": {"sha": HEAD, "ref": "codex/metadata-test"},
+                "base": {"ref": "main"},
+            }
         elif "graphql" in argv:
             value = {
                 "data": {
@@ -97,6 +119,7 @@ class StrictRunner:
                 }
             }
         elif "PUT" in argv and argv[-5].endswith("/pulls/17/merge"):
+            self.merged = True
             value = {"merged": True, "sha": MERGE, "message": "merged"}
         elif argv[-1].endswith(f"/commits/{MERGE}"):
             value = {"sha": MERGE, "parents": [{"sha": "d" * 40}]}
@@ -401,3 +424,97 @@ def test_broker_types_workspace_failures_without_returning_git_output(
     )
     with pytest.raises(CredentialBrokerError, match=f"^{reason}$"):
         broker._run(["git", "push"], environment={})
+
+
+def test_typed_pr_create_preserves_bounded_body_and_draft(tmp_path: Path) -> None:
+    runner = StrictRunner()
+    broker = _broker(tmp_path, runner)
+    receipt = broker.execute(
+        BrokerRequest(
+            request_id="CODEX-PR-CREATE-METADATA",
+            operation="pull_request.create",
+            owner="brullik",
+            repository="hermes-software-factory",
+            payload={
+                "head": "codex/metadata-test",
+                "base": "main",
+                "title": "Bounded title",
+                "body": "Bounded governed body",
+                "draft": True,
+            },
+        )
+    )
+    assert receipt.result == "PASS"
+    call = next(
+        argv for argv in runner.calls if any(arg.endswith("/pulls") for arg in argv)
+    )
+    assert "body=Bounded governed body" in call
+    assert "draft=true" in call
+
+
+def test_typed_pr_update_is_exact_head_bound_for_draft_and_comment(
+    tmp_path: Path,
+) -> None:
+    draft_runner = StrictRunner()
+    draft_root = tmp_path / "draft"
+    draft_root.mkdir()
+    draft_broker = _broker(draft_root, draft_runner)
+    draft = draft_broker.execute(
+        BrokerRequest(
+            request_id="CODEX-PR-MARK-DRAFT",
+            operation="pull_request.update",
+            owner="brullik",
+            repository="hermes-software-factory",
+            payload={
+                "number": 17,
+                "action": "mark_draft",
+                "expected_head_sha": HEAD,
+            },
+        )
+    )
+    assert "draft:true" in draft.object_ids
+
+    comment_runner = StrictRunner()
+    comment_root = tmp_path / "comment"
+    comment_root.mkdir()
+    comment_broker = _broker(comment_root, comment_runner)
+    comment = comment_broker.execute(
+        BrokerRequest(
+            request_id="CODEX-PR-STATUS-COMMENT",
+            operation="pull_request.update",
+            owner="brullik",
+            repository="hermes-software-factory",
+            payload={
+                "number": 17,
+                "action": "comment",
+                "expected_head_sha": HEAD,
+                "body": "Frozen for bounded decomposition.",
+            },
+        )
+    )
+    assert "comment_id:4242" in comment.object_ids
+    comment_call = next(
+        argv
+        for argv in comment_runner.calls
+        if any(arg.endswith("/issues/17/comments") for arg in argv)
+    )
+    assert "body=Frozen for bounded decomposition." in comment_call
+
+
+def test_pr_update_rejects_unbound_or_extra_payload(tmp_path: Path) -> None:
+    broker = _broker(tmp_path, StrictRunner())
+    with pytest.raises(CredentialBrokerError, match="payload is invalid"):
+        broker.execute(
+            BrokerRequest(
+                request_id="CODEX-PR-UPDATE-INVALID",
+                operation="pull_request.update",
+                owner="brullik",
+                repository="hermes-software-factory",
+                payload={
+                    "number": 17,
+                    "action": "mark_draft",
+                    "expected_head_sha": HEAD,
+                    "body": "unexpected",
+                },
+            )
+        )

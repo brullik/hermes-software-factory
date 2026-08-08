@@ -36,10 +36,21 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--head", required=True)
     create.add_argument("--base", default="main")
     create.add_argument("--title", required=True)
+    create.add_argument("--body-file", type=Path)
+    create.add_argument("--draft", action="store_true")
 
     for name in ("pr-read", "pr-close", "threads"):
         subparser = commands.add_parser(name)
         subparser.add_argument("--number", type=int, required=True)
+
+    mark_draft = commands.add_parser("pr-mark-draft")
+    mark_draft.add_argument("--number", type=int, required=True)
+    mark_draft.add_argument("--expected-head-sha", required=True)
+
+    comment = commands.add_parser("pr-comment")
+    comment.add_argument("--number", type=int, required=True)
+    comment.add_argument("--expected-head-sha", required=True)
+    comment.add_argument("--body-file", type=Path, required=True)
 
     checks = commands.add_parser("checks")
     checks.add_argument("--sha", required=True)
@@ -65,10 +76,30 @@ def _request(args: argparse.Namespace) -> tuple[str, dict[str, object]]:
             "branch": args.branch,
         }
     if args.command == "pr-create":
+        body = (
+            args.body_file.resolve().read_text(encoding="utf-8")
+            if args.body_file is not None
+            else "Operation-specific Hermes Q6.5 canary"
+        )
         return "pull_request.create", {
             "head": args.head,
             "base": args.base,
             "title": args.title,
+            "body": body,
+            "draft": args.draft,
+        }
+    if args.command == "pr-mark-draft":
+        return "pull_request.update", {
+            "number": args.number,
+            "action": "mark_draft",
+            "expected_head_sha": args.expected_head_sha,
+        }
+    if args.command == "pr-comment":
+        return "pull_request.update", {
+            "number": args.number,
+            "action": "comment",
+            "expected_head_sha": args.expected_head_sha,
+            "body": args.body_file.resolve().read_text(encoding="utf-8"),
         }
     if args.command == "pr-read":
         return "pull_request.read", {"number": args.number}
