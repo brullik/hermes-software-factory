@@ -18,7 +18,7 @@ LC_ALL = "C.UTF-8"
 PATH = "/usr/local/bin:/usr/bin:/bin"
 
 [permissions.codex-vps-workspace]
-description = "Workspace-write semantics with credential, production, and egress isolation."
+description = "Workspace and Git-metadata write semantics with credential, production, and egress isolation."
 extends = ":workspace"
 
 [permissions.codex-vps-workspace.filesystem]
@@ -33,7 +33,7 @@ glob_scan_max_depth = 8
 [permissions.codex-vps-workspace.filesystem.":workspace_roots"]
 "." = "write"
 ".codex" = "read"
-".git" = "read"
+".git" = "write"
 "**/*.env" = "deny"
 "**/*credential*" = "deny"
 "**/*secret*" = "deny"

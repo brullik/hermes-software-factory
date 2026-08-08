@@ -127,6 +127,20 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(config["model"], "gpt-5.6-sol")
         self.assertEqual(config["model_reasoning_effort"], "xhigh")
         self.assertFalse(config["features"]["shell_snapshot"])
+        profile = config["permissions"]["codex-vps-workspace"]
+        self.assertEqual(profile["extends"], ":workspace")
+        workspace = profile["filesystem"][":workspace_roots"]
+        self.assertEqual(workspace["."], "write")
+        self.assertEqual(workspace[".git"], "write")
+        self.assertEqual(workspace[".codex"], "read")
+        self.assertEqual(
+            profile["filesystem"]["/home/hermescodex/.codex/auth.json"], "deny"
+        )
+        self.assertEqual(
+            profile["network"]["unix_sockets"]["/run/hermes-codex-github-broker/broker.sock"],
+            "allow",
+        )
+        self.assertNotIn("danger-full-access", json.dumps(config, sort_keys=True))
 
     def test_vps_systemd_unit_keeps_code_mode_compatible_hardening(self) -> None:
         unit = (
