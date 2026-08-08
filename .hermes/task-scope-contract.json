@@ -2,33 +2,31 @@
   "allowed_paths": [
     ".hermes/task-scope-contract.json",
     "SHA256SUMS",
-    "config/codex-vps/config.toml",
-    "tests/test_codex_supervisor.py"
+    "docs/commissioning/CODEX-VPS-SELF-PUBLISH-CANARY-20260808.md"
   ],
-  "approval_evidence_digest": "e1bc81f83956f8ee5c8602546ec230adecb1cb032c885f46122079313ceae866",
-  "approval_evidence_ref": "artifact://desktop-bootstrap/e1bc81f83956f8ee5c8602546ec230adecb1cb032c885f46122079313ceae866",
+  "approval_evidence_digest": "1058b3f2b4870342396df0e2214f50c52332c6f2a467ac75b663aa7ea8434771",
+  "approval_evidence_ref": "artifact://desktop-recovery/1058b3f2b4870342396df0e2214f50c52332c6f2a467ac75b663aa7ea8434771",
   "approved_by": "desktop-bootstrap",
-  "branch": "codex/desktop-recovery-git-metadata-write",
-  "contract_digest": "28f4b68a8701d6fe412e25766ac04cec535f89f410a528c5625faee14f646cb7",
-  "contract_id": "desktop-recovery.git-metadata-write.20260808",
-  "created_at": "2026-08-08T19:26:28Z",
-  "expires_at": "2026-09-07T19:26:28Z",
+  "branch": "codex/vps-self-publish-canary-20260808",
+  "contract_digest": "57ce0b5fb728a1239cc4a641896c55b473c9f3c7e216c5692deb82217d627a4c",
+  "contract_id": "codex-vps.self-publish-canary.20260808",
+  "created_at": "2026-08-08T20:00:00Z",
+  "expires_at": "2026-09-07T20:00:00Z",
   "forbidden_paths": [
     ".git/**",
     "config/systemd/**",
-    "factory/codex_supervisor.py",
-    "factory/credential_broker.py",
-    "factory/gateway.py",
-    "factory/telegram.py"
+    "factory/**",
+    "scripts/**",
+    "tests/**"
   ],
-  "max_additions": 50,
-  "max_changed_files": 4,
-  "max_deletions": 30,
+  "max_additions": 160,
+  "max_changed_files": 3,
+  "max_deletions": 40,
   "original_goal_digest": "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497",
-  "parent_contract_digest": "54c90bead60bcd3356d9a5df39437a7741e98bd761090ffb6c4d80857e6a07fd",
+  "parent_contract_digest": "28f4b68a8701d6fe412e25766ac04cec535f89f410a528c5625faee14f646cb7",
   "product_id": "hermes-software-factory",
-  "rationale": "Allow the exact supervised workspace to update its local Git metadata while preserving credential, Stable, network-socket, and systemd isolation.",
+  "rationale": "Publish one neutral, non-merge commissioning canary from the supervised VPS through the typed GitHub broker, then close it and remove its remote branch without touching Stable runtime code.",
   "schema_version": "1.0",
-  "task_id": "desktop-recovery-git-metadata-write",
-  "trusted_base_sha": "36c8386d205a9f232e25e17ab9bde559791c2115"
+  "task_id": "vps-self-publish-canary-20260808",
+  "trusted_base_sha": "59e98d03f8a0d13848283e89e454e899ab3f48d3"
 }
