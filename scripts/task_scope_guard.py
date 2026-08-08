@@ -11,7 +11,7 @@ import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 
 CONTRACT_PATH = ".hermes/task-scope-contract.json"
 SHA40 = re.compile(r"^[a-f0-9]{40}$")
@@ -31,19 +31,30 @@ class ScopeViolation(RuntimeError):
     """The branch differs from its frozen, attested scope."""
 
 
+@overload
+def _git(repo: Path, *args: str, binary: Literal[False] = False) -> str: ...
+
+
+@overload
+def _git(repo: Path, *args: str, binary: Literal[True]) -> bytes: ...
+
+
 def _git(repo: Path, *args: str, binary: bool = False) -> str | bytes:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=False,
-        capture_output=True,
-        text=not binary,
+    command = ["git", "-C", str(repo), *args]
+    if binary:
+        binary_result = subprocess.run(command, check=False, capture_output=True)
+        if binary_result.returncode != 0:
+            stderr = binary_result.stderr.decode("utf-8", errors="replace")
+            raise ScopeViolation(f"git probe failed: {args[0]}: {stderr.strip()[:300]}")
+        return binary_result.stdout
+    text_result = subprocess.run(
+        command, check=False, capture_output=True, text=True, encoding="utf-8"
     )
-    if result.returncode != 0:
-        stderr = result.stderr if isinstance(result.stderr, str) else result.stderr.decode(
-            "utf-8", errors="replace"
+    if text_result.returncode != 0:
+        raise ScopeViolation(
+            f"git probe failed: {args[0]}: {text_result.stderr.strip()[:300]}"
         )
-        raise ScopeViolation(f"git probe failed: {args[0]}: {stderr.strip()[:300]}")
-    return result.stdout
+    return text_result.stdout
 
 
 def _canonical_digest(value: dict[str, Any]) -> str:
