@@ -62,6 +62,10 @@ INTAKE_DEADLINE="$(printf '%s' "${INTAKE_PHASE}" | "${VERIFIER_PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["deadline_epoch"])')"
 EPOCH_ID="$(printf '%s' "${INTAKE_PHASE}" | "${VERIFIER_PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["epoch_id"])')"
+if [[ ! "${EPOCH_ID}" =~ ^RE-[A-Z0-9][A-Z0-9-]{0,126}$ ]]; then
+  printf 'Golden functional epoch identity is unsafe\n' >&2
+  exit 65
+fi
 FUNCTIONAL_GOLDEN_ROOT="/var/lib/hermes-factory-functional/golden/${EPOCH_ID}"
 INTAKE_EVIDENCE="${FUNCTIONAL_GOLDEN_ROOT}/intake-evidence.json"
 GOLDEN_EVIDENCE="${FUNCTIONAL_GOLDEN_ROOT}/evidence.json"

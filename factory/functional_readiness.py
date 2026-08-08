@@ -27,6 +27,7 @@ from .common import sha256_text, stable_json, utc_now
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
 _CREDENTIAL_EPOCH = re.compile(r"^CE-[A-F0-9]{32}$")
+_EPOCH_ID = re.compile(r"^RE-[A-Z0-9][A-Z0-9-]{0,126}$")
 
 
 class FunctionalReadinessError(RuntimeError):
@@ -635,7 +636,7 @@ class FunctionalQualificationGovernor:
         candidate_digest: str,
         toolchain_digest: str,
     ) -> None:
-        if not epoch_id or not _SHA40.fullmatch(source_commit):
+        if _EPOCH_ID.fullmatch(epoch_id) is None or not _SHA40.fullmatch(source_commit):
             raise FunctionalReadinessError("functional epoch identity is invalid")
         if not _SHA256.fullmatch(candidate_digest) or not _SHA256.fullmatch(toolchain_digest):
             raise FunctionalReadinessError("functional epoch digest is invalid")

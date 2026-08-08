@@ -71,6 +71,17 @@ def test_pre_q8_phase_has_one_attempt_and_one_original_budget() -> None:
     )
 
 
+def test_functional_epoch_identity_cannot_escape_evidence_namespace() -> None:
+    governor = FunctionalQualificationGovernor(sqlite3.connect(":memory:"))
+    with pytest.raises(FunctionalReadinessError, match="identity is invalid"):
+        governor.register_epoch(
+            epoch_id="RE-../PREVIOUS",
+            source_commit="a" * 40,
+            candidate_digest="b" * 64,
+            toolchain_digest="c" * 64,
+        )
+
+
 def test_golden_intake_and_execution_use_separate_finite_deadlines() -> None:
     governor = _governor()
     governor.connection.execute(
