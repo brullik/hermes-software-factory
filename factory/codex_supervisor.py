@@ -408,12 +408,10 @@ class CodexSupervisor:
     def _command(self, state: SupervisorState) -> tuple[list[str], str]:
         base = [
             str(self.config.codex_binary),
-            "--permission-profile",
-            self.config.permission_profile,
+            "--strict-config",
             "exec",
         ]
         common = [
-            "--strict-config",
             "--json",
             "--output-schema",
             str(self.config.output_schema_path),

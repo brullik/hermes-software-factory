@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -17,6 +18,7 @@ from factory.codex_supervisor import (
 )
 
 SESSION_ID = "019c3fd5-3d61-7d20-a668-a2855efa25b1"
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeRunner:
@@ -47,6 +49,19 @@ class FakeRunner:
 
 
 class CodexSupervisorTests(unittest.TestCase):
+    def test_vps_config_uses_exact_permissions_without_shell_snapshot(self) -> None:
+        config = tomllib.loads(
+            (PACKAGE_ROOT / "config" / "codex-vps" / "config.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(config["approval_policy"], "on-request")
+        self.assertEqual(config["approvals_reviewer"], "auto_review")
+        self.assertEqual(config["default_permissions"], "codex-vps-workspace")
+        self.assertEqual(config["model"], "gpt-5.6-sol")
+        self.assertEqual(config["model_reasoning_effort"], "xhigh")
+        self.assertFalse(config["features"]["shell_snapshot"])
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
@@ -148,8 +163,10 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(supervisor.config.event_log_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(supervisor.config.state_path.stat().st_mode & 0o777, 0o600)
         command = runner.commands[0]
-        self.assertIn("--permission-profile", command)
-        self.assertIn("codex-vps-workspace", command)
+        self.assertNotIn("--permission-profile", command)
+        self.assertIn("--strict-config", command)
+        self.assertNotIn("--sandbox", command)
+        self.assertNotIn("--approve-for-me", command)
         self.assertIn("--json", command)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("danger-full-access", command)
