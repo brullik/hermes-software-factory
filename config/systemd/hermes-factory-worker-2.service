@@ -13,9 +13,16 @@ Environment=FACTORY_CONFIG=/etc/hermes-factory/config.yaml
 Environment=HOME=/var/lib/hermes-factory
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory
 Environment=PYTHONUNBUFFERED=1
+Environment=TERMINAL_ENV=docker
+Environment=HERMES_DOCKER_BINARY=/usr/bin/podman
+Environment=TERMINAL_DOCKER_FORWARD_ENV=[]
+Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
+Environment=TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES=false
+Environment=TERMINAL_DOCKER_RUN_AS_HOST_USER=true
 ExecStart=/opt/hermes-factory/venv/bin/python -m factory.worker --worker-id hermes-worker-2
 Restart=on-failure
 RestartSec=10
+NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
