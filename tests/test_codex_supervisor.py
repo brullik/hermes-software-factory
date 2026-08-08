@@ -21,6 +21,66 @@ SESSION_ID = "019c3fd5-3d61-7d20-a668-a2855efa25b1"
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
+def ready_result(manifest: str = "artifact://ready/result") -> dict[str, Any]:
+    return {
+        "status": "AUTONOMOUS_FACTORY_READY",
+        "factory": {
+            "golden_product": "COMPLETED",
+            "real_telegram_intake": "PASS",
+            "github_delivery": "PASS",
+            "product_delivery": "PASS",
+            "internal_state_verification": "PASS",
+            "ready_result_manifest": manifest,
+        },
+        "autonomy": {
+            "routine_gpt_codex_required": False,
+            "routine_owner_action_required": False,
+            "restart_recovery": "PASS",
+            "automatic_continuation": "PASS",
+            "telegram_notifier": "ACTIVE",
+            "support_bundle": "ACTIVE",
+        },
+        "self_improvement": {
+            "status": "ACTIVE",
+            "stable_self_write": False,
+            "isolated_candidate_only": True,
+            "finite_budget": True,
+            "independent_evaluation": True,
+        },
+        "safety": {
+            "credential_exposure": False,
+            "manual_database_edits": 0,
+            "branch_protection_bypassed": False,
+            "duplicate_side_effects": 0,
+            "open_controller_incidents": 0,
+        },
+        "reason_code": None,
+        "single_action": None,
+        "safe_instruction": None,
+        "unblock_probe": None,
+        "independent_work_completed": None,
+        "user_action_required": False,
+        "next_authority": "HERMES_AUTONOMOUS_RUNTIME",
+    }
+
+
+def owner_action_result() -> dict[str, Any]:
+    return {
+        "status": "OWNER_ACTION_REQUIRED",
+        "factory": None,
+        "autonomy": None,
+        "self_improvement": None,
+        "safety": None,
+        "reason_code": "two_factor_authentication",
+        "single_action": "Approve the existing login.",
+        "safe_instruction": ["Open the official login prompt and approve it."],
+        "unblock_probe": "Broker identity read returns PASS.",
+        "independent_work_completed": ["All credential-free checks completed."],
+        "user_action_required": True,
+        "next_authority": "OWNER",
+    }
+
+
 class FakeRunner:
     def __init__(self, steps: list[tuple[list[dict[str, Any]], CommandResult | Exception]]) -> None:
         self.steps = list(steps)
@@ -174,10 +234,7 @@ class CodexSupervisorTests(unittest.TestCase):
                         {"type": "thread.started", "thread_id": SESSION_ID},
                         {
                             "type": "test.structured_result",
-                            "value": {
-                                "status": "AUTONOMOUS_FACTORY_READY",
-                                "factory": {"ready_result_manifest": "artifact://ready/result"},
-                            },
+                            "value": ready_result(),
                         },
                         {"type": "turn.completed", "usage": {"input_tokens": 10}},
                     ],
@@ -221,10 +278,7 @@ class CodexSupervisorTests(unittest.TestCase):
                     [
                         {
                             "type": "test.structured_result",
-                            "value": {
-                                "status": "AUTONOMOUS_FACTORY_READY",
-                                "factory": {"ready_result_manifest": "artifact://ready/result"},
-                            },
+                            "value": ready_result(),
                         },
                         {"type": "turn.completed"},
                     ],
@@ -272,10 +326,7 @@ class CodexSupervisorTests(unittest.TestCase):
                     [
                         {
                             "type": "test.structured_result",
-                            "value": {
-                                "status": "AUTONOMOUS_FACTORY_READY",
-                                "factory": {"ready_result_manifest": "artifact://ready/result"},
-                            },
+                            "value": ready_result(),
                         },
                         {"type": "turn.completed"},
                     ],
@@ -312,7 +363,7 @@ class CodexSupervisorTests(unittest.TestCase):
                         {"type": "thread.started", "thread_id": SESSION_ID},
                         {
                             "type": "test.structured_result",
-                            "value": {"status": "OWNER_ACTION_REQUIRED"},
+                            "value": owner_action_result(),
                         },
                         {"type": "turn.completed"},
                     ],
@@ -324,6 +375,58 @@ class CodexSupervisorTests(unittest.TestCase):
             self.supervisor(runner).run_attempt().status, "WAITING_OWNER_ACTION"
         )
 
+    def test_incomplete_owner_action_is_not_a_terminal_stop(self) -> None:
+        malformed = owner_action_result()
+        malformed["safe_instruction"] = None
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {"type": "test.structured_result", "value": malformed},
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+        state = self.supervisor(runner).run_attempt()
+        self.assertEqual(state.status, "RETRYABLE_FAILURE")
+        self.assertEqual(state.last_failure_class, "missing_structured_terminal_result")
+
+    def test_incomplete_ready_result_is_not_success(self) -> None:
+        malformed = ready_result()
+        malformed["safety"] = None
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {"type": "test.structured_result", "value": malformed},
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+        state = self.supervisor(runner).run_attempt()
+        self.assertEqual(state.status, "RETRYABLE_FAILURE")
+        self.assertEqual(state.last_failure_class, "missing_structured_terminal_result")
+
+    def test_terminal_schema_is_supported_root_object_with_all_fields_required(self) -> None:
+        schema = json.loads(
+            (PACKAGE_ROOT / "schemas" / "autonomous-factory-ready-result.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(schema["type"], "object")
+        self.assertNotIn("oneOf", schema)
+        self.assertNotIn("anyOf", schema)
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        for field in ("factory", "autonomy", "self_improvement", "safety"):
+            nested = schema["properties"][field]
+            self.assertEqual(set(nested["required"]), set(nested["properties"]))
+
     def test_work_in_progress_ready_claim_is_rejected(self) -> None:
         runner = FakeRunner(
             [
@@ -332,12 +435,7 @@ class CodexSupervisorTests(unittest.TestCase):
                         {"type": "thread.started", "thread_id": SESSION_ID},
                         {
                             "type": "test.structured_result",
-                            "value": {
-                                "status": "AUTONOMOUS_FACTORY_READY",
-                                "factory": {
-                                    "ready_result_manifest": "WORK_IN_PROGRESS: still running"
-                                },
-                            },
+                            "value": ready_result("WORK_IN_PROGRESS: still running"),
                         },
                         {"type": "turn.completed"},
                     ],
@@ -381,10 +479,7 @@ class CodexSupervisorTests(unittest.TestCase):
                     [
                         {
                             "type": "test.structured_result",
-                            "value": {
-                                "status": "AUTONOMOUS_FACTORY_READY",
-                                "factory": {"ready_result_manifest": "artifact://ready/result"},
-                            },
+                            "value": ready_result(),
                         },
                         {"type": "turn.completed"},
                     ],

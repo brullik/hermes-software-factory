@@ -1,211 +1,130 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "autonomous-factory-ready-result.schema.json",
-  "oneOf": [
-    {
-      "type": "object",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "factory",
+    "autonomy",
+    "self_improvement",
+    "safety",
+    "reason_code",
+    "single_action",
+    "safe_instruction",
+    "unblock_probe",
+    "independent_work_completed",
+    "user_action_required",
+    "next_authority"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["AUTONOMOUS_FACTORY_READY", "OWNER_ACTION_REQUIRED"]
+    },
+    "factory": {
+      "type": ["object", "null"],
       "additionalProperties": false,
       "required": [
-        "status",
-        "factory",
-        "autonomy",
-        "self_improvement",
-        "safety",
-        "user_action_required",
-        "next_authority"
+        "golden_product",
+        "real_telegram_intake",
+        "github_delivery",
+        "product_delivery",
+        "internal_state_verification",
+        "ready_result_manifest"
       ],
       "properties": {
-        "status": {
-          "const": "AUTONOMOUS_FACTORY_READY"
-        },
-        "factory": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "golden_product",
-            "real_telegram_intake",
-            "github_delivery",
-            "product_delivery",
-            "internal_state_verification",
-            "ready_result_manifest"
-          ],
-          "properties": {
-            "golden_product": {
-              "const": "COMPLETED"
-            },
-            "real_telegram_intake": {
-              "const": "PASS"
-            },
-            "github_delivery": {
-              "const": "PASS"
-            },
-            "product_delivery": {
-              "const": "PASS"
-            },
-            "internal_state_verification": {
-              "const": "PASS"
-            },
-            "ready_result_manifest": {
-              "type": "string",
-              "minLength": 1
-            }
-          }
-        },
-        "autonomy": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "routine_gpt_codex_required",
-            "routine_owner_action_required",
-            "restart_recovery",
-            "automatic_continuation",
-            "telegram_notifier",
-            "support_bundle"
-          ],
-          "properties": {
-            "routine_gpt_codex_required": {
-              "const": false
-            },
-            "routine_owner_action_required": {
-              "const": false
-            },
-            "restart_recovery": {
-              "const": "PASS"
-            },
-            "automatic_continuation": {
-              "const": "PASS"
-            },
-            "telegram_notifier": {
-              "const": "ACTIVE"
-            },
-            "support_bundle": {
-              "const": "ACTIVE"
-            }
-          }
-        },
-        "self_improvement": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "status",
-            "stable_self_write",
-            "isolated_candidate_only",
-            "finite_budget",
-            "independent_evaluation"
-          ],
-          "properties": {
-            "status": {
-              "const": "ACTIVE"
-            },
-            "stable_self_write": {
-              "const": false
-            },
-            "isolated_candidate_only": {
-              "const": true
-            },
-            "finite_budget": {
-              "const": true
-            },
-            "independent_evaluation": {
-              "const": true
-            }
-          }
-        },
-        "safety": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "credential_exposure",
-            "manual_database_edits",
-            "branch_protection_bypassed",
-            "duplicate_side_effects",
-            "open_controller_incidents"
-          ],
-          "properties": {
-            "credential_exposure": {
-              "const": false
-            },
-            "manual_database_edits": {
-              "const": 0
-            },
-            "branch_protection_bypassed": {
-              "const": false
-            },
-            "duplicate_side_effects": {
-              "const": 0
-            },
-            "open_controller_incidents": {
-              "const": 0
-            }
-          }
-        },
-        "user_action_required": {
-          "const": false
-        },
-        "next_authority": {
-          "const": "HERMES_AUTONOMOUS_RUNTIME"
-        }
+        "golden_product": {"type": "string", "enum": ["COMPLETED"]},
+        "real_telegram_intake": {"type": "string", "enum": ["PASS"]},
+        "github_delivery": {"type": "string", "enum": ["PASS"]},
+        "product_delivery": {"type": "string", "enum": ["PASS"]},
+        "internal_state_verification": {"type": "string", "enum": ["PASS"]},
+        "ready_result_manifest": {"type": "string", "minLength": 1}
       }
     },
-    {
-      "type": "object",
+    "autonomy": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "routine_gpt_codex_required",
+        "routine_owner_action_required",
+        "restart_recovery",
+        "automatic_continuation",
+        "telegram_notifier",
+        "support_bundle"
+      ],
+      "properties": {
+        "routine_gpt_codex_required": {"type": "boolean", "enum": [false]},
+        "routine_owner_action_required": {"type": "boolean", "enum": [false]},
+        "restart_recovery": {"type": "string", "enum": ["PASS"]},
+        "automatic_continuation": {"type": "string", "enum": ["PASS"]},
+        "telegram_notifier": {"type": "string", "enum": ["ACTIVE"]},
+        "support_bundle": {"type": "string", "enum": ["ACTIVE"]}
+      }
+    },
+    "self_improvement": {
+      "type": ["object", "null"],
       "additionalProperties": false,
       "required": [
         "status",
-        "reason_code",
-        "single_action",
-        "safe_instruction",
-        "unblock_probe",
-        "independent_work_completed",
-        "user_action_required",
-        "next_authority"
+        "stable_self_write",
+        "isolated_candidate_only",
+        "finite_budget",
+        "independent_evaluation"
       ],
       "properties": {
-        "status": {
-          "const": "OWNER_ACTION_REQUIRED"
-        },
-        "reason_code": {
-          "enum": [
-            "missing_credential",
-            "oauth_device_code",
-            "two_factor_authentication",
-            "captcha",
-            "external_account_creation",
-            "paid_resource_purchase",
-            "dns_action_without_access",
-            "legal_decision",
-            "unapproved_irreversible_production_action"
-          ]
-        },
-        "single_action": {
-          "type": "string",
-          "minLength": 1
-        },
-        "safe_instruction": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "unblock_probe": {
-          "type": "string",
-          "minLength": 1
-        },
-        "independent_work_completed": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "user_action_required": {
-          "const": true
-        },
-        "next_authority": {
-          "const": "OWNER"
-        }
+        "status": {"type": "string", "enum": ["ACTIVE"]},
+        "stable_self_write": {"type": "boolean", "enum": [false]},
+        "isolated_candidate_only": {"type": "boolean", "enum": [true]},
+        "finite_budget": {"type": "boolean", "enum": [true]},
+        "independent_evaluation": {"type": "boolean", "enum": [true]}
       }
+    },
+    "safety": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "credential_exposure",
+        "manual_database_edits",
+        "branch_protection_bypassed",
+        "duplicate_side_effects",
+        "open_controller_incidents"
+      ],
+      "properties": {
+        "credential_exposure": {"type": "boolean", "enum": [false]},
+        "manual_database_edits": {"type": "integer", "enum": [0]},
+        "branch_protection_bypassed": {"type": "boolean", "enum": [false]},
+        "duplicate_side_effects": {"type": "integer", "enum": [0]},
+        "open_controller_incidents": {"type": "integer", "enum": [0]}
+      }
+    },
+    "reason_code": {
+      "type": ["string", "null"],
+      "enum": [
+        "missing_credential",
+        "oauth_device_code",
+        "two_factor_authentication",
+        "captcha",
+        "external_account_creation",
+        "paid_resource_purchase",
+        "dns_action_without_access",
+        "legal_decision",
+        "unapproved_irreversible_production_action",
+        null
+      ]
+    },
+    "single_action": {"type": ["string", "null"]},
+    "safe_instruction": {
+      "type": ["array", "null"],
+      "items": {"type": "string"}
+    },
+    "unblock_probe": {"type": ["string", "null"]},
+    "independent_work_completed": {
+      "type": ["array", "null"],
+      "items": {"type": "string"}
+    },
+    "user_action_required": {"type": "boolean"},
+    "next_authority": {
+      "type": "string",
+      "enum": ["HERMES_AUTONOMOUS_RUNTIME", "OWNER"]
     }
-  ]
+  }
 }
