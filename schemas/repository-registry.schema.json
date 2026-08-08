@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "repository-registry.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "entries",
+    "captured_at",
+    "registry_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "registry_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "full_name",
+          "repository_id",
+          "class",
+          "product_id",
+          "qualification_run_id",
+          "candidate_epoch",
+          "purpose",
+          "idempotency_key",
+          "creator_intent",
+          "creator_receipt",
+          "created_at",
+          "expires_at",
+          "terminal_state",
+          "cleanup_action",
+          "cleanup_receipt"
+        ],
+        "properties": {
+          "full_name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          },
+          "repository_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "class": {
+            "enum": [
+              "permanent_factory",
+              "permanent_pilot",
+              "permanent_product",
+              "temporary_canary",
+              "temporary_golden_qualification",
+              "temporary_shadow",
+              "unknown",
+              "non_hermes"
+            ]
+          },
+          "product_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qualification_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "candidate_epoch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "creator_intent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "creator_receipt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "terminal_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cleanup_action": {
+            "enum": [
+              "none",
+              "archive",
+              "delete",
+              "pending"
+            ]
+          },
+          "cleanup_receipt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
