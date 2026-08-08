@@ -37,6 +37,35 @@ _RESUME_PROMPT = (
     "Продолжи ровно эту сохранённую задачу с последней безопасной контрольной точки. "
     "Не создавай новый thread, не используй fork/внешний checkout и не ослабляй gates."
 )
+_OWNER_REASON_CODES = frozenset(
+    {
+        "missing_credential",
+        "oauth_device_code",
+        "two_factor_authentication",
+        "captcha",
+        "external_account_creation",
+        "paid_resource_purchase",
+        "dns_action_without_access",
+        "legal_decision",
+        "unapproved_irreversible_production_action",
+    }
+)
+_TERMINAL_RESULT_FIELDS = frozenset(
+    {
+        "status",
+        "factory",
+        "autonomy",
+        "self_improvement",
+        "safety",
+        "reason_code",
+        "single_action",
+        "safe_instruction",
+        "unblock_probe",
+        "independent_work_completed",
+        "user_action_required",
+        "next_authority",
+    }
+)
 
 
 class SupervisorConfigurationError(ValueError):
@@ -510,14 +539,87 @@ class CodexSupervisor:
             return None
         if not isinstance(value, dict):
             return None
+        if set(value) != _TERMINAL_RESULT_FIELDS:
+            return None
         status = value.get("status")
         if status == "OWNER_ACTION_REQUIRED":
-            return "WAITING_OWNER_ACTION"
+            owner_fields = (
+                value.get("reason_code") in _OWNER_REASON_CODES
+                and isinstance(value.get("single_action"), str)
+                and bool(value["single_action"])
+                and isinstance(value.get("safe_instruction"), list)
+                and bool(value["safe_instruction"])
+                and all(
+                    isinstance(instruction, str) and bool(instruction)
+                    for instruction in value["safe_instruction"]
+                )
+                and isinstance(value.get("unblock_probe"), str)
+                and bool(value["unblock_probe"])
+                and isinstance(value.get("independent_work_completed"), list)
+                and all(
+                    isinstance(item, str) for item in value["independent_work_completed"]
+                )
+                and value.get("user_action_required") is True
+                and value.get("next_authority") == "OWNER"
+            )
+            ready_fields_are_null = all(
+                value.get(field) is None
+                for field in ("factory", "autonomy", "self_improvement", "safety")
+            )
+            return "WAITING_OWNER_ACTION" if owner_fields and ready_fields_are_null else None
         if status != "AUTONOMOUS_FACTORY_READY":
             return None
         factory = value.get("factory")
         manifest = factory.get("ready_result_manifest") if isinstance(factory, dict) else None
-        if (
+        valid_factory = isinstance(factory, dict) and factory == {
+            "golden_product": "COMPLETED",
+            "real_telegram_intake": "PASS",
+            "github_delivery": "PASS",
+            "product_delivery": "PASS",
+            "internal_state_verification": "PASS",
+            "ready_result_manifest": manifest,
+        }
+        valid_ready = (
+            valid_factory
+            and value.get("autonomy")
+            == {
+                "routine_gpt_codex_required": False,
+                "routine_owner_action_required": False,
+                "restart_recovery": "PASS",
+                "automatic_continuation": "PASS",
+                "telegram_notifier": "ACTIVE",
+                "support_bundle": "ACTIVE",
+            }
+            and value.get("self_improvement")
+            == {
+                "status": "ACTIVE",
+                "stable_self_write": False,
+                "isolated_candidate_only": True,
+                "finite_budget": True,
+                "independent_evaluation": True,
+            }
+            and value.get("safety")
+            == {
+                "credential_exposure": False,
+                "manual_database_edits": 0,
+                "branch_protection_bypassed": False,
+                "duplicate_side_effects": 0,
+                "open_controller_incidents": 0,
+            }
+            and all(
+                value.get(field) is None
+                for field in (
+                    "reason_code",
+                    "single_action",
+                    "safe_instruction",
+                    "unblock_probe",
+                    "independent_work_completed",
+                )
+            )
+            and value.get("user_action_required") is False
+            and value.get("next_authority") == "HERMES_AUTONOMOUS_RUNTIME"
+        )
+        if not valid_ready or (
             not isinstance(manifest, str)
             or not manifest
             or manifest == "<immutable reference>"
