@@ -42,7 +42,13 @@ class FakeRunner:
         self.environments.append(environment)
         events, outcome = self.steps.pop(0)
         for event in events:
-            on_event(event)
+            if event.get("type") == "test.structured_result":
+                result_index = command.index("--output-last-message") + 1
+                Path(command[result_index]).write_text(
+                    json.dumps(event["value"]), encoding="utf-8"
+                )
+            else:
+                on_event(event)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -166,6 +172,13 @@ class CodexSupervisorTests(unittest.TestCase):
                 (
                     [
                         {"type": "thread.started", "thread_id": SESSION_ID},
+                        {
+                            "type": "test.structured_result",
+                            "value": {
+                                "status": "AUTONOMOUS_FACTORY_READY",
+                                "factory": {"ready_result_manifest": "artifact://ready/result"},
+                            },
+                        },
                         {"type": "turn.completed", "usage": {"input_tokens": 10}},
                     ],
                     CommandResult(0, ""),
@@ -203,7 +216,21 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(crashed_state.session_id, SESSION_ID)
 
         resumed = FakeRunner(
-            [([{"type": "turn.completed"}], CommandResult(0, ""))]
+            [
+                (
+                    [
+                        {
+                            "type": "test.structured_result",
+                            "value": {
+                                "status": "AUTONOMOUS_FACTORY_READY",
+                                "factory": {"ready_result_manifest": "artifact://ready/result"},
+                            },
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
         )
         second = self.supervisor(resumed)
         completed = second.run_attempt()
@@ -239,11 +266,135 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(waiting.session_id, SESSION_ID)
         self.assertIsNotNone(waiting.next_attempt_at)
 
-        resumed = FakeRunner([([{"type": "turn.completed"}], CommandResult(0, ""))])
+        resumed = FakeRunner(
+            [
+                (
+                    [
+                        {
+                            "type": "test.structured_result",
+                            "value": {
+                                "status": "AUTONOMOUS_FACTORY_READY",
+                                "factory": {"ready_result_manifest": "artifact://ready/result"},
+                            },
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
         finished = self.supervisor(resumed).run_attempt()
         self.assertEqual(finished.status, "COMPLETED")
         self.assertIn("resume", resumed.commands[0])
         self.assertIn(SESSION_ID, resumed.commands[0])
+
+    def test_turn_completed_without_structured_result_is_not_success(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+        state = self.supervisor(runner).run_attempt()
+        self.assertEqual(state.status, "RETRYABLE_FAILURE")
+        self.assertEqual(state.last_failure_class, "missing_structured_terminal_result")
+
+    def test_typed_owner_action_is_the_only_external_stop(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {
+                            "type": "test.structured_result",
+                            "value": {"status": "OWNER_ACTION_REQUIRED"},
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+        self.assertEqual(
+            self.supervisor(runner).run_attempt().status, "WAITING_OWNER_ACTION"
+        )
+
+    def test_work_in_progress_ready_claim_is_rejected(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {
+                            "type": "test.structured_result",
+                            "value": {
+                                "status": "AUTONOMOUS_FACTORY_READY",
+                                "factory": {
+                                    "ready_result_manifest": "WORK_IN_PROGRESS: still running"
+                                },
+                            },
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+        state = self.supervisor(runner).run_attempt()
+        self.assertEqual(state.status, "RETRYABLE_FAILURE")
+        self.assertEqual(state.last_failure_class, "missing_structured_terminal_result")
+
+    def test_digest_bound_continuation_handoff_augments_same_session_prompt(self) -> None:
+        crashing = FakeRunner(
+            [([{"type": "thread.started", "thread_id": SESSION_ID}], RuntimeError("killed"))]
+        )
+        supervisor = self.supervisor(crashing)
+        with self.assertRaises(RuntimeError):
+            supervisor.run_attempt()
+        state = supervisor.load_state()
+        handoff = {
+            "schema_version": "1.0",
+            "goal_id": state.goal_id,
+            "original_goal_digest": state.prompt_digest,
+            "session_id": SESSION_ID,
+            "active_obligation": "publish bounded canary",
+            "instructions": ["Do not mutate the frozen omnibus branch."],
+            "replay_guard": "CANARY-ONE",
+            "handoff_digest": "",
+        }
+        unsigned = dict(handoff)
+        unsigned.pop("handoff_digest")
+        from factory.common import sha256_text, stable_json
+
+        handoff["handoff_digest"] = sha256_text(stable_json(unsigned))
+        self.goal_dir.joinpath("continuation-handoff.json").write_text(
+            json.dumps(handoff), encoding="utf-8"
+        )
+        resumed = FakeRunner(
+            [
+                (
+                    [
+                        {
+                            "type": "test.structured_result",
+                            "value": {
+                                "status": "AUTONOMOUS_FACTORY_READY",
+                                "factory": {"ready_result_manifest": "artifact://ready/result"},
+                            },
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+        self.supervisor(resumed).run_attempt()
+        self.assertIn("publish bounded canary", resumed.prompts[0])
+        self.assertIn("Do not mutate the frozen omnibus branch.", resumed.prompts[0])
 
     def test_github_outage_has_bounded_retries_on_same_session(self) -> None:
         runner = FakeRunner(

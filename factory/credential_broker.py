@@ -29,6 +29,7 @@ GITHUB_BROKER_OPERATIONS: Final[frozenset[str]] = frozenset(
         "branch.push",
         "pull_request.create",
         "pull_request.read",
+        "pull_request.update",
         "checks.read",
         "review_threads.read",
         "pull_request.merge_or_close",
@@ -261,6 +262,37 @@ class GitHubCredentialBroker:
         if request.operation == "repository.create_private" and visibility != "private":
             raise CredentialBrokerError("broker cannot create a public repository")
         action = str(request.payload.get("action") or "")
+        if request.operation == "pull_request.create":
+            allowed = {"head", "base", "title", "body", "draft"}
+            if not set(request.payload).issubset(allowed):
+                raise CredentialBrokerError("pull request create payload is invalid")
+            title = request.payload.get("title")
+            body = request.payload.get("body")
+            draft = request.payload.get("draft", False)
+            if (
+                not isinstance(title, str)
+                or not 1 <= len(title) <= 120
+                or body is not None
+                and (not isinstance(body, str) or not 1 <= len(body) <= 4_000)
+                or not isinstance(draft, bool)
+            ):
+                raise CredentialBrokerError("pull request create metadata is invalid")
+        if request.operation == "pull_request.update":
+            action = str(request.payload.get("action") or "")
+            expected = {"number", "action", "expected_head_sha"}
+            if action == "comment":
+                expected.add("body")
+            if set(request.payload) != expected or action not in {"mark_draft", "comment"}:
+                raise CredentialBrokerError("pull request update payload is invalid")
+            if not re.fullmatch(
+                r"[a-f0-9]{40}", str(request.payload.get("expected_head_sha") or "")
+            ):
+                raise CredentialBrokerError("pull request update head SHA is invalid")
+            body = request.payload.get("body")
+            if action == "comment" and (
+                not isinstance(body, str) or not 1 <= len(body) <= 4_000
+            ):
+                raise CredentialBrokerError("pull request comment body is invalid")
         if request.operation == "repository.archive_or_delete":
             if action == "delete" and not self.policy.allow_delete:
                 raise CredentialBrokerError("repository deletion is denied by policy")
@@ -898,6 +930,8 @@ class GitHubCredentialBroker:
                 head = self._task_branch(head)
                 if base != self.policy.base_branch:
                     raise CredentialBrokerError("pull request base is outside policy")
+            body = str(payload.get("body") or "Operation-specific Hermes Q6.5 canary")
+            draft = bool(payload.get("draft", False))
             return self._run(
                 [
                     "gh",
@@ -906,13 +940,15 @@ class GitHubCredentialBroker:
                     "POST",
                     f"{endpoint}/pulls",
                     "-f",
-                    f"title={str(payload.get('title') or 'Hermes Candidate probe')[:120]}",
+                    f"title={payload.get('title')!s}",
                     "-f",
                     f"head={head}",
                     "-f",
                     f"base={base}",
                     "-f",
-                    "body=Operation-specific Hermes Q6.5 canary",
+                    f"body={body}",
+                    "-F",
+                    f"draft={str(draft).lower()}",
                 ],
                 environment=environment,
             )
@@ -935,6 +971,83 @@ class GitHubCredentialBroker:
                     f"head_ref:{pull_head.get('ref') if isinstance(pull_head, dict) else ''}",
                     f"draft:{pull.get('draft')}",
                 ],
+            }
+        if operation == "pull_request.update":
+            number = int(payload.get("number") or 0)
+            expected_head_sha = str(payload.get("expected_head_sha") or "")
+            if number < 1:
+                raise CredentialBrokerError("pull request number is invalid")
+            pull = self._pull_request(endpoint, number, environment)
+            head = pull.get("head")
+            if (
+                pull.get("state") != "open"
+                or not isinstance(head, dict)
+                or head.get("sha") != expected_head_sha
+            ):
+                raise CredentialBrokerError("pull request update target differs")
+            action = str(payload["action"])
+            if action == "comment":
+                result = self._run(
+                    [
+                        "gh",
+                        "api",
+                        "-X",
+                        "POST",
+                        f"{endpoint}/issues/{number}/comments",
+                        "-f",
+                        f"body={payload['body']!s}",
+                    ],
+                    environment=environment,
+                )
+                comment_id = result.get("id") if isinstance(result, dict) else None
+                if not isinstance(comment_id, int):
+                    raise CredentialBrokerError("pull request comment was not confirmed")
+                return {
+                    "number": number,
+                    "state": "commented",
+                    "head_sha": expected_head_sha,
+                    "object_ids": [f"comment_id:{comment_id}"],
+                }
+            if pull.get("draft") is True:
+                return {
+                    "number": number,
+                    "state": "draft",
+                    "head_sha": expected_head_sha,
+                    "object_ids": ["draft:true", "reconciliation:already_draft"],
+                }
+            node_id = pull.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                raise CredentialBrokerError("pull request node id is unavailable")
+            query = (
+                "mutation($pullRequestId:ID!){convertPullRequestToDraft("
+                "input:{pullRequestId:$pullRequestId}){pullRequest{number isDraft}}}"
+            )
+            result = self._run(
+                [
+                    "gh",
+                    "api",
+                    "graphql",
+                    "-f",
+                    f"query={query}",
+                    "-f",
+                    f"pullRequestId={node_id}",
+                ],
+                environment=environment,
+            )
+            converted = (
+                result.get("data", {})
+                .get("convertPullRequestToDraft", {})
+                .get("pullRequest", {})
+                if isinstance(result, dict)
+                else {}
+            )
+            if converted.get("number") != number or converted.get("isDraft") is not True:
+                raise CredentialBrokerError("pull request draft transition was not confirmed")
+            return {
+                "number": number,
+                "state": "draft",
+                "head_sha": expected_head_sha,
+                "object_ids": ["draft:true"],
             }
         if operation == "checks.read":
             sha = str(payload.get("sha") or "")

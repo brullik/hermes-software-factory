@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "autonomous-factory-ready-result.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "factory",
+        "autonomy",
+        "self_improvement",
+        "safety",
+        "user_action_required",
+        "next_authority"
+      ],
+      "properties": {
+        "status": {
+          "const": "AUTONOMOUS_FACTORY_READY"
+        },
+        "factory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "golden_product",
+            "real_telegram_intake",
+            "github_delivery",
+            "product_delivery",
+            "internal_state_verification",
+            "ready_result_manifest"
+          ],
+          "properties": {
+            "golden_product": {
+              "const": "COMPLETED"
+            },
+            "real_telegram_intake": {
+              "const": "PASS"
+            },
+            "github_delivery": {
+              "const": "PASS"
+            },
+            "product_delivery": {
+              "const": "PASS"
+            },
+            "internal_state_verification": {
+              "const": "PASS"
+            },
+            "ready_result_manifest": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "autonomy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "routine_gpt_codex_required",
+            "routine_owner_action_required",
+            "restart_recovery",
+            "automatic_continuation",
+            "telegram_notifier",
+            "support_bundle"
+          ],
+          "properties": {
+            "routine_gpt_codex_required": {
+              "const": false
+            },
+            "routine_owner_action_required": {
+              "const": false
+            },
+            "restart_recovery": {
+              "const": "PASS"
+            },
+            "automatic_continuation": {
+              "const": "PASS"
+            },
+            "telegram_notifier": {
+              "const": "ACTIVE"
+            },
+            "support_bundle": {
+              "const": "ACTIVE"
+            }
+          }
+        },
+        "self_improvement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "stable_self_write",
+            "isolated_candidate_only",
+            "finite_budget",
+            "independent_evaluation"
+          ],
+          "properties": {
+            "status": {
+              "const": "ACTIVE"
+            },
+            "stable_self_write": {
+              "const": false
+            },
+            "isolated_candidate_only": {
+              "const": true
+            },
+            "finite_budget": {
+              "const": true
+            },
+            "independent_evaluation": {
+              "const": true
+            }
+          }
+        },
+        "safety": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "credential_exposure",
+            "manual_database_edits",
+            "branch_protection_bypassed",
+            "duplicate_side_effects",
+            "open_controller_incidents"
+          ],
+          "properties": {
+            "credential_exposure": {
+              "const": false
+            },
+            "manual_database_edits": {
+              "const": 0
+            },
+            "branch_protection_bypassed": {
+              "const": false
+            },
+            "duplicate_side_effects": {
+              "const": 0
+            },
+            "open_controller_incidents": {
+              "const": 0
+            }
+          }
+        },
+        "user_action_required": {
+          "const": false
+        },
+        "next_authority": {
+          "const": "HERMES_AUTONOMOUS_RUNTIME"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason_code",
+        "single_action",
+        "safe_instruction",
+        "unblock_probe",
+        "independent_work_completed",
+        "user_action_required",
+        "next_authority"
+      ],
+      "properties": {
+        "status": {
+          "const": "OWNER_ACTION_REQUIRED"
+        },
+        "reason_code": {
+          "enum": [
+            "missing_credential",
+            "oauth_device_code",
+            "two_factor_authentication",
+            "captcha",
+            "external_account_creation",
+            "paid_resource_purchase",
+            "dns_action_without_access",
+            "legal_decision",
+            "unapproved_irreversible_production_action"
+          ]
+        },
+        "single_action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "safe_instruction": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "unblock_probe": {
+          "type": "string",
+          "minLength": 1
+        },
+        "independent_work_completed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "user_action_required": {
+          "const": true
+        },
+        "next_authority": {
+          "const": "OWNER"
+        }
+      }
+    }
+  ]
+}
