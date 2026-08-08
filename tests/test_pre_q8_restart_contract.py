@@ -51,6 +51,12 @@ def test_pre_q8_and_golden_deadlines_survive_service_restart() -> None:
         encoding="utf-8"
     )
     intake = (repository / "scripts/golden_intake.py").read_text(encoding="utf-8")
+    prepare = (repository / "scripts/bootstrap/prepare-candidate-plane.sh").read_text(
+        encoding="utf-8"
+    )
+    release = (
+        repository / "scripts/deploy/hermes-factory-golden-release.py"
+    ).read_text(encoding="utf-8")
 
     assert 'STARTED_AT="$(date +%s)"' not in pre_q8
     assert "DEADLINE_EPOCH" in pre_q8
@@ -64,6 +70,11 @@ def test_pre_q8_and_golden_deadlines_survive_service_restart() -> None:
     assert "INTERRUPTED=1; exit 75" in golden
     assert "deadline_digest" in intake
     assert "durable deadline expired" in intake
+    assert 'GOLDEN_STATE="${GOLDEN_STATE_BASE}/${SOURCE_COMMIT}"' in prepare
+    assert '--state-root "${GOLDEN_STATE}"' in prepare
+    assert 'FUNCTIONAL_GOLDEN_ROOT="/var/lib/hermes-factory-functional/golden/${EPOCH_ID}"' in golden
+    assert '--database "${DATABASE}" --state-root "${GOLDEN_STATE_ROOT}"' in golden
+    assert "Golden state root is not bound to one Candidate commit" in release
 
 
 def test_post_functional_reconciler_drives_every_durable_release_state() -> None:

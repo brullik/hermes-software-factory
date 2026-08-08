@@ -20,6 +20,9 @@
   qualification for every accepted Candidate.
 - Make PRE-Q8 and clean-canary executions resume their exact durable product
   after reboot instead of rejecting existing state or resetting timeout budget.
+- Bind each Golden database, deployment root, intake receipt, and verifier
+  evidence directory to one immutable Candidate commit/functional epoch so a
+  later Candidate cannot reuse an earlier Golden Product.
 - Add a permanent Stable product GitHub broker with no ambient-auth fallback and
   require its real private-repository operation proof before PRE-Q8.
 - Reconcile all post-functional stages through LTS, independently sign the final

@@ -8,8 +8,13 @@ fi
 
 CANDIDATE_PYTHON=/opt/hermes-factory-candidate/venv/bin/python
 VERIFIER_PYTHON=/opt/hermes-factory-verifier/venv/bin/python
-DATABASE=/var/lib/hermes-factory-golden/controller.db
-INTAKE_EVIDENCE=/var/lib/hermes-factory-functional/golden/intake-evidence.json
+GOLDEN_CONFIG=/etc/hermes-factory/golden.yaml
+DATABASE="$("${VERIFIER_PYTHON}" -c \
+  'import sys,yaml; value=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); print(value["controller"]["database_url"].removeprefix("sqlite:///"))' \
+  "${GOLDEN_CONFIG}")"
+GOLDEN_STATE_ROOT="$("${VERIFIER_PYTHON}" -c \
+  'import sys,yaml; value=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); print(value["paths"]["state"])' \
+  "${GOLDEN_CONFIG}")"
 INTAKE_BUDGET_SECONDS=86400
 PRODUCT_BUDGET_SECONDS=259200
 CURRENT_PHASE=""
@@ -55,6 +60,11 @@ INTAKE_STATUS="$(printf '%s' "${INTAKE_PHASE}" | "${VERIFIER_PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["status"])')"
 INTAKE_DEADLINE="$(printf '%s' "${INTAKE_PHASE}" | "${VERIFIER_PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["deadline_epoch"])')"
+EPOCH_ID="$(printf '%s' "${INTAKE_PHASE}" | "${VERIFIER_PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["epoch_id"])')"
+FUNCTIONAL_GOLDEN_ROOT="/var/lib/hermes-factory-functional/golden/${EPOCH_ID}"
+INTAKE_EVIDENCE="${FUNCTIONAL_GOLDEN_ROOT}/intake-evidence.json"
+GOLDEN_EVIDENCE="${FUNCTIONAL_GOLDEN_ROOT}/evidence.json"
 if [[ "${INTAKE_STATUS}" == FAIL ]]; then
   FAILURE_RECORDED=1
   exit 1
@@ -119,7 +129,8 @@ if [[ "${PRODUCT_PHASE_STATUS}" == RUNNING ]]; then
   done
 fi
 
-if ! run_as_verifier -m scripts.golden_verify; then
+if ! run_as_verifier -m scripts.golden_verify \
+  --database "${DATABASE}" --state-root "${GOLDEN_STATE_ROOT}" --output "${GOLDEN_EVIDENCE}"; then
   if [[ "${PRODUCT_PHASE_STATUS}" == PASS ]]; then
     CURRENT_PHASE=""
     run_as_verifier -m scripts.functional_qualification factory-checks >/dev/null || true
@@ -127,7 +138,7 @@ if ! run_as_verifier -m scripts.golden_verify; then
   exit 1
 fi
 run_as_verifier -m scripts.functional_qualification \
-  golden-complete /var/lib/hermes-factory-functional/golden/evidence.json
+  golden-complete "${GOLDEN_EVIDENCE}"
 CURRENT_PHASE=""
 STABLE_JSON="$("${VERIFIER_PYTHON}" -m scripts.stable_readiness)"
 STABLE_HEALTH="$(printf '%s' "${STABLE_JSON}" | "${VERIFIER_PYTHON}" -c \

@@ -37,7 +37,7 @@ def main() -> int:
     parser.add_argument(
         "--evidence-file",
         type=Path,
-        default=Path("/var/lib/hermes-factory-functional/golden/intake-evidence.json"),
+        default=None,
     )
     args = parser.parse_args()
     deadline_value = json.loads(args.deadline_file.read_text(encoding="utf-8"))
@@ -62,6 +62,11 @@ def main() -> int:
         or deadline_digest != sha256_text(stable_json(deadline_value))
     ):
         raise ValueError("Golden intake durable deadline differs")
+    evidence_file = args.evidence_file or (
+        args.deadline_file.parent
+        / str(deadline_value["epoch_id"])
+        / "intake-evidence.json"
+    )
     remaining = int(deadline_value["deadline_epoch"]) - int(time.time())
     if remaining <= 0:
         raise TimeoutError("Golden Telegram intake durable deadline expired")
@@ -149,11 +154,11 @@ def main() -> int:
         "accepted_at": utc_now(),
     }
     encoded = stable_json(evidence) + "\n"
-    args.evidence_file.parent.mkdir(parents=True, exist_ok=True)
-    if args.evidence_file.exists():
-        if args.evidence_file.is_symlink() or not args.evidence_file.is_file():
+    evidence_file.parent.mkdir(parents=True, exist_ok=True)
+    if evidence_file.exists():
+        if evidence_file.is_symlink() or not evidence_file.is_file():
             raise ValueError("Golden intake evidence path is unsafe")
-        previous = json.loads(args.evidence_file.read_text(encoding="utf-8"))
+        previous = json.loads(evidence_file.read_text(encoding="utf-8"))
         if (
             not isinstance(previous, dict)
             or previous.get("product_id") != evidence["product_id"]
@@ -162,14 +167,14 @@ def main() -> int:
         ):
             raise ValueError("Golden intake immutable evidence conflicts")
     else:
-        temporary = args.evidence_file.with_name(f".{args.evidence_file.name}.{os.getpid()}.tmp")
+        temporary = evidence_file.with_name(f".{evidence_file.name}.{os.getpid()}.tmp")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
-            temporary.replace(args.evidence_file)
+            temporary.replace(evidence_file)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise

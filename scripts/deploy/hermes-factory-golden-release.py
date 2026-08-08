@@ -8,6 +8,7 @@ import json
 import re
 from pathlib import Path
 
+from factory.config import load_config
 from factory.deployment import TransactionalDeployer
 from factory.release_executor import _release_digest
 
@@ -18,6 +19,9 @@ def main() -> int:
     parser.add_argument("--product-id", required=True)
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--staging-digest", required=True)
+    parser.add_argument(
+        "--config", type=Path, default=Path("/etc/hermes-factory/golden.yaml")
+    )
     args = parser.parse_args()
     if not re.fullmatch(r"brullik/hermes-golden-[A-Za-z0-9_.-]+", args.repository):
         raise ValueError("Golden repository is outside isolated allowlist")
@@ -25,7 +29,11 @@ def main() -> int:
         r"sha256:[a-f0-9]{64}", args.staging_digest
     ):
         raise ValueError("Golden release identity is invalid")
-    state = Path("/var/lib/hermes-factory-golden")
+    config = load_config(args.config)
+    state = Path(str(config.raw["paths"]["state"])).resolve()
+    allowed_root = Path("/var/lib/hermes-factory-golden").resolve()
+    if state.parent != allowed_root or not re.fullmatch(r"[a-f0-9]{40}", state.name):
+        raise ValueError("Golden state root is not bound to one Candidate commit")
     source = state / "staging" / args.product_id / "current"
     if not source.is_dir() or source.is_symlink() or _release_digest(source) != args.staging_digest:
         raise ValueError("Golden staging source differs from accepted digest")

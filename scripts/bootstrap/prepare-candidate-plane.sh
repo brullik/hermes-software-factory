@@ -27,6 +27,8 @@ QUALIFICATION_BACKUP_ROOT="${QUALIFICATION_BACKUP_ROOT:-/var/lib/hermes-factory-
 FUNCTIONAL_STATE="${FUNCTIONAL_STATE:-/var/lib/hermes-factory-functional}"
 PRE_Q8_STATE="${PRE_Q8_STATE:-/var/lib/hermes-factory-pre-q8}"
 PRE_Q8_LOG_ROOT="${PRE_Q8_LOG_ROOT:-/var/log/hermes-factory-pre-q8}"
+GOLDEN_STATE_BASE="${GOLDEN_STATE_BASE:-/var/lib/hermes-factory-golden}"
+GOLDEN_LOG_BASE="${GOLDEN_LOG_BASE:-/var/log/hermes-factory-golden}"
 IMPROVEMENT_STATE="${IMPROVEMENT_STATE:-/var/lib/hermes-factory-improvement-lab}"
 CONFIG_ROOT="${CONFIG_ROOT:-/etc/hermes-factory}"
 CANARY_EXISTING_REPOSITORY_URL="${CANARY_EXISTING_REPOSITORY_URL:-https://github.com/brullik/hermes-path-governor-shadow-20260803}"
@@ -63,6 +65,8 @@ if [[ ! "${SOURCE_COMMIT}" =~ ^[a-f0-9]{40}$ ]]; then
   printf 'Candidate source commit is invalid\n' >&2
   exit 65
 fi
+GOLDEN_STATE="${GOLDEN_STATE_BASE}/${SOURCE_COMMIT}"
+GOLDEN_LOG_ROOT="${GOLDEN_LOG_BASE}/${SOURCE_COMMIT}"
 if [[ ! -d /opt/hermes-factory/current || ! -f /var/lib/hermes-factory/controller.db ]]; then
   printf 'Stable A installation is unavailable\n' >&2
   exit 66
@@ -242,7 +246,8 @@ install -d -o "${CANDIDATE_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
   "${PRE_Q8_STATE}" "${PRE_Q8_STATE}/${SOURCE_COMMIT}" \
   "${PRE_Q8_LOG_ROOT}" "${PRE_Q8_LOG_ROOT}/${SOURCE_COMMIT}"
 install -d -o "${CANDIDATE_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
-  /var/lib/hermes-factory-golden /var/log/hermes-factory-golden
+  "${GOLDEN_STATE_BASE}" "${GOLDEN_STATE}" \
+  "${GOLDEN_LOG_BASE}" "${GOLDEN_LOG_ROOT}"
 install -d -o root -g hermesshadow -m 2750 "${SHADOW_OUTPUT_ROOT}"
 install -d -o "${CANDIDATE_USER}" -g hermesshadow -m 2750 \
   "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}"
@@ -605,8 +610,8 @@ chmod 0644 "${CONFIG_ROOT}/pre-q8/index.json"
   --stable-config "${CONFIG_ROOT}/config.yaml" \
   --stable-telegram-environment "${CONFIG_ROOT}/telegram.env" \
   --output "${CONFIG_ROOT}/golden.yaml" \
-  --state-root /var/lib/hermes-factory-golden \
-  --log-root /var/log/hermes-factory-golden \
+  --state-root "${GOLDEN_STATE}" \
+  --log-root "${GOLDEN_LOG_ROOT}" \
   --admin-port 8990
 chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/golden.yaml"
 chmod 0640 "${CONFIG_ROOT}/golden.yaml"

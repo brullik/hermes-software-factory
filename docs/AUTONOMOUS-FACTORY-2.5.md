@@ -38,6 +38,11 @@ prevents a second `getUpdates` consumer from racing the Stable Telegram gateway.
 The Stable notification token is used only by the owner notifier and is never
 made visible to Candidate or model processes.
 
+Each Candidate commit receives a separate Golden database, worktree, staging,
+deployment, and log root. Intake receipts and independent verifier evidence are
+also namespaced by the functional epoch. Historical Golden evidence is
+preserved, but it cannot satisfy a later Candidate's qualification.
+
 The permanent Stable product lane has its own `LoadCredential` broker and
 repository namespace. A real pre-PRE-Q8 probe creates a private canary
 repository, clones it, pushes a workflow and branch, opens a PR, reads checks,
