@@ -1,0 +1,35 @@
+{
+  "allowed_paths": [
+    ".github/workflows/ci.yml",
+    ".hermes/task-scope-contract.json",
+    "SHA256SUMS",
+    "evidence/sbom.spdx.json",
+    "schemas/task-scope-contract.schema.json",
+    "scripts/task_scope_guard.py",
+    "tests/test_task_scope_guard.py"
+  ],
+  "approval_evidence_digest": "1058b3f2b4870342396df0e2214f50c52332c6f2a467ac75b663aa7ea8434771",
+  "approval_evidence_ref": "artifact://desktop-bootstrap/1058b3f2b4870342396df0e2214f50c52332c6f2a467ac75b663aa7ea8434771",
+  "approved_by": "desktop-bootstrap",
+  "branch": "codex/desktop-recovery-scope-guard",
+  "contract_digest": "fd45ad6becc8290a6bae27241e0030450ffb1ed886f1a7c39a253a84cac840b2",
+  "contract_id": "desktop-recovery.scope-guard.20260808",
+  "created_at": "2026-08-08T15:35:00Z",
+  "expires_at": "2026-09-07T15:35:00Z",
+  "forbidden_paths": [
+    ".git/**",
+    "config/systemd/hermes-factory-gateway.service",
+    "config/systemd/hermes-factory-*.service",
+    "factory/telegram.py"
+  ],
+  "max_additions": 1100,
+  "max_changed_files": 7,
+  "max_deletions": 40,
+  "original_goal_digest": "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497",
+  "parent_contract_digest": null,
+  "product_id": "hermes-software-factory",
+  "rationale": "Install a real merge-base Task Scope Contract guard before any further recovery slice, with no Stable runtime or Telegram gateway changes.",
+  "schema_version": "1.0",
+  "task_id": "desktop-recovery-scope-guard",
+  "trusted_base_sha": "9e9eae25e6da8d017fffd1529b753a94ed255685"
+}
