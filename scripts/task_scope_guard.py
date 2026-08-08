@@ -9,7 +9,6 @@ import hashlib
 import json
 import re
 import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -59,7 +58,7 @@ def _timestamp(value: Any, field: str) -> datetime:
     if not isinstance(value, str):
         raise ScopeViolation(f"{field} must be a date-time string")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as error:
         raise ScopeViolation(f"{field} is not a valid date-time") from error
     if parsed.tzinfo is None:
