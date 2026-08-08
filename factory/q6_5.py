@@ -46,6 +46,7 @@ class Q65ProviderCapabilityError(Q65ProbeError):
         selection: ModelSelection,
         semantic_id: str,
     ) -> None:
+        self.selection = selection
         self.operation = f"provider.{tier}.invoke"
         self.capability = self.operation
         self.safe_reason_code = "missing_candidate_provider_credential"

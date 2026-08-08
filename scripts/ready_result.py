@@ -456,12 +456,14 @@ def _runtime_ready_proof(
         improvement.close()
     if lane is None or lane_state is None:
         raise ReadyControlError("isolated recursive improvement lane is unqualified")
+    objective_id = str(lane["objective_id"])
+    candidate_digest = str(lane["candidate_digest"])
     lane_values = {
         "release_digest": str(lane["release_digest"]),
         "observation_digest": str(lane["observation_digest"]),
-        "objective_id": str(lane["objective_id"]),
+        "objective_id": objective_id,
         "cycle_id": str(lane["cycle_id"]),
-        "candidate_digest": str(lane["candidate_digest"]),
+        "candidate_digest": candidate_digest,
         "decision": str(lane["decision"]),
         "implementation_attempts": int(lane["implementation_attempts"]),
         "stable_identity_before": str(lane["stable_identity_before"]),
@@ -478,8 +480,8 @@ def _runtime_ready_proof(
     candidate_path = (
         improvement_root
         / "experiments"
-        / lane_values["objective_id"]
-        / f"candidate-{lane_values['candidate_digest']}.json"
+        / objective_id
+        / f"candidate-{candidate_digest}.json"
     )
     if not candidate_path.is_file() or candidate_path.is_symlink():
         raise ReadyControlError("isolated Candidate implementation is unavailable")

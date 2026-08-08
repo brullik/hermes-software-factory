@@ -255,11 +255,11 @@ class OwnerNotifier:
                 self.outbox.archive_request(path)
                 pending_path.unlink()
                 continue
-            message_id = pending["message_id"]
+            pending_message_id = pending["message_id"]
             if ephemeral_probe and pending["phase"] == "SENT_PENDING_DELETE":
-                if not isinstance(message_id, int):
+                if not isinstance(pending_message_id, int):
                     raise NotificationError("ephemeral notification message id is invalid")
-                self.api.delete_message(self.chat_id, message_id)
+                self.api.delete_message(self.chat_id, pending_message_id)
                 pending = {**pending, "phase": "SENT"}
                 self._write_pending(pending_path, pending)
             if pending["phase"] != "SENT":
