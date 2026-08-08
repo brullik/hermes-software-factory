@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -141,11 +142,12 @@ class CodexOwnerActionStore:
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self._initialize()
-        try:
-            os.chmod(path, 0o660)
-        except OSError:
-            self.connection.close()
-            raise
+        if stat.S_IMODE(path.stat().st_mode) != 0o660:
+            try:
+                os.chmod(path, 0o660)
+            except OSError:
+                self.connection.close()
+                raise
 
     def _initialize(self) -> None:
         self.connection.executescript(

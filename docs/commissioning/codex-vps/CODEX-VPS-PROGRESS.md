@@ -118,3 +118,28 @@
 Next checkpoint: commit/push the governance evidence, merge PR #165 through the
 strict exact-head broker, deploy the merged immutable runtime and run disposable
 canary commissioning.
+
+## Checkpoint 4 - post-auth shared notification-store boundary
+
+- The owner completed a separate VPS `codex login --device-auth`; no Desktop
+  credential was copied. `codex login status` reports ChatGPT login, while the
+  Codex home and credential file retain modes `0700` and `0600`.
+- The owner-action directory now has the designed setgid
+  `root:hermescodexops` mode `2770`; SQLite, WAL and SHM files are
+  `hermesfactory:hermescodexops` mode `0660`.
+- A live write probe under the exact supervisor User/Group/SupplementaryGroups
+  exposed an unconditional `chmod(0660)` in `CodexOwnerActionStore`. Linux
+  correctly rejected that operation because `hermescodex` is a permitted group
+  writer but not the file owner.
+- The minimal fail-closed correction skips `chmod` only when the current mode is
+  already exactly `0660`; any other mode still requires a successful correction
+  or raises and closes the connection. A regression mocks non-owner `chmod` and
+  proves an existing correctly shared database opens without calling it.
+- Focused owner-action/supervisor regression: 18/18 PASS. Ruff and strict mypy:
+  PASS. Full regression in a private mount namespace with loopback only and
+  production paths hidden: 594/594 PASS. Version, 469-file manifest, SBOM,
+  package, secret, ruff and mypy gates: PASS.
+
+Next checkpoint: commit and publish this minimal fix through a fresh governed
+PR, wait for all exact-head checks, squash-merge through the broker, deploy the
+immutable merge, then continue live model/crash/resume commissioning.
