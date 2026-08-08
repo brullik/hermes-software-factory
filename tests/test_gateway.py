@@ -56,18 +56,19 @@ def update(update_id: int, user_id: int, text: str) -> dict[str, Any]:
 
 
 class GatewayTests(unittest.TestCase):
-    def test_systemd_unit_loads_gateway_from_codex_runtime(self) -> None:
+    def test_systemd_unit_loads_gateway_from_stable_runtime(self) -> None:
         unit = (
             ROOT / "config" / "systemd" / "hermes-factory-gateway.service"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("WorkingDirectory=/opt/hermes-codex-runtime/current", unit)
-        self.assertIn("Environment=PYTHONPATH=/opt/hermes-codex-runtime/current", unit)
+        self.assertIn("WorkingDirectory=/opt/hermes-factory/current", unit)
+        self.assertIn("Environment=PYTHONPATH=/opt/hermes-factory/current", unit)
         self.assertIn(
             "ExecStart=/opt/hermes-factory/venv/bin/python -P -m factory.gateway",
             unit,
         )
-        self.assertIn("ReadOnlyPaths=/opt/hermes-codex-runtime", unit)
+        self.assertIn("ReadOnlyPaths=/opt/hermes-factory", unit)
+        self.assertNotIn("/opt/hermes-codex-runtime", unit)
 
     def test_telegram_api_base_url_allows_only_official_or_loopback(self) -> None:
         TelegramApi("fixture", api_base_url="https://api.telegram.org")
