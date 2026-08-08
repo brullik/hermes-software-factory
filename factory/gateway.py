@@ -134,7 +134,9 @@ class TelegramGateway:
             raise GatewayCommandError("Укажите один product_id")
         return argument
 
-    def _dispatch(self, command: str, argument: str | None, owner_id: int, update_id: int) -> str:
+    def _dispatch(
+        self, command: str, argument: str | None, owner_id: int, update_id: int
+    ) -> str | None:
         if command == "help":
             return (
                 "/idea <текст>, /status, /projects, /kanban, /pause <product>, "
@@ -170,7 +172,7 @@ class TelegramGateway:
             ).response
         if command == "idea":
             assert argument is not None
-            result = IntakeService(
+            IntakeService(
                 self.config,
                 self.state,
                 self.artifacts,
@@ -183,8 +185,10 @@ class TelegramGateway:
                 repository_visibility="private",
                 idempotency_key=f"telegram-update:{update_id}",
             )
-            verb = "создан" if result.created else "уже существует"
-            return f"Product {verb}: {result.product_id}"
+            # Intake itself is durably acknowledged by the Telegram update
+            # offset and product record.  The owner receives no intermediate
+            # progress message; only COMPLETED or a real external action.
+            return None
         product_id = self._product_id(argument)
         workflow = WorkflowEngine(self.state)
         if command == "pause":
@@ -212,7 +216,8 @@ class TelegramGateway:
             response = self._dispatch(parsed.name, parsed.argument, owner_id, update_id)
         except (GatewayCommandError, OwnerApprovalRejected, ValueError, KeyError) as error:
             response = f"Команда отклонена: {error}"
-        self.api.send_message(chat_id, response)
+        if response is not None:
+            self.api.send_message(chat_id, response)
         LOGGER.info("telegram update processed update_id=%s command=%s", update_id, command_name)
         return True
 
@@ -236,6 +241,18 @@ class TelegramGateway:
                 payload = json.loads(str(item["payload_json"]))
                 if not isinstance(payload, dict):
                     raise TypeError("invalid_outbox_payload")
+                kind = str(payload.get("kind") or "")
+                if kind not in {"owner_action", "product_completed"}:
+                    # Retire legacy progress/repair notifications without a
+                    # transport side effect. They are durable internal audit,
+                    # not owner-facing messages under the current policy.
+                    self.state.mark_outbox_done(outbox_id, self.outbox_worker_id)
+                    LOGGER.info(
+                        "telegram intermediate outbox retired outbox_id=%s kind=%s",
+                        outbox_id,
+                        kind[:80],
+                    )
+                    continue
                 text = payload.get("text")
                 if not isinstance(text, str) or not text.strip():
                     raise ValueError("invalid_outbox_message")
@@ -247,7 +264,7 @@ class TelegramGateway:
                 LOGGER.info(
                     "telegram outbox delivered outbox_id=%s kind=%s",
                     outbox_id,
-                    str(payload.get("kind", "notification"))[:80],
+                    kind[:80],
                 )
                 delivered += 1
             except (
@@ -289,7 +306,9 @@ class TelegramGateway:
                 )
                 delivered += 1
             except (TelegramApiError, OSError, ValueError) as error:
-                self.codex_action_store.mark_notification_failed(item.event_id, type(error).__name__)
+                self.codex_action_store.mark_notification_failed(
+                    item.event_id, type(error).__name__
+                )
                 LOGGER.warning(
                     "codex telegram outbox delivery failed event_id=%s reason=%s",
                     item.event_id,
@@ -369,9 +388,7 @@ def main() -> int:
             TelegramApi(
                 token,
                 api_base_url=str(
-                    config.raw.get("telegram", {}).get(
-                        "api_base_url", "https://api.telegram.org"
-                    )
+                    config.raw.get("telegram", {}).get("api_base_url", "https://api.telegram.org")
                 ),
             ),
             codex_action_store=codex_store,

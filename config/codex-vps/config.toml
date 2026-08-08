@@ -29,6 +29,7 @@ glob_scan_max_depth = 8
 "/opt/hermes-factory" = "deny"
 "/var/lib/hermes-factory" = "deny"
 "/var/log/hermes-factory" = "deny"
+"/var/lib/hermes-codex/repository/.git" = "write"
 
 [permissions.codex-vps-workspace.filesystem.":workspace_roots"]
 "." = "write"

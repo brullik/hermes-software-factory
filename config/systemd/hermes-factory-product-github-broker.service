@@ -1,0 +1,34 @@
+[Unit]
+Description=Hermes Stable product operation-scoped GitHub credential broker
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/hermes-factory/credentials.d/github-token
+
+[Service]
+Type=simple
+User=hermesgithubbroker
+Group=hermesfactory
+UMask=0007
+WorkingDirectory=/opt/hermes-factory/current
+Environment=HOME=/var/lib/hermes-factory/product-github
+LoadCredential=github-token:/etc/hermes-factory/credentials.d/github-token
+RuntimeDirectory=hermes-factory-product-github-broker
+RuntimeDirectoryMode=0750
+ExecStartPre=/usr/libexec/hermes-broker-epoch --input %d/github-token --output /var/lib/hermes-factory/product-github/credential-epoch
+ExecStart=/opt/hermes-factory/venv/bin/python -m scripts.github_credential_broker --owner brullik --repository-prefix hermes-product- --repository-prefix hermes-canary-runtime- --operation identity.read --operation repository.create_private --operation repository.read --operation branch.push --operation pull_request.create --operation pull_request.read --operation checks.read --operation review_threads.read --operation pull_request.merge_or_close --operation repository.archive_or_delete --workspace-root /var/lib/hermes-factory/worktrees --socket /run/hermes-factory-product-github-broker/broker.sock --receipt-root /var/lib/hermes-factory/evidence/product-github-receipts --credential-epoch-file /var/lib/hermes-factory/product-github/credential-epoch --askpass /usr/libexec/hermes-github-askpass --base-branch main --deny-delete
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory/product-github /var/lib/hermes-factory/evidence/product-github-receipts /var/lib/hermes-factory/worktrees /run/hermes-factory-product-github-broker
+ReadOnlyPaths=/opt/hermes-factory /usr/libexec/hermes-github-askpass
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /var/lib/hermes-factory-functional /var/lib/hermes-factory-verifier /var/lib/hermes-factory-candidate /etc/hermes-factory/candidate-credentials.d /etc/hermes-factory/credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

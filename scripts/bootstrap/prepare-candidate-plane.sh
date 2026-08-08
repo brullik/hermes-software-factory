@@ -27,6 +27,8 @@ QUALIFICATION_BACKUP_ROOT="${QUALIFICATION_BACKUP_ROOT:-/var/lib/hermes-factory-
 FUNCTIONAL_STATE="${FUNCTIONAL_STATE:-/var/lib/hermes-factory-functional}"
 PRE_Q8_STATE="${PRE_Q8_STATE:-/var/lib/hermes-factory-pre-q8}"
 PRE_Q8_LOG_ROOT="${PRE_Q8_LOG_ROOT:-/var/log/hermes-factory-pre-q8}"
+GOLDEN_STATE_BASE="${GOLDEN_STATE_BASE:-/var/lib/hermes-factory-golden}"
+GOLDEN_LOG_BASE="${GOLDEN_LOG_BASE:-/var/log/hermes-factory-golden}"
 IMPROVEMENT_STATE="${IMPROVEMENT_STATE:-/var/lib/hermes-factory-improvement-lab}"
 CONFIG_ROOT="${CONFIG_ROOT:-/etc/hermes-factory}"
 CANARY_EXISTING_REPOSITORY_URL="${CANARY_EXISTING_REPOSITORY_URL:-https://github.com/brullik/hermes-path-governor-shadow-20260803}"
@@ -63,6 +65,8 @@ if [[ ! "${SOURCE_COMMIT}" =~ ^[a-f0-9]{40}$ ]]; then
   printf 'Candidate source commit is invalid\n' >&2
   exit 65
 fi
+GOLDEN_STATE="${GOLDEN_STATE_BASE}/${SOURCE_COMMIT}"
+GOLDEN_LOG_ROOT="${GOLDEN_LOG_BASE}/${SOURCE_COMMIT}"
 if [[ ! -d /opt/hermes-factory/current || ! -f /var/lib/hermes-factory/controller.db ]]; then
   printf 'Stable A installation is unavailable\n' >&2
   exit 66
@@ -94,6 +98,11 @@ done
 for functional_member in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}" "${BROKER_USER}"; do
   usermod --append --groups "${FUNCTIONAL_GROUP}" "${functional_member}"
 done
+install -d -o "${BROKER_USER}" -g "${SERVICE_USER}" -m 0770 \
+  /var/lib/hermes-factory/product-github \
+  /var/lib/hermes-factory/evidence/product-github-receipts
+install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0770 \
+  /var/lib/hermes-factory/worktrees/product-capability
 if ! grep -q "^${CANDIDATE_USER}:" /etc/subuid; then
   usermod --add-subuids 1100000-1165535 "${CANDIDATE_USER}"
 fi
@@ -104,6 +113,8 @@ fi
 install -d -o root -g root -m 0755 \
   "${CANDIDATE_ROOT}" "${CANDIDATE_ROOT}/releases" "${CANDIDATE_ROOT}/venvs" \
   "${VERIFIER_ROOT}" "${VERIFIER_ROOT}/releases" "${VERIFIER_ROOT}/venvs"
+install -o root -g root -m 0755 \
+  "${SOURCE_ROOT}/scripts/broker_epoch.py" /usr/libexec/hermes-broker-epoch
 
 stop_functional_candidate_services() {
   systemctl disable --now hermes-factory-functional-qualification.timer \
@@ -235,7 +246,8 @@ install -d -o "${CANDIDATE_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
   "${PRE_Q8_STATE}" "${PRE_Q8_STATE}/${SOURCE_COMMIT}" \
   "${PRE_Q8_LOG_ROOT}" "${PRE_Q8_LOG_ROOT}/${SOURCE_COMMIT}"
 install -d -o "${CANDIDATE_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
-  /var/lib/hermes-factory-golden /var/log/hermes-factory-golden
+  "${GOLDEN_STATE_BASE}" "${GOLDEN_STATE}" \
+  "${GOLDEN_LOG_BASE}" "${GOLDEN_LOG_ROOT}"
 install -d -o root -g hermesshadow -m 2750 "${SHADOW_OUTPUT_ROOT}"
 install -d -o "${CANDIDATE_USER}" -g hermesshadow -m 2750 \
   "${SHADOW_OUTPUT_ROOT}/${SOURCE_COMMIT}"
@@ -598,8 +610,8 @@ chmod 0644 "${CONFIG_ROOT}/pre-q8/index.json"
   --stable-config "${CONFIG_ROOT}/config.yaml" \
   --stable-telegram-environment "${CONFIG_ROOT}/telegram.env" \
   --output "${CONFIG_ROOT}/golden.yaml" \
-  --state-root /var/lib/hermes-factory-golden \
-  --log-root /var/log/hermes-factory-golden \
+  --state-root "${GOLDEN_STATE}" \
+  --log-root "${GOLDEN_LOG_ROOT}" \
   --admin-port 8990
 chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/golden.yaml"
 chmod 0640 "${CONFIG_ROOT}/golden.yaml"
@@ -636,12 +648,19 @@ for unit in \
   hermes-factory-shadow-finalize.service \
   hermes-factory-shadow-finalize.timer \
   hermes-factory-github-broker.service \
+  hermes-factory-product-github-broker.service \
+  hermes-factory-product-github-capability.service \
+  hermes-factory-product-github-capability.path \
+  hermes-factory-stable-provider-capability.service \
+  hermes-factory-stable-provider-capability.path \
+  hermes-factory-stable-runtime-attestation.service \
   hermes-factory-capability-probe.service \
   hermes-factory-capability-reconciler.service \
   hermes-factory-functional-handoff.service \
   hermes-factory-functional-qualification.service \
   hermes-factory-functional-qualification.timer \
   hermes-factory-functional-ready.service \
+  hermes-factory-ready-result.service \
   hermes-factory-pre-q8-controller@.service \
   hermes-factory-pre-q8-worker@.service \
   hermes-factory-pre-q8@.service \
@@ -654,6 +673,8 @@ for unit in \
   hermes-factory-recursive-improvement.timer \
   hermes-factory-owner-notifier.service \
   hermes-factory-owner-notifier.path \
+  hermes-factory-support-bundle-reconciler.service \
+  hermes-factory-support-bundle-reconciler.timer \
   hermes-factory-support-bundle@.service; do
   unit_source="${CANDIDATE_RELEASE}/config/systemd/${unit}"
   unit_destination="/etc/systemd/system/${unit}"
@@ -686,6 +707,11 @@ done
 runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.qualification_control init
 systemctl enable --now hermes-factory-recursive-improvement.timer
+systemctl enable --now hermes-factory-support-bundle-reconciler.timer
+systemctl enable --now \
+  hermes-factory-product-github-capability.path \
+  hermes-factory-stable-provider-capability.path
+systemctl enable hermes-factory-product-github-broker.service
 systemctl enable hermes-factory-qualification.service
 if ! systemctl start --wait hermes-factory-qualification.service; then
   runuser -u "${VERIFIER_USER}" -- \

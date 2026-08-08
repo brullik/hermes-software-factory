@@ -41,6 +41,10 @@ for scenario_id in "${SCENARIOS[@]}"; do
   if [[ "${EXISTING_STATUS}" == PASS ]]; then
     continue
   fi
+  if [[ "${EXISTING_STATUS}" == RUNNING ]]; then
+    systemctl start --wait "hermes-factory-clean-canary@${scenario_id}.service"
+    continue
+  fi
   if [[ "${EXISTING_STATUS}" != MISSING ]]; then
     printf 'clean canary is not safely restartable: %s=%s\n' \
       "${scenario_id}" "${EXISTING_STATUS}" >&2

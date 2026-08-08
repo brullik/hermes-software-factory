@@ -18,6 +18,31 @@
   experiment, depth three, two attempts per cycle, independent scorecards,
   no-progress rejection, forbidden authority boundaries, and mandatory full
   qualification for every accepted Candidate.
+- Make PRE-Q8 and clean-canary executions resume their exact durable product
+  after reboot instead of rejecting existing state or resetting timeout budget.
+- Bind each Golden database, deployment root, intake receipt, and verifier
+  evidence directory to one immutable Candidate commit/functional epoch so a
+  later Candidate cannot reuse an earlier Golden Product.
+- Add a permanent Stable product GitHub broker with no ambient-auth fallback and
+  require its real private-repository operation proof before PRE-Q8.
+- Reconcile all post-functional stages through LTS, independently sign the final
+  `AUTONOMOUS_FACTORY_READY` manifest, and emit only that terminal result.
+- Generate one sanitized support bundle for each confirmed terminal technical
+  incident, and bind final readiness to a real recursive-improvement observation
+  scan rather than an enabled timer alone.
+- Limit owner-visible Telegram traffic to genuine external actions and completed
+  results, with silent ephemeral capability probes and durable at-most-once final
+  delivery whose exact receipt must precede the internal ready transition.
+- Force model-writing tools through a rootless Podman boundary with no forwarded
+  credential environment, and add a real provider-driven terminal canary that
+  proves the container identity, workspace mount, negative credential paths, and
+  immutable nonce marker before PRE-Q8 and again after production observation.
+- Classify permanent product-broker operation failures as internal terminal
+  qualification defects; only a genuinely absent credential may create an owner
+  action.
+- Attest Stable SQLite truth and service sandbox properties after production,
+  reconcile immutable support-bundle receipts, and execute a bounded isolated
+  self-improvement lane without permitting Stable writes.
 
 ## 2.4.14 - 2026-08-04
 

@@ -9,6 +9,11 @@ ConditionPathExists=/var/lib/hermes-codex-github-broker/credential-epoch
 Type=simple
 User=hermescodexgithubbroker
 Group=hermescodexops
+# The repository/worktree parents were deliberately created with traverse-only
+# nogroup/hermescodex ownership. Grant those non-credential groups explicitly;
+# the broker's path policy and systemd mounts still restrict it to exact
+# workspaces and read-only source Git metadata.
+SupplementaryGroups=hermescodex nogroup
 UMask=0007
 WorkingDirectory=/opt/hermes-codex-runtime/current
 Environment=HOME=/var/lib/hermes-codex-github-broker
@@ -23,7 +28,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/hermes-codex-github-broker /var/lib/hermes-codex/worktrees /run/hermes-codex-github-broker
-ReadOnlyPaths=/opt/hermes-codex-runtime /usr/libexec/hermes-github-askpass
+ReadOnlyPaths=/opt/hermes-codex-runtime /usr/libexec/hermes-github-askpass /var/lib/hermes-codex/repository/.git
 InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-candidate /var/lib/hermes-factory-functional /var/lib/hermes-factory-pre-q8 /var/lib/hermes-factory-verifier /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
 RestrictSUIDSGID=true
 LockPersonality=true

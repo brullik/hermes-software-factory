@@ -18,6 +18,7 @@ class DeployEntrypointTests(unittest.TestCase):
         cls.validate_health_url = loaded["validate_health_url"]
         cls.health_probe = loaded["health_probe"]
         cls.optional_services = loaded["OPTIONAL_SERVICES"]
+        cls.install_runtime_units = loaded["install_runtime_units"]
         cls.runtime_switch = loaded["RuntimeSwitch"]
         submit = runpy.run_path(str(RELEASE_SUBMIT))
         cls.install_root = submit["_install_root"]
@@ -109,15 +110,13 @@ class DeployEntrypointTests(unittest.TestCase):
             self.assertEqual(receipt_path.read_text(encoding="utf-8").count("PROMOTED"), 1)
 
     def test_second_worker_is_durable_and_restarted_when_installed(self) -> None:
-        worker_one = (
-            ROOT / "config" / "systemd" / "hermes-factory-worker.service"
-        ).read_text(encoding="utf-8")
-        worker_two = (
-            ROOT / "config" / "systemd" / "hermes-factory-worker-2.service"
-        ).read_text(encoding="utf-8")
-        installer = (
-            ROOT / "scripts" / "bootstrap" / "install.sh"
-        ).read_text(encoding="utf-8")
+        worker_one = (ROOT / "config" / "systemd" / "hermes-factory-worker.service").read_text(
+            encoding="utf-8"
+        )
+        worker_two = (ROOT / "config" / "systemd" / "hermes-factory-worker-2.service").read_text(
+            encoding="utf-8"
+        )
+        installer = (ROOT / "scripts" / "bootstrap" / "install.sh").read_text(encoding="utf-8")
 
         self.assertIn("--worker-id hermes-worker-1", worker_one)
         self.assertNotIn("--worker-id hermes-worker-2", worker_one)
@@ -131,6 +130,40 @@ class DeployEntrypointTests(unittest.TestCase):
             installer.count("hermes-factory-worker-2.service"),
             2,
         )
+
+    def test_runtime_unit_install_is_exact_and_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release"
+            source = release / "config" / "systemd"
+            target = root / "systemd"
+            source.mkdir(parents=True)
+            target.mkdir()
+            for name in (
+                "hermes-factory-controller.service",
+                "hermes-factory-gateway.service",
+                "hermes-factory-worker.service",
+                "hermes-factory-worker-2.service",
+                "hermes-factory-product-github-broker.service",
+            ):
+                (source / name).write_text(f"[Unit]\nDescription={name}\n", encoding="utf-8")
+            (source / "untrusted.service").write_text("[Service]\n", encoding="utf-8")
+            installed = type(self).install_runtime_units(
+                release_root=release,
+                systemd_root=target,
+            )
+            self.assertIn("hermes-factory-product-github-broker.service", installed)
+            self.assertFalse((target / "untrusted.service").exists())
+            self.assertFalse(any(path.name.endswith(".tmp") for path in target.iterdir()))
+
+    def test_promoted_gateway_imports_the_promoted_factory_release(self) -> None:
+        gateway = (ROOT / "config" / "systemd" / "hermes-factory-gateway.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("WorkingDirectory=/opt/hermes-factory/current", gateway)
+        self.assertIn("Environment=PYTHONPATH=/opt/hermes-factory/current", gateway)
+        self.assertIn("ReadOnlyPaths=/opt/hermes-factory/current", gateway)
+        self.assertNotIn("/opt/hermes-codex-runtime", gateway)
 
     @unittest.skipIf(os.name == "nt", "Windows test process cannot create symlinks")
     def test_runtime_switch_binds_code_and_python_then_restores_lts(self) -> None:
@@ -179,13 +212,17 @@ class DeployEntrypointTests(unittest.TestCase):
 
             switch.prepare()
             self.assertTrue((install / "venv").is_symlink())
-            self.assertEqual((install / "venv").resolve().name, f"venv-lts-before-{release_id[:12]}")
+            self.assertEqual(
+                (install / "venv").resolve().name, f"venv-lts-before-{release_id[:12]}"
+            )
             (current / "VERSION").write_text("new\n", encoding="utf-8")
             switch.select_for(current)
             self.assertEqual((install / "venv").resolve(), candidate_runtime.resolve())
             (current / "VERSION").write_text("old\n", encoding="utf-8")
             switch.select_for(current)
-            self.assertEqual((install / "venv").resolve().name, f"venv-lts-before-{release_id[:12]}")
+            self.assertEqual(
+                (install / "venv").resolve().name, f"venv-lts-before-{release_id[:12]}"
+            )
 
 
 if __name__ == "__main__":

@@ -51,9 +51,7 @@ class FakeRunner:
 class CodexSupervisorTests(unittest.TestCase):
     def test_vps_config_uses_exact_permissions_without_shell_snapshot(self) -> None:
         config = tomllib.loads(
-            (PACKAGE_ROOT / "config" / "codex-vps" / "config.toml").read_text(
-                encoding="utf-8"
-            )
+            (PACKAGE_ROOT / "config" / "codex-vps" / "config.toml").read_text(encoding="utf-8")
         )
         self.assertEqual(config["approval_policy"], "on-request")
         self.assertEqual(config["approvals_reviewer"], "auto_review")
@@ -61,13 +59,23 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(config["model"], "gpt-5.6-sol")
         self.assertEqual(config["model_reasoning_effort"], "xhigh")
         self.assertFalse(config["features"]["shell_snapshot"])
+        self.assertEqual(
+            config["permissions"]["codex-vps-workspace"]["filesystem"][
+                "/var/lib/hermes-codex/repository/.git"
+            ],
+            "write",
+        )
 
     def test_vps_systemd_unit_keeps_code_mode_compatible_hardening(self) -> None:
-        unit = (
-            PACKAGE_ROOT / "config" / "systemd" / "hermes-codex-vps@.service"
-        ).read_text(encoding="utf-8")
+        unit = (PACKAGE_ROOT / "config" / "systemd" / "hermes-codex-vps@.service").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("MemoryDenyWriteExecute=false", unit)
         self.assertNotIn("MemoryDenyWriteExecute=true", unit)
+        self.assertIn(
+            "ReadWritePaths=/var/lib/hermes-codex/repository/.git",
+            unit,
+        )
         for invariant in (
             "NoNewPrivileges=true",
             "ProtectSystem=strict",
@@ -103,7 +111,9 @@ class CodexSupervisorTests(unittest.TestCase):
         self.goal_dir = self.state_root / "goal-one"
         self.goal_dir.mkdir()
         self.goal_path = self.goal_dir / "goal.txt"
-        self.goal_path.write_text("Inspect the trusted fixture and finish safely.\n", encoding="utf-8")
+        self.goal_path.write_text(
+            "Inspect the trusted fixture and finish safely.\n", encoding="utf-8"
+        )
         self.schema_path = self.root / "result.schema.json"
         self.schema_path.write_text(
             json.dumps({"type": "object", "properties": {"status": {"type": "string"}}}),
@@ -115,6 +125,7 @@ class CodexSupervisorTests(unittest.TestCase):
         self.owner_action_db = self.root / "owner-actions" / "actions.sqlite3"
         self.boundary = SupervisorBoundary(
             worktree_root=self.worktree_root,
+            git_common_root=self.workspace / ".git",
             state_root=self.state_root,
             codex_binary=self.codex_binary,
             owner_action_db=self.owner_action_db,
@@ -191,6 +202,27 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(runner.environments[0].get("GITHUB_TOKEN"), None)
         self.assertEqual(runner.environments[0].get("GH_TOKEN"), None)
 
+    def test_supervisor_rejects_untrusted_git_common_directory(self) -> None:
+        untrusted = self.root / "untrusted-git"
+        untrusted.mkdir()
+        boundary = SupervisorBoundary(
+            worktree_root=self.worktree_root,
+            git_common_root=untrusted,
+            state_root=self.state_root,
+            codex_binary=self.codex_binary,
+            owner_action_db=self.owner_action_db,
+        )
+        with self.assertRaisesRegex(
+            SupervisorConfigurationError,
+            "Git common directory is outside the trusted root",
+        ):
+            CodexSupervisor(
+                self.config(),
+                runner=FakeRunner([]),
+                sleep=lambda _delay: None,
+                boundary=boundary,
+            )
+
     def test_controlled_crash_preserves_and_resumes_exact_session(self) -> None:
         crashing = FakeRunner(
             [([{"type": "thread.started", "thread_id": SESSION_ID}], RuntimeError("killed"))]
@@ -202,9 +234,7 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(crashed_state.status, "RUNNING")
         self.assertEqual(crashed_state.session_id, SESSION_ID)
 
-        resumed = FakeRunner(
-            [([{"type": "turn.completed"}], CommandResult(0, ""))]
-        )
+        resumed = FakeRunner([([{"type": "turn.completed"}], CommandResult(0, ""))])
         second = self.supervisor(resumed)
         completed = second.run_attempt()
         self.assertEqual(completed.status, "COMPLETED")

@@ -16,6 +16,7 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/hermes-factory}"
 SERVICE_USER="${SERVICE_USER:-hermesfactory}"
 CANDIDATE_USER="${CANDIDATE_USER:-hermescandidate}"
 VERIFIER_USER="${VERIFIER_USER:-hermesverifier}"
+BROKER_USER="${BROKER_USER:-hermesgithubbroker}"
 CANDIDATE_INSTALL_ROOT="${CANDIDATE_INSTALL_ROOT:-/opt/hermes-factory-candidate}"
 VERIFIER_INSTALL_ROOT="${VERIFIER_INSTALL_ROOT:-/opt/hermes-factory-verifier}"
 CANDIDATE_STATE_DIR="${CANDIDATE_STATE_DIR:-/var/lib/hermes-factory-candidate}"
@@ -26,7 +27,7 @@ HERMES_AGENT_SHA256="${HERMES_AGENT_SHA256:-bd0bac012aee38a60894781f4597dc29ee7b
 OSV_SCANNER_VERSION="2.4.0"
 OSV_SCANNER_SHA256="15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0"
 
-for candidate_name in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}"; do
+for candidate_name in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}" "${BROKER_USER}"; do
   if [[ ! "${candidate_name}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     printf 'service user contains unsafe characters\n' >&2
     exit 78
@@ -106,6 +107,10 @@ fi
 if ! id "${VERIFIER_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${VERIFIER_STATE_DIR}" --create-home --shell /usr/sbin/nologin "${VERIFIER_USER}"
 fi
+if ! id "${BROKER_USER}" >/dev/null 2>&1; then
+  useradd --system --home-dir "${STATE_DIR}/product-github" \
+    --create-home --shell /usr/sbin/nologin "${BROKER_USER}"
+fi
 if ! grep -q "^${SERVICE_USER}:" /etc/subuid; then
   usermod --add-subuids 1000000-1065535 "${SERVICE_USER}"
 fi
@@ -123,6 +128,11 @@ install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0750 \
   "${INSTALL_ROOT}/current" "${STATE_DIR}/evidence" "${STATE_DIR}/worktrees" "${STATE_DIR}/profiles" "${STATE_DIR}/kanban" \
   /var/log/hermes-factory /run/hermes-factory
 install -d -o root -g root -m 0750 "${INSTALL_ROOT}/bin"
+install -d -o "${BROKER_USER}" -g "${SERVICE_USER}" -m 0770 \
+  "${STATE_DIR}/product-github" \
+  "${STATE_DIR}/evidence/product-github-receipts"
+install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0770 \
+  "${STATE_DIR}/worktrees/product-capability"
 install -d -o "${CANDIDATE_USER}" -g "${CANDIDATE_USER}" -m 0750 \
   "${CANDIDATE_STATE_DIR}" \
   "${CANDIDATE_STATE_DIR}/evidence" \
@@ -164,6 +174,8 @@ find "${INSTALL_ROOT}/current" -type f -exec chmod 0644 {} +
 find "${INSTALL_ROOT}/current/scripts" -type f -name '*.sh' -exec chmod 0755 {} +
 chmod 0755 "${INSTALL_ROOT}/current/scripts/deploy/promote-release.py"
 install -d -o root -g root -m 0755 /usr/local/sbin
+install -o root -g root -m 0755 \
+  "${INSTALL_ROOT}/current/scripts/broker_epoch.py" /usr/libexec/hermes-broker-epoch
 install -o root -g root -m 0755 \
   "${INSTALL_ROOT}/current/scripts/deploy/release-submit.py" \
   /usr/local/sbin/hermes-factory-release-submit
@@ -220,6 +232,9 @@ install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-gateway.service" \
   /etc/systemd/system/hermes-factory-gateway.service
 install -o root -g root -m 0644 \
+  "${INSTALL_ROOT}/current/config/systemd/hermes-factory-product-github-broker.service" \
+  /etc/systemd/system/hermes-factory-product-github-broker.service
+install -o root -g root -m 0644 \
   "${INSTALL_ROOT}/current/config/systemd/hermes-factory-worker.service" \
   /etc/systemd/system/hermes-factory-worker.service
 install -o root -g root -m 0644 \
@@ -254,6 +269,7 @@ systemctl enable \
   docker.service \
   fail2ban.service \
   hermes-factory-controller.service \
+  hermes-factory-product-github-broker.service \
   hermes-factory-worker.service \
   hermes-factory-worker-2.service \
   hermes-factory-backup.timer \

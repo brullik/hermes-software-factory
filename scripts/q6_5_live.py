@@ -93,9 +93,7 @@ def _run(argv: list[str], *, cwd: Path, timeout: int = 1800) -> str:
         env={
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": os.environ.get("HOME", "/var/lib/hermes-factory-candidate"),
-            "XDG_RUNTIME_DIR": os.environ.get(
-                "XDG_RUNTIME_DIR", "/run/hermes-factory-candidate"
-            ),
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", "/run/hermes-factory-candidate"),
             "LANG": "C.UTF-8",
             "GIT_TERMINAL_PROMPT": "0",
         },
@@ -166,9 +164,7 @@ def _provider_credential_available(provider: str) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0 and result.stdout.strip().startswith(
-        f"{provider}: logged in"
-    )
+    return result.returncode == 0 and result.stdout.strip().startswith(f"{provider}: logged in")
 
 
 def _archive_external_failure(path: Path, receipt_digest: str) -> None:
@@ -191,9 +187,7 @@ def _provider_reports(
     evidence_root: Path,
 ) -> tuple[CapabilityHandshakeReport, ...]:
     config = load_config(candidate_config)
-    registry = ProviderRegistry(
-        config, Path("/etc/hermes-factory/candidate-model-registry.yaml")
-    )
+    registry = ProviderRegistry(config, Path("/etc/hermes-factory/candidate-model-registry.yaml"))
     selections: dict[str, ModelSelection] = {}
     for tier, alias in ProviderOperationHandshake.ROUTES:
         providers = registry.providers_for(alias)
@@ -213,7 +207,7 @@ def _provider_reports(
         "Return one JSON object preserving semantic_id "
         f"{semantic_id}. This transport invocation is intentionally bounded."
     )
-    timeout = SubprocessHermesRunner(timeout_seconds=1).run(
+    timeout = SubprocessHermesRunner(timeout_seconds=1, toolsets=("vision",)).run(
         selection=selections["luna"], prompt=timeout_prompt, cwd=workspace
     )
     if timeout.status != "TIMEOUT" or timeout.reason_code != "agent_execution_timeout":
@@ -232,7 +226,7 @@ def _provider_reports(
     )
     return ProviderOperationHandshake(
         identity=identity,
-        runner=SubprocessHermesRunner(timeout_seconds=900),
+        runner=SubprocessHermesRunner(timeout_seconds=900, toolsets=("vision",)),
         selections=selections,
         workspace=workspace,
         evidence_root=evidence_root,
@@ -257,7 +251,7 @@ def _container_and_deployment(
     (build_root / "Containerfile").write_text(
         "FROM docker.io/library/python:3.12-alpine\n"
         "COPY --chown=65532:65532 app.py /app.py\n"
-        "USER 65532:65532\nEXPOSE 8080\nCMD [\"python\",\"/app.py\"]\n",
+        'USER 65532:65532\nEXPOSE 8080\nCMD ["python","/app.py"]\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -479,6 +473,13 @@ def _telegram_reports(
         time.sleep(2)
     if not all(path.is_file() and not path.is_symlink() for path in receipts):
         raise LiveProbeError("Telegram notifier did not produce delivery receipts")
+    for receipt in receipts:
+        value = json.loads(receipt.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise LiveProbeError("Telegram notifier delivery receipt is invalid")
+        digest = str(value.pop("receipt_digest", ""))
+        if value.get("status") != "SENT" or digest != sha256_text(stable_json(value)):
+            raise LiveProbeError("Telegram notifier delivery was not confirmed")
     return (
         external_operation_report(
             identity=identity,
@@ -622,7 +623,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_digest": identity.candidate_digest,
         "toolchain_digest": identity.toolchain_digest,
         "credential_epoch_id": identity.credential_epoch_id,
-        "reports": [report.as_dict() for report in sorted(reports, key=lambda item: item.operation)],
+        "reports": [
+            report.as_dict() for report in sorted(reports, key=lambda item: item.operation)
+        ],
     }
     payload["index_digest"] = sha256_text(stable_json(payload))
     _write_once(args.output, payload)

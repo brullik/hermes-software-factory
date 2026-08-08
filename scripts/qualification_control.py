@@ -157,9 +157,7 @@ def _load_config(path: Path) -> dict[str, Any]:
         raise QualificationControlError("verifier_public_key is invalid") from error
     if len(public_key) != 32:
         raise QualificationControlError("verifier_public_key is not Ed25519")
-    if hashlib.sha256(public_key).hexdigest() != str(
-        raw["trusted_verifier_public_key_digest"]
-    ):
+    if hashlib.sha256(public_key).hexdigest() != str(raw["trusted_verifier_public_key_digest"]):
         raise QualificationControlError("verifier public key differs from trust root")
     repository = Path(str(raw["candidate_repository_root"]))
     if not repository.is_dir() or repository.is_symlink():
@@ -238,9 +236,7 @@ def _canary_index(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 def _governor(state: StateStore, config: Mapping[str, Any]) -> ReleaseQualificationGovernor:
     return ReleaseQualificationGovernor(
         state._connection,
-        trusted_verifier_public_key_digest=str(
-            config["trusted_verifier_public_key_digest"]
-        ),
+        trusted_verifier_public_key_digest=str(config["trusted_verifier_public_key_digest"]),
     )
 
 
@@ -371,10 +367,9 @@ def initialize_epoch(config: Mapping[str, Any]) -> str:
                 WHERE status NOT IN ('QUALIFICATION_FAILED','LTS')"""
         ).fetchone()
         if existing is not None:
-            if (
-                str(existing["source_commit"]) != str(config["source_commit"])
-                or str(existing["candidate_digest"]) != str(config["candidate_digest"])
-            ):
+            if str(existing["source_commit"]) != str(config["source_commit"]) or str(
+                existing["candidate_digest"]
+            ) != str(config["candidate_digest"]):
                 raise QualificationControlError("active epoch belongs to another candidate")
             return str(existing["epoch_id"])
         epoch_id = governor.create_epoch(
@@ -411,13 +406,9 @@ def checkpoint_functional_handoff(config: Mapping[str, Any]) -> str:
         if actual_identity != expected_identity:
             raise QualificationControlError("functional handoff identity differs")
         if str(epoch["status"]) != "FUNCTIONAL_PENDING":
-            raise QualificationControlError(
-                "functional handoff requires Q0-Q6 FUNCTIONAL_PENDING"
-            )
+            raise QualificationControlError("functional handoff requires Q0-Q6 FUNCTIONAL_PENDING")
         state._connection.commit()
-        checkpoint = state._connection.execute(
-            "PRAGMA wal_checkpoint(TRUNCATE)"
-        ).fetchone()
+        checkpoint = state._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if checkpoint is None or tuple(int(value) for value in checkpoint) != (0, 0, 0):
             raise QualificationControlError("functional handoff WAL checkpoint failed")
     finally:
@@ -462,12 +453,8 @@ def run_and_record_stage(config: Mapping[str, Any], stage: str) -> tuple[str, st
             stage,
             repository,
             evidence_root,
-            q6_capability_attestation_path=Path(
-                str(config["q6_capability_attestation_path"])
-            ),
-            q6_capability_attestation_digest=str(
-                config["q6_capability_attestation_digest"]
-            ),
+            q6_capability_attestation_path=Path(str(config["q6_capability_attestation_path"])),
+            q6_capability_attestation_digest=str(config["q6_capability_attestation_digest"]),
             expected_source_commit=str(config["source_commit"]),
         )
         if stage == "Q0_SOURCE_INTEGRITY":
@@ -542,9 +529,7 @@ def finalize_shadow(
     try:
         governor = _governor(state, config)
         epoch_id = _active_epoch(governor)
-        journal = ShadowEvidenceJournal(
-            Path(str(config["shadow_journal_root"])), epoch_id=epoch_id
-        )
+        journal = ShadowEvidenceJournal(Path(str(config["shadow_journal_root"])), epoch_id=epoch_id)
         feeds = feed_paths(Path(str(config["shadow_feed_root"])))
         if not feeds or journal.entry_count() != len(feeds):
             raise QualificationControlError("Q7 has unverified shadow feed batches")
@@ -553,9 +538,7 @@ def finalize_shadow(
         if int(first_batch["first_event_id"]) != 1:
             raise QualificationControlError("Q7 feed does not include complete history")
         historical_total = int(last_batch["stable_product_count"])
-        if int(last_batch["last_event_id"]) < int(
-            first_batch["stable_event_high_watermark"]
-        ):
+        if int(last_batch["last_event_id"]) < int(first_batch["stable_event_high_watermark"]):
             raise QualificationControlError("Q7 historical high-watermark is incomplete")
         run_id = journal.finalize_q7(
             governor,
@@ -568,9 +551,7 @@ def finalize_shadow(
         state.close()
 
 
-def authorize_shadow(
-    config: Mapping[str, Any], readiness_manifest_digest: str
-) -> tuple[str, str]:
+def authorize_shadow(config: Mapping[str, Any], readiness_manifest_digest: str) -> tuple[str, str]:
     """Persist the functional gate binding and open Q7 exactly once."""
 
     state = _store(config)
@@ -618,12 +599,15 @@ def fail_qualification_orchestration(
         }
         digest = sha256_text(stable_json(payload))
         envelope = {**payload, "report_digest": digest}
-        encoded = json.dumps(
-            envelope,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ) + "\n"
+        encoded = (
+            json.dumps(
+                envelope,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         evidence_root = Path(str(config["evidence_root"])).resolve()
         evidence_root.mkdir(parents=True, exist_ok=True)
         failure_path = evidence_root / f"orchestration-failure-{digest}.json"
@@ -656,10 +640,9 @@ def fail_functional_orchestration(config: Mapping[str, Any]) -> tuple[str, str]:
         if latest is None:
             raise QualificationControlError("qualification epoch is unavailable")
         epoch_id = str(latest["epoch_id"])
-        if (
-            str(latest["source_commit"]) != str(config["source_commit"])
-            or str(latest["candidate_digest"]) != str(config["candidate_digest"])
-        ):
+        if str(latest["source_commit"]) != str(config["source_commit"]) or str(
+            latest["candidate_digest"]
+        ) != str(config["candidate_digest"]):
             raise QualificationControlError("functional failure identity differs")
         if str(latest["status"]) == "QUALIFICATION_FAILED":
             existing_ref = str(latest["failure_evidence_ref"] or "")
@@ -667,9 +650,7 @@ def fail_functional_orchestration(config: Mapping[str, Any]) -> tuple[str, str]:
                 raise QualificationControlError("failed epoch lacks immutable evidence")
             return epoch_id, existing_ref
         if str(latest["status"]) != "FUNCTIONAL_PENDING":
-            raise QualificationControlError(
-                "functional failure requires Q0-Q6 FUNCTIONAL_PENDING"
-            )
+            raise QualificationControlError("functional failure requires Q0-Q6 FUNCTIONAL_PENDING")
         payload = {
             "schema_version": "1.0",
             "epoch_id": epoch_id,
@@ -683,12 +664,15 @@ def fail_functional_orchestration(config: Mapping[str, Any]) -> tuple[str, str]:
         }
         digest = sha256_text(stable_json(payload))
         envelope = {**payload, "report_digest": digest}
-        encoded = json.dumps(
-            envelope,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ) + "\n"
+        encoded = (
+            json.dumps(
+                envelope,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         evidence_root = Path(str(config["evidence_root"])).resolve()
         evidence_root.mkdir(parents=True, exist_ok=True)
         failure_path = evidence_root / f"functional-orchestration-failure-{digest}.json"
@@ -704,9 +688,7 @@ def fail_functional_orchestration(config: Mapping[str, Any]) -> tuple[str, str]:
                 or not failure_path.is_file()
                 or failure_path.read_text(encoding="utf-8") != encoded
             ):
-                raise QualificationControlError(
-                    "functional failure evidence conflicts"
-                ) from None
+                raise QualificationControlError("functional failure evidence conflicts") from None
         else:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(encoded)
@@ -723,9 +705,7 @@ def fail_functional_orchestration(config: Mapping[str, Any]) -> tuple[str, str]:
         state.close()
 
 
-_SHADOW_FAILURE_COMPONENTS = frozenset(
-    {"export", "evaluate", "verify", "finalize"}
-)
+_SHADOW_FAILURE_COMPONENTS = frozenset({"export", "evaluate", "verify", "finalize"})
 
 
 def fail_shadow_pipeline(
@@ -751,9 +731,7 @@ def fail_shadow_pipeline(
                 raise QualificationControlError("failed epoch lacks immutable evidence")
             return epoch_id, existing_ref
         if str(latest["status"]) != "SHADOW_RUNNING":
-            raise QualificationControlError(
-                "shadow pipeline failure requires an active Q7 epoch"
-            )
+            raise QualificationControlError("shadow pipeline failure requires an active Q7 epoch")
         failure_coordinate = f"q7_shadow_pipeline-{component}"
         payload = {
             "schema_version": "1.0",
@@ -768,12 +746,15 @@ def fail_shadow_pipeline(
         }
         digest = sha256_text(stable_json(payload))
         envelope = {**payload, "report_digest": digest}
-        encoded = json.dumps(
-            envelope,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ) + "\n"
+        encoded = (
+            json.dumps(
+                envelope,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         evidence_root = Path(str(config["evidence_root"])).resolve()
         evidence_root.mkdir(parents=True, exist_ok=True)
         failure_path = evidence_root / f"shadow-pipeline-failure-{digest}.json"
@@ -817,9 +798,7 @@ def shadow_finalization_ready(config: Mapping[str, Any]) -> tuple[str, bool]:
         try:
             started = datetime.fromisoformat(raw_started)
         except ValueError as error:
-            raise QualificationControlError(
-                "shadow start timestamp is invalid"
-            ) from error
+            raise QualificationControlError("shadow start timestamp is invalid") from error
         if started.tzinfo is None:
             raise QualificationControlError("shadow start timestamp lacks timezone")
         observed_hours = (datetime.now(UTC) - started).total_seconds() / 3600
@@ -862,9 +841,7 @@ def verify_shadow_batches(config: Mapping[str, Any]) -> tuple[str, int, int]:
             raise QualificationControlError("shadow verification requires Q0-Q6 PASS")
         feed_root = Path(str(config["shadow_feed_root"]))
         output_root = Path(str(config["candidate_shadow_output_root"]))
-        journal = ShadowEvidenceJournal(
-            Path(str(config["shadow_journal_root"])), epoch_id=epoch_id
-        )
+        journal = ShadowEvidenceJournal(Path(str(config["shadow_journal_root"])), epoch_id=epoch_id)
         feeds = feed_paths(feed_root)
         processed = journal.entry_count()
         if processed > len(feeds):
@@ -886,13 +863,10 @@ def verify_shadow_batches(config: Mapping[str, Any]) -> tuple[str, int, int]:
                 source_batch_digest=source_digest,
             )
             candidate_by_event = {
-                str(value["event_digest"]): dict(value["decision"])
-                for value in candidate_values
+                str(value["event_digest"]): dict(value["decision"]) for value in candidate_values
             }
             events = list(batch["events"])
-            expected_event_digests = {
-                sha256_text(stable_json(event)) for event in events
-            }
+            expected_event_digests = {sha256_text(stable_json(event)) for event in events}
             if set(candidate_by_event) != expected_event_digests:
                 raise QualificationControlError("candidate shadow decision set differs")
 
@@ -1015,19 +989,15 @@ def complete_canary(
         indexed = _canary_index(config)[str(canary["scenario_id"])]
         if candidate_database.resolve() != Path(str(indexed["database_path"])).resolve():
             raise QualificationControlError("clean canary database differs from root index")
-        evidence_root = (
-            Path(str(config["evidence_root"]))
-            / "canaries"
-            / str(canary["scenario_id"])
-        )
+        evidence_root = Path(str(config["evidence_root"])) / "canaries" / str(canary["scenario_id"])
         observation = observe_completion(
             candidate_database,
             evidence_root,
             product_id=product_id,
             expected_controller_release_digest=str(config["controller_release_digest"]),
-            scenario=load_canary_catalog(
-                Path(str(config["canary_catalog_path"]))
-            )[str(canary["scenario_id"])],
+            scenario=load_canary_catalog(Path(str(config["canary_catalog_path"])))[
+                str(canary["scenario_id"])
+            ],
             fault_receipt_root=Path(str(indexed["fault_receipt_root"])),
             expected_candidate_digest=str(config["candidate_digest"]),
         )
@@ -1067,12 +1037,15 @@ def fail_canary(
         }
         digest = sha256_text(stable_json(payload))
         destination = Path(str(config["evidence_root"])) / f"canary-failure-{digest}.json"
-        encoded = json.dumps(
-            {**payload, "report_digest": digest},
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ) + "\n"
+        encoded = (
+            json.dumps(
+                {**payload, "report_digest": digest},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             if destination.is_symlink() or destination.read_text(encoding="utf-8") != encoded:
@@ -1135,15 +1108,11 @@ def create_manifest_request(
     try:
         governor = _governor(state, config)
         epoch_id = _active_epoch(governor)
-        q2 = _stage_report_payload(
-            governor, config, epoch_id=epoch_id, stage="Q2_MODEL_CHECKING"
-        )
+        q2 = _stage_report_payload(governor, config, epoch_id=epoch_id, stage="Q2_MODEL_CHECKING")
         q4 = _stage_report_payload(
             governor, config, epoch_id=epoch_id, stage="Q4_HISTORICAL_REPLAY"
         )
-        q5 = _stage_report_payload(
-            governor, config, epoch_id=epoch_id, stage="Q5_MIGRATION_MATRIX"
-        )
+        q5 = _stage_report_payload(governor, config, epoch_id=epoch_id, stage="Q5_MIGRATION_MATRIX")
         q4_artifacts = _mapping(q4.get("artifacts"), "Q4 artifacts")
         q5_artifacts = _mapping(q5.get("artifacts"), "Q5 artifacts")
         shadow = ShadowEvidenceJournal(
@@ -1199,9 +1168,7 @@ def admit_signed_manifest(config: Mapping[str, Any]) -> tuple[str, str]:
     payload = dict(envelope)
     envelope_digest = verify_qualification_manifest_envelope(
         payload,
-        trusted_verifier_public_key_digest=str(
-            config["trusted_verifier_public_key_digest"]
-        ),
+        trusted_verifier_public_key_digest=str(config["trusted_verifier_public_key_digest"]),
         expected_source_commit=str(config["source_commit"]),
         expected_candidate_digest=str(config["candidate_digest"]),
     )
@@ -1259,9 +1226,7 @@ def observe_promotion(config: Mapping[str, Any]) -> tuple[str, str]:
     )
     manifest_digest = verify_qualification_manifest_envelope(
         signed,
-        trusted_verifier_public_key_digest=str(
-            config["trusted_verifier_public_key_digest"]
-        ),
+        trusted_verifier_public_key_digest=str(config["trusted_verifier_public_key_digest"]),
         expected_source_commit=str(config["source_commit"]),
         expected_candidate_digest=str(config["candidate_digest"]),
     )
@@ -1278,9 +1243,9 @@ def observe_promotion(config: Mapping[str, Any]) -> tuple[str, str]:
         raise QualificationControlError("root promotion receipt differs from manifest")
     from factory.release_executor import _release_digest
 
-    production_digest = _release_digest(
-        Path(str(config["stable_release_root"]))
-    ).removeprefix("sha256:")
+    production_digest = _release_digest(Path(str(config["stable_release_root"]))).removeprefix(
+        "sha256:"
+    )
     if production_digest != str(config["candidate_digest"]):
         raise QualificationControlError("production tree differs from qualified candidate")
     state = _store(config)
@@ -1414,7 +1379,7 @@ def status(config: Mapping[str, Any]) -> dict[str, Any]:
         epoch = governor.epoch(epoch_id)
         runs = governor.qualification_runs(epoch_id)
         canaries = governor.connection.execute(
-            """SELECT canary_id,scenario_id,status,product_id
+            """SELECT canary_id,scenario_id,status,product_id,started_at
                  FROM clean_canary_runs WHERE epoch_id=? ORDER BY scenario_id""",
             (epoch_id,),
         ).fetchall()
@@ -1424,8 +1389,7 @@ def status(config: Mapping[str, Any]) -> dict[str, Any]:
             "source_commit": str(epoch["source_commit"]),
             "candidate_digest": str(epoch["candidate_digest"]),
             "qualification_stages": [
-                {"stage": str(row["stage"]), "status": str(row["status"])}
-                for row in runs
+                {"stage": str(row["stage"]), "status": str(row["status"])} for row in runs
             ],
             "clean_canaries": [dict(row) for row in canaries],
         }
@@ -1514,9 +1478,7 @@ def main(argv: list[str] | None = None) -> int:
                 "verified_event_count": event_count,
             }
         elif args.command == "functional-ready":
-            epoch_id, manifest_digest = authorize_shadow(
-                config, args.readiness_manifest_digest
-            )
+            epoch_id, manifest_digest = authorize_shadow(config, args.readiness_manifest_digest)
             result = {
                 "epoch_id": epoch_id,
                 "readiness_manifest_digest": manifest_digest,

@@ -1,0 +1,21 @@
+[Unit]
+Description=Reconcile sanitized bundles for confirmed terminal Hermes incidents
+After=hermes-factory-controller.service
+
+[Service]
+Type=oneshot
+User=hermesfactory
+Group=hermesfactory
+SupplementaryGroups=hermesfunctional
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/venv/bin/python -m scripts.support_bundle_reconciler
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/hermes-factory /var/lib/hermes-factory-verifier /opt/hermes-factory-verifier
+ReadWritePaths=/var/lib/hermes-factory-functional
+InaccessiblePaths=/etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+RestrictSUIDSGID=true
+LockPersonality=true

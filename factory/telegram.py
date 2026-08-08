@@ -77,10 +77,27 @@ class TelegramApi:
             raise TelegramApiError("Telegram update payload is invalid")
         return result
 
-    def send_message(self, chat_id: str, text: str) -> None:
+    @staticmethod
+    def _message_id(response: dict[str, Any]) -> int:
+        result = response.get("result")
+        message_id = result.get("message_id") if isinstance(result, dict) else None
+        if not isinstance(message_id, int) or message_id < 1:
+            raise TelegramApiError("Telegram response lacks a message id")
+        return message_id
+
+    def send_message(self, chat_id: str, text: str, *, silent: bool = False) -> int:
         if not text.strip() or len(text) > 4096:
             raise ValueError("Telegram message must contain 1..4096 characters")
-        self._request("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
+        response = self._request(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+                "disable_notification": silent,
+            },
+        )
+        return self._message_id(response)
 
     def send_document(
         self,
@@ -89,7 +106,8 @@ class TelegramApi:
         *,
         filename: str,
         caption: str = "",
-    ) -> None:
+        silent: bool = False,
+    ) -> int:
         if not document or len(document) > 50 * 1024 * 1024:
             raise ValueError("Telegram document must contain 1..52428800 bytes")
         if not filename or any(character in filename for character in ("/", "\\", "\x00")):
@@ -97,19 +115,24 @@ class TelegramApi:
         if len(caption) > 1024:
             raise ValueError("Telegram document caption is too long")
         if self._request_handler is not None:
-            self._request(
+            response = self._request(
                 "sendDocument",
                 {
                     "chat_id": chat_id,
                     "filename": filename,
                     "document_digest": __import__("hashlib").sha256(document).hexdigest(),
                     "caption": caption,
+                    "disable_notification": silent,
                 },
             )
-            return
+            return self._message_id(response)
         boundary = f"HermesBoundary{secrets.token_hex(16)}"
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        fields = (("chat_id", chat_id), ("caption", caption))
+        fields = (
+            ("chat_id", chat_id),
+            ("caption", caption),
+            ("disable_notification", "true" if silent else "false"),
+        )
         body = bytearray()
         for name, value in fields:
             body.extend(f"--{boundary}\r\n".encode())
@@ -140,3 +163,9 @@ class TelegramApi:
             ) from error
         if not isinstance(decoded, dict) or decoded.get("ok") is not True:
             raise TelegramApiError("Telegram API returned a document failure")
+        return self._message_id(decoded)
+
+    def delete_message(self, chat_id: str, message_id: int) -> None:
+        if not isinstance(message_id, int) or message_id < 1:
+            raise ValueError("Telegram message id is invalid")
+        self._request("deleteMessage", {"chat_id": chat_id, "message_id": message_id})

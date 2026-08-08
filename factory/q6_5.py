@@ -28,9 +28,7 @@ class Q65ExternalCapabilityError(Q65ProbeError):
     def __init__(self, broker_operation: str, safe_reason_code: str) -> None:
         self.broker_operation = broker_operation
         self.operation = (
-            "git.branch.push"
-            if broker_operation == "branch.push"
-            else f"github.{broker_operation}"
+            "git.branch.push" if broker_operation == "branch.push" else f"github.{broker_operation}"
         )
         self.capability = self.operation
         self.safe_reason_code = safe_reason_code
@@ -48,6 +46,7 @@ class Q65ProviderCapabilityError(Q65ProbeError):
         selection: ModelSelection,
         semantic_id: str,
     ) -> None:
+        self.selection = selection
         self.operation = f"provider.{tier}.invoke"
         self.capability = self.operation
         self.safe_reason_code = "missing_candidate_provider_credential"
@@ -122,15 +121,19 @@ class GitHubOperationHandshake:
         owner: str,
         repository: str,
         workspace: Path,
+        repository_prefix: str = "hermes-canary-",
         git_runner: Callable[[list[str], Path], subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
-        if not repository.startswith("hermes-canary-"):
+        if not re.fullmatch(r"[a-z0-9-]{4,60}", repository_prefix) or not repository.startswith(
+            repository_prefix
+        ):
             raise Q65ProbeError("Q6.5 repository is outside the dedicated namespace")
         self.broker = broker
         self.identity = identity
         self.epoch_id = epoch_id
         self.owner = owner
         self.repository = repository
+        self.repository_prefix = repository_prefix
         self.workspace = workspace.resolve()
         self.git_runner = git_runner or self._default_git_runner
 
@@ -189,9 +192,7 @@ class GitHubOperationHandshake:
         return value if result.returncode == 0 and re.fullmatch(r"[a-f0-9]{40}", value) else None
 
     def _fixture_phase(self, ref: str) -> str | None:
-        result = self.git_runner(
-            ["git", "show", f"{ref}:q6_5_fixture.json"], self.workspace
-        )
+        result = self.git_runner(["git", "show", f"{ref}:q6_5_fixture.json"], self.workspace)
         if result.returncode != 0:
             return None
         try:
@@ -240,25 +241,17 @@ class GitHubOperationHandshake:
     def run(self) -> tuple[CapabilityHandshakeReport, ...]:
         self.workspace.parent.mkdir(parents=True, exist_ok=True)
         identity = self._request("identity.read", {})
-        created = self._request(
-            "repository.create_private", {"visibility": "private"}
-        )
-        configured = self._request(
-            "repository.read", {"query": "configuration"}, ordinal=0
-        )
-        cloned = self._request(
-            "repository.read", {"workspace": str(self.workspace)}, ordinal=1
-        )
+        created = self._request("repository.create_private", {"visibility": "private"})
+        configured = self._request("repository.read", {"query": "configuration"}, ordinal=0)
+        cloned = self._request("repository.read", {"workspace": str(self.workspace)}, ordinal=1)
         fixture = self.workspace / "q6_5_fixture.json"
         workflow = self.workspace / ".github" / "workflows" / "q6-5-proof.yml"
-        if (
-            self._fixture_phase("refs/heads/main") != "main"
-            or not self._workflow_is_bound("refs/heads/main")
+        if self._fixture_phase("refs/heads/main") != "main" or not self._workflow_is_bound(
+            "refs/heads/main"
         ):
             self._git("git", "checkout", "-B", "main")
             fixture.write_text(
-                stable_json({"schema_version": "1.0", "status": "PASS", "phase": "main"})
-                + "\n",
+                stable_json({"schema_version": "1.0", "status": "PASS", "phase": "main"}) + "\n",
                 encoding="utf-8",
                 newline="\n",
             )
@@ -293,8 +286,7 @@ class GitHubOperationHandshake:
         if self._fixture_phase("refs/heads/q6-5-proof") != "branch":
             self._git("git", "checkout", "-B", "q6-5-proof", "main")
             fixture.write_text(
-                stable_json({"schema_version": "1.0", "status": "PASS", "phase": "branch"})
-                + "\n",
+                stable_json({"schema_version": "1.0", "status": "PASS", "phase": "branch"}) + "\n",
                 encoding="utf-8",
                 newline="\n",
             )
@@ -339,21 +331,21 @@ class GitHubOperationHandshake:
 
         # Exact negative policy calls must fail before any adapter subprocess.
         forbidden_requests = (
-                BrokerRequest(
-                    request_id=_request_id(self.epoch_id, "negative.outside", 0),
-                    operation="repository.read",
-                    owner=self.owner,
-                    repository="outside-the-hermes-canary-namespace",
-                    payload={},
-                ),
-                BrokerRequest(
-                    request_id=_request_id(self.epoch_id, "negative.public", 1),
-                    operation="repository.create_private",
-                    owner=self.owner,
-                    repository=f"{self.repository}-public",
-                    payload={"visibility": "public"},
-                ),
-            )
+            BrokerRequest(
+                request_id=_request_id(self.epoch_id, "negative.outside", 0),
+                operation="repository.read",
+                owner=self.owner,
+                repository=f"outside-{self.repository_prefix}namespace",
+                payload={},
+            ),
+            BrokerRequest(
+                request_id=_request_id(self.epoch_id, "negative.public", 1),
+                operation="repository.create_private",
+                owner=self.owner,
+                repository=f"{self.repository}-public",
+                payload={"visibility": "public"},
+            ),
+        )
         for forbidden in forbidden_requests:
             try:
                 self.broker.execute(forbidden)
@@ -362,7 +354,9 @@ class GitHubOperationHandshake:
             raise Q65ProbeError("GitHub broker negative policy proof failed")
 
         return (
-            self._report("identity.read", (identity,), scope={"subject": identity.subject_identity}),
+            self._report(
+                "identity.read", (identity,), scope={"subject": identity.subject_identity}
+            ),
             self._report("repository.create_private", (created,)),
             self._report(
                 "repository.read",
@@ -476,9 +470,7 @@ def external_operation_report(
 ) -> CapabilityHandshakeReport:
     """Bind a generic real adapter proof to exact immutable files."""
 
-    if not receipt_paths or any(
-        not path.is_file() or path.is_symlink() for path in receipt_paths
-    ):
+    if not receipt_paths or any(not path.is_file() or path.is_symlink() for path in receipt_paths):
         raise Q65ProbeError(f"{operation} proof receipt is unavailable")
     return CapabilityHandshakeReport.create(
         candidate_digest=identity.candidate_digest,

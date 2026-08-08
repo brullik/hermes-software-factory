@@ -267,7 +267,9 @@ def test_solution_architect_gets_trusted_capacity_evidence() -> None:
         with patch("factory.worker._host_capacity_snapshot", return_value=snapshot):
             spec = worker.default_spec(task)
 
-        capacity = next(item for item in spec.evidence if item["type"] == "controller-host-capacity")
+        capacity = next(
+            item for item in spec.evidence if item["type"] == "controller-host-capacity"
+        )
         payload = stable_json(snapshot)
         assert payload in capacity["summary"]
         assert capacity["artifact_ref"] == "controller://host-capacity/" + sha256_text(payload)
@@ -1108,8 +1110,7 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                finding["code"]
-                == "CONTROLLER_UNIQUE_TEST_SOURCE_OUTSIDE_ALLOWED_PATHS"
+                finding["code"] == "CONTROLLER_UNIQUE_TEST_SOURCE_OUTSIDE_ALLOWED_PATHS"
                 for finding in failure.actual["provider_scope_findings"]
             )
         )
@@ -1634,9 +1635,7 @@ class WorkerTests(unittest.TestCase):
             )
             # Once the controller materialises a direct binding, later audit
             # lineage branches cannot make runtime result lookup ambiguous.
-            stable_path, stable_output, stable_attempt = worker._accepted_task_artifacts(
-                failed_id
-            )
+            stable_path, stable_output, stable_attempt = worker._accepted_task_artifacts(failed_id)
             self.assertEqual(stable_path, output_path)
             self.assertEqual(stable_output, output)
             self.assertEqual(stable_attempt, attempt)
@@ -4038,6 +4037,8 @@ class WorkerTests(unittest.TestCase):
             assert isinstance(worker.planning_runner, SubprocessHermesRunner)
             self.assertEqual(worker.runner.timeout_seconds, 2400)
             self.assertEqual(worker.planning_runner.timeout_seconds, 600)
+            self.assertEqual(worker.runner.toolsets, ("terminal",))
+            self.assertEqual(worker.planning_runner.toolsets, ("vision",))
             state.close()
 
     def test_hermes_stdin_prompt_reader_is_bounded_and_utf8_strict(self) -> None:
@@ -4239,13 +4240,13 @@ class WorkerTests(unittest.TestCase):
 
     def test_subprocess_runner_pins_tools_and_ignores_repository_rules(self) -> None:
         selection = ModelSelection("openai-codex", "economy", "gpt-5.6-luna", "luna")
-        coding = SubprocessHermesRunner()
+        coding = SubprocessHermesRunner(toolsets=("terminal",))
         planning = SubprocessHermesRunner(toolsets=("vision",))
 
         coding_argv = coding.build_argv(selection, "prompt", None)
         planning_argv = planning.build_argv(selection, "prompt", None)
 
-        self.assertEqual(coding_argv[coding_argv.index("--toolsets") + 1], "file,terminal")
+        self.assertEqual(coding_argv[coding_argv.index("--toolsets") + 1], "terminal")
         self.assertEqual(planning_argv[planning_argv.index("--toolsets") + 1], "vision")
         self.assertIn("--ignore-rules", coding_argv)
         self.assertIn("--ignore-rules", planning_argv)
@@ -4259,6 +4260,12 @@ class WorkerTests(unittest.TestCase):
                 "HOME": "/var/lib/hermes-factory",
                 "PATH": "/usr/local/bin:/usr/bin",
                 "XDG_RUNTIME_DIR": "/run/hermes-factory",
+                "TERMINAL_ENV": "docker",
+                "HERMES_DOCKER_BINARY": "/usr/bin/podman",
+                "TERMINAL_DOCKER_FORWARD_ENV": "[]",
+                "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": "true",
+                "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "false",
+                "TERMINAL_DOCKER_RUN_AS_HOST_USER": "true",
                 "UNTRUSTED_SECRET": "must-not-cross-the-provider-boundary",
             },
             clear=True,
@@ -4266,6 +4273,8 @@ class WorkerTests(unittest.TestCase):
             environment = runner._environment()
 
         self.assertEqual(environment["XDG_RUNTIME_DIR"], "/run/hermes-factory")
+        self.assertEqual(environment["TERMINAL_ENV"], "docker")
+        self.assertEqual(environment["TERMINAL_DOCKER_FORWARD_ENV"], "[]")
         self.assertNotIn("UNTRUSTED_SECRET", environment)
 
     def test_subprocess_runner_exposes_controller_python_toolchain(self) -> None:
