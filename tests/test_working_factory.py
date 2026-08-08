@@ -767,6 +767,22 @@ def _pass_q6_5(governor: FunctionalQualificationGovernor) -> None:
             receipts=(sha256_text("stable:" + tier),),
         )
         for tier, alias in (("luna", "economy"), ("terra", "standard"), ("sol", "expert"))
+    ) + (
+        CapabilityHandshakeReport.create(
+            candidate_digest=DIGEST,
+            capability="provider.terminal.sandbox",
+            operation="provider.terminal.sandbox",
+            scope={
+                "runtime_principal": "hermesfactory",
+                "execution_boundary": "rootless_oci",
+                "credential_forwarding": False,
+                "toolsets": ["terminal"],
+            },
+            status=CapabilityStatus.AVAILABLE,
+            credential_epoch_id=None,
+            toolchain_digest=TOOLCHAIN,
+            receipts=(sha256_text("stable:terminal-sandbox"),),
+        ),
     )
     provider_payload = {
         "schema_version": "1.0",
@@ -1964,7 +1980,7 @@ def test_wf_p0_023_024_025_systemd_autonomy_has_no_codex_runtime() -> None:
         encoding="utf-8"
     )
     assert "systemctl start --no-block hermes-factory-owner-notifier.service" in reconciler
-    assert reconciler.count("systemctl start --no-block hermes-factory-owner-notifier.service") == 3
+    assert reconciler.count("systemctl start --no-block hermes-factory-owner-notifier.service") == 4
 
 
 def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:
