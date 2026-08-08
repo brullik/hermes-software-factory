@@ -8,10 +8,10 @@ Type=simple
 User=hermesfactory
 Group=hermesfactory
 SupplementaryGroups=hermescodexops
-WorkingDirectory=/opt/hermes-codex-runtime/current
+WorkingDirectory=/opt/hermes-factory/current
 Environment=FACTORY_CONFIG=/etc/hermes-factory/config.yaml
 Environment=HERMES_CODEX_OWNER_ACTION_DB=/var/lib/hermes-codex-owner-actions/actions.sqlite3
-Environment=PYTHONPATH=/opt/hermes-codex-runtime/current
+Environment=PYTHONPATH=/opt/hermes-factory/current
 EnvironmentFile=-/etc/hermes-factory/telegram.env
 LoadCredential=telegram-token:/etc/hermes-factory/credentials.d/telegram-token
 ExecStart=/opt/hermes-factory/venv/bin/python -P -m factory.gateway
@@ -25,7 +25,7 @@ ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory /var/log/hermes-factory /run/hermes-factory
 ReadWritePaths=/var/lib/hermes-codex-owner-actions
 ReadOnlyPaths=/etc/hermes-factory
-ReadOnlyPaths=/opt/hermes-codex-runtime
+ReadOnlyPaths=/opt/hermes-factory
 RestrictSUIDSGID=true
 MemoryMax=500M
 TasksMax=256
