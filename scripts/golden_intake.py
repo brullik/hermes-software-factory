@@ -144,6 +144,8 @@ def main() -> int:
                 raise TimeoutError("Golden Telegram intake timed out")
     finally:
         state.close()
+    if result is None:  # Defensive type and crash boundary; timeout already raises above.
+        raise RuntimeError("Golden Telegram intake result is unavailable")
     evidence = {
         "schema_version": "1.0",
         "phase_id": "golden-intake",
