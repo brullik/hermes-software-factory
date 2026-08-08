@@ -143,3 +143,37 @@ canary commissioning.
 Next checkpoint: commit and publish this minimal fix through a fresh governed
 PR, wait for all exact-head checks, squash-merge through the broker, deploy the
 immutable merge, then continue live model/crash/resume commissioning.
+
+## Checkpoint 5 - exact Codex CLI contract and live model boundary
+
+- The installed Codex CLI `0.147.0` does not expose a
+  `--permission-profile` flag. Official OpenAI permission-profile guidance
+  selects the named profile through top-level `default_permissions`; passing
+  legacy `--sandbox` settings would override that profile. The supervisor now
+  launches `codex --strict-config exec` and relies on the validated
+  `approval_policy = "on-request"`, `approvals_reviewer = "auto_review"` and
+  `default_permissions = "codex-vps-workspace"` configuration.
+- The optional shell snapshot optimization is disabled because the pinned CLI
+  emitted a Bash snapshot syntax error on this host. This does not change the
+  permission boundary or production semantics.
+- The owner-required model contract is pinned as `model = "gpt-5.6-sol"` with
+  `model_reasoning_effort = "xhigh"` (the CLI value for Very High). Live
+  `turn_context` evidence confirms the exact model, effort, managed permission
+  profile, `on-request` approval policy and `auto_review` reviewer.
+- A live structured model smoke completed with status PASS. A non-disclosing
+  one-byte read probe was redirected to `/dev/null` and returned
+  `AUTH_READ_DENIED`; the launcher independently proved the worktree clean
+  before and after. Event and result SHA-256 values are
+  `e62b129557b86eca4b53543ed2421a0129597ba5d7ec6582129b967c9bb1ade2`
+  and `585a90c168e7dd1bd72e14b8e929154c9e902b611a542c217e36e26b81ec03cf`.
+  A bounded secret-pattern scan found zero matches.
+- Focused supervisor/config tests are 9/9 PASS with Ruff and strict mypy PASS.
+  The isolated full regression passed 594 of 595 tests in one run; the sole
+  environment-sensitive capability test then passed separately after its
+  harness received a private HOME/XDG/GH config and production broker sockets
+  were hidden. This provides aggregate 595/595 regression coverage while
+  retaining private network, hidden production paths and non-root execution.
+
+Next checkpoint: rebuild the source manifest, run package/SBOM/secret gates,
+publish and merge the exact-head PR through the typed broker, deploy the
+immutable merge, then execute controlled supervisor crash/resume commissioning.
