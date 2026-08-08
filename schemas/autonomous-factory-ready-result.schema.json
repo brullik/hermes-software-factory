@@ -19,7 +19,11 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["AUTONOMOUS_FACTORY_READY", "OWNER_ACTION_REQUIRED"]
+      "enum": [
+        "AUTONOMOUS_FACTORY_READY",
+        "CONTINUE_AUTONOMOUSLY",
+        "OWNER_ACTION_REQUIRED"
+      ]
     },
     "factory": {
       "type": ["object", "null"],

@@ -32,6 +32,7 @@ _GOAL_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 _TASK_BRANCH = re.compile(r"codex/[a-z0-9][a-z0-9._/-]{0,118}[a-z0-9]\Z")
 _SHA = re.compile(r"[a-f0-9]{40}\Z")
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}\Z")
+_SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _ALLOWED_REMOTE = "https://github.com/brullik/hermes-software-factory.git"
 _RESUME_PROMPT = (
     "Продолжи ровно эту сохранённую задачу с последней безопасной контрольной точки. "
@@ -165,6 +166,8 @@ class SupervisorState:
     started_at: str
     updated_at: str
     completed_at: str | None
+    last_continuation_digest: str | None = None
+    repeated_continuation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -388,6 +391,8 @@ class CodexSupervisor:
         raw = json.loads(self.config.state_path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise SupervisorConfigurationError("supervisor state must be an object")
+        raw.setdefault("last_continuation_digest", None)
+        raw.setdefault("repeated_continuation_count", 0)
         state = SupervisorState(**raw)
         if state.status not in SUPERVISOR_STATES:
             raise SupervisorConfigurationError("unknown supervisor state")
@@ -397,6 +402,20 @@ class CodexSupervisor:
             raise SupervisorConfigurationError("immutable goal text changed")
         if state.session_id is not None and _SESSION_ID.fullmatch(state.session_id) is None:
             raise SupervisorConfigurationError("invalid durable session id")
+        if state.last_continuation_digest is not None and _SHA256.fullmatch(
+            state.last_continuation_digest
+        ) is None:
+            raise SupervisorConfigurationError("invalid continuation digest")
+        if (
+            not isinstance(state.repeated_continuation_count, int)
+            or isinstance(state.repeated_continuation_count, bool)
+            or state.repeated_continuation_count < 0
+        ):
+            raise SupervisorConfigurationError("invalid continuation repetition count")
+        if (state.last_continuation_digest is None) != (
+            state.repeated_continuation_count == 0
+        ):
+            raise SupervisorConfigurationError("continuation state is inconsistent")
         return state
 
     def _save_state(self, state: SupervisorState) -> None:
@@ -529,7 +548,7 @@ class CodexSupervisor:
             "PATH": "/home/hermescodex/.local/bin:/usr/local/bin:/usr/bin:/bin",
         }
 
-    def _structured_result(self) -> str | None:
+    def _structured_result(self) -> tuple[str, str | None] | None:
         if not self.config.result_path.is_file():
             return None
         os.chmod(self.config.result_path, 0o600)
@@ -566,7 +585,46 @@ class CodexSupervisor:
                 value.get(field) is None
                 for field in ("factory", "autonomy", "self_improvement", "safety")
             )
-            return "WAITING_OWNER_ACTION" if owner_fields and ready_fields_are_null else None
+            return (
+                ("WAITING_OWNER_ACTION", None)
+                if owner_fields and ready_fields_are_null
+                else None
+            )
+        if status == "CONTINUE_AUTONOMOUSLY":
+            progress = value.get("independent_work_completed")
+            probe = value.get("unblock_probe")
+            continuation_fields = (
+                all(
+                    value.get(field) is None
+                    for field in (
+                        "factory",
+                        "autonomy",
+                        "self_improvement",
+                        "safety",
+                        "reason_code",
+                        "single_action",
+                        "safe_instruction",
+                    )
+                )
+                and isinstance(probe, str)
+                and bool(probe)
+                and isinstance(progress, list)
+                and bool(progress)
+                and all(isinstance(item, str) and bool(item) for item in progress)
+                and value.get("user_action_required") is False
+                and value.get("next_authority") == "HERMES_AUTONOMOUS_RUNTIME"
+            )
+            if not continuation_fields:
+                return None
+            digest = sha256_text(
+                stable_json(
+                    {
+                        "independent_work_completed": progress,
+                        "unblock_probe": probe,
+                    }
+                )
+            )
+            return "CONTINUE_AUTONOMOUSLY", digest
         if status != "AUTONOMOUS_FACTORY_READY":
             return None
         factory = value.get("factory")
@@ -626,7 +684,27 @@ class CodexSupervisor:
             or manifest.startswith("WORK_IN_PROGRESS")
         ):
             return None
-        return "COMPLETED"
+        return "COMPLETED", None
+
+    def _continue_autonomously(
+        self, state: SupervisorState, continuation_digest: str
+    ) -> SupervisorState:
+        if state.last_continuation_digest == continuation_digest:
+            state.repeated_continuation_count += 1
+        else:
+            state.last_continuation_digest = continuation_digest
+            state.repeated_continuation_count = 1
+        state.attempts = 0
+        state.repeated_failure_count = 0
+        state.last_failure_digest = None
+        state.last_failure_class = None
+        state.next_attempt_at = None
+        state.completed_at = None
+        if state.repeated_continuation_count >= self.config.loop_threshold:
+            self._transition(state, "TERMINAL_BLOCKED", "repeated_no_progress_continuation")
+        else:
+            self._transition(state, "RUNNING", None)
+        return state
 
     @staticmethod
     def _failure_class(diagnostics: str, returncode: int) -> str:
@@ -690,8 +768,17 @@ class CodexSupervisor:
             environment=self._environment(),
             on_event=lambda event: self._on_event(state, event),
         )
-        structured_status = self._structured_result()
-        if result.returncode == 0 and structured_status is not None:
+        structured_result = self._structured_result()
+        if result.returncode == 0 and structured_result is not None:
+            structured_status, continuation_digest = structured_result
+            if structured_status == "CONTINUE_AUTONOMOUSLY":
+                if continuation_digest is None:
+                    raise SupervisorConfigurationError(
+                        "continuation result is missing its progress digest"
+                    )
+                return self._continue_autonomously(state, continuation_digest)
+            state.last_continuation_digest = None
+            state.repeated_continuation_count = 0
             self._transition(state, structured_status, None)
             return state
 
