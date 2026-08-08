@@ -38,6 +38,22 @@ prevents a second `getUpdates` consumer from racing the Stable Telegram gateway.
 The Stable notification token is used only by the owner notifier and is never
 made visible to Candidate or model processes.
 
+The permanent Stable product lane has its own `LoadCredential` broker and
+repository namespace. A real pre-PRE-Q8 probe creates a private canary
+repository, clones it, pushes a workflow and branch, opens a PR, reads checks,
+closes the PR safely, and archives the repository. A missing broker credential
+is the only owner-action outcome. Once a credential epoch exists, a broker,
+GitHub, CI, or receipt defect is recorded as `BROKEN_INTERNAL` and fails the
+qualification; it is never delegated to the owner.
+
+Every model-writing worker enables only Hermes' terminal tool and forces that
+tool through rootless Podman with an empty environment-forwarding allowlist.
+The Stable provider gate invokes all three model routes and additionally makes
+a real terminal tool call. That call must run inside Podman, see the mounted
+workspace, see neither credential directory nor any known credential variable,
+and create a mode-0600 nonce marker. Final readiness requires a fresh copy of
+this four-operation proof after production observation.
+
 ## Recursive improvement
 
 The improvement governor operates only in
@@ -48,13 +64,37 @@ configured measurable delta with no safety regression. Gate, credential,
 trust-root, Stable, audit-history, and production-risk changes are rejected
 before model execution. An accepted experiment creates an immutable Candidate
 release epoch with `FULL_QUALIFICATION_REQUIRED`; it never edits Stable or
-bypasses the normal release pipeline.
+bypasses the normal release pipeline. The persistent detector now binds every
+LTS decision to an immutable production-observation digest and records either a
+typed opportunity or `NO_MEASURABLE_OPPORTUNITY`; merely having an enabled
+timer is not readiness evidence. The LTS proof also executes one isolated,
+single-attempt Candidate lane for the latest observation, independently
+compares it, deterministically rejects a no-improvement result, and proves the
+Stable release identity did not change.
 
 ## Autonomous runtime
 
 The capability reconciler, functional qualification, Golden Product,
 notification, support-bundle, and recursive-improvement units contain no Codex
-runtime dependency. Stable remains authoritative until exact promotion. Low-risk
-pilot use begins only after the owner receives `FACTORY_FUNCTIONALLY_READY`;
-production authority begins only after Q7, authoritative Q8, and exact signed
-promotion complete.
+runtime dependency. Stable product workers use a separate operation-scoped
+broker and cannot fall back to ambient `gh` authentication. Its real private
+repository, workflow push, PR, checks, and safe-close journey is a pre-PRE-Q8
+gate. Stable remains authoritative until exact promotion. Production authority
+begins only after Q7, authoritative Q8, exact signed promotion, 24-hour
+observation, and the final signed `FACTORY_LTS_READY` result.
+
+Confirmed terminal Controller or Candidate-qualification incidents are scanned
+by a persistent reconciler. It creates exactly one redacted, immutable support
+bundle per incident without sending a technical task to the owner. Telegram
+owner delivery is reserved for one genuinely external action and completed
+results. Golden commissioning waits silently for a real owner-originated intake;
+it does not ask the bot to impersonate the owner and it does not fabricate a
+database row. Qualification delivery probes are silent and deleted immediately
+after their typed Telegram receipts are observed. Intermediate progress and
+repair messages are rejected or retired without delivery.
+
+The signed `FACTORY_LTS_READY` notification uses a durable write-ahead outbox.
+Internal `AUTONOMOUS_FACTORY_READY` is committed only after the notifier has a
+matching immutable Telegram receipt for the exact signed manifest digest. A
+restart in the irreducible send/receipt window records `DELIVERY_UNCERTAIN` and
+never risks a duplicate send; readiness remains fail-closed.

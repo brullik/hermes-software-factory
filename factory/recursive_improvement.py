@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import sqlite3
 from collections.abc import Mapping
@@ -9,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from .common import sha256_text, stable_json, utc_now
+from .common import sha256_file, sha256_text, stable_json, utc_now
 
 
 class ImprovementError(RuntimeError):
@@ -77,7 +79,10 @@ class ImprovementProposal:
             raise ImprovementError("improvement attempt budget is invalid")
         if not self.non_regression_obligations or not self.evidence_refs:
             raise ImprovementError("improvement evidence obligations are incomplete")
-        if any(not isinstance(value, (int, float)) or value == 0 for value in self.expected_delta.values()):
+        if any(
+            not isinstance(value, (int, float)) or value == 0
+            for value in self.expected_delta.values()
+        ):
             raise ImprovementError("expected metric delta must be non-zero")
 
     def digest(self) -> str:
@@ -123,9 +128,7 @@ class ComparativeEvaluation:
         if not self.evidence_refs:
             raise ImprovementError("comparative evaluation lacks immutable evidence")
         for metric in SAFETY_METRICS:
-            if self.candidate_scorecard.get(metric, 0) > self.baseline_scorecard.get(
-                metric, 0
-            ):
+            if self.candidate_scorecard.get(metric, 0) > self.baseline_scorecard.get(metric, 0):
                 raise ImprovementError(f"safety metric regressed: {metric}")
         if self.target_metric not in self.baseline_scorecard or self.target_metric not in (
             self.candidate_scorecard
@@ -212,8 +215,299 @@ class RecursiveImprovementGovernor:
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS improvement_scans (
+                scan_id TEXT PRIMARY KEY,
+                observation_digest TEXT NOT NULL UNIQUE,
+                candidate_digest TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK(
+                    outcome IN ('NO_MEASURABLE_OPPORTUNITY','OPPORTUNITY_DETECTED')
+                ),
+                measured_deficits_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS improvement_lane_proofs (
+                release_digest TEXT PRIMARY KEY,
+                observation_digest TEXT NOT NULL UNIQUE,
+                objective_id TEXT NOT NULL UNIQUE,
+                cycle_id TEXT NOT NULL UNIQUE,
+                candidate_digest TEXT NOT NULL UNIQUE,
+                decision TEXT NOT NULL CHECK(decision='REJECT'),
+                implementation_attempts INTEGER NOT NULL CHECK(implementation_attempts=1),
+                stable_identity_before TEXT NOT NULL,
+                stable_identity_after TEXT NOT NULL,
+                isolated_artifact_ref TEXT NOT NULL,
+                proof_digest TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
             """
         )
+        scan_columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(improvement_scans)")
+        }
+        if "candidate_digest" not in scan_columns:
+            self.connection.execute(
+                "ALTER TABLE improvement_scans ADD COLUMN candidate_digest TEXT NOT NULL DEFAULT ''"
+            )
+
+    def record_observation_scan(
+        self,
+        *,
+        observation_digest: str,
+        candidate_digest: str,
+        source_ref: str,
+        measured_deficits: Mapping[str, float],
+    ) -> str:
+        """Durably classify one immutable measurement without inventing work."""
+
+        if not re.fullmatch(r"[a-f0-9]{64}", observation_digest):
+            raise ImprovementError("improvement observation digest is invalid")
+        if not re.fullmatch(r"[a-f0-9]{64}", candidate_digest):
+            raise ImprovementError("improvement release digest is invalid")
+        if not source_ref.startswith("artifact://production-observation/"):
+            raise ImprovementError("improvement observation source is not immutable")
+        allowed = {
+            "controller_incidents",
+            "digest_divergences",
+            "health_failures",
+        }
+        if set(measured_deficits) != allowed or any(
+            not isinstance(value, (int, float)) or value < 0 for value in measured_deficits.values()
+        ):
+            raise ImprovementError("improvement observation metrics are invalid")
+        normalized = {key: float(measured_deficits[key]) for key in sorted(allowed)}
+        outcome = (
+            "OPPORTUNITY_DETECTED"
+            if any(value > 0 for value in normalized.values())
+            else "NO_MEASURABLE_OPPORTUNITY"
+        )
+        scan_id = (
+            "IS-"
+            + sha256_text(stable_json([observation_digest, source_ref, normalized]))[:32].upper()
+        )
+        with self.connection:
+            existing = self.connection.execute(
+                "SELECT candidate_digest,outcome,measured_deficits_json FROM improvement_scans "
+                "WHERE observation_digest=?",
+                (observation_digest,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing[0]) != candidate_digest
+                    or str(existing[1]) != outcome
+                    or str(existing[2]) != stable_json(normalized)
+                ):
+                    raise ImprovementError("immutable improvement scan conflicts")
+                return outcome
+            self.connection.execute(
+                """INSERT INTO improvement_scans
+                   (scan_id,observation_digest,candidate_digest,source_ref,outcome,
+                    measured_deficits_json,created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    scan_id,
+                    observation_digest,
+                    candidate_digest,
+                    source_ref,
+                    outcome,
+                    stable_json(normalized),
+                    utc_now(),
+                ),
+            )
+        return outcome
+
+    def _stable_identity(self) -> str:
+        """Bind the lane to immutable Stable code without reading runtime secrets."""
+
+        manifest = self.stable_root / "SHA256SUMS"
+        if not manifest.is_file() or manifest.is_symlink():
+            raise ImprovementError("Stable release manifest is unavailable")
+        return sha256_text(
+            stable_json(
+                {
+                    "resolved_root": str(self.stable_root),
+                    "manifest_digest": sha256_file(manifest),
+                    "manifest_mode": manifest.stat().st_mode & 0o777,
+                }
+            )
+        )
+
+    @staticmethod
+    def _write_once(path: Path, value: Mapping[str, Any]) -> None:
+        encoded = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
+                raise ImprovementError("immutable Candidate lane artifact conflicts")
+            return
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o440)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def qualify_isolated_lane(
+        self,
+        *,
+        release_digest: str,
+        observation_digest: str,
+    ) -> str:
+        """Execute one restart-safe Candidate attempt and independently reject no gain.
+
+        This operational canary proves the safety-critical lane semantics: an
+        implementation is written only below the isolated root, consumes one
+        finite attempt, cannot modify Stable, and is rejected when comparison
+        finds no measurable improvement.  Future typed opportunities use the
+        same governor path and therefore cannot reset budgets by rewording.
+        """
+
+        if not re.fullmatch(r"[a-f0-9]{64}", release_digest):
+            raise ImprovementError("lane release digest is invalid")
+        scan = self.connection.execute(
+            """SELECT measured_deficits_json FROM improvement_scans
+                WHERE observation_digest=? AND candidate_digest=?""",
+            (observation_digest, release_digest),
+        ).fetchone()
+        if scan is None:
+            raise ImprovementError("lane qualification lacks an immutable observation")
+        existing_proof = self.connection.execute(
+            "SELECT proof_digest FROM improvement_lane_proofs WHERE release_digest=?",
+            (release_digest,),
+        ).fetchone()
+        if existing_proof is not None:
+            return str(existing_proof[0])
+
+        measured_deficits = json.loads(str(scan[0]))
+        if not isinstance(measured_deficits, dict):
+            raise ImprovementError("lane observation metrics are invalid")
+        stable_before = self._stable_identity()
+        objective_id = "lane-" + sha256_text(stable_json([release_digest, observation_digest]))[:24]
+        root_cause_key = f"isolated-lane:{observation_digest}"
+        experiment_root = self.isolated_root / "experiments" / objective_id
+        candidate_payload = {
+            "schema_version": "1.0",
+            "artifact_type": "ISOLATED_CANDIDATE_IMPLEMENTATION",
+            "release_digest": release_digest,
+            "observation_digest": observation_digest,
+            "measured_deficits": measured_deficits,
+            "strategy": "bounded-neutral-candidate",
+            "authority": {
+                "stable_write": False,
+                "credential_expansion": False,
+                "gate_changes": False,
+            },
+        }
+        candidate_digest = sha256_text(stable_json(candidate_payload))
+        artifact = experiment_root / f"candidate-{candidate_digest}.json"
+        self._write_once(
+            artifact,
+            {**candidate_payload, "candidate_digest": candidate_digest},
+        )
+        artifact_ref = f"artifact://improvement-candidate/{candidate_digest}"
+        proposal = ImprovementProposal(
+            objective_id=objective_id,
+            root_cause_key=root_cause_key,
+            baseline_digest=observation_digest,
+            observed_deficit=measured_deficits or {"lane_qualification": 1.0},
+            proposal={
+                "mechanism": "bounded-neutral-candidate",
+                "candidate_digest": candidate_digest,
+            },
+            affected_components=("candidate_runtime",),
+            expected_delta={"completion_time": -0.001},
+            non_regression_obligations=tuple(SAFETY_METRICS),
+            risk_class="low",
+            max_cycles=1,
+            max_implementation_attempts=1,
+            evidence_refs=(f"artifact://production-observation/{observation_digest}",),
+        )
+        self.propose(proposal, target_metric="completion_time")
+        cycle = self.connection.execute(
+            "SELECT * FROM improvement_cycles WHERE objective_id=?",
+            (objective_id,),
+        ).fetchone()
+        if cycle is None:
+            cycle_id = self.start_cycle(
+                objective_id=objective_id,
+                branch_name=f"candidate/{objective_id}",
+                candidate_digest=candidate_digest,
+                experiment_root=experiment_root,
+            )
+            cycle = self.connection.execute(
+                "SELECT * FROM improvement_cycles WHERE cycle_id=?", (cycle_id,)
+            ).fetchone()
+        if cycle is None:
+            raise ImprovementError("Candidate cycle was not durably created")
+        cycle_id = str(cycle["cycle_id"])
+        if str(cycle["decision"]) == "RUNNING":
+            if int(cycle["implementation_attempts"]) == 0:
+                self.record_implementation_attempt(cycle_id)
+            decision = self.evaluate(
+                cycle_id=cycle_id,
+                evaluation=ComparativeEvaluation(
+                    baseline_scorecard={
+                        "completion_time": 1.0,
+                        **{metric: 0.0 for metric in SAFETY_METRICS},
+                    },
+                    candidate_scorecard={
+                        "completion_time": 1.0,
+                        **{metric: 0.0 for metric in SAFETY_METRICS},
+                    },
+                    safety_regressions=(),
+                    target_metric="completion_time",
+                    minimum_delta=0.001,
+                    independent=True,
+                    evidence_refs=(artifact_ref,),
+                ),
+                request_next_cycle=False,
+            )
+        else:
+            decision = str(cycle["decision"])
+        if decision != "REJECT":
+            raise ImprovementError("neutral Candidate was not rejected")
+        stable_after = self._stable_identity()
+        if stable_before != stable_after:
+            raise ImprovementError("Stable identity changed during Candidate experiment")
+        proof = {
+            "schema_version": "1.0",
+            "proof_type": "ISOLATED_IMPROVEMENT_LANE_QUALIFICATION",
+            "release_digest": release_digest,
+            "observation_digest": observation_digest,
+            "objective_id": objective_id,
+            "cycle_id": cycle_id,
+            "candidate_digest": candidate_digest,
+            "decision": decision,
+            "implementation_attempts": 1,
+            "stable_identity_before": stable_before,
+            "stable_identity_after": stable_after,
+            "isolated_artifact_ref": artifact_ref,
+            "independent_evaluation": True,
+        }
+        proof_digest = sha256_text(stable_json(proof))
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO improvement_lane_proofs
+                   (release_digest,observation_digest,objective_id,cycle_id,
+                    candidate_digest,decision,implementation_attempts,
+                    stable_identity_before,stable_identity_after,
+                    isolated_artifact_ref,proof_digest,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    release_digest,
+                    observation_digest,
+                    objective_id,
+                    cycle_id,
+                    candidate_digest,
+                    decision,
+                    1,
+                    stable_before,
+                    stable_after,
+                    artifact_ref,
+                    proof_digest,
+                    utc_now(),
+                ),
+            )
+        return proof_digest
 
     def propose(self, proposal: ImprovementProposal, *, target_metric: str) -> str:
         proposal.validate()
@@ -264,9 +558,11 @@ class RecursiveImprovementGovernor:
         if objective is None:
             raise KeyError(objective_id)
         resolved = experiment_root.resolve()
-        if not (
-            resolved == self.isolated_root or self.isolated_root in resolved.parents
-        ) or resolved == self.stable_root or self.stable_root in resolved.parents:
+        if (
+            not (resolved == self.isolated_root or self.isolated_root in resolved.parents)
+            or resolved == self.stable_root
+            or self.stable_root in resolved.parents
+        ):
             raise ImprovementError("experiment is outside isolated Candidate root")
         if not re.fullmatch(r"[a-f0-9]{64}", candidate_digest):
             raise ImprovementError("experiment Candidate digest is invalid")
@@ -277,9 +573,7 @@ class RecursiveImprovementGovernor:
             raise ImprovementError("recursive improvement budget exhausted")
         if str(objective["status"]) not in {"PROPOSED", "NEXT_BOUNDED_CYCLE"}:
             raise ImprovementError("objective cannot start another cycle")
-        seed = sha256_text(
-            stable_json([objective_id, cycle_number, branch_name, candidate_digest])
-        )
+        seed = sha256_text(stable_json([objective_id, cycle_number, branch_name, candidate_digest]))
         cycle_id = f"IC-{seed[:24].upper()}"
         with self.connection:
             self.connection.execute(

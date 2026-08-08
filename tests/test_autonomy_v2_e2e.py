@@ -277,22 +277,13 @@ def test_AUT_P0_021_new_repository_full_e2e_without_owner(
             artifacts=ArtifactStore(config),
         )
         assert decision.completed
-        assert len(
-            [
-                call
-                for call in repository.calls
-                if call[0] == "create"
-            ]
-        ) == 1
+        assert len([call for call in repository.calls if call[0] == "create"]) == 1
         assert all(
             task["graph_status"] in {"ACCEPTED", "SUPERSEDED"}
             for task in state.list_tasks(product_id)
             if task["plan_id"] == "PLAN-NEW-E2E-1"
         )
-        assert not any(
-            row["event_type"] == "owner_notification"
-            for row in state.list_outbox()
-        )
+        assert not any(row["event_type"] == "owner_notification" for row in state.list_outbox())
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         product = state.get_product(product_id)
         assert product is not None
@@ -404,8 +395,7 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
         assert state.claim_task(worker_id="too-early") is None
         with state._lock, state._connection:
             state._connection.execute(
-                "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' "
-                "WHERE task_id='T-PRIVA001'",
+                "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' WHERE task_id='T-PRIVA001'",
             )
         accept_next(
             state,
@@ -432,9 +422,7 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
                     evidence_ref="internal://failure/private-builder",
                     failed_gate_ids=("persistence-idempotency",),
                     actual={
-                        "required_fixes": [
-                            "Make persistence retry idempotent and rerun its gate"
-                        ]
+                        "required_fixes": ["Make persistence retry idempotent and rerun its gate"]
                     },
                 ),
                 hypothesis=HypothesisData(
@@ -447,9 +435,7 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
         repaired = PipelineReconciler(config, state).reconcile_once()
         assert repaired.repaired == 1
         repair_task = next(
-            task
-            for task in state.list_tasks(product_id)
-            if task["stage_key"] == "repair"
+            task for task in state.list_tasks(product_id) if task["stage_key"] == "repair"
         )
         repair_id = str(repair_task["task_id"])
         assert repair_task["root_task_id"] == root_id
@@ -480,15 +466,12 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
                     failure_class="semantic",
                     reason_code="needs_replan",
                     safe_message=(
-                        "Accepted architecture omits the required bounded "
-                        "operations node"
+                        "Accepted architecture omits the required bounded operations node"
                     ),
                     evidence_ref="internal://failure/private-scope",
                     failed_gate_ids=("architecture-operations-scope",),
                     actual={
-                        "required_fixes": [
-                            "Add a bounded operations node through plan revision 2"
-                        ]
+                        "required_fixes": ["Add a bounded operations node through plan revision 2"]
                     },
                 ),
                 hypothesis=HypothesisData(
@@ -503,8 +486,7 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
         arbiter = next(
             task
             for task in state.list_tasks(product_id)
-            if task["role"] == "path-arbiter"
-            and task["graph_status"] == "READY"
+            if task["role"] == "path-arbiter" and task["graph_status"] == "READY"
         )
         accept_path_arbiter_and_prepare_replanner(
             config,
@@ -515,8 +497,7 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
         replanner = next(
             task
             for task in state.list_tasks(product_id)
-            if task["role"] == "replanner"
-            and task["graph_status"] == "READY"
+            if task["role"] == "replanner" and task["graph_status"] == "READY"
         )
         assert replanner["capability_profile"] == "planning_readonly"
         source_failure_id = str(replanner["failure_id"])
@@ -595,14 +576,8 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
             artifacts=ArtifactStore(config),
         )
         assert decision.completed
-        assert all(
-            failure["status"] == "RESOLVED"
-            for failure in state.list_failures(product_id)
-        )
-        assert not any(
-            row["event_type"] == "owner_notification"
-            for row in state.list_outbox()
-        )
+        assert all(failure["status"] == "RESOLVED" for failure in state.list_failures(product_id))
+        assert not any(row["event_type"] == "owner_notification" for row in state.list_outbox())
         persisted = json.dumps(
             {
                 "products": state.list_products(),
@@ -869,8 +844,7 @@ def test_AUT_P1_005_waiting_timer_survives_restart(
         assert restarted.claim_task(worker_id="too-early") is None
         with restarted._lock, restarted._connection:
             restarted._connection.execute(
-                "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' "
-                "WHERE task_id='T-TIMERWAIT1'",
+                "UPDATE tasks SET available_at='2000-01-01T00:00:00Z' WHERE task_id='T-TIMERWAIT1'",
             )
         claimed = restarted.claim_task(worker_id="timer-ready")
         assert claimed is not None
@@ -939,14 +913,12 @@ def test_AUT_P1_007_cancel_pause_resume_preserve_graph(
         workflow = WorkflowEngine(state)
         workflow.pause("pause-product")
         before = {
-            task["task_id"]: task["graph_status"]
-            for task in state.list_tasks("pause-product")
+            task["task_id"]: task["graph_status"] for task in state.list_tasks("pause-product")
         }
         assert state.claim_task(worker_id="paused-worker") is None
         workflow.resume("pause-product", "IDEA_RECEIVED")
         after = {
-            task["task_id"]: task["graph_status"]
-            for task in state.list_tasks("pause-product")
+            task["task_id"]: task["graph_status"] for task in state.list_tasks("pause-product")
         }
         assert after == before
         assert state.claim_task(worker_id="resumed-worker")["task_id"] == "T-PAUSEA001"
@@ -964,10 +936,9 @@ def test_AUT_P1_007_cancel_pause_resume_preserve_graph(
             dependencies=["T-CANCELA01"],
         )
         workflow.cancel("cancel-product")
-        assert {
-            task["graph_status"]
-            for task in state.list_tasks("cancel-product")
-        } == {"CANCELLED"}
+        assert {task["graph_status"] for task in state.list_tasks("cancel-product")} == {
+            "CANCELLED"
+        }
     finally:
         state.close()
 
@@ -992,9 +963,7 @@ def test_AUT_P1_008_controller_incident_quarantines_without_model_recovery(
             plan_id="PLAN-CONTROLLER-1",
             root_task_id="T-CONTROOT1",
             parent_plan_id=str(product["active_plan_id"]),
-            node_specs=[
-                ("controller", "T-CONTROLLER1", "accept-controller")
-            ],
+            node_specs=[("controller", "T-CONTROLLER1", "accept-controller")],
             edges=[],
         )
         persist_and_ingest_plan(
@@ -1025,30 +994,28 @@ def test_AUT_P1_008_controller_incident_quarantines_without_model_recovery(
                 ),
             )
         )
-        routed = FailureRouter(config, state).route_open_failures(
-            "product-autonomy"
-        )
+        routed = FailureRouter(config, state).route_open_failures("product-autonomy")
         assert routed == []
         assert not any(
-            task["role"] == "incident-recovery"
-            for task in state.list_tasks("product-autonomy")
+            task["role"] == "incident-recovery" for task in state.list_tasks("product-autonomy")
         )
         assert state.list_hypotheses("product-autonomy") == []
         product = state.get_product("product-autonomy")
         assert product is not None
         assert product["status"] == "FAILED_SAFE"
         assert product["terminal_reason"] == "controller_schema_corruption"
-        assert state._connection.execute(
-            "SELECT COUNT(*) FROM problem_budgets WHERE product_id=?",
-            ("product-autonomy",),
-        ).fetchone()[0] == 0
+        assert (
+            state._connection.execute(
+                "SELECT COUNT(*) FROM problem_budgets WHERE product_id=?",
+                ("product-autonomy",),
+            ).fetchone()[0]
+            == 0
+        )
         with state._lock:
             incidents = state._connection.execute(
                 "SELECT reason_code, status FROM controller_incidents",
             ).fetchall()
-        assert [tuple(row) for row in incidents] == [
-            ("controller_schema_corruption", "OPEN")
-        ]
+        assert [tuple(row) for row in incidents] == [("controller_schema_corruption", "OPEN")]
     finally:
         state.close()
 
@@ -1073,9 +1040,7 @@ def test_AUT_P1_008_controller_defect_cannot_start_recovery_retry_loop(
             plan_id="PLAN-CONTROLLER-2",
             root_task_id="T-CONTROOT2",
             parent_plan_id=str(product["active_plan_id"]),
-            node_specs=[
-                ("controller", "T-CONTROLLER2", "accept-controller-depth")
-            ],
+            node_specs=[("controller", "T-CONTROLLER2", "accept-controller-depth")],
             edges=[],
         )
         persist_and_ingest_plan(
@@ -1107,9 +1072,7 @@ def test_AUT_P1_008_controller_defect_cannot_start_recovery_retry_loop(
             )
         )
         assert failed.failure_id is not None
-        routed = FailureRouter(config, state).route_open_failures(
-            "product-autonomy"
-        )
+        routed = FailureRouter(config, state).route_open_failures("product-autonomy")
         assert routed == []
         assert FailureRouter(config, state).route_open_failures("product-autonomy") == []
         assert state.claim_task(worker_id="incident-depth-forbidden") is None
@@ -1179,9 +1142,7 @@ def test_AUT_P1_008_transient_transport_routes_product_retry_not_controller_reco
             )
         )
         assert failed.failure_id is not None
-        routed = FailureRouter(config, state).route_open_failures(
-            "product-autonomy"
-        )
+        routed = FailureRouter(config, state).route_open_failures("product-autonomy")
         assert len(routed) == 1
         recovery = state.claim_task(worker_id="incident-contained")
         assert recovery is not None
@@ -1189,8 +1150,7 @@ def test_AUT_P1_008_transient_transport_routes_product_retry_not_controller_reco
         assert recovery["role"] == "builder"
         assert recovery["role"] != "incident-recovery"
         assert not any(
-            task["role"] == "incident-recovery"
-            for task in state.list_tasks("product-autonomy")
+            task["role"] == "incident-recovery" for task in state.list_tasks("product-autonomy")
         )
     finally:
         state.close()
@@ -1278,9 +1238,7 @@ class MutableCapabilityProbe:
         self.calls.append((str(product["product_id"]), capability))
         scope = {
             "owner": "brullik",
-            "repository": str(
-                product.get("repository_name") or product["product_id"]
-            ),
+            "repository": str(product.get("repository_name") or product["product_id"]),
             "allowed_operations": [capability],
         }
         if capability in self.missing:
@@ -1327,9 +1285,7 @@ def release_staging_plan(
     contract["role"] = "release-operator"
     contract["output_schema"] = "release-operation-result.schema.json"
     contract["capability_profile"] = "release_staging"
-    contract["required_capabilities"] = list(
-        CAPABILITY_PROFILES["release_staging"]
-    )
+    contract["required_capabilities"] = list(CAPABILITY_PROFILES["release_staging"])
     return plan
 
 
@@ -1415,8 +1371,7 @@ def test_AUT_P0_023_intake_after_worker_start_resumes_capability_task(
             thread.join(timeout=5)
             assert not thread.is_alive()
         assert not any(
-            event["event_type"] == "worker_restarted"
-            for event in state.events(intake.product_id)
+            event["event_type"] == "worker_restarted" for event in state.events(intake.product_id)
         )
     finally:
         state.close()
@@ -1475,40 +1430,47 @@ def test_AUT_P0_024_credential_appearance_closes_old_owner_action(
         ]
         assert len(owner_events) == 1
         assert len(state.open_capability_blocks()) == 1
-        assert len(
-            [
-                item
-                for item in state.list_outbox()
-                if json.loads(str(item["payload_json"])).get("kind")
-                == "owner_action"
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    item
+                    for item in state.list_outbox()
+                    if json.loads(str(item["payload_json"])).get("kind") == "owner_action"
+                ]
+            )
+            == 1
+        )
 
         probe.missing.add("git.push_branch")
         reconciler.reconcile_once()
         assert len(state.open_capability_blocks()) == 2
-        assert len(
-            [
-                event
-                for event in state.events(intake.product_id)
-                if event["event_type"] == "owner_action_required"
-            ]
-        ) == 1
-        assert len(
-            [
-                item
-                for item in state.list_outbox()
-                if json.loads(str(item["payload_json"])).get("kind")
-                == "owner_action"
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    event
+                    for event in state.events(intake.product_id)
+                    if event["event_type"] == "owner_action_required"
+                ]
+            )
+            == 1
+        )
+        assert (
+            len(
+                [
+                    item
+                    for item in state.list_outbox()
+                    if json.loads(str(item["payload_json"])).get("kind") == "owner_action"
+                ]
+            )
+            == 1
+        )
 
         probe.missing.remove("github.pull_request.create")
         reconciler.reconcile_once()
         assert state.get_task(release_task_id)["graph_status"] == "BLOCKED_CAPABILITY"
-        assert [
-            block["capability"] for block in state.open_capability_blocks()
-        ] == ["git.push_branch"]
+        assert [block["capability"] for block in state.open_capability_blocks()] == [
+            "git.push_branch"
+        ]
 
         probe.missing.clear()
         result = reconciler.reconcile_once()
@@ -1566,9 +1528,7 @@ def test_AUT_P0_025_production_profile_underdeclaration_is_atomic(
         contract["capability_profile"] = "release_production"
         contract["required_capabilities"] = []
         before = {
-            table: state._connection.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
+            table: state._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in (
                 "plans",
                 "tasks",
@@ -1579,10 +1539,7 @@ def test_AUT_P0_025_production_profile_underdeclaration_is_atomic(
         }
         with pytest.raises(
             ValueError,
-            match=(
-                "required_capabilities omits canonical capability: "
-                "backup.verify"
-            ),
+            match=("required_capabilities omits canonical capability: backup.verify"),
         ):
             state.ingest_plan(
                 plan,
@@ -1591,9 +1548,7 @@ def test_AUT_P0_025_production_profile_underdeclaration_is_atomic(
                 created_by_task_id=root_id,
             )
         after = {
-            table: state._connection.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
+            table: state._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in before
         }
         assert after == before
@@ -1635,9 +1590,7 @@ def test_CAP_P0_004_unknown_capability_is_rejected_before_sqlite_mutation(
             "controller.unknown-capability",
         ]
         before = {
-            table: state._connection.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
+            table: state._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in ("plans", "tasks", "task_edges", "task_outcomes", "outbox")
         }
         with pytest.raises(ValueError, match="contains unknown capability"):
@@ -1648,9 +1601,7 @@ def test_CAP_P0_004_unknown_capability_is_rejected_before_sqlite_mutation(
                 created_by_task_id=root_id,
             )
         after = {
-            table: state._connection.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
+            table: state._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in before
         }
         assert after == before
@@ -1745,14 +1696,8 @@ def test_admin_permission_proves_configure_and_merge_when_governance_is_unreadab
             config,
             command_runner=runner,
         )
-        assert (
-            probe.check("github.repository.configure", product=product).status
-            == "AVAILABLE"
-        )
-        assert (
-            probe.check("github.pull_request.merge", product=product).status
-            == "AVAILABLE"
-        )
+        assert probe.check("github.repository.configure", product=product).status == "AVAILABLE"
+        assert probe.check("github.pull_request.merge", product=product).status == "AVAILABLE"
 
 
 def test_container_capability_requires_subject_runtime_ipam_and_network_probe(
@@ -1944,15 +1889,11 @@ class RuntimeRepositoryAdapter(FakeRepositoryAdapter):
         )
         (workspace / "tests").mkdir()
         (workspace / "tests" / "test_runtime_service.py").write_text(
-            "def test_runtime_service() -> None:\n"
-            "    assert True\n",
+            "def test_runtime_service() -> None:\n    assert True\n",
             encoding="utf-8",
         )
         (workspace / "pyproject.toml").write_text(
-            "[project]\n"
-            'name = "runtime-service-fixture"\n'
-            'version = "1.0.0"\n'
-            "dependencies = []\n",
+            '[project]\nname = "runtime-service-fixture"\nversion = "1.0.0"\ndependencies = []\n',
             encoding="utf-8",
         )
         subprocess.run(
@@ -2063,8 +2004,7 @@ def _runtime_plan(
             {
                 "goal_id": "runtime-service",
                 "statement": (
-                    "Build, release, and observe the complete private runtime "
-                    "acceptance service."
+                    "Build, release, and observe the complete private runtime acceptance service."
                 ),
                 "mandatory": True,
             }
@@ -2075,8 +2015,7 @@ def _runtime_plan(
                 "stage_kind": "implementation_slice",
                 "title": "Implement the private runtime service",
                 "objective": (
-                    "Implement the complete private service and its observable "
-                    "critical journey."
+                    "Implement the complete private service and its observable critical journey."
                 ),
                 "depends_on": [],
                 "scope": [
@@ -2092,8 +2031,7 @@ def _runtime_plan(
             }
         ],
         "summary": (
-            "Semantic implementation proposal for the complete private runtime "
-            "acceptance service."
+            "Semantic implementation proposal for the complete private runtime acceptance service."
         ),
         "evidence_refs": ["strict://architecture/accepted"],
     }
@@ -2251,9 +2189,7 @@ def _product_test_output(
                 {
                     "journey_id": "critical-owner-journey",
                     "result": "PASS",
-                    "evidence_refs": [
-                        f"strict://journey/{environment}/pass"
-                    ],
+                    "evidence_refs": [f"strict://journey/{environment}/pass"],
                 }
             ],
             "defects": [],
@@ -2270,16 +2206,12 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
 ) -> None:
     config = configured(tmp_path)
     quality_catalog = yaml.safe_load(
-        (
-            Path(__file__).resolve().parents[1]
-            / "config"
-            / "quality-gates.yaml"
-        ).read_text(encoding="utf-8")
+        (Path(__file__).resolve().parents[1] / "config" / "quality-gates.yaml").read_text(
+            encoding="utf-8"
+        )
     )
     dependency_gate = next(
-        gate
-        for gate in quality_catalog["gates"]
-        if gate["id"] == "target-dependency-audit"
+        gate for gate in quality_catalog["gates"] if gate["id"] == "target-dependency-audit"
     )
     dependency_gate.clear()
     dependency_gate.update(
@@ -2343,13 +2275,12 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
                     "from": {"id": 42},
                     "chat": {"id": 42, "type": "private"},
                     "text": (
-                        "/idea Build and release a complete private runtime "
-                        "acceptance service"
+                        "/idea Build and release a complete private runtime acceptance service"
                     ),
                 },
             }
         )
-        assert telegram.messages
+        assert telegram.messages == []
         product = state.list_products()[0]
         product_id = str(product["product_id"])
         runner.outputs.extend(
@@ -2369,8 +2300,7 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
         task_specifier = next(
             task
             for task in state.list_tasks(product_id)
-            if task["role"] == "task-specifier"
-            and task["graph_status"] == "READY"
+            if task["role"] == "task-specifier" and task["graph_status"] == "READY"
         )
         plan = _runtime_plan(
             config,
@@ -2482,13 +2412,11 @@ def test_AUT_P0_027_real_service_path_completes_new_private_product(
             "production",
         ]
         assert any(
-            task["stage_key"] == "observation"
-            and task["graph_status"] == "ACCEPTED"
+            task["stage_key"] == "observation" and task["graph_status"] == "ACCEPTED"
             for task in state.list_tasks(product_id)
         )
         assert not any(
-            event["event_type"] == "worker_restarted"
-            for event in state.events(product_id)
+            event["event_type"] == "worker_restarted" for event in state.events(product_id)
         )
     finally:
         state.close()
@@ -2547,7 +2475,7 @@ def test_AUT_ARCH_001_canonical_v2_path_excludes_legacy_heuristics() -> None:
     assert "latest_task" not in outcome_source
     assert "latest_task" not in router_source
     assert "next_repair_cycle" not in router_source
-    assert "task.get(\"title\")" not in prepare_source
+    assert 'task.get("title")' not in prepare_source
     assert "copytree" not in bootstrap_source
     assert 'role = "replanner"' in router_source
     assert '"observation"' in prepare_source

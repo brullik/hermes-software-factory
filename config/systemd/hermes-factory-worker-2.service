@@ -1,8 +1,8 @@
 [Unit]
 Description=Hermes Software Factory provider-backed worker 2
-After=network-online.target hermes-factory-controller.service
+After=network-online.target hermes-factory-controller.service hermes-factory-product-github-broker.service
 Wants=network-online.target
-Requires=hermes-factory-controller.service
+Requires=hermes-factory-controller.service hermes-factory-product-github-broker.service
 
 [Service]
 Type=simple
@@ -13,14 +13,24 @@ Environment=FACTORY_CONFIG=/etc/hermes-factory/config.yaml
 Environment=HOME=/var/lib/hermes-factory
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory
 Environment=PYTHONUNBUFFERED=1
+Environment=HERMES_GITHUB_BROKER_SOCKET=/run/hermes-factory-product-github-broker/broker.sock
+Environment=HERMES_GITHUB_REPOSITORY_PREFIX=hermes-product-
+Environment=TERMINAL_ENV=docker
+Environment=HERMES_DOCKER_BINARY=/usr/bin/podman
+Environment=TERMINAL_DOCKER_FORWARD_ENV=[]
+Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
+Environment=TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES=false
+Environment=TERMINAL_DOCKER_RUN_AS_HOST_USER=true
 ExecStart=/opt/hermes-factory/venv/bin/python -m factory.worker --worker-id hermes-worker-2
 Restart=on-failure
 RestartSec=10
+NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/hermes-factory /var/log/hermes-factory /run/hermes-factory
-ReadOnlyPaths=/etc/hermes-factory
+ReadOnlyPaths=/etc/hermes-factory -/run/hermes-factory-product-github-broker/broker.sock
+InaccessiblePaths=/etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryMax=1200M

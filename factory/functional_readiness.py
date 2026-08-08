@@ -26,6 +26,7 @@ from .common import sha256_text, stable_json, utc_now
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
+_CREDENTIAL_EPOCH = re.compile(r"^CE-[A-F0-9]{32}$")
 
 
 class FunctionalReadinessError(RuntimeError):
@@ -205,9 +206,7 @@ class CapabilityHandshakeReport:
             toolchain_digest=str(value["toolchain_digest"]),
             receipts=tuple(str(item) for item in receipts),
             safe_reason_code=(
-                str(value["safe_reason_code"])
-                if value["safe_reason_code"] is not None
-                else None
+                str(value["safe_reason_code"]) if value["safe_reason_code"] is not None else None
             ),
             report_digest=str(value["report_digest"]),
         )
@@ -237,8 +236,7 @@ class CandidateDatabaseVerifier:
         database: Path,
         *,
         worker_idle: bool = False,
-        independent_completion_verifier: Callable[[sqlite3.Connection, str], bool]
-        | None = None,
+        independent_completion_verifier: Callable[[sqlite3.Connection, str], bool] | None = None,
     ) -> CandidateTruth:
         if not database.is_file() or database.is_symlink():
             raise FunctionalReadinessError("Candidate database is unavailable")
@@ -279,7 +277,9 @@ class CandidateDatabaseVerifier:
                     (product_id,),
                 ).fetchone()[0]
             )
-            has_runnable = any(status in CandidateDatabaseVerifier.RUNNABLE_TASKS for status in task_statuses)
+            has_runnable = any(
+                status in CandidateDatabaseVerifier.RUNNABLE_TASKS for status in task_statuses
+            )
             external_wait = "BLOCKED_EXTERNAL" in task_statuses
             liveness = (
                 worker_idle
@@ -334,12 +334,17 @@ class FunctionalQualificationGovernor:
                 toolchain_digest TEXT NOT NULL,
                 status TEXT NOT NULL,
                 q6_5_status TEXT NOT NULL DEFAULT 'PENDING',
+                product_github_status TEXT NOT NULL DEFAULT 'PENDING',
+                stable_provider_status TEXT NOT NULL DEFAULT 'PENDING',
                 pre_q8_status TEXT NOT NULL DEFAULT 'PENDING',
                 golden_product_status TEXT NOT NULL DEFAULT 'PENDING',
                 internal_verifier_status TEXT NOT NULL DEFAULT 'PENDING',
                 stable_health_status TEXT NOT NULL DEFAULT 'PENDING',
                 stable_intake_status TEXT NOT NULL DEFAULT 'PENDING',
                 q7_started_at TEXT,
+                ready_result_manifest_digest TEXT,
+                ready_result_manifest_ref TEXT,
+                factory_ready_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -356,6 +361,16 @@ class FunctionalQualificationGovernor:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(epoch_id,operation)
             );
+            CREATE TABLE IF NOT EXISTS runtime_capability_reports (
+                epoch_id TEXT NOT NULL REFERENCES functional_epochs(epoch_id),
+                capability TEXT NOT NULL,
+                credential_epoch_id TEXT,
+                status TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                report_digest TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(epoch_id,capability)
+            );
             CREATE TABLE IF NOT EXISTS pre_q8_scenarios (
                 epoch_id TEXT NOT NULL REFERENCES functional_epochs(epoch_id),
                 scenario_id TEXT NOT NULL,
@@ -367,6 +382,21 @@ class FunctionalQualificationGovernor:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(epoch_id,scenario_id)
             );
+            CREATE TABLE IF NOT EXISTS functional_phase_runs (
+                epoch_id TEXT NOT NULL REFERENCES functional_epochs(epoch_id),
+                phase_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL CHECK(attempt=1),
+                status TEXT NOT NULL CHECK(status IN ('RUNNING','PASS','FAIL')),
+                budget_seconds INTEGER NOT NULL CHECK(budget_seconds BETWEEN 60 AND 604800),
+                started_at TEXT NOT NULL,
+                reason_code TEXT,
+                evidence_digest TEXT,
+                completed_at TEXT,
+                PRIMARY KEY(epoch_id,phase_id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_functional_one_running_phase
+              ON functional_phase_runs(epoch_id)
+              WHERE status='RUNNING';
             CREATE TABLE IF NOT EXISTS golden_products (
                 epoch_id TEXT PRIMARY KEY REFERENCES functional_epochs(epoch_id),
                 product_id TEXT NOT NULL,
@@ -375,6 +405,10 @@ class FunctionalQualificationGovernor:
                 artifact_digest TEXT NOT NULL,
                 completion_manifest_ref TEXT NOT NULL,
                 verifier_digest TEXT NOT NULL,
+                branch_protection_bypassed INTEGER NOT NULL DEFAULT 0,
+                duplicate_side_effects INTEGER NOT NULL DEFAULT 0,
+                credential_exposure INTEGER NOT NULL DEFAULT 0,
+                manual_database_edits INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -403,6 +437,195 @@ class FunctionalQualificationGovernor:
             );
             """
         )
+        columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(functional_epochs)")
+        }
+        if "product_github_status" not in columns:
+            self.connection.execute(
+                "ALTER TABLE functional_epochs ADD COLUMN "
+                "product_github_status TEXT NOT NULL DEFAULT 'PENDING'"
+            )
+        if "stable_provider_status" not in columns:
+            self.connection.execute(
+                "ALTER TABLE functional_epochs ADD COLUMN "
+                "stable_provider_status TEXT NOT NULL DEFAULT 'PENDING'"
+            )
+        for name in (
+            "ready_result_manifest_digest",
+            "ready_result_manifest_ref",
+            "factory_ready_at",
+        ):
+            if name not in columns:
+                self.connection.execute(f"ALTER TABLE functional_epochs ADD COLUMN {name} TEXT")
+        self.connection.execute(
+            "UPDATE functional_epochs SET product_github_status='PENDING' "
+            "WHERE product_github_status IS NULL"
+        )
+        self.connection.execute(
+            "UPDATE functional_epochs SET stable_provider_status='PENDING' "
+            "WHERE stable_provider_status IS NULL"
+        )
+        golden_columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(golden_products)")
+        }
+        for name in (
+            "branch_protection_bypassed",
+            "duplicate_side_effects",
+            "credential_exposure",
+            "manual_database_edits",
+        ):
+            if name not in golden_columns:
+                self.connection.execute(
+                    f"ALTER TABLE golden_products ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0"
+                )
+
+    def record_product_github_capability(
+        self,
+        *,
+        epoch_id: str,
+        credential_epoch_id: str,
+        report_digest: str,
+        reports: tuple[CapabilityHandshakeReport, ...],
+    ) -> None:
+        epoch = self.epoch(epoch_id)
+        if str(epoch["q6_5_status"]) != "PASS":
+            raise FunctionalReadinessError("product GitHub proof requires Q6.5 PASS")
+        expected = set(MANDATORY_Q6_5_OPERATIONS[:8])
+        if (
+            not _CREDENTIAL_EPOCH.fullmatch(credential_epoch_id)
+            or not _SHA256.fullmatch(report_digest)
+            or {report.operation for report in reports} != expected
+            or any(
+                report.status != CapabilityStatus.AVAILABLE
+                or report.credential_epoch_id != credential_epoch_id
+                or report.candidate_digest != str(epoch["candidate_digest"])
+                or not str(report.scope.get("repository", "")).startswith("hermes-canary-runtime-")
+                for report in reports
+            )
+        ):
+            raise FunctionalReadinessError("product GitHub runtime proof is invalid")
+        payload = {
+            "schema_version": "1.0",
+            "credential_epoch_id": credential_epoch_id,
+            "reports": [
+                report.as_dict() for report in sorted(reports, key=lambda item: item.operation)
+            ],
+        }
+        with self.connection:
+            existing = self.connection.execute(
+                "SELECT report_digest,report_json FROM runtime_capability_reports "
+                "WHERE epoch_id=? AND capability='github.product.runtime'",
+                (epoch_id,),
+            ).fetchone()
+            encoded = stable_json(payload)
+            if existing is not None:
+                if str(existing[0]) != report_digest or str(existing[1]) != encoded:
+                    raise FunctionalReadinessError("product GitHub runtime proof conflicts")
+            else:
+                self.connection.execute(
+                    """INSERT INTO runtime_capability_reports
+                       (epoch_id,capability,credential_epoch_id,status,report_json,
+                        report_digest,created_at)
+                       VALUES (?,'github.product.runtime',?,'AVAILABLE',?,?,?)""",
+                    (epoch_id, credential_epoch_id, encoded, report_digest, utc_now()),
+                )
+            self.connection.execute(
+                "UPDATE functional_epochs SET product_github_status='PASS',"
+                "status=CASE WHEN stable_provider_status='PASS' "
+                "THEN 'PRE_Q8_PENDING' ELSE 'RUNTIME_CAPABILITY_PENDING' END,updated_at=? "
+                "WHERE epoch_id=?",
+                (utc_now(), epoch_id),
+            )
+
+    def record_stable_provider_capability(
+        self,
+        *,
+        epoch_id: str,
+        observed_at: str,
+        report_digest: str,
+        reports: tuple[CapabilityHandshakeReport, ...],
+    ) -> None:
+        epoch = self.epoch(epoch_id)
+        expected = {
+            "provider.luna.invoke",
+            "provider.terra.invoke",
+            "provider.sol.invoke",
+            "provider.terminal.sandbox",
+        }
+        if (
+            str(epoch["q6_5_status"]) != "PASS"
+            or not observed_at
+            or not _SHA256.fullmatch(report_digest)
+            or {report.operation for report in reports} != expected
+            or any(
+                report.status != CapabilityStatus.AVAILABLE
+                or report.credential_epoch_id is not None
+                or report.candidate_digest != str(epoch["candidate_digest"])
+                or report.toolchain_digest != str(epoch["toolchain_digest"])
+                or report.scope.get("runtime_principal") != "hermesfactory"
+                for report in reports
+            )
+            or any(
+                report.scope.get("execution_boundary") != "rootless_oci"
+                or report.scope.get("credential_forwarding") is not False
+                or report.scope.get("toolsets") != ["terminal"]
+                for report in reports
+                if report.operation == "provider.terminal.sandbox"
+            )
+        ):
+            raise FunctionalReadinessError("Stable provider runtime proof is invalid")
+        payload = {
+            "schema_version": "1.0",
+            "observed_at": observed_at,
+            "reports": [
+                report.as_dict() for report in sorted(reports, key=lambda item: item.operation)
+            ],
+        }
+        encoded = stable_json(payload)
+        with self.connection:
+            existing = self.connection.execute(
+                "SELECT report_digest,report_json FROM runtime_capability_reports "
+                "WHERE epoch_id=? AND capability='provider.stable.runtime'",
+                (epoch_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != report_digest or str(existing[1]) != encoded:
+                    raise FunctionalReadinessError("Stable provider runtime proof conflicts")
+            else:
+                self.connection.execute(
+                    """INSERT INTO runtime_capability_reports
+                       (epoch_id,capability,credential_epoch_id,status,report_json,
+                        report_digest,created_at)
+                       VALUES (?,'provider.stable.runtime',NULL,'AVAILABLE',?,?,?)""",
+                    (epoch_id, encoded, report_digest, utc_now()),
+                )
+            self.connection.execute(
+                "UPDATE functional_epochs SET stable_provider_status='PASS',"
+                "status=CASE WHEN product_github_status='PASS' "
+                "THEN 'PRE_Q8_PENDING' ELSE 'RUNTIME_CAPABILITY_PENDING' END,updated_at=? "
+                "WHERE epoch_id=?",
+                (utc_now(), epoch_id),
+            )
+
+    def fail_runtime_capability(
+        self, *, epoch_id: str, capability: str, report_digest: str
+    ) -> None:
+        if capability not in {
+            "github.product.runtime",
+            "provider.stable.runtime",
+        } or not _SHA256.fullmatch(report_digest):
+            raise FunctionalReadinessError("runtime capability failure proof is invalid")
+        status_column = (
+            "product_github_status"
+            if capability == "github.product.runtime"
+            else "stable_provider_status"
+        )
+        with self.connection:
+            self.connection.execute(
+                f"UPDATE functional_epochs SET {status_column}='FAIL',"
+                "status='QUALIFICATION_FAILED',updated_at=? WHERE epoch_id=?",
+                (utc_now(), epoch_id),
+            )
 
     def register_epoch(
         self,
@@ -414,9 +637,7 @@ class FunctionalQualificationGovernor:
     ) -> None:
         if not epoch_id or not _SHA40.fullmatch(source_commit):
             raise FunctionalReadinessError("functional epoch identity is invalid")
-        if not _SHA256.fullmatch(candidate_digest) or not _SHA256.fullmatch(
-            toolchain_digest
-        ):
+        if not _SHA256.fullmatch(candidate_digest) or not _SHA256.fullmatch(toolchain_digest):
             raise FunctionalReadinessError("functional epoch digest is invalid")
         now = utc_now()
         with self.connection:
@@ -504,9 +725,7 @@ class FunctionalQualificationGovernor:
             raise KeyError(epoch_id)
         return dict(row)
 
-    def record_handshake(
-        self, epoch_id: str, report: CapabilityHandshakeReport
-    ) -> None:
+    def record_handshake(self, epoch_id: str, report: CapabilityHandshakeReport) -> None:
         report.validate()
         epoch = self.epoch(epoch_id)
         if str(epoch["candidate_digest"]) != report.candidate_digest:
@@ -553,7 +772,8 @@ class FunctionalQualificationGovernor:
         )
         if passed:
             self.connection.execute(
-                "UPDATE functional_epochs SET q6_5_status='PASS',status='PRE_Q8_PENDING',"
+                "UPDATE functional_epochs SET q6_5_status='PASS',"
+                "status='RUNTIME_CAPABILITY_PENDING',"
                 "updated_at=? WHERE epoch_id=?",
                 (now, epoch_id),
             )
@@ -584,11 +804,11 @@ class FunctionalQualificationGovernor:
             "missing_candidate_github_credential",
             "missing_candidate_provider_credential",
             "missing_candidate_telegram_credential",
+            "missing_stable_product_github_credential",
+            "missing_stable_provider_credential",
         }:
             raise FunctionalReadinessError("owner action reason is not external")
-        seed = sha256_text(
-            stable_json([epoch_id, reason_code, capability, capability_epoch])
-        )
+        seed = sha256_text(stable_json([epoch_id, reason_code, capability, capability_epoch]))
         action_id = f"OA-{seed[:24].upper()}"
         with self.connection:
             self.connection.execute(
@@ -604,6 +824,18 @@ class FunctionalQualificationGovernor:
                     utc_now(),
                 ),
             )
+            if capability == "github.product.runtime":
+                self.connection.execute(
+                    "UPDATE functional_epochs SET product_github_status='WAITING_CAPABILITY',"
+                    "status='WAITING_CAPABILITY',updated_at=? WHERE epoch_id=?",
+                    (utc_now(), epoch_id),
+                )
+            elif capability == "provider.stable.runtime":
+                self.connection.execute(
+                    "UPDATE functional_epochs SET stable_provider_status='WAITING_CAPABILITY',"
+                    "status='WAITING_CAPABILITY',updated_at=? WHERE epoch_id=?",
+                    (utc_now(), epoch_id),
+                )
         return action_id
 
     def recover_external_capability(self, *, epoch_id: str, capability: str) -> bool:
@@ -683,11 +915,13 @@ class FunctionalQualificationGovernor:
         epoch = self.epoch(epoch_id)
         if str(epoch["q6_5_status"]) != "PASS":
             raise FunctionalReadinessError("PRE-Q8 requires Q6.5 PASS")
+        if str(epoch["product_github_status"]) != "PASS":
+            raise FunctionalReadinessError("PRE-Q8 requires product GitHub runtime capability")
+        if str(epoch["stable_provider_status"]) != "PASS":
+            raise FunctionalReadinessError("PRE-Q8 requires Stable provider runtime capability")
         if scenario_id not in PRE_Q8_SCENARIOS or attempt != 1:
             raise FunctionalReadinessError("PRE-Q8 requires exact first-run scenario")
-        if not product_id or not completion_manifest_ref or not _SHA256.fullmatch(
-            evidence_digest
-        ):
+        if not product_id or not completion_manifest_ref or not _SHA256.fullmatch(evidence_digest):
             raise FunctionalReadinessError("PRE-Q8 evidence is incomplete")
         now = utc_now()
         with self.connection:
@@ -711,6 +945,28 @@ class FunctionalQualificationGovernor:
                     now,
                 ),
             )
+            phase_id = f"pre-q8:{scenario_id}"
+            phase = self.connection.execute(
+                "SELECT status FROM functional_phase_runs WHERE epoch_id=? AND phase_id=?",
+                (epoch_id, phase_id),
+            ).fetchone()
+            if phase is not None and str(phase[0]) == "FAIL":
+                raise FunctionalReadinessError("failed PRE-Q8 phase cannot pass")
+            if phase is None:
+                self.connection.execute(
+                    """INSERT INTO functional_phase_runs
+                       (epoch_id,phase_id,attempt,status,budget_seconds,started_at,
+                        evidence_digest,completed_at)
+                       VALUES (?,?,1,'PASS',172800,?,?,?)""",
+                    (epoch_id, phase_id, now, evidence_digest, now),
+                )
+            else:
+                self.connection.execute(
+                    """UPDATE functional_phase_runs
+                          SET status='PASS',evidence_digest=?,completed_at=?
+                        WHERE epoch_id=? AND phase_id=?""",
+                    (evidence_digest, now, epoch_id, phase_id),
+                )
             count = int(
                 self.connection.execute(
                     "SELECT COUNT(*) FROM pre_q8_scenarios WHERE epoch_id=? AND status='PASS'",
@@ -734,6 +990,10 @@ class FunctionalQualificationGovernor:
         artifact_digest: str,
         completion_manifest_ref: str,
         verifier_digest: str,
+        branch_protection_bypassed: bool = False,
+        duplicate_side_effects: int = 0,
+        credential_exposure: bool = False,
+        manual_database_edits: int = 0,
     ) -> None:
         epoch = self.epoch(epoch_id)
         if str(epoch["pre_q8_status"]) != "10/10 PASS":
@@ -745,6 +1005,10 @@ class FunctionalQualificationGovernor:
             or not _SHA256.fullmatch(artifact_digest)
             or not completion_manifest_ref
             or not _SHA256.fullmatch(verifier_digest)
+            or branch_protection_bypassed
+            or duplicate_side_effects != 0
+            or credential_exposure
+            or manual_database_edits != 0
         ):
             raise FunctionalReadinessError("Golden Product evidence is invalid")
         identity = (
@@ -754,11 +1018,17 @@ class FunctionalQualificationGovernor:
             artifact_digest,
             completion_manifest_ref,
             verifier_digest,
+            str(int(branch_protection_bypassed)),
+            str(duplicate_side_effects),
+            str(int(credential_exposure)),
+            str(manual_database_edits),
         )
         with self.connection:
             existing = self.connection.execute(
                 """SELECT product_id,repository_ref,merge_commit,artifact_digest,
-                          completion_manifest_ref,verifier_digest
+                          completion_manifest_ref,verifier_digest,
+                          branch_protection_bypassed,duplicate_side_effects,
+                          credential_exposure,manual_database_edits
                      FROM golden_products WHERE epoch_id=?""",
                 (epoch_id,),
             ).fetchone()
@@ -769,8 +1039,10 @@ class FunctionalQualificationGovernor:
             self.connection.execute(
                 """INSERT INTO golden_products
                    (epoch_id,product_id,repository_ref,merge_commit,artifact_digest,
-                    completion_manifest_ref,verifier_digest,status,created_at)
-                   VALUES (?,?,?,?,?,?,?,'COMPLETED',?)""",
+                    completion_manifest_ref,verifier_digest,
+                    branch_protection_bypassed,duplicate_side_effects,
+                    credential_exposure,manual_database_edits,status,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'COMPLETED',?)""",
                 (
                     epoch_id,
                     product_id,
@@ -779,14 +1051,245 @@ class FunctionalQualificationGovernor:
                     artifact_digest,
                     completion_manifest_ref,
                     verifier_digest,
+                    int(branch_protection_bypassed),
+                    duplicate_side_effects,
+                    int(credential_exposure),
+                    manual_database_edits,
                     utc_now(),
                 ),
             )
+            for phase_id, budget_seconds in (
+                ("golden-intake", 86400),
+                ("golden-product", 259200),
+            ):
+                phase = self.connection.execute(
+                    "SELECT status FROM functional_phase_runs WHERE epoch_id=? AND phase_id=?",
+                    (epoch_id, phase_id),
+                ).fetchone()
+                if phase is not None and str(phase[0]) == "FAIL":
+                    raise FunctionalReadinessError("failed Golden phase cannot pass")
+                if phase is None:
+                    self.connection.execute(
+                        """INSERT INTO functional_phase_runs
+                           (epoch_id,phase_id,attempt,status,budget_seconds,started_at,
+                            evidence_digest,completed_at)
+                           VALUES (?,?,1,'PASS',?,?,?,?)""",
+                        (
+                            epoch_id,
+                            phase_id,
+                            budget_seconds,
+                            utc_now(),
+                            verifier_digest,
+                            utc_now(),
+                        ),
+                    )
+                else:
+                    self.connection.execute(
+                        """UPDATE functional_phase_runs
+                              SET status='PASS',evidence_digest=?,completed_at=?
+                            WHERE epoch_id=? AND phase_id=?""",
+                        (verifier_digest, utc_now(), epoch_id, phase_id),
+                    )
             self.connection.execute(
                 "UPDATE functional_epochs SET golden_product_status='COMPLETED',"
                 "status='READY_EVALUATION',updated_at=? WHERE epoch_id=?",
                 (utc_now(), epoch_id),
             )
+
+    @staticmethod
+    def _validate_phase_id(phase_id: str) -> None:
+        if phase_id in {"golden-intake", "golden-product"}:
+            return
+        if phase_id.startswith("pre-q8:") and phase_id.removeprefix("pre-q8:") in PRE_Q8_SCENARIOS:
+            return
+        raise FunctionalReadinessError("functional phase identity is invalid")
+
+    def start_phase(
+        self,
+        *,
+        epoch_id: str,
+        phase_id: str,
+        budget_seconds: int,
+    ) -> dict[str, Any]:
+        """Create or resume the only durable attempt with its original wall-clock budget."""
+
+        self._validate_phase_id(phase_id)
+        if not 60 <= budget_seconds <= 604800:
+            raise FunctionalReadinessError("functional phase budget is invalid")
+        epoch = self.epoch(epoch_id)
+        existing = self.connection.execute(
+            "SELECT * FROM functional_phase_runs WHERE epoch_id=? AND phase_id=?",
+            (epoch_id, phase_id),
+        ).fetchone()
+        if existing is not None:
+            value = dict(existing)
+            if int(value["budget_seconds"]) != budget_seconds:
+                raise FunctionalReadinessError("functional phase budget conflicts")
+            return value
+        if str(epoch["status"]) == "QUALIFICATION_FAILED":
+            raise FunctionalReadinessError("terminal functional epoch cannot start a phase")
+        running = self.connection.execute(
+            "SELECT phase_id FROM functional_phase_runs "
+            "WHERE epoch_id=? AND status='RUNNING'",
+            (epoch_id,),
+        ).fetchone()
+        if running is not None:
+            raise FunctionalReadinessError(
+                f"functional phase already running: {running[0]!s}"
+            )
+        if phase_id.startswith("pre-q8:"):
+            if (
+                str(epoch["q6_5_status"]) != "PASS"
+                or str(epoch["product_github_status"]) != "PASS"
+                or str(epoch["stable_provider_status"]) != "PASS"
+                or str(epoch["pre_q8_status"]) not in {"PENDING", "RUNNING"}
+            ):
+                raise FunctionalReadinessError("PRE-Q8 phase prerequisites are incomplete")
+        else:
+            if str(epoch["pre_q8_status"]) != "10/10 PASS":
+                raise FunctionalReadinessError("Golden phase requires PRE-Q8 10/10 PASS")
+            if phase_id == "golden-product":
+                intake = self.connection.execute(
+                    "SELECT status FROM functional_phase_runs "
+                    "WHERE epoch_id=? AND phase_id='golden-intake'",
+                    (epoch_id,),
+                ).fetchone()
+                if intake is None or str(intake[0]) != "PASS":
+                    raise FunctionalReadinessError("Golden Product execution requires intake PASS")
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO functional_phase_runs
+                   (epoch_id,phase_id,attempt,status,budget_seconds,started_at)
+                   VALUES (?,?,1,'RUNNING',?,?)""",
+                (epoch_id, phase_id, budget_seconds, now),
+            )
+            if phase_id.startswith("pre-q8:"):
+                self.connection.execute(
+                    "UPDATE functional_epochs SET pre_q8_status='RUNNING',updated_at=? "
+                    "WHERE epoch_id=?",
+                    (now, epoch_id),
+                )
+        row = self.connection.execute(
+            "SELECT * FROM functional_phase_runs WHERE epoch_id=? AND phase_id=?",
+            (epoch_id, phase_id),
+        ).fetchone()
+        if row is None:  # pragma: no cover - protected by the transaction
+            raise FunctionalReadinessError("functional phase was not persisted")
+        return dict(row)
+
+    def pass_phase(
+        self,
+        *,
+        epoch_id: str,
+        phase_id: str,
+        evidence_digest: str,
+    ) -> dict[str, Any]:
+        """Complete a started phase exactly once without changing its original deadline."""
+
+        self._validate_phase_id(phase_id)
+        if phase_id != "golden-intake":
+            raise FunctionalReadinessError("generic phase pass is restricted to Golden intake")
+        if not _SHA256.fullmatch(evidence_digest):
+            raise FunctionalReadinessError("functional phase evidence is invalid")
+        row = self.connection.execute(
+            "SELECT * FROM functional_phase_runs WHERE epoch_id=? AND phase_id=?",
+            (epoch_id, phase_id),
+        ).fetchone()
+        if row is None:
+            raise FunctionalReadinessError("functional phase was not started")
+        current = dict(row)
+        if str(current["status"]) == "FAIL":
+            raise FunctionalReadinessError("failed functional phase cannot pass")
+        if str(current["status"]) == "PASS":
+            if str(current["evidence_digest"]) != evidence_digest:
+                raise FunctionalReadinessError("functional phase evidence conflicts")
+            return current
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """UPDATE functional_phase_runs
+                      SET status='PASS',evidence_digest=?,completed_at=?
+                    WHERE epoch_id=? AND phase_id=?""",
+                (evidence_digest, now, epoch_id, phase_id),
+            )
+        current.update(status="PASS", evidence_digest=evidence_digest, completed_at=now)
+        return current
+
+    def fail_phase(
+        self,
+        *,
+        epoch_id: str,
+        phase_id: str,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """Terminally close one exhausted or broken phase; it can never be retried."""
+
+        self._validate_phase_id(phase_id)
+        allowed_reasons = {
+            "pre_q8_timeout",
+            "pre_q8_terminal_failure",
+            "pre_q8_execution_failed",
+            "golden_intake_timeout",
+            "golden_intake_failed",
+            "golden_product_timeout",
+            "golden_product_terminal_failure",
+            "golden_product_execution_failed",
+        }
+        if reason_code not in allowed_reasons:
+            raise FunctionalReadinessError("functional phase failure reason is invalid")
+        row = self.connection.execute(
+            "SELECT * FROM functional_phase_runs WHERE epoch_id=? AND phase_id=?",
+            (epoch_id, phase_id),
+        ).fetchone()
+        if row is None:
+            raise FunctionalReadinessError("functional phase was not started")
+        current = dict(row)
+        if str(current["status"]) == "PASS":
+            raise FunctionalReadinessError("passed functional phase cannot fail")
+        payload = {
+            "epoch_id": epoch_id,
+            "phase_id": phase_id,
+            "attempt": 1,
+            "started_at": str(current["started_at"]),
+            "budget_seconds": int(current["budget_seconds"]),
+            "reason_code": reason_code,
+        }
+        evidence_digest = sha256_text(stable_json(payload))
+        if str(current["status"]) == "FAIL":
+            if (
+                str(current["reason_code"]) != reason_code
+                or str(current["evidence_digest"]) != evidence_digest
+            ):
+                raise FunctionalReadinessError("functional phase failure conflicts")
+            return current
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """UPDATE functional_phase_runs
+                      SET status='FAIL',reason_code=?,evidence_digest=?,completed_at=?
+                    WHERE epoch_id=? AND phase_id=?""",
+                (reason_code, evidence_digest, now, epoch_id, phase_id),
+            )
+            if phase_id.startswith("pre-q8:"):
+                self.connection.execute(
+                    "UPDATE functional_epochs SET pre_q8_status='FAIL',"
+                    "status='QUALIFICATION_FAILED',updated_at=? WHERE epoch_id=?",
+                    (now, epoch_id),
+                )
+            else:
+                self.connection.execute(
+                    "UPDATE functional_epochs SET golden_product_status='FAIL',"
+                    "status='QUALIFICATION_FAILED',updated_at=? WHERE epoch_id=?",
+                    (now, epoch_id),
+                )
+        current.update(
+            status="FAIL",
+            reason_code=reason_code,
+            evidence_digest=evidence_digest,
+            completed_at=now,
+        )
+        return current
 
     def record_factory_checks(
         self,
@@ -799,6 +1302,14 @@ class FunctionalQualificationGovernor:
         epoch = self.epoch(epoch_id)
         if str(epoch["golden_product_status"]) != "COMPLETED":
             raise FunctionalReadinessError("factory checks require Golden Product COMPLETED")
+        if str(epoch["product_github_status"]) != "PASS":
+            raise FunctionalReadinessError(
+                "factory checks require product GitHub runtime capability"
+            )
+        if str(epoch["stable_provider_status"]) != "PASS":
+            raise FunctionalReadinessError(
+                "factory checks require Stable provider runtime capability"
+            )
         open_actions = int(
             self.connection.execute(
                 "SELECT COUNT(*) FROM functional_owner_actions WHERE epoch_id=? AND status='OPEN'",
@@ -818,7 +1329,12 @@ class FunctionalQualificationGovernor:
                 """UPDATE functional_epochs
                       SET internal_verifier_status=?,stable_health_status=?,
                           stable_intake_status=?,status=?,updated_at=? WHERE epoch_id=?""",
-                (*values, "FUNCTIONALLY_READY" if ready else "QUALIFICATION_FAILED", utc_now(), epoch_id),
+                (
+                    *values,
+                    "FUNCTIONALLY_READY" if ready else "QUALIFICATION_FAILED",
+                    utc_now(),
+                    epoch_id,
+                ),
             )
 
     def authorize_q7(self, epoch_id: str) -> dict[str, Any]:
@@ -834,6 +1350,8 @@ class FunctionalQualificationGovernor:
             return dict(value)
         required = {
             "q6_5_status": "PASS",
+            "product_github_status": "PASS",
+            "stable_provider_status": "PASS",
             "pre_q8_status": "10/10 PASS",
             "golden_product_status": "COMPLETED",
             "internal_verifier_status": "PASS",
@@ -860,6 +1378,47 @@ class FunctionalQualificationGovernor:
                 (result["authorized_at"], result["authorized_at"], epoch_id),
             )
         return result
+
+    def record_factory_ready(
+        self,
+        *,
+        epoch_id: str,
+        manifest_digest: str,
+        manifest_ref: str,
+    ) -> bool:
+        """Bind the final independently signed LTS result to functional truth."""
+
+        if not _SHA256.fullmatch(manifest_digest):
+            raise FunctionalReadinessError("factory ready manifest digest is invalid")
+        if (
+            not manifest_ref.startswith("artifact://ready-result/")
+            or manifest_ref.rsplit("/", 1)[-1] != manifest_digest
+            or any(character.isspace() for character in manifest_ref)
+        ):
+            raise FunctionalReadinessError("factory ready manifest reference is invalid")
+        epoch = self.epoch(epoch_id)
+        existing = (
+            str(epoch.get("ready_result_manifest_digest") or ""),
+            str(epoch.get("ready_result_manifest_ref") or ""),
+        )
+        expected = (manifest_digest, manifest_ref)
+        if str(epoch["status"]) == "AUTONOMOUS_FACTORY_READY":
+            if existing != expected:
+                raise FunctionalReadinessError("factory ready manifest conflicts")
+            return False
+        if str(epoch["status"]) != "Q7_STARTED" or existing != ("", ""):
+            raise FunctionalReadinessError("factory ready requires the authorized release epoch")
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """UPDATE functional_epochs
+                      SET status='AUTONOMOUS_FACTORY_READY',
+                          ready_result_manifest_digest=?,ready_result_manifest_ref=?,
+                          factory_ready_at=?,updated_at=?
+                    WHERE epoch_id=?""",
+                (manifest_digest, manifest_ref, now, now, epoch_id),
+            )
+        return True
 
 
 @dataclass(frozen=True)
@@ -995,9 +1554,10 @@ def verify_ready_result_manifest(
         raise FunctionalReadinessError("ready manifest schema is invalid")
     manifest_digest = str(envelope.get("manifest_digest") or "")
     signed_payload = {key: item for key, item in envelope.items() if key != "manifest_digest"}
-    if not _SHA256.fullmatch(manifest_digest) or sha256_text(
-        stable_json(signed_payload)
-    ) != manifest_digest:
+    if (
+        not _SHA256.fullmatch(manifest_digest)
+        or sha256_text(stable_json(signed_payload)) != manifest_digest
+    ):
         raise FunctionalReadinessError("ready manifest digest differs")
     verifier = envelope.get("verifier")
     if not isinstance(verifier, Mapping) or set(verifier) != {"digest", "signature"}:

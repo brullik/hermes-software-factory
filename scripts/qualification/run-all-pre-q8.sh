@@ -32,7 +32,11 @@ for scenario_id in "${SCENARIOS[@]}"; do
   if [[ "${EXISTING}" == PASS ]]; then
     continue
   fi
-  if [[ "${EXISTING}" != MISSING ]]; then
+  if [[ "${EXISTING}" == FAIL ]]; then
+    printf 'PRE-Q8 scenario is terminally failed: %s\n' "${scenario_id}" >&2
+    exit 1
+  fi
+  if [[ "${EXISTING}" != MISSING && "${EXISTING}" != RUNNING ]]; then
     printf 'PRE-Q8 scenario is not first-run restartable: %s=%s\n' "${scenario_id}" "${EXISTING}" >&2
     exit 1
   fi

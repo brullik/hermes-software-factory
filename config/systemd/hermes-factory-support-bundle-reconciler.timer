@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule confirmed Hermes incident support-bundle reconciliation
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+Persistent=true
+Unit=hermes-factory-support-bundle-reconciler.service
+
+[Install]
+WantedBy=timers.target

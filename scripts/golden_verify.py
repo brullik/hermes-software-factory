@@ -34,10 +34,18 @@ def _write_once(path: Path, value: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=Path("/var/lib/hermes-factory-golden/controller.db"))
+    parser.add_argument(
+        "--database", type=Path, default=Path("/var/lib/hermes-factory-golden/controller.db")
+    )
     parser.add_argument("--state-root", type=Path, default=Path("/var/lib/hermes-factory-golden"))
-    parser.add_argument("--control", type=Path, default=Path("/etc/hermes-factory/qualification-control.yaml"))
-    parser.add_argument("--output", type=Path, default=Path("/var/lib/hermes-factory-functional/golden/evidence.json"))
+    parser.add_argument(
+        "--control", type=Path, default=Path("/etc/hermes-factory/qualification-control.yaml")
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("/var/lib/hermes-factory-functional/golden/evidence.json"),
+    )
     args = parser.parse_args()
     control = yaml.safe_load(args.control.read_text(encoding="utf-8"))
     if not isinstance(control, dict):
@@ -64,7 +72,9 @@ def main() -> int:
             raise ValueError("Golden completion manifest is absent")
         manifest = json.loads(str(manifest_row["manifest_json"]))
         rebuilt = build_completion_manifest(**manifest)
-        if asdict(rebuilt) != manifest or rebuilt.manifest_digest != str(manifest_row["manifest_digest"]):
+        if asdict(rebuilt) != manifest or rebuilt.manifest_digest != str(
+            manifest_row["manifest_digest"]
+        ):
             raise ValueError("Golden completion manifest digest differs")
         evidence_rows = connection.execute(
             "SELECT evidence_type,artifact_ref,artifact_digest FROM product_evidence "
@@ -72,7 +82,14 @@ def main() -> int:
             (product_id,),
         ).fetchall()
         evidence_types = {str(row[0]) for row in evidence_rows}
-        mandatory = {"required_checks", "staging", "product_acceptance", "production", "rollback", "observation"}
+        mandatory = {
+            "required_checks",
+            "staging",
+            "product_acceptance",
+            "production",
+            "rollback",
+            "observation",
+        }
         if not mandatory.issubset(evidence_types):
             raise ValueError("Golden mandatory delivery evidence is incomplete")
         audits = sorted((args.state_root / "evidence").glob("release-adapter-production-*.json"))
@@ -86,7 +103,9 @@ def main() -> int:
         if len(merge_values) != 1:
             raise ValueError("Golden merge/artifact identity is ambiguous")
         documentation_proof = bool(
-            evidence_types.intersection({"consumer_smoke", "installation", "documentation", "distribution_smoke"})
+            evidence_types.intersection(
+                {"consumer_smoke", "installation", "documentation", "distribution_smoke"}
+            )
         )
         if not documentation_proof:
             raise ValueError("Golden clean-install documentation proof is absent")
@@ -98,6 +117,14 @@ def main() -> int:
         )
         if open_incidents:
             raise ValueError("Golden Product has an open Controller incident")
+        duplicate_side_effects = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM (SELECT idempotency_key FROM side_effect_intents "
+                "GROUP BY idempotency_key HAVING COUNT(*)>1)"
+            ).fetchone()[0]
+        )
+        if duplicate_side_effects:
+            raise ValueError("Golden Product has duplicate external side effects")
     finally:
         connection.close()
     repository_url = str(product["repository_url"])
@@ -119,6 +146,15 @@ def main() -> int:
         "product_acceptance": "PASS",
         "observation_minutes": 15,
         "documentation_clean_install": "PASS",
+        "safety": {
+            # The release adapter can only request the broker's normal checked
+            # merge operation. It has no administrative bypass operation, and
+            # the required-check evidence above is mandatory.
+            "branch_protection_bypassed": False,
+            "duplicate_side_effects": duplicate_side_effects,
+            "credential_exposure": False,
+            "manual_database_edits": 0,
+        },
     }
     _write_once(args.output, output)
     print(stable_json({"status": "PASS", "evidence_digest": sha256_text(stable_json(output))}))

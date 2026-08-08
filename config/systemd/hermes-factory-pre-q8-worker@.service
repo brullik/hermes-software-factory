@@ -13,6 +13,12 @@ Environment=HOME=/var/lib/hermes-factory-candidate
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory-pre-q8-%i
 Environment=HERMES_GITHUB_BROKER_SOCKET=/run/hermes-factory-github-broker/broker.sock
 Environment=PYTHONUNBUFFERED=1
+Environment=TERMINAL_ENV=docker
+Environment=HERMES_DOCKER_BINARY=/usr/bin/podman
+Environment=TERMINAL_DOCKER_FORWARD_ENV=[]
+Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
+Environment=TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES=false
+Environment=TERMINAL_DOCKER_RUN_AS_HOST_USER=true
 ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m scripts.canary_candidate --config /etc/hermes-factory/pre-q8/%i.yaml worker --worker-id pre-q8-%i-worker-1
 Restart=on-failure
 RestartSec=10

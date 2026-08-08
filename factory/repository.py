@@ -12,7 +12,6 @@ from typing import Any, Protocol
 from .common import redact_text, sha256_text, stable_json, utc_now
 from .config import FactoryConfig
 from .credential_broker import BrokerClient, BrokerRequest, CredentialBrokerError
-from .github import GitHubAdapter, GitHubCommandError
 from .proof_obligations import SideEffectProtocol
 from .providers import ExternalBlocker
 from .state import StateStore
@@ -66,9 +65,10 @@ class ConfiguredRepositoryAdapter:
     ) -> None:
         if self.broker is None:
             raise RuntimeError("Candidate GitHub broker is not configured")
-        request_id = "BR-" + sha256_text(
-            stable_json([operation, repository, idempotency_key, dict(payload)])
-        )[:40]
+        request_id = (
+            "BR-"
+            + sha256_text(stable_json([operation, repository, idempotency_key, dict(payload)]))[:40]
+        )
         try:
             self.broker.execute(
                 BrokerRequest(
@@ -142,20 +142,12 @@ class ConfiguredRepositoryAdapter:
         description: str,
         idempotency_key: str,
     ) -> str:
-        if self.broker is not None:
-            self._broker_execute(
-                operation="repository.create_private",
-                repository=name,
-                idempotency_key=idempotency_key,
-                payload={"visibility": visibility, "description": description},
-            )
-            return f"https://github.com/{self.owner}/{name}"
-        adapter = GitHubAdapter(self.owner, name)
-        adapter.require_authentication()
-        try:
-            adapter.repository_view()
-        except GitHubCommandError:
-            adapter.create_repository(visibility=visibility, description=description)
+        self._broker_execute(
+            operation="repository.create_private",
+            repository=name,
+            idempotency_key=idempotency_key,
+            payload={"visibility": visibility, "description": description},
+        )
         return f"https://github.com/{self.owner}/{name}"
 
     def clone(
@@ -166,9 +158,7 @@ class ConfiguredRepositoryAdapter:
         idempotency_key: str,
     ) -> tuple[str, str]:
         if destination.exists() and (destination / ".git").is_dir():
-            default_branch = self._git_run(
-                destination, "branch", "--show-current"
-            ) or "main"
+            default_branch = self._git_run(destination, "branch", "--show-current") or "main"
             try:
                 starting_sha = self._git_run(destination, "rev-parse", "HEAD")
             except RuntimeError:
@@ -177,42 +167,19 @@ class ConfiguredRepositoryAdapter:
         if destination.exists() and any(destination.iterdir()):
             raise RuntimeError("repository clone destination is not empty")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if self.broker is not None:
-            match = re.fullmatch(
-                rf"https://github\.com/{re.escape(self.owner)}/([A-Za-z0-9_.-]+)(?:\.git)?",
-                repository_url,
-            )
-            if match is None:
-                raise RuntimeError("Candidate repository URL is outside broker owner")
-            self._broker_execute(
-                operation="repository.read",
-                repository=match.group(1),
-                idempotency_key=idempotency_key,
-                payload={"workspace": str(destination.resolve())},
-            )
-            default_branch = self._git_run(
-                destination, "branch", "--show-current"
-            ) or "main"
-            try:
-                starting_sha = self._git_run(destination, "rev-parse", "HEAD")
-            except RuntimeError:
-                starting_sha = ""
-            return default_branch, starting_sha
-        self._run(
-            [
-                "gh",
-                "repo",
-                "clone",
-                repository_url,
-                str(destination),
-                "--",
-                "--no-tags",
-            ],
-            cwd=destination.parent,
+        match = re.fullmatch(
+            rf"https://github\.com/{re.escape(self.owner)}/([A-Za-z0-9_.-]+)(?:\.git)?",
+            repository_url,
         )
-        default_branch = self._git_run(
-            destination, "branch", "--show-current"
-        ) or "main"
+        if match is None:
+            raise RuntimeError("repository URL is outside broker owner")
+        self._broker_execute(
+            operation="repository.read",
+            repository=match.group(1),
+            idempotency_key=idempotency_key,
+            payload={"workspace": str(destination.resolve())},
+        )
+        default_branch = self._git_run(destination, "branch", "--show-current") or "main"
         try:
             starting_sha = self._git_run(destination, "rev-parse", "HEAD")
         except RuntimeError:
@@ -273,19 +240,16 @@ class ConfiguredRepositoryAdapter:
             "-m",
             "Initialize product repository",
         )
-        if self.broker is not None:
-            remote = self._git_run(workspace, "remote", "get-url", "origin")
-            match = re.search(r"github\.com[/:][^/]+/([A-Za-z0-9_.-]+?)(?:\.git)?$", remote)
-            if match is None:
-                raise RuntimeError("Candidate repository remote is invalid")
-            self._broker_execute(
-                operation="branch.push",
-                repository=match.group(1),
-                idempotency_key=idempotency_key,
-                payload={"workspace": str(workspace.resolve()), "branch": default_branch},
-            )
-        else:
-            self._git_run(workspace, "push", "-u", "origin", default_branch)
+        remote = self._git_run(workspace, "remote", "get-url", "origin")
+        match = re.search(r"github\.com[/:][^/]+/([A-Za-z0-9_.-]+?)(?:\.git)?$", remote)
+        if match is None:
+            raise RuntimeError("repository remote is invalid")
+        self._broker_execute(
+            operation="branch.push",
+            repository=match.group(1),
+            idempotency_key=idempotency_key,
+            payload={"workspace": str(workspace.resolve()), "branch": default_branch},
+        )
         return self._git_run(workspace, "rev-parse", "HEAD")
 
 
@@ -303,10 +267,17 @@ class RepositoryBootstrapper:
     @staticmethod
     def _name(product: Mapping[str, Any]) -> str:
         configured = str(product.get("repository_name") or "").strip()
-        if configured:
-            return configured
-        base = re.sub(r"[^a-z0-9]+", "-", str(product["product_id"]).lower()).strip("-")
-        return base[:90] or f"product-{sha256_text(str(product['product_id']))[:8]}"
+        base = configured or str(product["product_id"])
+        slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
+        prefix = str(os.environ.get("HERMES_GITHUB_REPOSITORY_PREFIX") or "").strip()
+        if prefix:
+            if not re.fullmatch(r"[a-z0-9-]{4,40}", prefix):
+                raise ValueError("repository broker prefix is invalid")
+            if slug.startswith(prefix):
+                return slug[:100]
+            suffix = slug[: 100 - len(prefix)] or sha256_text(str(product["product_id"]))[:8]
+            return prefix + suffix
+        return slug[:90] or f"product-{sha256_text(str(product['product_id']))[:8]}"
 
     def ensure(self, product_id: str, destination: Path) -> dict[str, str]:
         """Bootstrap through one crash-safe intent and verified receipt.
@@ -327,9 +298,7 @@ class RepositoryBootstrapper:
             "product_id": product_id,
             "delivery_mode": mode,
             "repository_name": self._name(product),
-            "repository_visibility": str(
-                product.get("repository_visibility") or "private"
-            ),
+            "repository_visibility": str(product.get("repository_visibility") or "private"),
             "repository_url": (
                 "controller-assigned"
                 if mode == "new_repository"
@@ -414,9 +383,7 @@ class RepositoryBootstrapper:
             saga_state = dict(saga)
         try:
             repository_url = str(
-                saga_state.get("repository_url")
-                or product.get("repository_url")
-                or ""
+                saga_state.get("repository_url") or product.get("repository_url") or ""
             )
             if mode == "new_repository" and not repository_url:
                 repository_url = self.adapter.create_repository(

@@ -35,6 +35,13 @@ SERVICES = (
 )
 OPTIONAL_SERVICES = ("hermes-factory-worker-2.service",)
 CANDIDATE_RUNTIME_LINK = Path("/opt/hermes-factory-candidate/venv")
+RUNTIME_UNITS = (
+    "hermes-factory-controller.service",
+    "hermes-factory-gateway.service",
+    "hermes-factory-worker.service",
+    "hermes-factory-worker-2.service",
+)
+OPTIONAL_RUNTIME_UNITS = ("hermes-factory-product-github-broker.service",)
 
 
 def root_owned_immutable_runtime(path: Path) -> bool:
@@ -42,8 +49,7 @@ def root_owned_immutable_runtime(path: Path) -> bool:
 
     metadata = path.stat()
     return os.name == "nt" or (
-        metadata.st_uid == 0
-        and not metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        metadata.st_uid == 0 and not metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
     )
 
 
@@ -81,7 +87,49 @@ def validate_source(source: Path) -> None:
         )
 
 
+def install_runtime_units(
+    *,
+    release_root: Path = Path("/opt/hermes-factory/current"),
+    systemd_root: Path = Path("/etc/systemd/system"),
+) -> tuple[str, ...]:
+    """Atomically install only the audited Stable unit allowlist from current."""
+
+    source_root = release_root.resolve() / "config" / "systemd"
+    installed: list[str] = []
+    for unit in (*RUNTIME_UNITS, *OPTIONAL_RUNTIME_UNITS):
+        source = source_root / unit
+        if unit in RUNTIME_UNITS and (not source.is_file() or source.is_symlink()):
+            raise DeploymentError(f"required runtime unit is unavailable: {unit}")
+        if not source.exists():
+            continue
+        if not source.is_file() or source.is_symlink():
+            raise DeploymentError(f"runtime unit is unsafe: {unit}")
+        destination = systemd_root / unit
+        temporary = systemd_root / f".{unit}.{os.getpid()}.tmp"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o644,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(source.read_bytes())
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(destination)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        installed.append(unit)
+    return tuple(installed)
+
+
 def restart_services() -> None:
+    installed = install_runtime_units()
+    run_checked(["systemctl", "daemon-reload"])
+    if "hermes-factory-product-github-broker.service" in installed:
+        run_checked(["systemctl", "enable", "hermes-factory-product-github-broker.service"])
+        run_checked(["systemctl", "restart", "hermes-factory-product-github-broker.service"])
     installed_optional = tuple(
         service
         for service in OPTIONAL_SERVICES
@@ -140,7 +188,10 @@ class RuntimeSwitch:
         }
         encoded = json.dumps(expected, sort_keys=True) + "\n"
         if self.journal_path.exists():
-            if self.journal_path.is_symlink() or self.journal_path.read_text(encoding="utf-8") != encoded:
+            if (
+                self.journal_path.is_symlink()
+                or self.journal_path.read_text(encoding="utf-8") != encoded
+            ):
                 raise DeploymentError("runtime switch journal conflicts")
         else:
             descriptor = os.open(
@@ -159,9 +210,7 @@ class RuntimeSwitch:
         elif self.runtime_link.is_symlink() and not (
             self.preserved_runtime.exists() or self.preserved_runtime.is_symlink()
         ):
-            self.preserved_runtime.symlink_to(
-                self.runtime_link.resolve(), target_is_directory=True
-            )
+            self.preserved_runtime.symlink_to(self.runtime_link.resolve(), target_is_directory=True)
         if not self.preserved_runtime.is_dir():
             raise DeploymentError("Stable runtime rollback target is unavailable")
         current = self.install_root / "current"
@@ -176,7 +225,9 @@ class RuntimeSwitch:
     def _replace_link(self, target: Path) -> None:
         if self.runtime_link.is_symlink() and self.runtime_link.resolve() == target.resolve():
             return
-        if (self.runtime_link.exists() or self.runtime_link.is_symlink()) and not self.runtime_link.is_symlink():
+        if (
+            self.runtime_link.exists() or self.runtime_link.is_symlink()
+        ) and not self.runtime_link.is_symlink():
             raise DeploymentError("runtime link boundary contains a directory")
         temporary = self.install_root / f".venv-next-{self.release_id[:12]}"
         if temporary.exists() or temporary.is_symlink():

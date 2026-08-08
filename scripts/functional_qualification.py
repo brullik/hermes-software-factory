@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import sys
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,9 +106,12 @@ def _credential_epoch(path: Path, *, label: str) -> str | None:
         raise FunctionalControlError(f"Candidate {label} credential source is unsafe")
     if os.name != "nt" and metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         raise FunctionalControlError(f"Candidate {label} credential permissions are unsafe")
-    return "CE-" + sha256_text(
-        stable_json([metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns])
-    )[:32].upper()
+    return (
+        "CE-"
+        + sha256_text(
+            stable_json([metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns])
+        )[:32].upper()
+    )
 
 
 def _governor(database: Path) -> FunctionalQualificationGovernor:
@@ -143,8 +147,7 @@ def _retire_superseded_functional_epochs(
             "status": release_status,
         }
         action_rows = governor.connection.execute(
-            "SELECT action_id FROM functional_owner_actions "
-            "WHERE epoch_id=? AND status='OPEN'",
+            "SELECT action_id FROM functional_owner_actions WHERE epoch_id=? AND status='OPEN'",
             (epoch_id,),
         ).fetchall()
         outbox = NotificationOutbox(
@@ -205,19 +208,265 @@ def _archive_stale_index(path: Path) -> None:
     path.replace(destination)
 
 
-def _notify_waiting(
-    root: Path, *, epoch_id: str, action_id: str, text: str
-) -> None:
+def _reconcile_product_github(
+    governor: FunctionalQualificationGovernor,
+    *,
+    epoch_id: str,
+    config: Mapping[str, Any],
+    state_root: Path,
+    report_index: Path,
+    failure_index: Path,
+) -> dict[str, Any] | None:
+    epoch = governor.epoch(epoch_id)
+    if str(epoch["q6_5_status"]) != "PASS" or str(epoch["product_github_status"]) == "PASS":
+        return None
+    if report_index.exists() and (not report_index.is_file() or report_index.is_symlink()):
+        raise FunctionalControlError("product GitHub report index is unsafe")
+    if failure_index.exists() and (not failure_index.is_file() or failure_index.is_symlink()):
+        raise FunctionalControlError("product GitHub failure index is unsafe")
+    if report_index.exists() and failure_index.exists():
+        raise FunctionalControlError("product GitHub success and failure indexes conflict")
+    if report_index.exists():
+        value = _mapping(
+            json.loads(report_index.read_text(encoding="utf-8")),
+            "product GitHub report index",
+        )
+        report_digest = str(value.pop("report_digest", ""))
+        if report_digest != sha256_text(stable_json(value)):
+            raise FunctionalControlError("product GitHub report digest differs")
+        if (
+            set(value) != {"schema_version", "credential_epoch_id", "reports"}
+            or value.get("schema_version") != "1.0"
+        ):
+            raise FunctionalControlError("product GitHub report schema differs")
+        credential_epoch = str(value["credential_epoch_id"])
+        raw_reports = value["reports"]
+        if not isinstance(raw_reports, list):
+            raise FunctionalControlError("product GitHub reports are invalid")
+        reports = tuple(
+            CapabilityHandshakeReport.from_dict(_mapping(item, "product GitHub operation report"))
+            for item in raw_reports
+        )
+        governor.record_product_github_capability(
+            epoch_id=epoch_id,
+            credential_epoch_id=credential_epoch,
+            report_digest=report_digest,
+            reports=reports,
+        )
+        governor.resolve_owner_action(epoch_id=epoch_id, capability="github.product.runtime")
+        _retire_resolved_action_notifications(governor, state_root, epoch_id=epoch_id)
+        return None
+    if failure_index.exists():
+        failure = _mapping(
+            json.loads(failure_index.read_text(encoding="utf-8")),
+            "product GitHub failure index",
+        )
+        failure_digest = str(failure.pop("failure_digest", ""))
+        if failure_digest != sha256_text(stable_json(failure)):
+            raise FunctionalControlError("product GitHub failure digest differs")
+        reason_code = str(failure.get("safe_reason_code") or "")
+        if (
+            set(failure)
+            != {
+                "schema_version",
+                "candidate_digest",
+                "credential_epoch_id",
+                "capability",
+                "status",
+                "safe_reason_code",
+                "observed_at",
+            }
+            or failure.get("schema_version") != "1.0"
+            or failure.get("candidate_digest") != config["candidate_digest"]
+            or failure.get("capability") != "github.product.runtime"
+            or not str(failure.get("observed_at") or "")
+        ):
+            raise FunctionalControlError("product GitHub failure report is invalid")
+        if failure.get("status") == "BROKEN_INTERNAL":
+            if (
+                reason_code != "stable_product_github_operation_failed"
+                or not re.fullmatch(
+                    r"CE-[A-F0-9]{32}", str(failure.get("credential_epoch_id") or "")
+                )
+            ):
+                raise FunctionalControlError("product GitHub internal failure differs")
+            governor.fail_runtime_capability(
+                epoch_id=epoch_id,
+                capability="github.product.runtime",
+                report_digest=failure_digest,
+            )
+            return {
+                "status": "QUALIFICATION_FAILED",
+                "reason_code": reason_code,
+                "epoch_id": epoch_id,
+            }
+        if (
+            failure.get("status") != "MISSING_EXTERNAL"
+            or reason_code != "missing_stable_product_github_credential"
+            or failure.get("credential_epoch_id") is not None
+        ):
+            raise FunctionalControlError("product GitHub external failure differs")
+        capability_epoch = (
+            str(failure["credential_epoch_id"])
+            if failure["credential_epoch_id"] is not None
+            else None
+        )
+        action_id = governor.ensure_owner_action(
+            epoch_id=epoch_id,
+            reason_code=reason_code,
+            capability="github.product.runtime",
+            capability_epoch=capability_epoch,
+        )
+        _notify_waiting(
+            state_root,
+            epoch_id=epoch_id,
+            action_id=action_id,
+            text=(
+                "Install or replace the separate Stable product GitHub credential in the "
+                "protected Stable credential slot so the product broker can create and "
+                "deliver private hermes-product repositories. Do not send the credential "
+                "in Telegram."
+            ),
+        )
+        return {
+            "status": "WAITING_CAPABILITY",
+            "reason_code": reason_code,
+            "action_ref": f"state://functional-owner-actions/{action_id}",
+            "automatic_resume": True,
+            "epoch_id": epoch_id,
+        }
+    return {
+        "status": "PRODUCT_GITHUB_PROBE_REQUIRED",
+        "epoch_id": epoch_id,
+    }
+
+
+def _reconcile_stable_provider(
+    governor: FunctionalQualificationGovernor,
+    *,
+    epoch_id: str,
+    config: Mapping[str, Any],
+    state_root: Path,
+    report_index: Path,
+    failure_index: Path,
+) -> dict[str, Any] | None:
+    epoch = governor.epoch(epoch_id)
+    if str(epoch["q6_5_status"]) != "PASS" or str(epoch["stable_provider_status"]) == "PASS":
+        return None
+    for path, label in (
+        (report_index, "Stable provider report index"),
+        (failure_index, "Stable provider failure index"),
+    ):
+        if path.exists() and (not path.is_file() or path.is_symlink()):
+            raise FunctionalControlError(f"{label} is unsafe")
+    if report_index.exists() and failure_index.exists():
+        raise FunctionalControlError("Stable provider success and failure indexes conflict")
+    if report_index.exists():
+        value = _mapping(
+            json.loads(report_index.read_text(encoding="utf-8")),
+            "Stable provider report index",
+        )
+        report_digest = str(value.pop("report_digest", ""))
+        if report_digest != sha256_text(stable_json(value)):
+            raise FunctionalControlError("Stable provider report digest differs")
+        if (
+            set(value) != {"schema_version", "observed_at", "reports"}
+            or value.get("schema_version") != "1.0"
+        ):
+            raise FunctionalControlError("Stable provider report schema differs")
+        raw_reports = value["reports"]
+        if not isinstance(raw_reports, list):
+            raise FunctionalControlError("Stable provider reports are invalid")
+        reports = tuple(
+            CapabilityHandshakeReport.from_dict(_mapping(item, "Stable provider operation report"))
+            for item in raw_reports
+        )
+        governor.record_stable_provider_capability(
+            epoch_id=epoch_id,
+            observed_at=str(value["observed_at"]),
+            report_digest=report_digest,
+            reports=reports,
+        )
+        governor.resolve_owner_action(epoch_id=epoch_id, capability="provider.stable.runtime")
+        _retire_resolved_action_notifications(governor, state_root, epoch_id=epoch_id)
+        return None
+    if failure_index.exists():
+        failure = _mapping(
+            json.loads(failure_index.read_text(encoding="utf-8")),
+            "Stable provider failure index",
+        )
+        failure_digest = str(failure.pop("failure_digest", ""))
+        if failure_digest != sha256_text(stable_json(failure)):
+            raise FunctionalControlError("Stable provider failure digest differs")
+        expected = {
+            "schema_version",
+            "candidate_digest",
+            "capability",
+            "status",
+            "safe_reason_code",
+            "credential_provider",
+            "observed_at",
+        }
+        if (
+            set(failure) != expected
+            or failure.get("schema_version") != "1.0"
+            or failure.get("candidate_digest") != config["candidate_digest"]
+            or failure.get("capability") != "provider.stable.runtime"
+            or not str(failure.get("observed_at") or "")
+        ):
+            raise FunctionalControlError("Stable provider failure report is invalid")
+        if failure.get("status") == "BROKEN_INTERNAL":
+            if (
+                failure.get("safe_reason_code") != "stable_provider_operation_failed"
+                or failure.get("credential_provider") is not None
+            ):
+                raise FunctionalControlError("Stable provider internal failure differs")
+            governor.fail_runtime_capability(
+                epoch_id=epoch_id,
+                capability="provider.stable.runtime",
+                report_digest=failure_digest,
+            )
+            return {
+                "status": "QUALIFICATION_FAILED",
+                "reason_code": "stable_provider_operation_failed",
+                "epoch_id": epoch_id,
+            }
+        provider = str(failure.get("credential_provider") or "")
+        if (
+            failure.get("status") != "MISSING_EXTERNAL"
+            or failure.get("safe_reason_code") != "missing_stable_provider_credential"
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", provider)
+        ):
+            raise FunctionalControlError("Stable provider external failure differs")
+        action_id = governor.ensure_owner_action(
+            epoch_id=epoch_id,
+            reason_code="missing_stable_provider_credential",
+            capability="provider.stable.runtime",
+            capability_epoch=None,
+        )
+        _notify_waiting(
+            state_root,
+            epoch_id=epoch_id,
+            action_id=action_id,
+            text=(
+                f"Authenticate the permanent Stable provider {provider} through its secure "
+                "OAuth device flow. Do not send credentials or device codes in Telegram."
+            ),
+        )
+        return {
+            "status": "WAITING_CAPABILITY",
+            "reason_code": "missing_stable_provider_credential",
+            "action_ref": f"state://functional-owner-actions/{action_id}",
+            "automatic_resume": True,
+            "epoch_id": epoch_id,
+        }
+    return {"status": "STABLE_PROVIDER_PROBE_REQUIRED", "epoch_id": epoch_id}
+
+
+def _notify_waiting(root: Path, *, epoch_id: str, action_id: str, text: str) -> None:
     outbox = NotificationOutbox(
         root / "notifications",
         attachment_roots=(root, Path("/var/lib/hermes-factory-verifier")),
-    )
-    outbox.enqueue(
-        NotificationRequest(
-            request_id="WAITING-" + sha256_text(action_id)[:32],
-            kind="CAPABILITY_WAITING",
-            text=f"Hermes is waiting for one external capability; action {action_id}.",
-        )
     )
     outbox.enqueue(
         NotificationRequest(
@@ -228,17 +477,25 @@ def _notify_waiting(
     )
 
 
-def _notify(root: Path, *, kind: str, identity: str, text: str) -> None:
-    NotificationOutbox(
+def _retire_resolved_action_notifications(
+    governor: FunctionalQualificationGovernor, root: Path, *, epoch_id: str
+) -> int:
+    outbox = NotificationOutbox(
         root / "notifications",
         attachment_roots=(root, Path("/var/lib/hermes-factory-verifier")),
-    ).enqueue(
-        NotificationRequest(
-            request_id="EVENT-" + sha256_text(stable_json([kind, identity]))[:32],
-            kind=kind,
-            text=text,
-        )
     )
+    rows = governor.connection.execute(
+        "SELECT action_id FROM functional_owner_actions WHERE epoch_id=? AND status='RESOLVED'",
+        (epoch_id,),
+    ).fetchall()
+    retired = 0
+    for row in rows:
+        request_id = "NOTIFY-" + sha256_text(str(row[0]))[:32]
+        path = outbox.outbox / f"{request_id}.json"
+        if path.exists():
+            outbox.retire_request(path)
+            retired += 1
+    return retired
 
 
 def _missing_report(config: Mapping[str, Any]) -> CapabilityHandshakeReport:
@@ -313,10 +570,7 @@ def _external_failure_report(
             "repository": f"hermes-canary-q65-{str(config['candidate_digest'])[:10]}",
             "private": True,
         }
-    elif (
-        operation in provider_aliases
-        and reason_code == "missing_candidate_provider_credential"
-    ):
+    elif operation in provider_aliases and reason_code == "missing_candidate_provider_credential":
         expected_scope = _mapping(failure.get("scope"), "Q6.5 provider failure scope")
         if (
             set(expected_scope)
@@ -362,6 +616,10 @@ def reconcile(
     telegram_credential_source: Path,
     report_index: Path,
     failure_index: Path,
+    product_github_report_index: Path | None = None,
+    product_github_failure_index: Path | None = None,
+    stable_provider_report_index: Path | None = None,
+    stable_provider_failure_index: Path | None = None,
 ) -> dict[str, Any]:
     config = _load_config(config_path)
     epoch_id, release_snapshot = _release_snapshot(config)
@@ -422,12 +680,6 @@ def reconcile(
             )
             _archive_stale_index(report_index)
             _archive_stale_index(failure_index)
-            _notify(
-                state_root,
-                kind="CAPABILITY_READY",
-                identity=credential_epoch,
-                text="Candidate GitHub capability changed; automatic Q6.5 resume started.",
-            )
             epoch = governor.epoch(epoch_id)
         if str(epoch.get("q6_5_status")) != "PASS":
             if report_index.exists() and (not report_index.is_file() or report_index.is_symlink()):
@@ -520,7 +772,9 @@ def reconcile(
             )
             if {report.operation for report in reports} != set(MANDATORY_Q6_5_OPERATIONS):
                 raise FunctionalControlError("Q6.5 report set is incomplete")
-            if any(report.credential_epoch_id not in {None, credential_epoch} for report in reports):
+            if any(
+                report.credential_epoch_id not in {None, credential_epoch} for report in reports
+            ):
                 raise FunctionalControlError("Q6.5 report credential epoch differs")
             for report in reports:
                 if report.status == CapabilityStatus.AVAILABLE:
@@ -528,18 +782,32 @@ def reconcile(
                         epoch_id=epoch_id, capability=report.capability
                     )
                 governor.record_handshake(epoch_id, report)
+            _retire_resolved_action_notifications(governor, state_root, epoch_id=epoch_id)
+        if product_github_report_index is not None and product_github_failure_index is not None:
+            product_github = _reconcile_product_github(
+                governor,
+                epoch_id=epoch_id,
+                config=config,
+                state_root=state_root,
+                report_index=product_github_report_index,
+                failure_index=product_github_failure_index,
+            )
+            if product_github is not None:
+                return product_github
+        if stable_provider_report_index is not None and stable_provider_failure_index is not None:
+            stable_provider = _reconcile_stable_provider(
+                governor,
+                epoch_id=epoch_id,
+                config=config,
+                state_root=state_root,
+                report_index=stable_provider_report_index,
+                failure_index=stable_provider_failure_index,
+            )
+            if stable_provider is not None:
+                return stable_provider
         current = governor.epoch(epoch_id)
-        if str(current["status"]) == "PRE_Q8_PENDING":
-            _notify(
-                state_root,
-                kind="PRE_Q8_STARTED",
-                identity=epoch_id,
-                text="Hermes PRE-Q8 started: ten isolated first-run scenarios, no skip.",
-            )
         if str(current["status"]) == "GOLDEN_PRODUCT_PENDING":
-            telegram_epoch = _credential_epoch(
-                telegram_credential_source, label="Telegram"
-            )
+            telegram_epoch = _credential_epoch(telegram_credential_source, label="Telegram")
             if telegram_epoch is None:
                 action_id = governor.ensure_owner_action(
                     epoch_id=epoch_id,
@@ -564,9 +832,8 @@ def reconcile(
                     "automatic_resume": True,
                     "epoch_id": epoch_id,
                 }
-            governor.resolve_owner_action(
-                epoch_id=epoch_id, capability="telegram.owner_intake"
-            )
+            governor.resolve_owner_action(epoch_id=epoch_id, capability="telegram.owner_intake")
+            _retire_resolved_action_notifications(governor, state_root, epoch_id=epoch_id)
         return {"status": current["status"], "epoch_id": epoch_id}
     finally:
         governor.connection.close()
@@ -583,6 +850,11 @@ def status(config_path: Path, *, state_root: Path) -> dict[str, Any]:
             "WHERE epoch_id=? ORDER BY operation",
             (epoch_id,),
         ).fetchall()
+        runtime_reports = governor.connection.execute(
+            "SELECT capability,status,report_digest FROM runtime_capability_reports "
+            "WHERE epoch_id=? ORDER BY capability",
+            (epoch_id,),
+        ).fetchall()
         actions = governor.connection.execute(
             "SELECT action_id,reason_code,status FROM functional_owner_actions "
             "WHERE epoch_id=? ORDER BY created_at",
@@ -593,19 +865,56 @@ def status(config_path: Path, *, state_root: Path) -> dict[str, Any]:
             "WHERE epoch_id=? ORDER BY scenario_id",
             (epoch_id,),
         ).fetchall()
+        phase_runs = governor.connection.execute(
+            "SELECT phase_id,attempt,status,budget_seconds,started_at,reason_code,"
+            "evidence_digest,completed_at FROM functional_phase_runs "
+            "WHERE epoch_id=? ORDER BY phase_id",
+            (epoch_id,),
+        ).fetchall()
+        pre_q8_values = {
+            str(row[0]): {
+                "scenario_id": str(row[0]),
+                "status": str(row[1]),
+                "evidence_digest": row[2],
+            }
+            for row in pre_q8
+        }
+        for row in phase_runs:
+            phase_id = str(row[0])
+            if not phase_id.startswith("pre-q8:"):
+                continue
+            scenario_id = phase_id.removeprefix("pre-q8:")
+            if scenario_id not in pre_q8_values:
+                pre_q8_values[scenario_id] = {
+                    "scenario_id": scenario_id,
+                    "status": str(row[2]),
+                    "evidence_digest": row[6],
+                }
         return {
             "epoch": epoch,
             "capabilities": [
-                {"operation": row[0], "status": row[1], "report_digest": row[2]}
-                for row in reports
+                {"operation": row[0], "status": row[1], "report_digest": row[2]} for row in reports
+            ],
+            "runtime_capabilities": [
+                {"capability": row[0], "status": row[1], "report_digest": row[2]}
+                for row in runtime_reports
             ],
             "owner_actions": [
-                {"action_id": row[0], "reason_code": row[1], "status": row[2]}
-                for row in actions
+                {"action_id": row[0], "reason_code": row[1], "status": row[2]} for row in actions
             ],
-            "pre_q8": [
-                {"scenario_id": row[0], "status": row[1], "evidence_digest": row[2]}
-                for row in pre_q8
+            "pre_q8": [pre_q8_values[key] for key in sorted(pre_q8_values)],
+            "phase_runs": [
+                {
+                    "phase_id": row[0],
+                    "attempt": row[1],
+                    "status": row[2],
+                    "budget_seconds": row[3],
+                    "started_at": row[4],
+                    "reason_code": row[5],
+                    "evidence_digest": row[6],
+                    "completed_at": row[7],
+                }
+                for row in phase_runs
             ],
         }
     finally:
@@ -659,22 +968,157 @@ def record_pre_q8(
             completion_manifest_ref=observation.completion_manifest_ref,
             evidence_digest=observation.observation_digest,
         )
-        completed = int(
-            governor.connection.execute(
-                "SELECT COUNT(*) FROM pre_q8_scenarios WHERE epoch_id=? AND status='PASS'",
-                (epoch_id,),
-            ).fetchone()[0]
-        )
-        _notify(
-            state_root,
-            kind="PRE_Q8_PROGRESS",
-            identity=f"{epoch_id}:{scenario_id}",
-            text=f"Hermes PRE-Q8 progress: {completed}/10; {scenario_id} PASS on first run.",
-        )
         return {
             "status": governor.epoch(epoch_id)["status"],
             "scenario_id": scenario_id,
             "evidence_digest": observation.observation_digest,
+        }
+    finally:
+        governor.connection.close()
+
+
+def _phase_deadline(started_at: str, budget_seconds: int) -> int:
+    started = datetime.fromisoformat(started_at)
+    return int(started.timestamp()) + budget_seconds
+
+
+def _install_golden_intake_deadline(
+    state_root: Path,
+    *,
+    epoch_id: str,
+    started_at: str,
+    budget_seconds: int,
+) -> Path:
+    payload = {
+        "schema_version": "1.0",
+        "epoch_id": epoch_id,
+        "phase_id": "golden-intake",
+        "attempt": 1,
+        "started_at": started_at,
+        "budget_seconds": budget_seconds,
+        "deadline_epoch": _phase_deadline(started_at, budget_seconds),
+    }
+    payload["deadline_digest"] = sha256_text(stable_json(payload))
+    encoded = stable_json(payload) + "\n"
+    destination = state_root / "golden" / "intake-deadline.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.parent.chmod(0o2770)
+    if destination.exists():
+        if not destination.is_file() or destination.is_symlink():
+            raise FunctionalControlError("Golden intake deadline path is unsafe")
+        previous = destination.read_text(encoding="utf-8")
+        if previous == encoded:
+            return destination
+        archive = destination.parent / "deadline-history"
+        archive.mkdir(parents=True, exist_ok=True)
+        archive.chmod(0o2750)
+        previous_digest = sha256_text(previous)
+        archived = archive / f"intake-deadline-{previous_digest}.json"
+        if archived.exists():
+            if archived.is_symlink() or archived.read_text(encoding="utf-8") != previous:
+                raise FunctionalControlError("Golden intake deadline archive conflicts")
+            destination.unlink()
+        else:
+            destination.replace(archived)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+def start_phase(
+    config_path: Path,
+    *,
+    state_root: Path,
+    phase_id: str,
+    budget_seconds: int,
+) -> dict[str, Any]:
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    governor = _governor(state_root / "functional.db")
+    try:
+        phase = governor.start_phase(
+            epoch_id=epoch_id,
+            phase_id=phase_id,
+            budget_seconds=budget_seconds,
+        )
+    finally:
+        governor.connection.close()
+    started_at = str(phase["started_at"])
+    if phase_id == "golden-intake":
+        _install_golden_intake_deadline(
+            state_root,
+            epoch_id=epoch_id,
+            started_at=started_at,
+            budget_seconds=int(phase["budget_seconds"]),
+        )
+    return {
+        "epoch_id": epoch_id,
+        "phase_id": phase_id,
+        "attempt": int(phase["attempt"]),
+        "status": str(phase["status"]),
+        "started_at": started_at,
+        "budget_seconds": int(phase["budget_seconds"]),
+        "deadline_epoch": _phase_deadline(started_at, int(phase["budget_seconds"])),
+    }
+
+
+def pass_phase(
+    config_path: Path,
+    *,
+    state_root: Path,
+    phase_id: str,
+    evidence_digest: str,
+) -> dict[str, Any]:
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    governor = _governor(state_root / "functional.db")
+    try:
+        phase = governor.pass_phase(
+            epoch_id=epoch_id,
+            phase_id=phase_id,
+            evidence_digest=evidence_digest,
+        )
+        return {
+            "epoch_id": epoch_id,
+            "phase_id": phase_id,
+            "status": str(phase["status"]),
+            "evidence_digest": str(phase["evidence_digest"]),
+        }
+    finally:
+        governor.connection.close()
+
+
+def fail_phase(
+    config_path: Path,
+    *,
+    state_root: Path,
+    phase_id: str,
+    reason_code: str,
+) -> dict[str, Any]:
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    governor = _governor(state_root / "functional.db")
+    try:
+        phase = governor.fail_phase(
+            epoch_id=epoch_id,
+            phase_id=phase_id,
+            reason_code=reason_code,
+        )
+        return {
+            "epoch_id": epoch_id,
+            "phase_id": phase_id,
+            "status": str(phase["status"]),
+            "reason_code": str(phase["reason_code"]),
+            "evidence_digest": str(phase["evidence_digest"]),
         }
     finally:
         governor.connection.close()
@@ -707,6 +1151,7 @@ def record_golden(
         "product_acceptance",
         "observation_minutes",
         "documentation_clean_install",
+        "safety",
     }
     if set(evidence) != exact or evidence.get("status") != "COMPLETED":
         raise FunctionalControlError("Golden Product evidence schema is invalid")
@@ -718,10 +1163,19 @@ def record_golden(
         "product_acceptance": "PASS",
         "documentation_clean_install": "PASS",
     }
-    if any(evidence.get(key) != value for key, value in required.items()) or int(
-        evidence["observation_minutes"]
-    ) < 15:
+    if (
+        any(evidence.get(key) != value for key, value in required.items())
+        or int(evidence["observation_minutes"]) < 15
+    ):
         raise FunctionalControlError("Golden Product mandatory journey is incomplete")
+    safety = _mapping(evidence.get("safety"), "Golden safety evidence")
+    if safety != {
+        "branch_protection_bypassed": False,
+        "duplicate_side_effects": 0,
+        "credential_exposure": False,
+        "manual_database_edits": 0,
+    }:
+        raise FunctionalControlError("Golden Product safety evidence is incomplete")
     governor = _governor(state_root / "functional.db")
     try:
         governor.record_golden_product(
@@ -732,6 +1186,10 @@ def record_golden(
             artifact_digest=str(evidence["artifact_digest"]),
             completion_manifest_ref=str(evidence["completion_manifest_ref"]),
             verifier_digest=str(evidence["verifier_digest"]),
+            branch_protection_bypassed=bool(safety["branch_protection_bypassed"]),
+            duplicate_side_effects=int(safety["duplicate_side_effects"]),
+            credential_exposure=bool(safety["credential_exposure"]),
+            manual_database_edits=int(safety["manual_database_edits"]),
         )
         return {"status": governor.epoch(epoch_id)["status"], "epoch_id": epoch_id}
     finally:
@@ -757,16 +1215,6 @@ def record_factory_checks(
             stable_intake_pass=stable_intake_pass,
         )
         current = governor.epoch(epoch_id)
-        if str(current["status"]) == "FUNCTIONALLY_READY":
-            _notify(
-                state_root,
-                kind="FACTORY_FUNCTIONALLY_READY",
-                identity=epoch_id,
-                text=(
-                    "Hermes factory is functionally ready: Q6.5 PASS, PRE-Q8 10/10, "
-                    "Golden Product COMPLETED, Stable health/intake PASS."
-                ),
-            )
         return {"status": current["status"], "epoch_id": epoch_id}
     finally:
         governor.connection.close()
@@ -796,11 +1244,29 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("/var/lib/hermes-factory-functional/q6-5/failure-index.json"),
     )
     parser.add_argument(
+        "--product-github-report-index",
+        type=Path,
+        default=Path("/var/lib/hermes-factory-functional/product-github/report-index.json"),
+    )
+    parser.add_argument(
+        "--product-github-failure-index",
+        type=Path,
+        default=Path("/var/lib/hermes-factory-functional/product-github/failure-index.json"),
+    )
+    parser.add_argument(
+        "--stable-provider-report-index",
+        type=Path,
+        default=Path("/var/lib/hermes-factory-functional/stable-provider/report-index.json"),
+    )
+    parser.add_argument(
+        "--stable-provider-failure-index",
+        type=Path,
+        default=Path("/var/lib/hermes-factory-functional/stable-provider/failure-index.json"),
+    )
+    parser.add_argument(
         "--telegram-credential-source",
         type=Path,
-        default=Path(
-            "/etc/hermes-factory/candidate-credentials.d/candidate-telegram-token"
-        ),
+        default=Path("/etc/hermes-factory/candidate-credentials.d/candidate-telegram-token"),
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("reconcile")
@@ -809,6 +1275,15 @@ def _parser() -> argparse.ArgumentParser:
     pre_q8.add_argument("scenario_id")
     pre_q8.add_argument("product_id")
     pre_q8.add_argument("candidate_config", type=Path)
+    phase_start = commands.add_parser("phase-start")
+    phase_start.add_argument("phase_id")
+    phase_start.add_argument("budget_seconds", type=int)
+    phase_pass = commands.add_parser("phase-pass")
+    phase_pass.add_argument("phase_id")
+    phase_pass.add_argument("evidence_digest")
+    phase_fail = commands.add_parser("phase-fail")
+    phase_fail.add_argument("phase_id")
+    phase_fail.add_argument("reason_code")
     golden = commands.add_parser("golden-complete")
     golden.add_argument("evidence_path", type=Path)
     checks = commands.add_parser("factory-checks")
@@ -829,6 +1304,10 @@ def main(argv: list[str] | None = None) -> int:
                 telegram_credential_source=args.telegram_credential_source,
                 report_index=args.report_index,
                 failure_index=args.failure_index,
+                product_github_report_index=args.product_github_report_index,
+                product_github_failure_index=args.product_github_failure_index,
+                stable_provider_report_index=args.stable_provider_report_index,
+                stable_provider_failure_index=args.stable_provider_failure_index,
             )
         elif args.command == "status":
             result = status(args.config, state_root=args.state_root)
@@ -839,6 +1318,27 @@ def main(argv: list[str] | None = None) -> int:
                 scenario_id=args.scenario_id,
                 product_id=args.product_id,
                 candidate_config=args.candidate_config,
+            )
+        elif args.command == "phase-start":
+            result = start_phase(
+                args.config,
+                state_root=args.state_root,
+                phase_id=args.phase_id,
+                budget_seconds=args.budget_seconds,
+            )
+        elif args.command == "phase-pass":
+            result = pass_phase(
+                args.config,
+                state_root=args.state_root,
+                phase_id=args.phase_id,
+                evidence_digest=args.evidence_digest,
+            )
+        elif args.command == "phase-fail":
+            result = fail_phase(
+                args.config,
+                state_root=args.state_root,
+                phase_id=args.phase_id,
+                reason_code=args.reason_code,
             )
         elif args.command == "golden-complete":
             result = record_golden(

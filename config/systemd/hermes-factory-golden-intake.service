@@ -12,7 +12,7 @@ WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=HOME=/var/lib/hermes-factory-candidate
 LoadCredential=candidate-telegram-token:/etc/hermes-factory/candidate-credentials.d/candidate-telegram-token
 ExecStart=/opt/hermes-factory-candidate/venv/bin/python -m scripts.golden_intake
-TimeoutStartSec=24h
+TimeoutStartSec=0
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

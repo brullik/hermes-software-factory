@@ -1,0 +1,25 @@
+[Unit]
+Description=Build and dispatch the final signed Hermes autonomous factory result
+After=network-online.target hermes-factory-controller.service
+Wants=network-online.target
+ConditionPathExists=/etc/hermes-factory/qualification-control.yaml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/hermes-factory-verifier/current
+ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-lts-ready.sh
+TimeoutStartSec=30min
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-functional
+ReadOnlyPaths=/opt/hermes-factory-verifier /opt/hermes-factory-candidate /opt/hermes-factory/current /etc/hermes-factory/qualification-control.yaml /var/lib/hermes-factory-verifier /var/lib/hermes-factory-improvement-lab
+InaccessiblePaths=/var/lib/hermes-factory/controller.db /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+RestrictSUIDSGID=true
+LockPersonality=true

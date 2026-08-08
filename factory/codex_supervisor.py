@@ -109,6 +109,7 @@ class SupervisorConfig:
 @dataclass(frozen=True)
 class SupervisorBoundary:
     worktree_root: Path = Path("/var/lib/hermes-codex/worktrees")
+    git_common_root: Path = Path("/var/lib/hermes-codex/repository/.git")
     state_root: Path = Path("/var/lib/hermes-codex/state")
     codex_binary: Path = Path("/home/hermescodex/.local/bin/codex")
     owner_action_db: Path = Path("/var/lib/hermes-codex-owner-actions/actions.sqlite3")
@@ -307,6 +308,11 @@ class CodexSupervisor:
     def _validate_git_workspace(self, workspace: Path) -> None:
         if Path(self._git("rev-parse", "--show-toplevel")).resolve() != workspace:
             raise SupervisorConfigurationError("Git top-level differs from configured worktree")
+        common_root = Path(self._git("rev-parse", "--git-common-dir"))
+        if not common_root.is_absolute():
+            common_root = workspace / common_root
+        if common_root.resolve(strict=True) != self.boundary.git_common_root.resolve(strict=True):
+            raise SupervisorConfigurationError("Git common directory is outside the trusted root")
         remotes = self._git("remote").splitlines()
         if remotes != ["origin"]:
             raise SupervisorConfigurationError("worktree must have only the exact origin remote")
@@ -545,7 +551,9 @@ class CodexSupervisor:
             self._transition(state, "TERMINAL_BLOCKED", "missing_session_after_failure")
         elif failure_class == "quota":
             retry_at = datetime.now(UTC) + timedelta(seconds=self.config.quota_retry_seconds)
-            state.next_attempt_at = retry_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            state.next_attempt_at = (
+                retry_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            )
             self._transition(state, "WAITING_QUOTA", failure_class)
         elif failure_class == "owner_action":
             self._transition(state, "WAITING_OWNER_ACTION", failure_class)

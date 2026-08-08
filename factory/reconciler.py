@@ -145,6 +145,11 @@ class PipelineReconciler:
         task_id: str | None = None,
         discriminator: str = "",
     ) -> bool:
+        # Owner-visible Telegram is deliberately quiet during ordinary repair,
+        # retry, replan, and recovery.  Only a genuine external action or an
+        # immutable completed result may cross this boundary.
+        if kind not in {"owner_action", "product_completed"}:
+            return False
         digest = sha256_text(f"telegram:{product_id}:{kind}:{task_id or ''}:{discriminator}")
         return self.state.enqueue_outbox(
             outbox_id=f"outbox-{digest[:24]}",
@@ -566,7 +571,19 @@ class PipelineReconciler:
             return True
         if stage == "observation":
             if str(product["status"]) == "OBSERVATION":
-                self.workflow.transition(product_id, "COMPLETED")
+                completed = self.workflow.transition(product_id, "COMPLETED")
+                completion_ref = str(completed.get("completion_evidence_ref") or "")
+                self._enqueue_notification(
+                    product_id=product_id,
+                    kind="product_completed",
+                    discriminator=completion_ref,
+                    text=(
+                        "✅ Hermes: продукт готов.\n"
+                        f"Проект: {product_id}\n"
+                        "Статус: COMPLETED\n"
+                        f"Неизменяемое доказательство: {completion_ref}"
+                    ),
+                )
             return True
         if successor is None:
             return False
@@ -1221,11 +1238,9 @@ class PipelineReconciler:
                     policy_digest=policy_digest(self.config),
                 )
                 governor.register_execution_membership(str(task["task_id"]))
-                architecture_binding, bindings = (
-                    governor.candidate_membership_bindings(
-                        product_id=product_id,
-                        plan_id=str(task["plan_id"]),
-                    )
+                architecture_binding, bindings = governor.candidate_membership_bindings(
+                    product_id=product_id,
+                    plan_id=str(task["plan_id"]),
                 )
                 snapshot_id = governor.create_candidate_snapshot(
                     product_id=product_id,
@@ -1286,13 +1301,12 @@ class PipelineReconciler:
                     )
                     existing_created_at = existing.get("created_at")
                     if (
-                        self.artifacts.validate(
-                            "candidate-snapshot.schema.json", existing
-                        )
+                        self.artifacts.validate("candidate-snapshot.schema.json", existing)
                         or not isinstance(existing_created_at, str)
                         or not existing_created_at
-                        or any(existing.get(field) != payload.get(field)
-                               for field in immutable_fields)
+                        or any(
+                            existing.get(field) != payload.get(field) for field in immutable_fields
+                        )
                     ):
                         raise
                     self.state._connection.execute(
@@ -1357,9 +1371,7 @@ class PipelineReconciler:
                     ),
                 ).fetchall()
                 if not consumer_rows:
-                    raise RuntimeError(
-                        "candidate snapshot has no mandatory review consumers"
-                    )
+                    raise RuntimeError("candidate snapshot has no mandatory review consumers")
                 for consumer_row in consumer_rows:
                     consumer_id = str(consumer_row["task_id"])
                     self.state._connection.execute(
@@ -1370,9 +1382,7 @@ class PipelineReconciler:
                     governor.register_execution_membership(consumer_id)
                 from .autonomy import AutonomyStore
 
-                AutonomyStore(self.state)._recompute_frontier(
-                    self.state._connection, product_id
-                )
+                AutonomyStore(self.state)._recompute_frontier(self.state._connection, product_id)
                 self.state._record_event(
                     product_id,
                     str(task["task_id"]),

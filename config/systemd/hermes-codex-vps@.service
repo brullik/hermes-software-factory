@@ -41,6 +41,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/home/hermescodex/.codex
 ReadWritePaths=/var/lib/hermes-codex/state
 ReadWritePaths=/var/lib/hermes-codex/worktrees
+ReadWritePaths=/var/lib/hermes-codex/repository/.git
 ReadWritePaths=/var/lib/hermes-codex-owner-actions
 ReadOnlyPaths=/opt/hermes-codex-runtime
 InaccessiblePaths=/etc/hermes-factory

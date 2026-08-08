@@ -18,7 +18,7 @@ import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from factory.common import sha256_text
+from factory.common import sha256_text, stable_json
 from factory.credential_broker import (
     BrokerPolicy,
     BrokerReceipt,
@@ -38,7 +38,11 @@ from factory.functional_readiness import (
     ReadyResultManifest,
     verify_ready_result_manifest,
 )
-from factory.notifications import NotificationOutbox, NotificationRequest, OwnerNotifier
+from factory.notifications import (
+    NotificationError,
+    NotificationOutbox,
+    NotificationRequest,
+)
 from factory.providers import ModelSelection
 from factory.q6_5 import (
     GitHubOperationHandshake,
@@ -59,7 +63,6 @@ from factory.release_qualification import QualificationError, ReleaseQualificati
 from factory.repository import ConfiguredRepositoryAdapter
 from factory.state import StateStore
 from factory.support_bundle import build_support_bundle
-from factory.telegram import TelegramApi
 from factory.worker import HermesRunResult, _workspace_snapshot
 from scripts import functional_qualification, q6_5_live
 
@@ -106,13 +109,16 @@ def test_functional_epoch_reader_uses_checkpointed_immutable_snapshot(
         return real_connect(database_uri, *args, **kwargs)
 
     monkeypatch.setattr(functional_qualification.sqlite3, "connect", recording_connect)
-    assert functional_qualification._release_epoch(
-        {
-            "governor_database": str(database),
-            "source_commit": COMMIT,
-            "candidate_digest": DIGEST,
-        }
-    ) == "RE-IMMUTABLE"
+    assert (
+        functional_qualification._release_epoch(
+            {
+                "governor_database": str(database),
+                "source_commit": COMMIT,
+                "candidate_digest": DIGEST,
+            }
+        )
+        == "RE-IMMUTABLE"
+    )
     assert observed == [f"file:{database.resolve().as_posix()}?mode=ro&immutable=1"]
 
 
@@ -186,9 +192,7 @@ def test_functional_reconcile_retires_checkpointed_failed_release_epoch(
 
     state_root = tmp_path / "functional"
     state_root.mkdir()
-    governor = FunctionalQualificationGovernor(
-        sqlite3.connect(state_root / "functional.db")
-    )
+    governor = FunctionalQualificationGovernor(sqlite3.connect(state_root / "functional.db"))
     governor.register_epoch(
         epoch_id=old_epoch,
         source_commit=old_commit,
@@ -276,12 +280,10 @@ def test_functional_reconcile_retires_checkpointed_failed_release_epoch(
     old_notification_digest = sha256_text(old_action)[:32]
     assert sorted(path.name for path in (state_root / "notifications" / "retired").iterdir()) == [
         f"NOTIFY-{old_notification_digest}.json",
-        f"WAITING-{old_notification_digest}.json",
     ]
     current_notification_digest = sha256_text(str(result["action_ref"]).rsplit("/", 1)[1])[:32]
     assert sorted(path.name for path in (state_root / "notifications" / "outbox").iterdir()) == [
         f"NOTIFY-{current_notification_digest}.json",
-        f"WAITING-{current_notification_digest}.json",
     ]
 
 
@@ -397,8 +399,7 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
             "SELECT status,q6_5_status FROM functional_epochs WHERE epoch_id=?", (epoch_id,)
         ).fetchone()
         report = database.execute(
-            "SELECT status FROM capability_handshake_reports "
-            "WHERE epoch_id=? AND operation=?",
+            "SELECT status FROM capability_handshake_reports WHERE epoch_id=? AND operation=?",
             (epoch_id, operation),
         ).fetchone()
         action = database.execute(
@@ -418,8 +419,9 @@ def test_functional_reconcile_durably_waits_on_authenticated_github_denial(
         credential_epoch,
     )
     notification = json.loads(
-        (state_root / "notifications" / "outbox" / f"NOTIFY-{sha256_text(action[0])[:32]}.json")
-        .read_text(encoding="utf-8")
+        (
+            state_root / "notifications" / "outbox" / f"NOTIFY-{sha256_text(action[0])[:32]}.json"
+        ).read_text(encoding="utf-8")
     )
     assert notification["kind"] == "OWNER_ACTION_REQUIRED"
     assert message in notification["text"]
@@ -564,8 +566,9 @@ def test_functional_reconcile_durably_waits_on_candidate_provider_oauth(
         None,
     )
     notification = json.loads(
-        (state_root / "notifications" / "outbox" / f"NOTIFY-{sha256_text(action[0])[:32]}.json")
-        .read_text(encoding="utf-8")
+        (
+            state_root / "notifications" / "outbox" / f"NOTIFY-{sha256_text(action[0])[:32]}.json"
+        ).read_text(encoding="utf-8")
     )
     assert notification["kind"] == "OWNER_ACTION_REQUIRED"
     assert "openai-codex" in notification["text"]
@@ -616,15 +619,15 @@ def test_q6_5_shared_workspace_is_group_writable_without_setgid_and_rejects_syml
 
 def test_github_broker_preserves_shared_group_write_umask() -> None:
     repository = Path(__file__).parents[1]
-    unit = (
-        repository / "config/systemd/hermes-factory-github-broker.service"
-    ).read_text(encoding="utf-8")
+    unit = (repository / "config/systemd/hermes-factory-github-broker.service").read_text(
+        encoding="utf-8"
+    )
 
     assert "Group=hermesfunctional" in unit
     assert "UMask=0007" in unit
-    probe_unit = (
-        repository / "config/systemd/hermes-factory-capability-probe.service"
-    ).read_text(encoding="utf-8")
+    probe_unit = (repository / "config/systemd/hermes-factory-capability-probe.service").read_text(
+        encoding="utf-8"
+    )
     assert "Group=hermesfunctional" in probe_unit
     assert "SupplementaryGroups=hermescandidate" in probe_unit
     assert "RestrictSUIDSGID=true" in probe_unit
@@ -677,9 +680,7 @@ def test_golden_builder_reads_single_owner_from_stable_environment(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).parents[1]
-    namespace = runpy.run_path(
-        str(root / "scripts" / "bootstrap" / "build-golden-config.py")
-    )
+    namespace = runpy.run_path(str(root / "scripts" / "bootstrap" / "build-golden-config.py"))
     resolve = namespace["_resolve_owner_ids"]
     environment = tmp_path / "telegram.env"
     environment.write_text(
@@ -688,12 +689,8 @@ def test_golden_builder_reads_single_owner_from_stable_environment(
     )
     environment.chmod(0o640)
 
-    assert resolve({"telegram": {"allowed_user_ids": []}}, environment) == [
-        "123456789"
-    ]
-    assert resolve(
-        {"telegram": {"allowed_user_ids": [123456789]}}, environment
-    ) == ["123456789"]
+    assert resolve({"telegram": {"allowed_user_ids": []}}, environment) == ["123456789"]
+    assert resolve({"telegram": {"allowed_user_ids": [123456789]}}, environment) == ["123456789"]
     with pytest.raises(ValueError, match="exactly one"):
         resolve({"telegram": {"allowed_user_ids": [987654321]}}, environment)
 
@@ -713,15 +710,77 @@ def _report(
         credential_epoch_id=credential_epoch,
         toolchain_digest=TOOLCHAIN,
         receipts=(sha256_text(operation),) if status == CapabilityStatus.AVAILABLE else (),
-        safe_reason_code=(
-            None if status == CapabilityStatus.AVAILABLE else "missing_credential"
-        ),
+        safe_reason_code=(None if status == CapabilityStatus.AVAILABLE else "missing_credential"),
     )
 
 
 def _pass_q6_5(governor: FunctionalQualificationGovernor) -> None:
     for operation in MANDATORY_Q6_5_OPERATIONS:
         governor.record_handshake("RE-FUNCTIONAL-1", _report(operation))
+    credential_epoch = "CE-" + "1" * 32
+    reports = tuple(
+        CapabilityHandshakeReport.create(
+            candidate_digest=DIGEST,
+            capability=operation,
+            operation=operation,
+            scope={
+                "owner": "brullik",
+                "repository": "hermes-canary-runtime-fixture",
+                "private": True,
+            },
+            status=CapabilityStatus.AVAILABLE,
+            credential_epoch_id=credential_epoch,
+            toolchain_digest=TOOLCHAIN,
+            receipts=(sha256_text("runtime:" + operation),),
+        )
+        for operation in MANDATORY_Q6_5_OPERATIONS[:8]
+    )
+    payload = {
+        "schema_version": "1.0",
+        "credential_epoch_id": credential_epoch,
+        "reports": [
+            report.as_dict() for report in sorted(reports, key=lambda item: item.operation)
+        ],
+    }
+    governor.record_product_github_capability(
+        epoch_id="RE-FUNCTIONAL-1",
+        credential_epoch_id=credential_epoch,
+        report_digest=sha256_text(stable_json(payload)),
+        reports=reports,
+    )
+    provider_reports = tuple(
+        CapabilityHandshakeReport.create(
+            candidate_digest=DIGEST,
+            capability=f"provider.{tier}.invoke",
+            operation=f"provider.{tier}.invoke",
+            scope={
+                "alias": alias,
+                "provider": "fixture",
+                "model": f"fixture-{tier}",
+                "semantic_id": sha256_text("stable-provider-fixture"),
+                "stdout_contract": "json-only",
+                "runtime_principal": "hermesfactory",
+            },
+            status=CapabilityStatus.AVAILABLE,
+            credential_epoch_id=None,
+            toolchain_digest=TOOLCHAIN,
+            receipts=(sha256_text("stable:" + tier),),
+        )
+        for tier, alias in (("luna", "economy"), ("terra", "standard"), ("sol", "expert"))
+    )
+    provider_payload = {
+        "schema_version": "1.0",
+        "observed_at": "2026-08-08T00:00:00+00:00",
+        "reports": [
+            report.as_dict() for report in sorted(provider_reports, key=lambda item: item.operation)
+        ],
+    }
+    governor.record_stable_provider_capability(
+        epoch_id="RE-FUNCTIONAL-1",
+        observed_at=str(provider_payload["observed_at"]),
+        report_digest=sha256_text(stable_json(provider_payload)),
+        reports=provider_reports,
+    )
 
 
 def _pass_pre_q8(governor: FunctionalQualificationGovernor) -> None:
@@ -960,15 +1019,11 @@ def test_broker_accepts_only_private_systemd_credential_projection(
     credential = credential_directory / "github-token"
     credential.write_text("fixture-token-not-a-real-secret", encoding="utf-8")
     file_metadata = os.stat_result((stat.S_IFREG | 0o440, 0, 0, 1, 0, 0, 0, 0, 0, 0))
-    directory_metadata = os.stat_result(
-        (stat.S_IFDIR | 0o550, 0, 0, 1, 0, 0, 0, 0, 0, 0)
-    )
+    directory_metadata = os.stat_result((stat.S_IFDIR | 0o550, 0, 0, 1, 0, 0, 0, 0, 0, 0))
     monkeypatch.setattr(
         Path,
         "stat",
-        lambda path, **_kwargs: (
-            file_metadata if path == credential else directory_metadata
-        ),
+        lambda path, **_kwargs: file_metadata if path == credential else directory_metadata,
     )
     broker = GitHubCredentialBroker(
         policy=BrokerPolicy(owner="brullik"),
@@ -1079,9 +1134,7 @@ def test_wf_p0_011_idle_without_frontier_is_liveness_finding(tmp_path: Path) -> 
 def test_wf_p0_012_013_completed_requires_internal_manifest_and_verifier(
     tmp_path: Path,
 ) -> None:
-    database = _candidate_database(
-        tmp_path, product_status="COMPLETED", task_status="COMPLETED"
-    )
+    database = _candidate_database(tmp_path, product_status="COMPLETED", task_status="COMPLETED")
     assert CandidateDatabaseVerifier.inspect(database).scenario_status == "VERIFY_FAILED"
     connection = sqlite3.connect(database)
     connection.execute("INSERT INTO completion_manifests VALUES ('p')")
@@ -1112,14 +1165,17 @@ def _proposal(objective: str = "objective-1", root: str = "root-1") -> Improveme
 
 
 def _evaluation(*, candidate_time: float, independent: bool = True) -> ComparativeEvaluation:
-    baseline = {metric: 0.0 for metric in (
-        "unknown_transitions",
-        "privilege_expansion",
-        "duplicate_side_effects",
-        "manual_database_mutations",
-        "controller_recovery_in_clean_run",
-        "high_critical_security_findings",
-    )}
+    baseline = {
+        metric: 0.0
+        for metric in (
+            "unknown_transitions",
+            "privilege_expansion",
+            "duplicate_side_effects",
+            "manual_database_mutations",
+            "controller_recovery_in_clean_run",
+            "high_critical_security_findings",
+        )
+    }
     baseline["completion_time"] = 100.0
     candidate = dict(baseline)
     candidate["completion_time"] = candidate_time
@@ -1184,14 +1240,15 @@ def test_wf_p0_029_032_accepted_cycle_creates_immutable_release_epoch(
         experiment_root=candidate,
     )
     assert governor.record_implementation_attempt(cycle) == 1
-    assert governor.evaluate(
-        cycle_id=cycle,
-        evaluation=_evaluation(candidate_time=80.0),
-        request_next_cycle=False,
-    ) == "ACCEPT"
-    row = governor.connection.execute(
-        "SELECT status FROM improvement_release_epochs"
-    ).fetchone()
+    assert (
+        governor.evaluate(
+            cycle_id=cycle,
+            evaluation=_evaluation(candidate_time=80.0),
+            request_next_cycle=False,
+        )
+        == "ACCEPT"
+    )
+    row = governor.connection.execute("SELECT status FROM improvement_release_epochs").fetchone()
     assert row[0] == "FULL_QUALIFICATION_REQUIRED"
 
 
@@ -1213,11 +1270,14 @@ def test_wf_p0_030_031_034_no_progress_or_safety_regression_rejects(
         candidate_digest="2" * 64,
         experiment_root=candidate,
     )
-    assert governor.evaluate(
-        cycle_id=cycle,
-        evaluation=_evaluation(candidate_time=95.0),
-        request_next_cycle=True,
-    ) == "REJECT"
+    assert (
+        governor.evaluate(
+            cycle_id=cycle,
+            evaluation=_evaluation(candidate_time=95.0),
+            request_next_cycle=True,
+        )
+        == "REJECT"
+    )
     with pytest.raises(ImprovementError):
         governor.start_cycle(
             objective_id="objective-1",
@@ -1295,7 +1355,9 @@ def test_wf_p0_043_ready_manifest_signature_and_digests_verify_independently() -
         "verifier": {"digest": TOOLCHAIN},
     }
     signature = base64.b64encode(
-        private_key.sign(json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+        private_key.sign(
+            json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        )
     ).decode("ascii")
     manifest = ReadyResultManifest.create(
         manifest_type="PRODUCT_READY_RESULT",
@@ -1308,11 +1370,14 @@ def test_wf_p0_043_ready_manifest_signature_and_digests_verify_independently() -
         verifier_digest=TOOLCHAIN,
         verifier_signature=signature,
     ).as_dict()
-    assert verify_ready_result_manifest(
-        manifest,
-        verifier_public_key=public,
-        trusted_public_key_digest=trust_digest,
-    ) == manifest["manifest_digest"]
+    assert (
+        verify_ready_result_manifest(
+            manifest,
+            verifier_public_key=public,
+            trusted_public_key_digest=trust_digest,
+        )
+        == manifest["manifest_digest"]
+    )
     tampered = {**manifest, "subject": {"product_id": "other", "state": "COMPLETED"}}
     with pytest.raises(FunctionalReadinessError, match="digest"):
         verify_ready_result_manifest(
@@ -1330,7 +1395,10 @@ class _FakeQ65Broker:
     def execute(self, request: BrokerRequest) -> BrokerReceipt:
         self.calls.append(request.operation)
         self.requests.append(request)
-        if request.repository.startswith("outside-") or request.payload.get("visibility") == "public":
+        if (
+            request.repository.startswith("outside-")
+            or request.payload.get("visibility") == "public"
+        ):
             raise CredentialBrokerError("denied_policy")
         if request.operation == "repository.read" and request.payload.get("workspace"):
             workspace = Path(str(request.payload["workspace"]))
@@ -1365,9 +1433,7 @@ def test_q6_5_local_git_runner_trusts_only_the_exact_shared_workspace(
 
     monkeypatch.setattr("factory.q6_5.subprocess.run", fake_run)
     workspace = tmp_path / "broker-owned-checkout"
-    result = GitHubOperationHandshake._default_git_runner(
-        ["git", "status", "--short"], workspace
-    )
+    result = GitHubOperationHandshake._default_git_runner(["git", "status", "--short"], workspace)
 
     assert result.returncode == 0
     assert observed == {
@@ -1398,9 +1464,7 @@ def test_repository_adapter_trusts_only_the_exact_broker_workspace(
     monkeypatch.setattr("factory.repository.subprocess.run", fake_run)
     workspace = tmp_path / "broker-owned-checkout"
     workspace.mkdir()
-    result = ConfiguredRepositoryAdapter._git_run(
-        workspace, "branch", "--show-current"
-    )
+    result = ConfiguredRepositoryAdapter._git_run(workspace, "branch", "--show-current")
 
     resolved = workspace.resolve()
     assert result == "main"
@@ -1490,14 +1554,9 @@ def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(
     )
     assert cleanup.payload == {"action": "archive"}
     by_operation = {report.operation: report for report in reports}
-    assert (
-        by_operation["github.repository.read"].scope["repository_configuration"]
-        == "verified"
-    )
+    assert by_operation["github.repository.read"].scope["repository_configuration"] == "verified"
     assert by_operation["git.branch.push"].scope["workflow_write"] == "verified"
-    assert (
-        tmp_path / "workspace" / ".github" / "workflows" / "q6-5-proof.yml"
-    ).is_file()
+    assert (tmp_path / "workspace" / ".github" / "workflows" / "q6-5-proof.yml").is_file()
     replayed = handshake.run()
     assert [report.operation for report in replayed] == [report.operation for report in reports]
 
@@ -1571,9 +1630,7 @@ def test_q6_5_workflow_permission_denial_is_typed_for_branch_push(tmp_path: Path
     class DeniedBroker(_FakeQ65Broker):
         def execute(self, request: BrokerRequest) -> BrokerReceipt:
             if request.operation == "branch.push":
-                raise CredentialBrokerError(
-                    "candidate_github_workflow_permission_denied"
-                )
+                raise CredentialBrokerError("candidate_github_workflow_permission_denied")
             return super().execute(request)
 
     handshake = GitHubOperationHandshake(
@@ -1588,10 +1645,7 @@ def test_q6_5_workflow_permission_denial_is_typed_for_branch_push(tmp_path: Path
     with pytest.raises(Q65ExternalCapabilityError) as captured:
         handshake.run()
     assert captured.value.operation == "git.branch.push"
-    assert (
-        captured.value.safe_reason_code
-        == "candidate_github_workflow_permission_denied"
-    )
+    assert captured.value.safe_reason_code == "candidate_github_workflow_permission_denied"
 
 
 class _ProviderRunner:
@@ -1629,9 +1683,7 @@ class _MissingProviderRunner:
         usage_path: Path | None = None,
     ) -> HermesRunResult:
         del selection, prompt, cwd, usage_path
-        return HermesRunResult(
-            "FAIL", "authentication required", "d" * 64, "missing_credential"
-        )
+        return HermesRunResult("FAIL", "authentication required", "d" * 64, "missing_credential")
 
 
 def test_q6_5_provider_missing_oauth_is_typed_without_raw_output(tmp_path: Path) -> None:
@@ -1801,26 +1853,18 @@ def test_wf_p0_023_026_notification_reboot_idempotence_and_support_bundle(
     assert len(digest) == 64
     with zipfile.ZipFile(bundle) as archive:
         assert secret not in archive.read("evidence/state.json").decode("utf-8")
-    calls: list[str] = []
-
-    def telegram(method: str, payload: dict[str, object]) -> dict[str, Any]:
-        calls.append(method)
-        return {"ok": True, "result": {"message_id": 1}}
-
     outbox = NotificationOutbox(tmp_path / "notifications", attachment_roots=(tmp_path,))
-    outbox.enqueue(
-        NotificationRequest(
-            request_id="SUPPORT-REQUEST-1",
-            kind="ASSISTANCE_REQUIRED_GPT_CODEX",
-            text="Sanitized support evidence is ready.",
-            document_path=str(bundle),
-            document_digest=digest,
+    with pytest.raises(NotificationError, match="intermediate owner notification"):
+        outbox.enqueue(
+            NotificationRequest(
+                request_id="SUPPORT-REQUEST-1",
+                kind="ASSISTANCE_REQUIRED_GPT_CODEX",
+                text="Sanitized support evidence is ready.",
+                document_path=str(bundle),
+                document_digest=digest,
+            )
         )
-    )
-    notifier = OwnerNotifier(outbox, TelegramApi("fixture-token", request=telegram), chat_id="42")
-    assert notifier.run_once() == 1
-    assert notifier.run_once() == 0
-    assert calls == ["sendDocument"]
+    assert list(outbox.outbox.glob("*.json")) == []
 
 
 def test_wf_p0_029_recursion_depth_three_is_durable(tmp_path: Path) -> None:
@@ -1853,9 +1897,7 @@ def test_wf_p0_029_recursion_depth_three_is_durable(tmp_path: Path) -> None:
 def test_wf_p0_acceptance_matrix_is_exact_43_and_has_no_skip() -> None:
     root = Path(__file__).parents[1]
     matrix = yaml.safe_load(
-        (root / "qualification" / "working-factory-p0.yaml").read_text(
-            encoding="utf-8"
-        )
+        (root / "qualification" / "working-factory-p0.yaml").read_text(encoding="utf-8")
     )
     cases = matrix["cases"]
     assert list(cases) == [f"WF-P0-{value:03d}" for value in range(1, 44)]
@@ -1883,15 +1925,24 @@ def test_wf_p0_023_024_025_systemd_autonomy_has_no_codex_runtime() -> None:
         "hermes-factory-functional-handoff.service",
         "hermes-factory-functional-qualification.service",
         "hermes-factory-functional-qualification.timer",
+        "hermes-factory-gateway.service",
         "hermes-factory-golden-product.service",
+        "hermes-factory-product-github-broker.service",
+        "hermes-factory-product-github-capability.service",
+        "hermes-factory-product-github-capability.path",
+        "hermes-factory-stable-provider-capability.service",
+        "hermes-factory-stable-provider-capability.path",
+        "hermes-factory-stable-runtime-attestation.service",
         "hermes-factory-recursive-improvement.service",
         "hermes-factory-recursive-improvement.timer",
+        "hermes-factory-ready-result.service",
+        "hermes-factory-support-bundle-reconciler.service",
+        "hermes-factory-support-bundle-reconciler.timer",
         "hermes-factory-support-bundle@.service",
         "hermes-factory-owner-notifier.service",
     )
     combined = "\n".join(
-        (root / "config" / "systemd" / name).read_text(encoding="utf-8")
-        for name in required
+        (root / "config" / "systemd" / name).read_text(encoding="utf-8") for name in required
     )
     assert "NoNewPrivileges=true" in combined
     assert "codex" not in combined.lower()
@@ -1899,25 +1950,28 @@ def test_wf_p0_023_024_025_systemd_autonomy_has_no_codex_runtime() -> None:
         encoding="utf-8"
     )
     assert "shadow-verify.timer" not in initial
-    notifier = (
-        root / "config/systemd/hermes-factory-owner-notifier.service"
-    ).read_text(encoding="utf-8")
+    notifier = (root / "config/systemd/hermes-factory-owner-notifier.service").read_text(
+        encoding="utf-8"
+    )
     assert "Group=hermesfactory" in notifier
     assert "SupplementaryGroups=hermesfunctional" in notifier
-    reconciler = (
-        root / "scripts/qualification/reconcile-functional.sh"
-    ).read_text(encoding="utf-8")
+    gateway = (root / "config/systemd/hermes-factory-gateway.service").read_text(
+        encoding="utf-8"
+    )
+    assert "/opt/hermes-factory/current" in gateway
+    assert "codex" not in gateway.lower()
+    reconciler = (root / "scripts/qualification/reconcile-functional.sh").read_text(
+        encoding="utf-8"
+    )
     assert "systemctl start --no-block hermes-factory-owner-notifier.service" in reconciler
-    assert reconciler.count(
-        "systemctl start --no-block hermes-factory-owner-notifier.service"
-    ) == 2
+    assert reconciler.count("systemctl start --no-block hermes-factory-owner-notifier.service") == 3
 
 
 def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:
     root = Path(__file__).parents[1]
-    bootstrap = (
-        root / "scripts" / "bootstrap" / "prepare-candidate-plane.sh"
-    ).read_text(encoding="utf-8")
+    bootstrap = (root / "scripts" / "bootstrap" / "prepare-candidate-plane.sh").read_text(
+        encoding="utf-8"
+    )
     assert 'OLD_EPOCH_SOURCE_COMMIT="$(OLD_STATUS_JSON=' in bootstrap
     assert '"${OLD_EPOCH_SOURCE_COMMIT}" != "${OLD_SOURCE_COMMIT}"' in bootstrap
     assert "Previous Candidate B epoch status identity differs" in bootstrap

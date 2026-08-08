@@ -401,3 +401,20 @@ def test_broker_types_workspace_failures_without_returning_git_output(
     )
     with pytest.raises(CredentialBrokerError, match=f"^{reason}$"):
         broker._run(["git", "push"], environment={})
+
+
+def test_broker_service_can_traverse_only_the_governed_codex_source_roots() -> None:
+    root = Path(__file__).resolve().parents[1]
+    unit = (root / "config/systemd/hermes-codex-github-broker.service").read_text(
+        encoding="utf-8"
+    )
+    assert "SupplementaryGroups=hermescodex nogroup" in unit
+    assert "ReadWritePaths=/var/lib/hermes-codex-github-broker " in unit
+    assert "/var/lib/hermes-codex/repository/.git" in next(
+        line for line in unit.splitlines() if line.startswith("ReadOnlyPaths=")
+    )
+    inaccessible = next(
+        line for line in unit.splitlines() if line.startswith("InaccessiblePaths=")
+    )
+    assert "/etc/hermes-factory/credentials.d" in inaccessible
+    assert "/var/lib/hermes-factory" in inaccessible

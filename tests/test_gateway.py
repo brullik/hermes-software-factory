@@ -32,7 +32,9 @@ class FakeTelegramApi:
 
 
 def make_config(root: Path) -> FactoryConfig:
-    raw = yaml.safe_load((ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8"))
+    raw = yaml.safe_load(
+        (ROOT / "config" / "factory-config.example.yaml").read_text(encoding="utf-8")
+    )
     raw["telegram"]["allowed_user_ids"] = [42]
     raw["paths"]["state"] = str(root)
     raw["paths"]["policies"] = str(ROOT / "policies")
@@ -57,9 +59,9 @@ def update(update_id: int, user_id: int, text: str) -> dict[str, Any]:
 
 class GatewayTests(unittest.TestCase):
     def test_systemd_unit_loads_gateway_from_codex_runtime(self) -> None:
-        unit = (
-            ROOT / "config" / "systemd" / "hermes-factory-gateway.service"
-        ).read_text(encoding="utf-8")
+        unit = (ROOT / "config" / "systemd" / "hermes-factory-gateway.service").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("WorkingDirectory=/opt/hermes-codex-runtime/current", unit)
         self.assertIn("Environment=PYTHONPATH=/opt/hermes-codex-runtime/current", unit)
@@ -91,16 +93,16 @@ class GatewayTests(unittest.TestCase):
             self.assertTrue(gateway.process_update(update(10, 42, "Build a safe tool")))
             self.assertFalse(gateway.process_update(update(11, 99, "Build a rejected tool")))
             self.assertEqual(len(state.list_products()), 1)
-            self.assertEqual(len(api.sent), 2)
-            self.assertIn("создан", api.sent[0][1])
-            self.assertIn("уже существует", api.sent[1][1])
+            self.assertEqual(api.sent, [])
             state.close()
 
     def test_command_errors_are_safe_and_poll_offset_is_durable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = make_config(Path(directory))
             state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
-            api = FakeTelegramApi([update(20, 42, "/idea " + "ghp_" + "abcdefghijklmnopqrstuvwxyz123456")])
+            api = FakeTelegramApi(
+                [update(20, 42, "/idea " + "ghp_" + "abcdefghijklmnopqrstuvwxyz123456")]
+            )
             offset = Path(directory) / "offset"
             gateway = TelegramGateway(config, state, ArtifactStore(config), api, offset_path=offset)  # type: ignore[arg-type]
             self.assertEqual(gateway.poll_once(), 1)
@@ -132,7 +134,9 @@ class GatewayTests(unittest.TestCase):
                 "/approve <action_id> <code>, /deny <action_id>",
             )
             self.assertNotIn("Р", api.sent[0][1])
-            self.assertIn("telegram update processed update_id=30 command=help", "\n".join(logs.output))
+            self.assertIn(
+                "telegram update processed update_id=30 command=help", "\n".join(logs.output)
+            )
             state.close()
 
     def test_kanban_command_returns_read_only_task_summary_without_private_fields(self) -> None:
@@ -178,7 +182,10 @@ class GatewayTests(unittest.TestCase):
 
         def request(method: str, payload: dict[str, object]) -> dict[str, Any]:
             calls.append((method, payload))
-            return {"ok": True, "result": [] if method == "getUpdates" else {}}
+            return {
+                "ok": True,
+                "result": [] if method == "getUpdates" else {"message_id": 1},
+            }
 
         api = TelegramApi("123456:secret-token", request=request)
         self.assertEqual(api.get_updates(None), [])
@@ -186,7 +193,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual([method for method, _ in calls], ["getUpdates", "sendMessage"])
         self.assertNotIn("secret-token", repr(calls))
 
-    def test_durable_outbox_is_delivered_to_owner_in_russian(self) -> None:
+    def test_durable_completed_result_is_delivered_to_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = make_config(Path(directory))
             state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
@@ -195,10 +202,10 @@ class GatewayTests(unittest.TestCase):
                 idempotency_key="outbox-russian-owner-key",
                 event_type="telegram.owner_notification",
                 payload={
-                    "kind": "repair_exhausted",
+                    "kind": "product_completed",
                     "product_id": "product-notification",
                     "task_id": "T-NOTIFY",
-                    "text": "Hermes самостоятельно исправляет ошибку. Действие владельца не требуется.",
+                    "text": "✅ Hermes: продукт готов. Статус: COMPLETED.",
                 },
             )
             api = FakeTelegramApi()
@@ -217,10 +224,7 @@ class GatewayTests(unittest.TestCase):
                 [
                     (
                         "42",
-                        (
-                            "Hermes самостоятельно исправляет ошибку. "
-                            "Действие владельца не требуется."
-                        ),
+                        "✅ Hermes: продукт готов. Статус: COMPLETED.",
                     )
                 ],
             )
@@ -261,11 +265,11 @@ class GatewayTests(unittest.TestCase):
                 offset_path=Path(directory) / "offset",
             )
 
-            self.assertEqual(gateway.deliver_outbox(), 1)
+            self.assertEqual(gateway.deliver_outbox(), 0)
 
             self.assertEqual(
                 api.sent,
-                [("42", "Hermes продолжил проект автоматически.")],
+                [],
             )
             outbox = {item["outbox_id"]: item for item in state.list_outbox()}
             self.assertEqual(outbox["outbox-generic-first"]["status"], "PENDING")

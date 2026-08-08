@@ -1,0 +1,10 @@
+[Unit]
+Description=Resume functional qualification after Stable provider authentication change
+ConditionPathExists=/etc/hermes-factory/qualification-control.yaml
+
+[Path]
+PathChanged=/var/lib/hermes-factory/.hermes/auth.json
+Unit=hermes-factory-stable-provider-capability.service
+
+[Install]
+WantedBy=multi-user.target

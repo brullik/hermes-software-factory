@@ -1,0 +1,10 @@
+[Unit]
+Description=Resume functional qualification after Stable product GitHub credential change
+ConditionPathExists=/etc/hermes-factory/qualification-control.yaml
+
+[Path]
+PathChanged=/etc/hermes-factory/credentials.d/github-token
+Unit=hermes-factory-product-github-capability.service
+
+[Install]
+WantedBy=multi-user.target

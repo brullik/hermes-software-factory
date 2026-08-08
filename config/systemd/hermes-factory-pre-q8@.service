@@ -10,7 +10,7 @@ Group=root
 WorkingDirectory=/opt/hermes-factory-verifier/current
 Environment=PRE_Q8_TIMEOUT_SECONDS=172800
 ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-pre-q8-scenario.sh %i
-TimeoutStartSec=48h
+TimeoutStartSec=0
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

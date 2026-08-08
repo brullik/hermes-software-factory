@@ -107,8 +107,7 @@ def test_orphaned_product_is_seeded_and_watchdog_is_durable() -> None:
         assert len(tasks) == 1
         assert tasks[0]["stage_key"] == "product-director"
         assert any(
-            event["event_type"] == "watchdog_incident"
-            for event in state.events("orphan-product")
+            event["event_type"] == "watchdog_incident" for event in state.events("orphan-product")
         )
         state.close()
 
@@ -169,9 +168,7 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
         assert repair["cycle"] == 1
         assert repair["next_tier"] == "terra"
         contract = json.loads(
-            (config.evidence_dir / f"task-{repair['task_id']}.json").read_text(
-                encoding="utf-8"
-            )
+            (config.evidence_dir / f"task-{repair['task_id']}.json").read_text(encoding="utf-8")
         )
         assert contract["allowed_paths"] == required
         assert "pm_acceptance/**" in contract["forbidden_paths"]
@@ -194,7 +191,7 @@ def test_failed_staging_acceptance_starts_exact_pm_scoped_repair_cycle() -> None
         assert brief["required_fixes"]
         assert brief["allowed_paths"] == required
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
-        assert any(item["status"] == "PENDING" for item in state.list_outbox())
+        assert state.list_outbox() == []
         state.close()
 
 
@@ -454,10 +451,7 @@ def test_repair_budget_exhaustion_is_terminal_and_notified_in_russian() -> None:
         product = state.get_product(product_id)
         assert product is not None
         assert product["status"] == "FAILED_SAFE"
-        payloads = [json.loads(item["payload_json"]) for item in state.list_outbox()]
-        exhausted = next(item for item in payloads if item["kind"] == "repair_exhausted")
-        assert "исчерпал автоматические попытки" in exhausted["text"]
-        assert "required_path_missing: tests/test_product.py" in exhausted["text"]
+        assert state.list_outbox() == []
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         state.close()
 
@@ -553,13 +547,7 @@ def test_expanded_budget_does_not_reopen_failed_safe_without_certificate() -> No
         product = state.get_product(product_id)
         assert product is not None
         assert product["status"] == "FAILED_SAFE"
-        exhausted_payload = next(
-            json.loads(item["payload_json"])
-            for item in state.list_outbox()
-            if json.loads(item["payload_json"])["kind"] == "repair_exhausted"
-        )
-        assert "SEC-WF-ASSIGNED-BOUNDARY-FAIL-OPEN" in exhausted_payload["text"]
-        assert "Reject every assigned row" in exhausted_payload["text"]
+        assert state.list_outbox() == []
 
         unchanged_result = PipelineReconciler(config, state).reconcile_once()
         assert unchanged_result.repaired == 0
@@ -583,31 +571,18 @@ def test_expanded_budget_does_not_reopen_failed_safe_without_certificate() -> No
         assert active[0]["cycle"] == 3
         assert active[0]["next_tier"] == "sol"
         brief = json.loads(
-            (
-                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(active[0]["repair_context_ref"]).name).read_text(
+                encoding="utf-8"
+            )
         )
-        assert brief["failed_gate_ids"] == [
-            "SEC-WF-ASSIGNED-BOUNDARY-FAIL-OPEN"
-        ]
-        assert brief["required_fixes"] == [
-            "Reject every assigned row that crosses its role end."
-        ]
+        assert brief["failed_gate_ids"] == ["SEC-WF-ASSIGNED-BOUNDARY-FAIL-OPEN"]
+        assert brief["required_fixes"] == ["Reject every assigned row that crosses its role end."]
         assert brief["allowed_paths"]
         assert "Reject every assigned row" in brief["relevant_log_fragment"]
         assert any(
-            event["event_type"] == "repair_budget_reopened"
-            for event in state.events(product_id)
+            event["event_type"] == "repair_budget_reopened" for event in state.events(product_id)
         )
-        recovered_payload = next(
-            json.loads(item["payload_json"])
-            for item in state.list_outbox()
-            if (
-                json.loads(item["payload_json"])["kind"] == "automatic_recovery"
-                and "расширенного" in json.loads(item["payload_json"])["text"]
-            )
-        )
-        assert "Действие владельца: не требуется" in recovered_payload["text"]
+        assert state.list_outbox() == []
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         state.close()
 
@@ -680,9 +655,7 @@ def test_interrupted_attempt_remains_failed_safe_without_certificate() -> None:
             event["event_type"] == "interrupted_attempt_recovered"
             for event in state.events(product_id)
         )
-        payloads = [json.loads(item["payload_json"]) for item in state.list_outbox()]
-        recovered = next(item for item in payloads if item["kind"] == "automatic_recovery")
-        assert "Действие владельца: не требуется" in recovered["text"]
+        assert state.list_outbox() == []
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         state.close()
 
@@ -718,9 +691,7 @@ def test_completed_builder_is_not_adopted_from_failed_safe_without_certificate()
                 {
                     "status": "blocked_external",
                     "summary": "Implementation and local PM acceptance are complete.",
-                    "changed_files": [
-                        {"path": "src/product.py", "change": "Applied the repair."}
-                    ],
+                    "changed_files": [{"path": "src/product.py", "change": "Applied the repair."}],
                     "test_results": [
                         {
                             "gate_id": "target-tests",
@@ -813,14 +784,7 @@ def test_completed_builder_is_not_adopted_from_failed_safe_without_certificate()
             event["event_type"] == "builder_downstream_gate_deferred"
             for event in state.events(product_id)
         )
-        notifications = [
-            json.loads(item["payload_json"]) for item in state.list_outbox()
-        ]
-        assert any(
-            "Следующий шаг: Test Engineer" in item["text"]
-            and "Действие владельца: не требуется" in item["text"]
-            for item in notifications
-        )
+        assert state.list_outbox() == []
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
 
         test_task_id = str(active[0]["task_id"])
@@ -865,14 +829,16 @@ def test_completed_builder_is_not_adopted_from_failed_safe_without_certificate()
         assert len(recovery_events) == 2
 
         PipelineReconciler(config, state).reconcile_once()
-        assert len(
-            [
-                event
-                for event in state.events(product_id)
-                if event["event_type"]
-                == "deferred_dependency_consumer_recovered"
-            ]
-        ) == 2
+        assert (
+            len(
+                [
+                    event
+                    for event in state.events(product_id)
+                    if event["event_type"] == "deferred_dependency_consumer_recovered"
+                ]
+            )
+            == 2
+        )
         state.close()
 
 
@@ -912,9 +878,7 @@ def test_prior_builder_is_not_adopted_from_failed_safe_without_certificate() -> 
             state.transition_product(product_id, status)
         pipeline = PipelineCoordinator(config, state)
         candidate_path = pipeline.create_task(product_id, "builder-core", cycle=2)
-        candidate_id = str(
-            json.loads(candidate_path.read_text(encoding="utf-8"))["task_id"]
-        )
+        candidate_id = str(json.loads(candidate_path.read_text(encoding="utf-8"))["task_id"])
         output_path = config.evidence_dir / "controller-valid-builder-output.json"
         output_path.write_text(
             json.dumps(
@@ -953,9 +917,7 @@ def test_prior_builder_is_not_adopted_from_failed_safe_without_certificate() -> 
             ),
             encoding="utf-8",
         )
-        candidate_attempt_path = (
-            config.evidence_dir / "attempt-controller-valid-builder.json"
-        )
+        candidate_attempt_path = config.evidence_dir / "attempt-controller-valid-builder.json"
         candidate_attempt_path.write_text(
             json.dumps(
                 {
@@ -998,9 +960,7 @@ def test_prior_builder_is_not_adopted_from_failed_safe_without_certificate() -> 
         )
 
         latest_path = pipeline.create_task(product_id, "builder-core", cycle=3)
-        latest_id = str(
-            json.loads(latest_path.read_text(encoding="utf-8"))["task_id"]
-        )
+        latest_id = str(json.loads(latest_path.read_text(encoding="utf-8"))["task_id"])
         assert state.claim_task(worker_id="latest-worker") is not None
         assert state.record_attempt(
             attempt_id="attempt-latest-builder",
@@ -1049,22 +1009,20 @@ def test_prior_builder_is_not_adopted_from_failed_safe_without_certificate() -> 
             if event["event_type"] == "builder_controller_gates_adopted"
         ]
         assert len(adoption_events) == 1
-        notification = next(
-            json.loads(item["payload_json"])
-            for item in state.list_outbox()
-            if json.loads(item["payload_json"])["kind"] == "automatic_recovery"
-        )
-        assert "Действие владельца: не требуется." in notification["text"]
+        assert state.list_outbox() == []
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
 
         PipelineReconciler(config, state).reconcile_once()
-        assert len(
-            [
-                event
-                for event in state.events(product_id)
-                if event["event_type"] == "builder_controller_gates_adopted"
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    event
+                    for event in state.events(product_id)
+                    if event["event_type"] == "builder_controller_gates_adopted"
+                ]
+            )
+            == 1
+        )
         state.close()
 
 
@@ -1095,9 +1053,7 @@ def test_director_cannot_open_new_failed_safe_budget_without_certificate() -> No
             "builder-core",
             cycle=3,
         )
-        historical_id = str(
-            json.loads(historical_path.read_text(encoding="utf-8"))["task_id"]
-        )
+        historical_id = str(json.loads(historical_path.read_text(encoding="utf-8"))["task_id"])
         historical = state.claim_task(worker_id="historical-worker")
         assert historical is not None and historical["task_id"] == historical_id
         state.complete_task(historical_id, "historical-worker", "DONE")
@@ -1106,9 +1062,7 @@ def test_director_cannot_open_new_failed_safe_budget_without_certificate() -> No
             "security-reviewer",
             cycle=2,
         )
-        security_id = str(
-            json.loads(security_path.read_text(encoding="utf-8"))["task_id"]
-        )
+        security_id = str(json.loads(security_path.read_text(encoding="utf-8"))["task_id"])
         output_path = config.evidence_dir / "distinct-security-finding.json"
         output_path.write_text(
             json.dumps(
@@ -1203,9 +1157,9 @@ def test_director_cannot_open_new_failed_safe_budget_without_certificate() -> No
         assert active[0]["stage_key"] == "builder-core"
         assert active[0]["cycle"] == 4
         brief = json.loads(
-            (
-                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(active[0]["repair_context_ref"]).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert brief["failed_gate_ids"] == ["SEC-NEW-FAIL-OPEN"]
         assert "exact negative regression" in brief["required_fixes"][0]
@@ -1220,15 +1174,7 @@ def test_director_cannot_open_new_failed_safe_budget_without_certificate() -> No
         assert payload["replan_number"] == 4
         assert payload["hypothesis_attempt"] == 1
         assert payload["max_replans_per_hypothesis"] == 3
-        notifications = [
-            json.loads(item["payload_json"]) for item in state.list_outbox()
-        ]
-        assert any(
-            item["kind"] == "automatic_recovery"
-            and "Director пересмотрел постановку" in item["text"]
-            and "Действие владельца: не требуется." in item["text"]
-            for item in notifications
-        )
+        assert state.list_outbox() == []
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
         state.close()
 
@@ -1259,9 +1205,7 @@ def test_director_cannot_reassess_failed_safe_without_certificate() -> None:
             "security-reviewer",
             cycle=3,
         )
-        task_id = str(
-            json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
-        )
+        task_id = str(json.loads(task_path.read_text(encoding="utf-8"))["task_id"])
         assert state.claim_task(worker_id="security-worker") is not None
         assert state.record_attempt(
             attempt_id="attempt-repeated-hypothesis",
@@ -1328,9 +1272,9 @@ def test_director_cannot_reassess_failed_safe_without_certificate() -> None:
         assert len(active) == 1
         assert active[0]["stage_key"] == "builder-core"
         brief = json.loads(
-            (
-                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(active[0]["repair_context_ref"]).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert brief["failed_gate_ids"] == ["mandatory_gate_failed"]
         assert "Do not repeat the previous fix" in brief["required_fixes"][0]
@@ -1458,9 +1402,9 @@ def test_exhausted_builder_cannot_open_next_cycle_without_certificate() -> None:
         assert active[0]["cycle"] == 1
         assert active[0]["next_tier"] == "terra"
         brief = json.loads(
-            (
-                config.evidence_dir / Path(active[0]["repair_context_ref"]).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(active[0]["repair_context_ref"]).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert "target-tests" in brief["failed_gate_ids"]
         assert any(
@@ -1469,8 +1413,7 @@ def test_exhausted_builder_cannot_open_next_cycle_without_certificate() -> None:
         )
         assert "ModuleNotFoundError" in brief["relevant_log_fragment"]
         assert any(
-            event["event_type"] == "builder_cycle_reopened"
-            for event in state.events(product_id)
+            event["event_type"] == "builder_cycle_reopened" for event in state.events(product_id)
         )
 
         second = PipelineReconciler(config, state).reconcile_once()
@@ -1506,9 +1449,7 @@ def test_legacy_secret_exposure_is_not_retried_without_certificate() -> None:
             "builder-core",
             cycle=5,
         )
-        task_id = str(
-            json.loads(task_path.read_text(encoding="utf-8"))["task_id"]
-        )
+        task_id = str(json.loads(task_path.read_text(encoding="utf-8"))["task_id"])
         assert state.claim_task(worker_id="legacy-worker") is not None
         assert state.record_attempt(
             attempt_id="attempt-legacy-secret",
@@ -1545,9 +1486,9 @@ def test_legacy_secret_exposure_is_not_retried_without_certificate() -> None:
         assert task["next_tier"] == "sol"
         assert task["next_attempt_kind"] == "repair"
         brief = json.loads(
-            (
-                config.evidence_dir / Path(task["repair_context_ref"]).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(task["repair_context_ref"]).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert brief["failed_gate_ids"] == ["secret_exposure"]
         assert "provider-output sanitizer v2" in brief["required_fixes"][0]
@@ -1557,20 +1498,18 @@ def test_legacy_secret_exposure_is_not_retried_without_certificate() -> None:
             if event["event_type"] == "secret_sanitizer_retry_scheduled"
         ]
         assert len(events) == 1
-        notification = next(
-            json.loads(item["payload_json"])
-            for item in state.list_outbox()
-            if json.loads(item["payload_json"])["kind"] == "automatic_recovery"
-        )
-        assert "Действие владельца: не требуется." in notification["text"]
+        assert state.list_outbox() == []
         assert list(config.evidence_dir.glob("owner-action-*.json")) == []
 
         PipelineReconciler(config, state).reconcile_once()
-        assert len(
-            [
-                event
-                for event in state.events(product_id)
-                if event["event_type"] == "secret_sanitizer_retry_scheduled"
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    event
+                    for event in state.events(product_id)
+                    if event["event_type"] == "secret_sanitizer_retry_scheduled"
+                ]
+            )
+            == 1
+        )
         state.close()
