@@ -62,6 +62,23 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(config["model_reasoning_effort"], "xhigh")
         self.assertFalse(config["features"]["shell_snapshot"])
 
+    def test_vps_systemd_unit_keeps_code_mode_compatible_hardening(self) -> None:
+        unit = (
+            PACKAGE_ROOT / "config" / "systemd" / "hermes-codex-vps@.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn("MemoryDenyWriteExecute=false", unit)
+        self.assertNotIn("MemoryDenyWriteExecute=true", unit)
+        for invariant in (
+            "NoNewPrivileges=true",
+            "ProtectSystem=strict",
+            "ProtectHome=read-only",
+            "InaccessiblePaths=/etc/hermes-factory",
+            "InaccessiblePaths=/opt/hermes-factory",
+            "InaccessiblePaths=/var/lib/hermes-factory",
+            "InaccessiblePaths=/var/log/hermes-factory",
+        ):
+            self.assertIn(invariant, unit)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()

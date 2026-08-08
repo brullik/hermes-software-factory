@@ -177,3 +177,37 @@ immutable merge, then continue live model/crash/resume commissioning.
 Next checkpoint: rebuild the source manifest, run package/SBOM/secret gates,
 publish and merge the exact-head PR through the typed broker, deploy the
 immutable merge, then execute controlled supervisor crash/resume commissioning.
+
+## Checkpoint 6 - durable resume and code-mode systemd compatibility
+
+- The first controlled crash intentionally killed the supervisor immediately
+  after thread.started; the rollout was still zero bytes, so a resume correctly
+  failed closed as session_lookup. The commissioning watchdog was tightened to
+  require a non-empty, parseable and synced rollout before killing the process.
+- With a durable rollout, systemd proved KILL, result=signal, restart counter
+  1 and a second start of the same unit. The supervisor preserved the exact
+  session ID and recorded resume_count=1, but the resumed model returned
+  TERMINAL_BLOCKED: its code-mode host repeatedly exited on signal 5
+  (SIGTRAP) and closed stdout.
+- The unit had MemoryDenyWriteExecute=true. A new isolated A/B instance changed
+  only that property to false while retaining the named permission profile,
+  NoNewPrivileges, read-only system paths, explicit production-path denies,
+  private state and exact network boundary. It was killed after the first
+  successful durable tool output and resumed the same session ID.
+- The A/B result is COMPLETED: resume_count=1, zero supervisor failures,
+  exact GPT-5.6-sol with xhigh, four structured evidence items, a clean
+  worktree, all state files mode 0600, and no SIGTRAP. Secret scans of state,
+  journal and the 70,148-byte rollout reported zero findings.
+- The template now documents the V8 requirement and sets
+  MemoryDenyWriteExecute=false; a regression test locks that compatibility
+  decision while asserting that the independent privilege, filesystem and
+  production isolation controls remain enabled.
+- Source verification after the fix: 10/10 supervisor tests plus the blocked
+  routing regression, Ruff and strict mypy PASS; isolated full regression
+  595/595 PASS; version, 469-file manifest, SBOM, package, secret, policy,
+  pilot, compileall, full Ruff and strict mypy gates PASS. The new 2.5.0 wheel
+  SHA-256 is f45acbc7da4cb2afdc73fd301d7511cb66815979013be0f2515a8e4cc9ca00d7.
+
+Next checkpoint: publish and squash-merge the exact head through the typed
+broker, deploy the immutable merge, then repeat the controlled crash/resume
+without an instance override.

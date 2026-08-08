@@ -32,7 +32,9 @@ ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# Codex code-mode embeds V8 and requires executable mappings for its tool host.
+# Filesystem, credential, network and privilege boundaries remain enforced below.
+MemoryDenyWriteExecute=false
 RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
