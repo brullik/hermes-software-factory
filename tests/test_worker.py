@@ -26,8 +26,9 @@ from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
 from factory.hermes_stdin import _invoke_hermes, read_stdin_prompt
 from factory.intake import IntakeService
-from factory.path_governor import ResultLineageIdentityError
+from factory.path_governor import PathGovernor, ResultLineageIdentityError
 from factory.pipeline import PipelineCoordinator
+from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
 from factory.proof_obligations import RecoveryCertificateService, SideEffectProtocol
 from factory.providers import ExternalBlocker, ModelSelection
@@ -42,6 +43,7 @@ from factory.worker import (
     TaskExecutionSpec,
     WorkerResult,
     _current_replan_frontier,
+    _external_target_execution_context,
     _host_capacity_snapshot,
     _local_file_reference,
     _mandatory_gate_failure_data,
@@ -277,6 +279,78 @@ def test_solution_architect_gets_trusted_capacity_evidence() -> None:
             for decision in spec.decisions
         )
         state.close()
+
+
+def test_external_planning_roles_and_builder_get_binding_python_contract() -> None:
+    product = {"repository_url": "https://github.com/example/service"}
+    for role in ("solution-architect", "task-specifier", "replanner", "builder"):
+        evidence, decisions = _external_target_execution_context(product, role)
+        assert len(evidence) == 1
+        assert any("Do not select Go" in decision for decision in decisions)
+    payload = json.loads(evidence[0]["summary"].removeprefix("TRUSTED_CONTROLLER_EVIDENCE: "))
+    assert payload["language"] == "python"
+    assert [item["command"] for item in payload["commands"]] == [
+        "python3 -m pytest -q", "python3 -m compileall -q src tests",
+        "python3 -m ruff check src tests",
+    ]
+    assert payload["required_implementation_scope"] == ["src/**", "tests/**"]
+    assert payload["admitted_capabilities"] == [
+        "toolchain.python", "toolchain.scanners", "toolchain.container_builder", "toolchain.make",
+    ]
+    assert evidence[0]["artifact_ref"].startswith("controller://target-execution-contract/")
+
+
+def test_replanner_context_exposes_exact_remaining_execution_slots() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(root, selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"))
+        state = StateStore(config.database_path)
+        product_id, task_id = "P-REPLANNER-BUDGET", "T-REPLANNER-BUDGET"
+        signature = "c" * 64
+        state.create_product(
+            product_id=product_id, owner_id="owner", source="test",
+            idea="https://github.com/example/service",
+            idempotency_key="replanner-budget-context",
+        )
+        contract = replanner_task_contract(config, product_id, task_id)
+        contract_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json", contract, filename=f"task-{task_id}.json",
+        )
+        state.add_task(
+            task_id=task_id, product_id=product_id, title=str(contract["title"]), role="replanner",
+            output_schema=str(contract["output_schema"]),
+            contract_ref=f"evidence/{contract_path.name}",
+            capability_profile="planning_readonly",
+            required_capabilities=list(contract["required_capabilities"]),
+            root_problem_signature=signature,
+        )
+        governor = PathGovernor(state._connection, policy_digest=policy_digest(config))
+        with state._connection:
+            assert governor.consume_budget(
+                product_id=product_id,
+                root_problem_signature=signature,
+                action_kind="arbiter",
+                progress=governor.progress_vector(product_id),
+                evidence_digest="d" * 64,
+            ) == "CONTINUE"
+        worker = AgentWorker(config, state, runner=FakeRunner("{}"), repository_root=ROOT)
+        task = state.get_task(task_id)
+        assert task is not None
+        spec = worker.default_spec(task)
+        _, _, context_path = worker._context_and_prompt(spec)
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        assert context["plan_summary"]["path_governor_execution_budget"] == {
+            "root_problem_signature": signature, "execution_slot_limit": 2,
+            "execution_attempts_used": 0, "remaining_execution_slots": 2, "status": "ACTIVE",
+        }
+        assert any("remaining_execution_slots" in decision for decision in spec.decisions)
+        assert any(item["type"] == "controller-target-execution-contract" for item in spec.evidence)
+        state.close()
+
+
+def test_plan_contract_violation_has_typed_worker_classification() -> None:
+    error = PlanContractViolation("bounded recovery delta exceeds remaining slots")
+    assert AgentWorker._exception_reason_code(error) == "plan_contract_violation"
 
 
 def test_default_spec_uses_exact_revised_contract_ref_instead_of_stale_canonical() -> None:

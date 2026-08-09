@@ -25,6 +25,7 @@ from factory.intake import IntakeService
 from factory.migrations import MIGRATIONS, apply_migrations
 from factory.path_governor import PathGovernor, task_contract_digest
 from factory.pipeline import PipelineCoordinator
+from factory.plan_compiler import CompileContext, PlanCompiler
 from factory.plan_semantics import PlanContractViolation
 from factory.policy import policy_digest
 from factory.proof_obligations import RecoveryCertificateService
@@ -493,17 +494,82 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
             "implementation-slice"
         )
         tasks_before = len(state.list_tasks("product-autonomy"))
-        with pytest.raises(ValueError, match="execution budget is exhausted"):
+        with pytest.raises(
+            PlanContractViolation,
+            match="execution budget is exhausted",
+        ) as exhausted:
             persist_and_ingest_plan(
                 config,
                 state,
                 next_plan,
                 created_by_task_id="T-PATH-ARBITER",
             )
+        assert exhausted.value.reason_code == "plan_contract_violation"
         assert len(state.list_tasks("product-autonomy")) == tasks_before
         assert state.get_product("product-autonomy")["active_plan_revision"] == 1
+        budget = state._connection.execute(
+            """SELECT arbiter_calls_used, execution_attempts_used, status
+                 FROM problem_budgets
+                WHERE product_id=? AND root_problem_signature=?""",
+            ("product-autonomy", signature),
+        ).fetchone()
+        assert tuple(budget) == (1, 2, "ACTIVE")
     finally:
         state.close()
+
+
+def test_external_target_scope_and_recovery_slot_compile_guards() -> None:
+    def implementation(key: str, scope: list[str]) -> dict[str, Any]:
+        return {
+            "node_key": key, "stage_kind": "implementation_slice",
+            "title": f"Implement {key}", "objective": "Produce fresh target-tests evidence.",
+            "scope": scope, "depends_on": [], "goal_ids": ["service"],
+            "acceptance_intents": ["target-tests passes with fresh evidence."],
+        }
+
+    proposal = {
+        "schema_version": "1.0", "proposal_kind": "initial",
+        "product_id": "P-EXTERNAL-PYTHON", "parent_plan_id": None,
+        "source_failure_id": None, "created_at": "2026-08-09T00:00:00Z",
+        "goals": [{"goal_id": "service", "mandatory": True}],
+        "nodes": [implementation("go-service", ["cmd/**", "internal/**"])],
+    }
+    context = CompileContext(
+        product_id="P-EXTERNAL-PYTHON", revision=1, parent_plan_id=None,
+        source_failure_id=None, created_by_task_id="T-SPECIFIER",
+        root_task_id="T-SPECIFIER", root_context_ref="evidence/intake.json",
+        external_repository=True, proposal_artifact_ref="evidence/proposal.json",
+    )
+    plan = PlanCompiler(policy_digest="a" * 64).compile(proposal, context)
+    contract = next(node["task_contract"] for node in plan["nodes"]
+                    if node["task_contract"]["lifecycle_stage"] == "implementation-slice")
+    assert {"cmd/**", "internal/**", "src/**", "tests/**"}.issubset(contract["allowed_paths"])
+    assert contract["quality_gates"] == ["target-environment", "target-tests",
+                                         "target-compile", "target-lint", "target-secret-scan"]
+    assert {"toolchain.python", "toolchain.scanners", "toolchain.container_builder",
+            "toolchain.make"}.issubset(contract["required_capabilities"])
+
+    proposal.update(
+        proposal_kind="replan_delta", product_id="P-BUDGETED-REPLAN",
+        parent_plan_id="PLAN-1", source_failure_id="failure-1",
+        nodes=[implementation(f"repair-{index}", [f"src/repair_{index}.py"])
+               for index in range(4)],
+    )
+    with pytest.raises(
+        PlanContractViolation,
+        match="4 fresh evidence-producing implementation slices but only 2 .* slots remain",
+    ):
+        PlanCompiler(policy_digest="b" * 64).compile(
+            proposal,
+            CompileContext(
+                product_id="P-BUDGETED-REPLAN", revision=2, parent_plan_id="PLAN-1",
+                source_failure_id="failure-1", created_by_task_id="T-REPLANNER",
+                root_task_id="T-ROOT", root_context_ref="evidence/intake.json",
+                external_repository=True,
+                proposal_artifact_ref="evidence/replan.json",
+                remaining_recovery_execution_slots=2,
+            ),
+        )
 
 
 def test_accepted_pipeline_successor_does_not_inherit_resolved_problem_signature(
