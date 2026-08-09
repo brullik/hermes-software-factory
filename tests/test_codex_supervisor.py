@@ -7,7 +7,7 @@ import tomllib
 import unittest
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from factory.codex_supervisor import (
     CodexSupervisor,
@@ -79,6 +79,34 @@ def owner_action_result() -> dict[str, Any]:
         "user_action_required": True,
         "next_authority": "OWNER",
     }
+
+
+def continuation_result(
+    probe: str = "artifact://continuation/progress-one",
+    completed: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "CONTINUE_AUTONOMOUSLY",
+        "factory": None,
+        "autonomy": None,
+        "self_improvement": None,
+        "safety": None,
+        "reason_code": None,
+        "single_action": None,
+        "safe_instruction": None,
+        "unblock_probe": probe,
+        "independent_work_completed": completed or ["Closed one bounded obligation."],
+        "user_action_required": False,
+        "next_authority": "HERMES_AUTONOMOUS_RUNTIME",
+    }
+
+
+class FakeNotificationStore:
+    def __init__(self) -> None:
+        self.events: list[dict[str, str]] = []
+
+    def enqueue_notification(self, **event: str) -> None:
+        self.events.append(event)
 
 
 class FakeRunner:
@@ -369,6 +397,162 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertEqual(state.status, "RETRYABLE_FAILURE")
         self.assertEqual(state.last_failure_class, "missing_structured_terminal_result")
 
+    def test_progress_continuation_keeps_session_and_clears_transient_failures(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    [{"type": "thread.started", "thread_id": SESSION_ID}],
+                    CommandResult(1, "deterministic transient failure"),
+                ),
+                (
+                    [
+                        {
+                            "type": "test.structured_result",
+                            "value": continuation_result(),
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                ),
+            ]
+        )
+        notifications = FakeNotificationStore()
+        supervisor = CodexSupervisor(
+            self.config(),
+            runner=runner,
+            notification_store=cast(Any, notifications),
+            sleep=lambda _delay: None,
+            boundary=self.boundary,
+        )
+        failed = supervisor.run_attempt()
+        self.assertEqual(failed.status, "RETRYABLE_FAILURE")
+        self.assertEqual(failed.attempts, 1)
+        notifications.events.clear()
+
+        continued = supervisor.run_attempt()
+        self.assertEqual(continued.status, "RUNNING")
+        self.assertEqual(continued.session_id, SESSION_ID)
+        self.assertEqual(continued.attempts, 0)
+        self.assertEqual(continued.repeated_failure_count, 0)
+        self.assertIsNone(continued.last_failure_digest)
+        self.assertIsNone(continued.last_failure_class)
+        self.assertEqual(continued.repeated_continuation_count, 1)
+        self.assertEqual(notifications.events, [])
+
+    def test_progress_continuation_resumes_automatically_on_same_session(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {
+                            "type": "test.structured_result",
+                            "value": continuation_result(),
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                ),
+                (
+                    [
+                        {"type": "test.structured_result", "value": ready_result()},
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                ),
+            ]
+        )
+        supervisor = self.supervisor(runner)
+        self.assertEqual(supervisor.run_until_stable(), 0)
+        completed = supervisor.load_state()
+        self.assertEqual(completed.status, "COMPLETED")
+        self.assertEqual(completed.session_id, SESSION_ID)
+        self.assertEqual(len(runner.commands), 2)
+        self.assertIn("resume", runner.commands[1])
+        self.assertIn(SESSION_ID, runner.commands[1])
+
+    def test_identical_no_progress_continuations_stop_at_loop_threshold(self) -> None:
+        repeated = continuation_result()
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {"type": "test.structured_result", "value": repeated},
+                    ],
+                    CommandResult(0, ""),
+                ),
+                (
+                    [{"type": "test.structured_result", "value": repeated}],
+                    CommandResult(0, ""),
+                ),
+                (
+                    [{"type": "test.structured_result", "value": repeated}],
+                    CommandResult(0, ""),
+                ),
+            ]
+        )
+        supervisor = self.supervisor(runner, max_retries=10, loop_threshold=3)
+        self.assertEqual(supervisor.run_attempt().status, "RUNNING")
+        self.assertEqual(supervisor.run_attempt().status, "RUNNING")
+        blocked = supervisor.run_attempt()
+        self.assertEqual(blocked.status, "TERMINAL_BLOCKED")
+        self.assertEqual(blocked.repeated_continuation_count, 3)
+        self.assertEqual(blocked.attempts, 0)
+        self.assertEqual(
+            blocked.last_failure_class, "repeated_no_progress_continuation"
+        )
+
+    def test_transient_failure_does_not_erase_no_progress_continuation_history(self) -> None:
+        repeated = continuation_result()
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {"type": "test.structured_result", "value": repeated},
+                    ],
+                    CommandResult(0, ""),
+                ),
+                ([], CommandResult(1, "transient execution failure")),
+                (
+                    [{"type": "test.structured_result", "value": repeated}],
+                    CommandResult(0, ""),
+                ),
+                ([], CommandResult(1, "transient execution failure")),
+                (
+                    [{"type": "test.structured_result", "value": repeated}],
+                    CommandResult(0, ""),
+                ),
+            ]
+        )
+        supervisor = self.supervisor(runner, max_retries=10, loop_threshold=3)
+        self.assertEqual(supervisor.run_attempt().status, "RUNNING")
+        self.assertEqual(supervisor.run_attempt().status, "RETRYABLE_FAILURE")
+        self.assertEqual(supervisor.run_attempt().status, "RUNNING")
+        self.assertEqual(supervisor.run_attempt().status, "RETRYABLE_FAILURE")
+        blocked = supervisor.run_attempt()
+        self.assertEqual(blocked.status, "TERMINAL_BLOCKED")
+        self.assertEqual(blocked.repeated_continuation_count, 3)
+
+    def test_malformed_continuation_remains_fail_closed(self) -> None:
+        malformed = continuation_result()
+        malformed["independent_work_completed"] = []
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {"type": "thread.started", "thread_id": SESSION_ID},
+                        {"type": "test.structured_result", "value": malformed},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+        state = self.supervisor(runner).run_attempt()
+        self.assertEqual(state.status, "RETRYABLE_FAILURE")
+        self.assertEqual(state.last_failure_class, "missing_structured_terminal_result")
+
     def test_typed_owner_action_is_the_only_external_stop(self) -> None:
         runner = FakeRunner(
             [
@@ -437,6 +621,14 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertNotIn("oneOf", schema)
         self.assertNotIn("anyOf", schema)
         self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(
+            set(schema["properties"]["status"]["enum"]),
+            {
+                "AUTONOMOUS_FACTORY_READY",
+                "CONTINUE_AUTONOMOUSLY",
+                "OWNER_ACTION_REQUIRED",
+            },
+        )
         for field in ("factory", "autonomy", "self_improvement", "safety"):
             nested = schema["properties"][field]
             self.assertEqual(set(nested["required"]), set(nested["properties"]))
