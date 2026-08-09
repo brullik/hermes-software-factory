@@ -1957,7 +1957,7 @@ class AutonomyStore:
         while supersedes_task_id:
             if supersedes_task_id in visited:
                 raise ValueError("supersession chain contains a cycle")
-            if len(chain) >= plan_task_count:
+            if transitive_repair and len(chain) >= plan_task_count:
                 raise ValueError("supersession chain exceeds its plan task bound")
             ancestor = connection.execute(
                 "SELECT * FROM tasks WHERE task_id=?",
@@ -1967,25 +1967,24 @@ class AutonomyStore:
                 raise ValueError("supersession ancestor is missing")
             if str(ancestor["product_id"]) != product_id:
                 raise ValueError("supersession chain crosses product boundary")
-            if ancestor["plan_id"] != plan_id:
-                raise ValueError("supersession chain crosses plan boundary")
+            reviewer_ancestor = (
+                str(ancestor["role"] or "") in _REVIEW_PROFILE_ROLES
+                and str(ancestor["capability_profile"] or "") == "reviewer_readonly"
+            )
+            repair_ancestor = (
+                str(ancestor["stage_key"] or "") == "repair" and not reviewer_ancestor
+            )
+            if transitive_repair and ancestor["plan_id"] != plan_id:
+                if chain or repair_ancestor:
+                    raise ValueError("supersession chain crosses plan boundary")
+                transitive_repair = False
             chain.append(ancestor)
             visited.add(supersedes_task_id)
-            if not transitive_repair:
-                break
-            if (
-                str(ancestor["role"] or "") in _REVIEW_PROFILE_ROLES
-                and str(ancestor["capability_profile"] or "")
-                == "reviewer_readonly"
-            ):
+            if not transitive_repair or reviewer_ancestor or not repair_ancestor:
                 break
             next_task_id = str(ancestor["supersedes_task_id"] or "")
             if not next_task_id:
                 break
-            if str(ancestor["stage_key"] or "") != "repair":
-                raise ValueError(
-                    "supersession chain continues through a non-repair task"
-                )
             supersedes_task_id = next_task_id
         return tuple(chain)
 
