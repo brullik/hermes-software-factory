@@ -2,18 +2,18 @@
   "allowed_paths": [
     ".hermes/task-scope-contract.json",
     "SHA256SUMS",
-    "scripts/bootstrap/preflight-rootless-podman.sh",
+    "scripts/bootstrap/prepare-candidate-plane.sh",
     "tests/test_error_free_process.py",
-    "tests/test_semantic_lifecycle.py"
+    "tests/test_working_factory.py"
   ],
-  "approval_evidence_digest": "12f2b18c9e591741f5c93e78eb14cd1aaba763d4acbdbf24fc60dbc67cab1585",
-  "approval_evidence_ref": "artifact://desktop-bootstrap/12f2b18c9e591741f5c93e78eb14cd1aaba763d4acbdbf24fc60dbc67cab1585",
+  "approval_evidence_digest": "424cea561ede1b7abe726f446e175d01cfebe4954ff54cd6695c94a365571abd",
+  "approval_evidence_ref": "artifact://desktop-bootstrap/424cea561ede1b7abe726f446e175d01cfebe4954ff54cd6695c94a365571abd",
   "approved_by": "desktop-bootstrap",
-  "branch": "codex/vps-candidate-protect-hostname-preflight-v2-20260809",
-  "contract_digest": "2db87fbfa12b02a88328a2bcd365eb3e7064eb059b10d15526373b72adb8638f",
-  "contract_id": "autonomous-factory.vps-candidate-protect-hostname-preflight-v2.20260809",
-  "created_at": "2026-08-09T04:14:14Z",
-  "expires_at": "2026-09-08T04:10:11Z",
+  "branch": "codex/vps-candidate-incomplete-epoch-recovery-20260809",
+  "contract_digest": "084316f249209fab43c81a5fbb6b40a7359958ccfb7ab322b40f0e64e112bb55",
+  "contract_id": "autonomous-factory.vps-candidate-incomplete-epoch-recovery.20260809",
+  "created_at": "2026-08-09T05:12:31Z",
+  "expires_at": "2026-09-08T05:12:31Z",
   "forbidden_paths": [
     ".git/**",
     "config/codex-vps/config.toml",
@@ -24,16 +24,17 @@
     "factory/telegram.py",
     "scripts/codex_candidate_deployment_broker.py",
     "scripts/codex_vps_supervisor.py",
-    "scripts/github_credential_broker.py"
+    "scripts/github_credential_broker.py",
+    "scripts/bootstrap/preflight-rootless-podman.sh"
   ],
-  "max_additions": 110,
+  "max_additions": 180,
   "max_changed_files": 5,
-  "max_deletions": 35,
+  "max_deletions": 45,
   "original_goal_digest": "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497",
-  "parent_contract_digest": "fb29c0c46fab85a6e3f66797f4258f13a4d614a94776fcfa5bf2802dc6a5b7a0",
+  "parent_contract_digest": "2db87fbfa12b02a88328a2bcd365eb3e7064eb059b10d15526373b72adb8638f",
   "product_id": "hermes-software-factory",
-  "rationale": "Supersede only the unpublished first ProtectHostname repair after its full parity run exposed one stale semantic lifecycle assertion: add --uts=host only to the offline scratch Podman probe, update the two exact regression assertions, preserve ProtectHostname=true and every broker, credential, Stable, supervisor, GitHub, Telegram, database, and danger-full-access boundary.",
+  "rationale": "Repair only the fail-closed restartability gap after immutable request FIVE: recognize an incomplete pre-qualification epoch only when Candidate and Verifier current and venv symlinks, ready markers, and clean immutable releases all bind to one valid old commit, while preserving the terminal qualification-status path and the no-active-Candidate-units gate.",
   "schema_version": "1.0",
-  "task_id": "codex-vps-candidate-protect-hostname-preflight-v2",
-  "trusted_base_sha": "01b68c67216792d0aabe9eee982420e140aa20e9"
+  "task_id": "codex-vps-candidate-incomplete-epoch-recovery",
+  "trusted_base_sha": "9fdd8ebfeef3b4eb1b9d31dbda29ed6fd1978420"
 }
