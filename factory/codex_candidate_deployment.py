@@ -14,7 +14,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from factory.common import redact_text, sha256_text, stable_json, utc_now
 
@@ -141,7 +141,7 @@ class CandidateDeploymentRequest:
         return request
 
     def digest(self) -> str:
-        return cast(str, sha256_text(stable_json(asdict(self))))
+        return sha256_text(stable_json(asdict(self)))
 
 
 GitRunner = Callable[[list[str], Mapping[str, str], Path], subprocess.CompletedProcess[str]]
