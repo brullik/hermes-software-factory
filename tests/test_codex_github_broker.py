@@ -62,17 +62,29 @@ class StrictRunner:
         self.calls.append(argv)
         if argv == ["gh", "api", "user"]:
             value: Any = {"login": "brullik", "id": 1}
+        elif "pulls?state=all&per_page=100" in argv[-1]:
+            value = [
+                {
+                    "number": 17,
+                    "state": "closed" if self.merged else "open",
+                    "head": {
+                        "sha": self.head,
+                        "ref": "codex/canary-commissioning",
+                    },
+                }
+            ]
         elif argv[-1].endswith("/pulls/17") and "PUT" not in argv:
             self.pull_reads += 1
+            merged = self.merged or self.pull_reads > 1
             value = {
                 "number": 17,
-                "state": "closed" if self.merged else "open",
+                "state": "closed" if merged else "open",
                 "draft": self.draft,
                 "node_id": "PR_node_fixture",
                 "head": {"sha": self.head, "ref": "codex/canary-commissioning"},
                 "base": {"ref": self.base},
-                "merged": self.pull_reads > 1,
-                "merge_commit_sha": MERGE if self.pull_reads > 1 else None,
+                "merged": merged,
+                "merge_commit_sha": MERGE if merged else None,
             }
         elif argv[-1].endswith(f"/commits/{HEAD}/check-runs"):
             value = {
@@ -396,6 +408,31 @@ def test_core_branch_push_and_delete_have_closed_arguments(tmp_path: Path) -> No
     assert f"safe.directory={workspace}" in git_calls[0]
     assert git_calls[1][-2:] == ["--delete", "codex/task"]
     assert f"safe.directory={workspace}" in git_calls[1]
+
+
+def test_workspace_generation_query_is_exact_head_and_merge_bound(
+    tmp_path: Path,
+) -> None:
+    runner = StrictRunner()
+    runner.merged = True
+    broker = _broker(tmp_path, runner)
+    receipt = broker.execute(
+        BrokerRequest(
+            request_id="CODEX-GENERATION-PROBE-1",
+            operation="repository.read",
+            owner="brullik",
+            repository="hermes-software-factory",
+            payload={"query": "workspace_generation_for_head_sha", "sha": HEAD},
+        )
+    )
+
+    assert receipt.result == "PASS"
+    assert f"head_sha:{HEAD}" in receipt.object_ids
+    assert f"merge_sha:{MERGE}" in receipt.object_ids
+    assert "state:closed" in receipt.object_ids
+    assert "merged:True" in receipt.object_ids
+    assert "head_ref:codex/canary-commissioning" in receipt.object_ids
+    assert "base:main" in receipt.object_ids
 
 
 @pytest.mark.parametrize(
