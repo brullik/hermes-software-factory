@@ -2269,6 +2269,8 @@ class AutonomyStore:
                         reviewer_task = (
                             supersession_chain[-1]
                             if supersession_chain
+                            and str(task["role"] or "") == "builder"
+                            and str(task["stage_key"] or "") == "repair"
                             and str(supersession_chain[-1]["role"] or "")
                             in _REVIEW_PROFILE_ROLES
                             and str(
@@ -2277,15 +2279,7 @@ class AutonomyStore:
                             == "reviewer_readonly"
                             else None
                         )
-                        reviewer_revalidation = bool(
-                            reviewer_task is not None
-                            and str(task["role"] or "") == "builder"
-                            and str(task["stage_key"] or "") == "repair"
-                        )
-                        if reviewer_task is not None and not reviewer_revalidation:
-                            raise ValueError(
-                                "reviewer supersession requires builder revalidation"
-                            )
+                        reviewer_revalidation = reviewer_task is not None
                         reviewer_task_id = (
                             str(reviewer_task["task_id"])
                             if reviewer_task is not None

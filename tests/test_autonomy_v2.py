@@ -1027,7 +1027,7 @@ def failed_two_node_graph(
 
 
 def transitive_repair_graph(tmp_path: Path, *, reviewer: bool = False):
-    config, state, _, failure_id, root_id = failed_two_node_graph(tmp_path)
+    config, state, artifacts, failure_id, root_id = failed_two_node_graph(tmp_path)
     if reviewer:
         with state._lock, state._connection:
             state._connection.execute(
@@ -1039,6 +1039,12 @@ def transitive_repair_graph(tmp_path: Path, *, reviewer: bool = False):
     def add_repair(task_id: str, source_id: str, graph_status: str) -> None:
         source = state.get_task(source_id)
         assert source is not None
+        contract_path = config.evidence_dir / Path(str(source["contract_ref"])).name
+        write_test_repair_contract(
+            artifacts, json.loads(contract_path.read_text(encoding="utf-8")),
+            task_id=task_id, source_task_id=source_id,
+            plan_node_id=f"A:{task_id}", failure_id=failure_id,
+        )
         state.add_task(
             task_id=task_id, product_id="product-autonomy",
             title=f"Repair {source_id}", role="builder",
