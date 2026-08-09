@@ -24,6 +24,7 @@ from .path_governor import (
     semantic_node_id,
     task_contract_digest,
 )
+from .plan_semantics import PlanContractViolation
 
 if TYPE_CHECKING:
     from .state import StateStore
@@ -184,6 +185,34 @@ CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
         "state.repair",
     ),
 }
+
+PATH_GOVERNOR_EXECUTION_SLOT_LIMIT = 2
+
+
+def path_governor_execution_budget(
+    connection: sqlite3.Connection,
+    *,
+    product_id: str,
+    root_problem_signature: str,
+) -> dict[str, int | str]:
+    """Return the exact controller-owned recovery execution budget."""
+
+    if not re.fullmatch(r"[a-f0-9]{64}", root_problem_signature):
+        raise ValueError("root problem signature must be a lowercase SHA-256")
+    row = connection.execute(
+        """SELECT execution_attempts_used, status FROM problem_budgets
+            WHERE product_id=? AND root_problem_signature=?""",
+        (product_id, root_problem_signature),
+    ).fetchone()
+    used = int(row[0]) if row is not None else 0
+    status = str(row[1]) if row is not None else "ACTIVE"
+    remaining = max(0, PATH_GOVERNOR_EXECUTION_SLOT_LIMIT - used) if status == "ACTIVE" else 0
+    return {
+        "execution_slot_limit": PATH_GOVERNOR_EXECUTION_SLOT_LIMIT,
+        "execution_attempts_used": used,
+        "remaining_execution_slots": remaining,
+        "status": status,
+    }
 
 ALL_CAPABILITIES = frozenset(
     capability
@@ -1449,7 +1478,7 @@ class AutonomyStore:
                 progress=governor.progress_vector(product_id),
             )
             if reservation != "CONTINUE":
-                raise ValueError(
+                raise PlanContractViolation(
                     "Path Governor execution budget is exhausted for this plan delta"
                 )
         connection.execute(

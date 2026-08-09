@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .artifacts import ArtifactStore, artifact_metadata
-from .autonomy import CAPABILITY_PROFILES
+from .autonomy import CAPABILITY_PROFILES, path_governor_execution_budget
 from .common import new_id, sha256_text
 from .config import FactoryConfig
 from .failure_router import FailureRouter
@@ -85,6 +85,29 @@ def _product_repository_url(product: dict[str, Any]) -> str | None:
         return value if _external_github_repository(value) else None
     legacy = str(product.get("idea", ""))
     return legacy if _external_github_repository(legacy) else None
+
+
+def external_target_execution_contract() -> dict[str, Any]:
+    """Return the controller-owned external Python execution contract."""
+
+    return {
+        "schema_version": "1.0",
+        "language": "python",
+        "commands": [
+            {"gate_id": "target-tests", "command": "python3 -m pytest -q", "mandatory": True},
+            {
+                "gate_id": "target-compile", "command": "python3 -m compileall -q src tests",
+                "mandatory": True,
+            },
+            {
+                "gate_id": "target-lint", "command": "python3 -m ruff check src tests",
+                "mandatory": False,
+            },
+        ],
+        "admitted_capabilities": ["toolchain.python", "toolchain.scanners",
+                                  "toolchain.container_builder", "toolchain.make"],
+        "required_implementation_scope": ["src/**", "tests/**"],
+    }
 
 
 def _replan_mandatory_gate_ids(
@@ -1084,6 +1107,16 @@ class PipelineCoordinator:
                         reason_code="missing_declared_predecessor",
                     )
         compiler = PlanCompiler(policy_digest=policy_digest(self.config))
+        root_problem_signature = str(task.get("root_problem_signature") or "")
+        execution_budget = (
+            path_governor_execution_budget(
+                self.state._connection,
+                product_id=product_id,
+                root_problem_signature=root_problem_signature,
+            )
+            if expected_kind == "replan_delta" and root_problem_signature
+            else None
+        )
         compiled = compiler.compile(
             proposal,
             CompileContext(
@@ -1104,6 +1137,11 @@ class PipelineCoordinator:
                 mandatory_replan_gate_ids=mandatory_replan_gate_ids,
                 blocked_replan_scope_paths=blocked_replan_scope_paths,
                 required_replan_scope_paths=required_replan_scope_paths,
+                remaining_recovery_execution_slots=(
+                    int(execution_budget["remaining_execution_slots"])
+                    if execution_budget is not None
+                    else None
+                ),
                 delivery_profile=str(
                     product.get("delivery_profile") or "DEPLOYED_SERVICE"
                 ),

@@ -34,6 +34,7 @@ class CompileContext:
     mandatory_replan_gate_ids: tuple[str, ...] = ()
     blocked_replan_scope_paths: tuple[str, ...] = ()
     required_replan_scope_paths: tuple[str, ...] = ()
+    remaining_recovery_execution_slots: int | None = None
     delivery_profile: str = "DEPLOYED_SERVICE"
 
 
@@ -165,6 +166,7 @@ class PlanCompiler:
         mandatory_gate_ids: Sequence[str],
         blocked_scope_paths: Sequence[str],
         required_scope_paths: Sequence[str],
+        remaining_execution_slots: int | None,
     ) -> None:
         """Require a replan to schedule fresh work for every failed mandatory gate."""
 
@@ -178,6 +180,15 @@ class PlanCompiler:
             raise PlanContractViolation(
                 "replan_delta has no fresh implementation slice; accepted inherited "
                 "nodes cannot repair the causal failure"
+            )
+        if (
+            remaining_execution_slots is not None
+            and len(fresh_slices) > remaining_execution_slots
+        ):
+            raise PlanContractViolation(
+                "replan_delta has "
+                f"{len(fresh_slices)} fresh evidence-producing implementation slices "
+                f"but only {remaining_execution_slots} Path Governor execution slots remain"
             )
 
         fresh_text = "\n".join(
@@ -341,6 +352,7 @@ class PlanCompiler:
                 context.mandatory_replan_gate_ids,
                 context.blocked_replan_scope_paths,
                 context.required_replan_scope_paths,
+                context.remaining_recovery_execution_slots,
             )
         merged_by_key = dict(inherited_by_key)
         for key, node in zip(proposed_keys, proposed_slices, strict=True):
@@ -540,6 +552,8 @@ class PlanCompiler:
                 if isinstance(scope_value, list) and scope_value
                 else ["src/**", "tests/**", "README.md"]
             )
+            if context.external_repository:
+                scope = list(dict.fromkeys([*scope, "src/**", "tests/**"]))
             intents_value = proposal_node.get("acceptance_intents", [])
             intents = (
                 [str(value) for value in intents_value]

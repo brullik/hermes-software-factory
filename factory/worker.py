@@ -36,6 +36,7 @@ from .autonomy import (
     FailureData,
     HypothesisData,
     TaskOutcome,
+    path_governor_execution_budget,
     safe_exception_diagnostic,
 )
 from .capabilities import CapabilityBroker
@@ -48,7 +49,11 @@ from .path_governor import (
     ResultLineageDepthExceededError,
     ResultLineageIdentityError,
 )
-from .pipeline import PipelineCoordinator, PreparedPipelineOutcome
+from .pipeline import (
+    PipelineCoordinator,
+    PreparedPipelineOutcome,
+    external_target_execution_contract,
+)
 from .plan_semantics import PlanContractViolation
 from .policy import policy_digest
 from .prompting import PromptCompiler
@@ -1174,6 +1179,34 @@ def public_github_repository_url(value: str) -> str | None:
     return f"https://github.com/{owner}/{repository}.git"
 
 
+def _external_target_execution_context(
+    product: Mapping[str, Any],
+    role: str,
+) -> tuple[list[dict[str, str]], list[str]]:
+    if role not in {"solution-architect", "task-specifier", "replanner", "builder"}:
+        return [], []
+    repository = public_github_repository_url(str(product.get("repository_url") or ""))
+    repository = repository or public_github_repository_url(str(product.get("idea") or ""))
+    if repository is None:
+        return [], []
+    contract = external_target_execution_contract()
+    payload = stable_json(contract)
+    return [
+        {
+            "type": "controller-target-execution-contract",
+            "summary": "TRUSTED_CONTROLLER_EVIDENCE: " + payload,
+            "artifact_ref": "controller://target-execution-contract/" + sha256_text(payload),
+        }
+    ], [
+        (
+            "The controller-owned external target contract is binding: select Python and "
+            "the admitted capabilities only; preserve the exact pytest, compileall, and Ruff "
+            "commands and required src/** plus tests/** scope. Do not select Go or another "
+            "unadmitted language/toolchain."
+        )
+    ]
+
+
 def ensure_initial_product_task(
     config: FactoryConfig,
     state: StateStore,
@@ -1586,6 +1619,11 @@ class AgentWorker:
             evidence.extend(self._dependency_evidence(task))
         else:
             evidence.extend(self._dependency_evidence(task))
+        target_evidence, target_decisions = _external_target_execution_context(
+            product,
+            prompt_role,
+        )
+        evidence.extend(target_evidence)
         if prompt_role == "solution-architect":
             capacity_snapshot = _host_capacity_snapshot(self.config)
             capacity_payload = stable_json(capacity_snapshot)
@@ -1603,6 +1641,7 @@ class AgentWorker:
                 }
             )
         decisions = ["Use safe defaults for unspecified reversible product details."]
+        decisions.extend(target_decisions)
         if prompt_role == "builder":
             decisions.append(
                 "Controller-owned target quality gates are authoritative. Do not invent a "
@@ -1656,6 +1695,11 @@ class AgentWorker:
                 "plan_summary.replan_scope_policy: preserve forbidden paths, include every "
                 "required_scope_path, and expand beyond failed_allowed_paths when "
                 "allow_bounded_expansion is true."
+            )
+            decisions.append(
+                "The controller-owned plan_summary.path_governor_execution_budget is binding. "
+                "Never propose more fresh evidence-producing implementation slices than its "
+                "remaining_execution_slots value."
             )
         if prompt_role == "path-arbiter":
             decisions.append(
@@ -3327,6 +3371,17 @@ class AgentWorker:
             if active_plan is not None
             else {}
         )
+        if spec.role == "replanner":
+            root_problem_signature = str(task_row.get("root_problem_signature") or "")
+            if root_problem_signature:
+                plan_summary["path_governor_execution_budget"] = {
+                    "root_problem_signature": root_problem_signature,
+                    **path_governor_execution_budget(
+                        self.state._connection,
+                        product_id=str(task["product_id"]),
+                        root_problem_signature=root_problem_signature,
+                    ),
+                }
         if spec.role == "path-arbiter":
             root_problem_signature = str(
                 task_row.get("root_problem_signature") or ""
@@ -3653,6 +3708,8 @@ class AgentWorker:
 
     @staticmethod
     def _exception_reason_code(error: BaseException) -> str:
+        if isinstance(error, PlanContractViolation):
+            return error.reason_code
         if isinstance(error, ResultLineageCycleError):
             return "controller_result_lineage_cycle"
         if isinstance(error, ResultLineageDepthExceededError):
@@ -5893,7 +5950,9 @@ class AgentWorker:
             diagnostic = safe_exception_diagnostic(error)
             reason_code = self._exception_reason_code(error)
             controller_failure = FailureData(
-                failure_class="controller",
+                failure_class=(
+                    "policy" if isinstance(error, PlanContractViolation) else "controller"
+                ),
                 reason_code=reason_code,
                 safe_message=str(diagnostic["safe_message"]),
                 evidence_ref=f"internal://task/{task_id}",
