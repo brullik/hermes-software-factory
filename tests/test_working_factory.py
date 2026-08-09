@@ -1994,10 +1994,8 @@ def test_orphaned_prequalification_config_probe_is_read_only_and_fail_closed(
         )
     config = tmp_path / "qualification-control.json"
     config.write_text(
-        json.dumps(
-            {"source_commit": COMMIT, "candidate_digest": DIGEST,
-             "governor_database": str(database)}
-        ),
+        json.dumps({"source_commit": COMMIT, "candidate_digest": DIGEST,
+                    "governor_database": str(database)}),
         encoding="utf-8",
     )
     def run_probe() -> int:
@@ -2007,20 +2005,25 @@ def test_orphaned_prequalification_config_probe_is_read_only_and_fail_closed(
             cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(tmp_path)},
         ).returncode
 
-    assert run_probe() == 0
-    Path(f"{database}-wal").touch(); assert run_probe() == 1; Path(f"{database}-wal").unlink()
-    with sqlite3.connect(database) as connection:
-        connection.execute(
+    with sqlite3.connect(database) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("PRAGMA user_version=1")
+        writer.commit()
+        assert Path(f"{database}-wal").is_file()
+        assert run_probe() == 0
+        writer.execute(
             "INSERT INTO controller_release_epochs VALUES (?,?,?)",
             ("e" * 40, "f" * 64, "CANDIDATE_BUILT"),
         )
-    assert run_probe() == 1
-    with sqlite3.connect(database) as connection:
-        connection.execute("DELETE FROM controller_release_epochs WHERE status!='LTS'")
-        connection.execute(
+        writer.commit()
+        assert run_probe() == 1
+        writer.execute("DELETE FROM controller_release_epochs WHERE status!='LTS'")
+        writer.execute(
             "UPDATE controller_release_epochs SET source_commit=?", (COMMIT,)
         )
-    assert run_probe() == 1
+        writer.commit()
+        assert run_probe() == 1
 
 
 def test_gnu_install_compare_skips_only_matching_helpers(tmp_path: Path) -> None:

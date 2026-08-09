@@ -197,7 +197,6 @@ orphaned_prequalification_config_is_restartable() {
   local verifier_release="${VERIFIER_ROOT}/releases/${old_source_commit}"
   local verifier_venv="${VERIFIER_ROOT}/venvs/${old_source_commit}"
   local expected_governor_database="${VERIFIER_STATE}/governor.db"
-
   incomplete_prequalification_epoch_is_restartable "${old_source_commit}" \
     || return 1
   [[ -f "${qualification_config}" && ! -L "${qualification_config}" ]] \
@@ -212,7 +211,6 @@ import os, re, sqlite3, stat, sys
 from pathlib import Path
 from factory.qualification_runner import _immutable_release_tree_digest
 from scripts.qualification_control import _load_config
-
 try:
     config_path, candidate_release, expected_database_path = map(
         Path, (sys.argv[1], sys.argv[3], sys.argv[4])
@@ -236,7 +234,6 @@ try:
         raise ValueError
     if database_path.resolve(strict=True) != expected_database:
         raise ValueError
-    if any(Path(str(database_path) + suffix).exists() for suffix in ("-journal", "-wal", "-shm")): raise ValueError
     database_metadata = database_path.lstat()
     if (
         not stat.S_ISREG(database_metadata.st_mode)
@@ -245,7 +242,7 @@ try:
         or database_metadata.st_nlink != 1
     ):
         raise ValueError
-    database_uri = f"file:{expected_database.as_posix()}?mode=ro&immutable=1"
+    database_uri = f"file:{expected_database.as_posix()}?mode=ro"
     connection = sqlite3.connect(database_uri, uri=True)
     try:
         connection.execute("PRAGMA query_only=ON")
