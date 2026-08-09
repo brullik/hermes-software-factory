@@ -1158,16 +1158,18 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
 
 
 @pytest.mark.parametrize(
-    ("second_reason", "failed_gate_id"),
+    ("second_reason", "failed_gate_id", "review_stage"),
     [
-        ("mandatory_gate_failed", "target-dependency-audit"),
-        ("model_requested_repair", "SECURITY-CONTAINER-SCAN-NOT-RUN"),
+        ("mandatory_gate_failed", "target-dependency-audit", "security-review"),
+        ("model_requested_repair", "SECURITY-CONTAINER-SCAN-NOT-RUN", "security-review"),
+        ("model_requested_repair", "ARCH-ROLLBACK-ATOMICITY-001", "architecture-review"),
     ],
 )
 def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
     tmp_path: Path,
     second_reason: str,
     failed_gate_id: str,
+    review_stage: str,
 ) -> None:
     config, state, artifacts, failure_id, _ = failed_two_node_graph(
         tmp_path,
@@ -1178,14 +1180,18 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         assert failed is not None
         contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        architecture = review_stage == "architecture-review"
+        reviewer_role = "independent-reviewer" if architecture else "security-reviewer"
+        reviewer_schema = "review-result.schema.json" if architecture else "security-review-result.schema.json"
         contract.update(
             {
-                "role": "security-reviewer",
-                "output_schema": "security-review-result.schema.json",
+                "role": reviewer_role,
+                "output_schema": reviewer_schema,
                 "capability_profile": "reviewer_readonly",
                 "required_capabilities": list(CAPABILITY_PROFILES["reviewer_readonly"]),
                 "allowed_paths": ["artifacts/**"],
-                "quality_gates": ["target-dependency-audit"],
+                "quality_gates": [] if architecture else ["target-dependency-audit"],
+                "lifecycle_stage": review_stage,
             }
         )
         contract_path.write_text(
@@ -1195,12 +1201,12 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         with state._lock, state._connection:
             state._connection.execute(
                 """UPDATE tasks
-                   SET role='security-reviewer',
-                       output_schema='security-review-result.schema.json',
+                   SET role=?, output_schema=?, stage_key=?, lifecycle_stage=?,
                        capability_profile='reviewer_readonly',
                        required_capabilities_json=?
                    WHERE task_id='T-FAILNODEA'""",
-                (stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),),
+                (reviewer_role, reviewer_schema, review_stage, review_stage,
+                 stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"]))),
             )
 
         router = FailureRouter(config, state, artifacts)
@@ -1251,6 +1257,11 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                 "UPDATE tasks SET failure_id=? WHERE task_id='T-FAILNODEA'",
                 (second_failure_id,),
             )
+            if architecture:
+                state._connection.execute(
+                    "UPDATE tasks SET status='DONE', graph_status='SUPERSEDED' WHERE task_id=?",
+                    (arbiter_id,),
+                )
             state._connection.execute(
                 """UPDATE problem_budgets
                       SET execution_attempts_used=1, status='ACTIVE'
@@ -1262,10 +1273,15 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         repair_id = router.route(second_failure_id)
         repair = state.get_task(repair_id)
         assert repair is not None
-        assert repair["role"] == "builder"
-        assert repair["output_schema"] == "attempt-result.schema.json"
+        expected_role = "solution-architect" if architecture else "builder"
+        assert str(repair["role"]).replace("_", "-") == expected_role
+        assert repair["output_schema"] == (
+            "architecture-package.schema.json" if architecture else "attempt-result.schema.json"
+        )
         assert (config.schema_root() / str(repair["output_schema"])).is_file()
-        assert repair["capability_profile"] == "builder_workspace"
+        assert repair["capability_profile"] == (
+            "planning_readonly" if architecture else "builder_workspace"
+        )
         assert repair["stage_key"] == "repair"
         assert repair["repair_context_ref"]
         worker = AgentWorker(
@@ -1275,7 +1291,8 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
             repository_root=tmp_path,
         )
         spec = worker.default_spec(repair)
-        assert any(
+        assert spec.role == expected_role
+        assert architecture or any(
             "subject_sha is the controller's SHA-256 digest" in decision
             and "not a Git commit ID" in decision
             for decision in spec.decisions
@@ -1291,7 +1308,7 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                 encoding="utf-8"
             )
         )
-        expected_paths = ["pyproject.toml", "src/**", "tests/**"]
+        expected_paths = ["artifacts/**"] if architecture else ["pyproject.toml", "src/**", "tests/**"]
         if "dependency" in failed_gate_id:
             expected_paths.insert(1, "requirements*.txt")
         if "CONTAINER" in failed_gate_id:
@@ -1306,13 +1323,27 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                 ]
             )
         assert repair_contract["allowed_paths"] == expected_paths
-        expected_gates = ["target-dependency-audit"]
+        expected_gates = [] if architecture else ["target-dependency-audit"]
         if "CONTAINER" in failed_gate_id:
             expected_gates.append("target-container-image-scan")
         assert repair_contract["quality_gates"] == expected_gates
         assert repair_contract["acceptance"][0]["criterion_id"] == (
-            "AC-REVIEWER-GATE-ROOT-CAUSE"
+            "AC-ARCHITECTURE-REPAIR" if architecture else "AC-REVIEWER-GATE-ROOT-CAUSE"
         )
+        if architecture:
+            brief = json.loads((config.evidence_dir / Path(str(repair["repair_context_ref"])).name).read_text())
+            assert repair_contract["role"] == "solution-architect"
+            assert repair_contract["supersedes_task_id"] is None
+            assert repair_contract["produces_evidence_types"] == ["architecture_package"]
+            assert brief["failed_gate_ids"] == [failed_gate_id]
+            assert brief["required_fixes"][0] == "Produce fresh subject-bound evidence for the reviewer."
+            assert state.get_task("T-FAILNODEA")["graph_status"] == "BLOCKED_DEPENDENCY"
+            assert state.get_task("T-FAILNODEB")["graph_status"] == "BLOCKED_DEPENDENCY"
+            edge = state._connection.execute(
+                "SELECT edge_type, required FROM task_edges WHERE from_task_id=? AND to_task_id='T-FAILNODEA'",
+                (repair_id,),
+            ).fetchone()
+            assert tuple(edge) == ("revalidates", 1)
         budget = state._connection.execute(
             """SELECT arbiter_calls_used, execution_attempts_used, status
                  FROM problem_budgets

@@ -575,6 +575,31 @@ class FailureRouter:
         ]
 
     @staticmethod
+    def _architecture_review_repair_acceptance(
+        failed_gate_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        gates = ", ".join(failed_gate_ids) or "the failed architecture review gate"
+        return [
+            {
+                "criterion_id": "AC-ARCHITECTURE-REPAIR",
+                "verification": (
+                    "The replacement architecture_package resolves the exact "
+                    f"required fixes for {gates} without weakening any review gate."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-ARCHITECTURE-REVALIDATION",
+                "verification": (
+                    "The same independent architecture reviewer consumes the replacement "
+                    "architecture_package and produces fresh accepted review evidence before "
+                    "any dependent implementation work becomes runnable."
+                ),
+                "mandatory": True,
+            },
+        ]
+
+    @staticmethod
     def _product_replan_acceptance() -> list[dict[str, Any]]:
         """Evaluate a product replan as a bounded planning handoff."""
 
@@ -664,6 +689,8 @@ class FailureRouter:
         acceptance: list[dict[str, Any]] | None = None,
         quality_gates: list[str] | None = None,
         model_floor: str = "terra",
+        supersede_failed: bool = True,
+        produces_evidence_types: list[str] | None = None,
     ) -> tuple[dict[str, Any], Path]:
         task_id = (
             "T-"
@@ -695,7 +722,9 @@ class FailureRouter:
             "active_context_ref": contract_ref,
             "failure_id": str(failure["failure_id"]),
             "hypothesis_id": hypothesis_id,
-            "supersedes_task_id": str(failed["task_id"]),
+            "supersedes_task_id": (
+                str(failed["task_id"]) if supersede_failed else None
+            ),
             "title": (
                 "Replan affected product graph"
                 if role == "replanner"
@@ -735,6 +764,8 @@ class FailureRouter:
             "critical_path_rank": 0,
             "quality_gates": list(quality_gates or []),
         }
+        if produces_evidence_types is not None:
+            contract["produces_evidence_types"] = list(produces_evidence_types)
         self.schemas.validate("task-contract-v2.schema.json", contract)
         path = self.artifacts.write(
             "task-contract-v2.schema.json",
@@ -1301,6 +1332,12 @@ class FailureRouter:
                 and int(budget_row["execution_attempts_used"] or 0) < 2
                 and str(budget_row["status"] or "") == "ACTIVE"
             )
+            bounded_architecture_review_repair = bool(
+                bounded_reviewer_gate_repair
+                and str(failed.get("role") or "") == "independent-reviewer"
+                and str(failed.get("lifecycle_stage") or failed.get("stage_key") or "")
+                == "architecture-review"
+            )
             if needs_replan and not bounded_reviewer_gate_repair:
                 budget_action_kind = "arbiter"
                 path_action = FailureAction.RECOMPILE_AFFECTED_SUBGRAPH.value
@@ -1321,15 +1358,30 @@ class FailureRouter:
                     root_problem_signature=root_problem_signature,
                 )
             if bounded_reviewer_gate_repair:
-                role = "builder"
+                role = (
+                    "solution-architect"
+                    if bounded_architecture_review_repair
+                    else "builder"
+                )
                 output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS[role]
-                capability_profile = "builder_workspace"
+                capability_profile = (
+                    "planning_readonly"
+                    if bounded_architecture_review_repair
+                    else "builder_workspace"
+                )
                 suffix = "repair"
                 objective = (
-                    "Use the remaining bounded execution slot to repair the exact "
-                    "repository-level cause of the reviewer mandatory-gate failure. "
-                    "Preserve the root problem signature, do not weaken a gate, and "
-                    "produce fresh subject-bound evidence for every failed gate."
+                    "Use the remaining bounded execution slot to replace the rejected "
+                    "architecture_package. Resolve every exact architecture-review finding "
+                    "from the controller repair brief, remain read-only, preserve the root "
+                    "problem signature and require fresh independent reviewer acceptance."
+                    if bounded_architecture_review_repair
+                    else (
+                        "Use the remaining bounded execution slot to repair the exact "
+                        "repository-level cause of the reviewer mandatory-gate failure. "
+                        "Preserve the root problem signature, do not weaken a gate, and "
+                        "produce fresh subject-bound evidence for every failed gate."
+                    )
                 )
             elif needs_replan:
                 if legacy_replanner_scope_contract:
@@ -1441,8 +1493,12 @@ class FailureRouter:
             # propose the controller-requested scope expansion and the router
             # creates an unbounded chain of semantically identical replans.
             if bounded_reviewer_gate_repair:
-                allowed_paths = self._reviewer_gate_repair_paths(
-                    self._failure_gate_ids(failure)
+                allowed_paths = (
+                    ["artifacts/**"]
+                    if bounded_architecture_review_repair
+                    else self._reviewer_gate_repair_paths(
+                        self._failure_gate_ids(failure)
+                    )
                 )
             elif role in {"replanner", "path-arbiter"}:
                 allowed_paths = ["artifacts/**"]
@@ -1456,8 +1512,14 @@ class FailureRouter:
             elif role == "replanner":
                 contract_acceptance = self._product_replan_acceptance()
             elif bounded_reviewer_gate_repair:
-                contract_acceptance = self._reviewer_gate_repair_acceptance(
-                    self._failure_gate_ids(failure)
+                contract_acceptance = (
+                    self._architecture_review_repair_acceptance(
+                        self._failure_gate_ids(failure)
+                    )
+                    if bounded_architecture_review_repair
+                    else self._reviewer_gate_repair_acceptance(
+                        self._failure_gate_ids(failure)
+                    )
                 )
             else:
                 contract_acceptance = None
@@ -1506,6 +1568,12 @@ class FailureRouter:
                     or suffix == "scope-contract-correction"
                     else "terra"
                 ),
+                supersede_failed=not bounded_architecture_review_repair,
+                produces_evidence_types=(
+                    ["architecture_package"]
+                    if bounded_architecture_review_repair
+                    else None
+                ),
             )
             repair_ref: str | None = None
             if suffix == "repair":
@@ -1524,11 +1592,18 @@ class FailureRouter:
                     acceptance=contract_acceptance,
                 )
                 repair_ref = f"evidence/{repair_path.name}"
+            # The persisted compatibility spelling normalizes to the canonical
+            # solution-architect prompt role, while preventing the legacy v1
+            # solution-architect -> task-specifier pipeline from recompiling an
+            # already-active v2 plan.  The immutable contract remains canonical.
+            durable_role = (
+                "solution_architect" if bounded_architecture_review_repair else role
+            )
             self.state.add_task(
                 task_id=str(contract["task_id"]),
                 product_id=str(failed["product_id"]),
                 title=str(contract["title"]),
-                role=role,
+                role=durable_role,
                 output_schema=output_schema,
                 contract_ref=f"evidence/{path.name}",
                 stage_key=suffix,
@@ -1552,7 +1627,11 @@ class FailureRouter:
                 hypothesis_id=hypothesis_id,
                 capability_profile=capability_profile,
                 idempotency_key=str(contract["idempotency_key"]),
-                supersedes_task_id=str(contract["supersedes_task_id"]),
+                supersedes_task_id=(
+                    str(contract["supersedes_task_id"])
+                    if contract.get("supersedes_task_id")
+                    else None
+                ),
                 root_problem_signature=root_problem_signature,
                 required_capabilities=[str(value) for value in contract["required_capabilities"]],
                 graph_status="READY",
@@ -1562,6 +1641,72 @@ class FailureRouter:
                     self.state._connection.execute(
                         """UPDATE tasks SET repair_context_ref=? WHERE task_id=?""",
                         (repair_ref, contract["task_id"]),
+                    )
+            if bounded_architecture_review_repair:
+                with self.state._lock, self.state._connection:
+                    dependencies = json.loads(
+                        str(failed.get("dependencies_json") or "[]")
+                    )
+                    if not isinstance(dependencies, list):
+                        raise TypeError("architecture reviewer dependencies are invalid")
+                    dependencies = list(
+                        dict.fromkeys(
+                            [
+                                *[str(value) for value in dependencies],
+                                str(contract["task_id"]),
+                            ]
+                        )
+                    )
+                    self.state._connection.execute(
+                        """UPDATE tasks
+                              SET status='PENDING', graph_status='BLOCKED_DEPENDENCY',
+                                  dependencies_json=?, failure_id=NULL, hypothesis_id=NULL,
+                                  result_ref=NULL, result_digest=NULL,
+                                  result_binding_id=NULL, lease_owner=NULL,
+                                  lease_until=NULL, heartbeat_at=NULL, lease_token=NULL,
+                                  available_at=NULL, next_tier='terra',
+                                  next_attempt_kind='initial', repair_context_ref=NULL,
+                                  terminal_reason=NULL, terminal_detail=NULL,
+                                  failure_kind=NULL, blocked_reason='waiting_for_dependencies',
+                                  blocked_ref=NULL, updated_at=?
+                            WHERE task_id=? AND product_id=?
+                              AND graph_status NOT IN ('ACCEPTED','CANCELLED')""",
+                        (
+                            stable_json(dependencies),
+                            str(failure["last_seen_at"]),
+                            str(failed["task_id"]),
+                            str(failed["product_id"]),
+                        ),
+                    )
+                    self.state._connection.execute(
+                        """UPDATE tasks SET produces_evidence_types_json=?
+                            WHERE task_id=? AND product_id=?""",
+                        (
+                            stable_json(["architecture_package"]),
+                            str(contract["task_id"]),
+                            str(failed["product_id"]),
+                        ),
+                    )
+                    self.state._connection.execute(
+                        """INSERT OR IGNORE INTO task_edges
+                           (plan_id, from_task_id, to_task_id, edge_type,
+                            required, created_at)
+                           VALUES (?, ?, ?, 'revalidates', 1, ?)""",
+                        (
+                            str(contract["plan_id"]),
+                            str(contract["task_id"]),
+                            str(failed["task_id"]),
+                            str(failure["last_seen_at"]),
+                        ),
+                    )
+                    self.state._record_event(
+                        str(failed["product_id"]),
+                        str(failed["task_id"]),
+                        "architecture_reviewer_revalidation_blocked",
+                        {
+                            "architecture_repair_task_id": str(contract["task_id"]),
+                            "fresh_reviewer_acceptance_required": True,
+                        },
                     )
             with self.state._lock, self.state._connection:
                 self.state._connection.execute(
