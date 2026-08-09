@@ -384,6 +384,8 @@ def test_systemd_and_codex_permissions_expose_only_typed_socket() -> None:
     ).read_text(encoding="utf-8")
     assert "User=root" in unit
     assert "ProtectSystem=strict" in unit
+    assert "RestrictSUIDSGID=false" in unit
+    assert "RestrictSUIDSGID=true" not in unit
     assert "LoadCredential=" not in unit
     assert "sudo" not in unit
     assert "bash -c" not in unit
