@@ -2,23 +2,24 @@
   "allowed_paths": [
     ".hermes/task-scope-contract.json",
     "SHA256SUMS",
-    "factory/codex_supervisor.py",
-    "tests/test_codex_supervisor.py"
+    "factory/worker.py",
+    "tests/test_worker.py"
   ],
-  "approval_evidence_digest": "bd80a6adabfb1da97dcd92b2f998760e2a81d9da5142a0a39296073f3e8062f3",
-  "approval_evidence_ref": "artifact://desktop-bootstrap/bd80a6adabfb1da97dcd92b2f998760e2a81d9da5142a0a39296073f3e8062f3",
+  "approval_evidence_digest": "1653574e372197a295aa692719c91aea9fc1a7a29f8d88abbf6472f1137c496b",
+  "approval_evidence_ref": "artifact://desktop-bootstrap/1653574e372197a295aa692719c91aea9fc1a7a29f8d88abbf6472f1137c496b",
   "approved_by": "desktop-bootstrap",
-  "branch": "codex/vps-supervisor-generation-safe-directory-20260809",
-  "contract_digest": "f923e80835ceecd475d412085b57a0567de51108715de88c91a36012b5e622ac",
-  "contract_id": "autonomous-factory.supervisor-generation-safe-directory.20260809",
-  "created_at": "2026-08-09T12:14:56Z",
-  "expires_at": "2026-09-08T12:14:56Z",
+  "branch": "codex/vps-pre-q8-review-safe-directory-20260809",
+  "contract_digest": "49f4911e6caff3b262cfbf327d11af3ee4c3ebbb82dd775d04003f8bba781596",
+  "contract_id": "autonomous-factory.pre-q8-review-safe-directory.20260809",
+  "created_at": "2026-08-09T13:41:00Z",
+  "expires_at": "2026-09-08T13:41:00Z",
   "forbidden_paths": [
     ".git/**",
     ".github/**",
     "config/**",
     "factory/autonomy.py",
     "factory/codex_candidate_deployment.py",
+    "factory/codex_supervisor.py",
     "factory/credential_broker.py",
     "factory/gateway.py",
     "factory/path_governor.py",
@@ -27,14 +28,14 @@
     "policies/**",
     "scripts/**"
   ],
-  "max_additions": 140,
+  "max_additions": 160,
   "max_changed_files": 4,
   "max_deletions": 40,
   "original_goal_digest": "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497",
-  "parent_contract_digest": "c8894ab098161de9c9aac8c23cfd42655a3540c4e9c6db06f89f56d9a7113835",
+  "parent_contract_digest": "f923e80835ceecd475d412085b57a0567de51108715de88c91a36012b5e622ac",
   "product_id": "hermes-software-factory",
-  "rationale": "Repair the live broker-owned workspace generation failure by granting command-scoped Git trust only to the exact resolved workspace in supervisor text and binary Git probes. Add regression coverage for both probe paths and reject wildcard trust. Do not change generation budgets, broker operations, credentials, Candidate, Stable, Telegram, databases, gates, or recursive-improvement authority.",
+  "rationale": "Repair only the proven PRE-Q8 security-review Git ownership boundary with exact command-scoped safe.directory trust after workspace validation. Preserve all path-safety, symlink, evidence, quality-gate, runtime, broker, Stable, and recursive-improvement boundaries.",
   "schema_version": "1.0",
-  "task_id": "supervisor-generation-safe-directory",
-  "trusted_base_sha": "d3621f5f8319de71aee247c8dc4ce1dba28d4968"
+  "task_id": "codex-vps-pre-q8-review-safe-directory",
+  "trusted_base_sha": "554960a5741bd1e2d817da019932d588db1b1dc9"
 }
