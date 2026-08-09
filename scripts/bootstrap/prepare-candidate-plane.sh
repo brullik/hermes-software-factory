@@ -664,10 +664,10 @@ chmod 0644 "${CONFIG_ROOT}/pre-q8/index.json"
 chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/golden.yaml"
 chmod 0640 "${CONFIG_ROOT}/golden.yaml"
 install -d -o root -g root -m 0755 /usr/libexec
-install -o root -g root -m 0755 \
+install --compare -o root -g root -m 0755 \
   "${CANDIDATE_RELEASE}/scripts/broker/git-askpass.sh" \
   /usr/libexec/hermes-github-askpass
-install -o root -g root -m 0700 \
+install --compare -o root -g root -m 0700 \
   "${CANDIDATE_RELEASE}/scripts/deploy/release-submit.py" \
   /usr/local/sbin/hermes-qualified-release-submit
 

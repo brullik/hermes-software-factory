@@ -2008,6 +2008,17 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert "q6-capability-attestation.json" in bootstrap
     assert "--q6-capability-attestation-digest" in bootstrap
     assert (
+        'install --compare -o root -g root -m 0755 \\\n'
+        '  "${CANDIDATE_RELEASE}/scripts/broker/git-askpass.sh" \\\n'
+        "  /usr/libexec/hermes-github-askpass"
+    ) in bootstrap
+    assert (
+        'install --compare -o root -g root -m 0700 \\\n'
+        '  "${CANDIDATE_RELEASE}/scripts/deploy/release-submit.py" \\\n'
+        "  /usr/local/sbin/hermes-qualified-release-submit"
+    ) in bootstrap
+    assert bootstrap.count("install --compare -o root -g root -m") == 2
+    assert (
         'podman_remote_as_service run --rm --uts=host --network podman "${PROBE_IMAGE}"'
         in podman_preflight
     )
