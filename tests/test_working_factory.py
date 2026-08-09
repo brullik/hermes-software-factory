@@ -1635,6 +1635,9 @@ def test_q6_5_workflow_permission_denial_is_typed_for_branch_push(tmp_path: Path
 
 
 class _ProviderRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def run(
         self,
         *,
@@ -1644,6 +1647,7 @@ class _ProviderRunner:
         usage_path: Path | None = None,
     ) -> HermesRunResult:
         del prompt, cwd
+        self.calls += 1
         semantic_id = sha256_text("q6.5-provider-no-side-effect-v1")
         output = json.dumps(
             {
@@ -1660,6 +1664,9 @@ class _ProviderRunner:
 
 
 class _MissingProviderRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def run(
         self,
         *,
@@ -1669,32 +1676,152 @@ class _MissingProviderRunner:
         usage_path: Path | None = None,
     ) -> HermesRunResult:
         del selection, prompt, cwd, usage_path
+        self.calls += 1
         return HermesRunResult(
             "FAIL", "authentication required", "d" * 64, "missing_credential"
         )
 
 
-def test_q6_5_provider_missing_oauth_is_typed_without_raw_output(tmp_path: Path) -> None:
+class _NoProviderRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, **_: Any) -> HermesRunResult:
+        self.calls += 1
+        raise AssertionError("validated provider evidence must prevent another call")
+
+
+def _provider_handshake(root: Path, runner: Any) -> ProviderOperationHandshake:
     selections = {
         tier: ModelSelection(
             "openai_codex_subscription", alias, f"model-{tier}", tier, "openai-codex"
         )
         for tier, alias in ProviderOperationHandshake.ROUTES
     }
+    return ProviderOperationHandshake(
+        identity=ProbeIdentity(DIGEST, TOOLCHAIN, None),
+        runner=runner,
+        selections=selections,
+        workspace=root,
+        evidence_root=root / "evidence",
+    )
+
+
+def _semantic_mismatch(result: HermesRunResult) -> HermesRunResult:
+    value = json.loads(result.output)
+    semantic_id = str(value["semantic_id"])
+    value["semantic_id"] = semantic_id[:-1] + ("0" if semantic_id[-1] != "0" else "1")
+    output = json.dumps(value)
+    return HermesRunResult("PASS", output, sha256_text(output), None)
+
+
+def test_q6_5_provider_missing_oauth_is_typed_without_raw_output(tmp_path: Path) -> None:
+    runner = _MissingProviderRunner()
 
     with pytest.raises(Q65ProviderCapabilityError) as captured:
-        ProviderOperationHandshake(
-            identity=ProbeIdentity(DIGEST, TOOLCHAIN, None),
-            runner=_MissingProviderRunner(),
-            selections=selections,
-            workspace=tmp_path,
-            evidence_root=tmp_path / "evidence",
-        ).run()
+        _provider_handshake(tmp_path, runner).run()
 
     assert captured.value.operation == "provider.luna.invoke"
     assert captured.value.safe_reason_code == "missing_candidate_provider_credential"
     assert captured.value.scope["credential_provider"] == "openai-codex"
     assert "authentication required" not in str(captured.value)
+    assert runner.calls == 1
+    assert not (tmp_path / "evidence").exists()
+
+
+def test_q6_5_provider_semantic_retry_is_sanitized_and_restart_reuses_success(
+    tmp_path: Path,
+) -> None:
+    class RetryRunner(_ProviderRunner):
+        def run(self, **kwargs: Any) -> HermesRunResult:
+            result = super().run(**kwargs)
+            if self.calls == 1:
+                return _semantic_mismatch(result)
+            return result
+
+    runner = RetryRunner()
+    reports = _provider_handshake(tmp_path, runner).run()
+    assert len(reports) == 3
+    assert runner.calls == 4
+    failure_path = tmp_path / "evidence/provider-luna-attempt-1-failure.json"
+    success_path = tmp_path / "evidence/provider-luna-success.json"
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert failure["reason_code"] == "provider_structured_output_contract_mismatch"
+    assert failure["attempt"] == 1
+    semantic_id = sha256_text("q6.5-provider-no-side-effect-v1")
+    wrong_semantic_id = semantic_id[:-1] + ("0" if semantic_id[-1] != "0" else "1")
+    assert wrong_semantic_id not in failure_path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(failure_path.stat().st_mode) == 0o400
+    assert stat.S_IMODE(success_path.stat().st_mode) == 0o400
+
+    no_call = _NoProviderRunner()
+    assert len(_provider_handshake(tmp_path, no_call).run()) == 3
+    assert no_call.calls == 0
+
+
+def test_q6_5_provider_attempt_budget_survives_restart(tmp_path: Path) -> None:
+    class FirstFailureThenAuth(_ProviderRunner):
+        def run(self, **kwargs: Any) -> HermesRunResult:
+            if self.calls:
+                self.calls += 1
+                return HermesRunResult(
+                    "FAIL", "private auth detail", "d" * 64, "missing_credential"
+                )
+            return _semantic_mismatch(super().run(**kwargs))
+
+    with pytest.raises(Q65ProviderCapabilityError):
+        _provider_handshake(tmp_path, FirstFailureThenAuth()).run()
+
+    class FinalFailure(_ProviderRunner):
+        def run(self, **kwargs: Any) -> HermesRunResult:
+            return _semantic_mismatch(super().run(**kwargs))
+
+    final = FinalFailure()
+    with pytest.raises(Q65ProbeError, match="attempts exhausted"):
+        _provider_handshake(tmp_path, final).run()
+    assert final.calls == 1
+    no_call = _NoProviderRunner()
+    with pytest.raises(Q65ProbeError, match="attempts exhausted"):
+        _provider_handshake(tmp_path, no_call).run()
+    assert no_call.calls == 0
+    evidence = "".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "evidence").glob("provider-luna-*-failure.json")
+    )
+    assert "private auth detail" not in evidence
+
+
+def test_q6_5_provider_conflicting_and_orphan_evidence_fail_closed(tmp_path: Path) -> None:
+    conflict = tmp_path / "conflict"
+    _provider_handshake(conflict, _ProviderRunner()).run()
+    receipt_path = conflict / "evidence/provider-luna-success.json"
+    receipt_path.chmod(0o600)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["model"] = "conflicting-model"
+    core = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    receipt["receipt_digest"] = sha256_text(
+        json.dumps(core, sort_keys=True, separators=(",", ":"))
+    )
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+    receipt_path.chmod(0o400)
+    with pytest.raises(Q65ProbeError, match="identity differs"):
+        _provider_handshake(conflict, _NoProviderRunner()).run()
+
+    orphan = tmp_path / "orphan"
+    orphan_usage = orphan / "evidence/provider-luna-attempt-1-usage.json"
+    orphan_usage.parent.mkdir(parents=True)
+    orphan_usage.write_text("{}\n", encoding="utf-8")
+    orphan_usage.chmod(0o400)
+    with pytest.raises(Q65ProbeError, match="orphaned"):
+        _provider_handshake(orphan, _NoProviderRunner()).run()
+
+    malformed = tmp_path / "malformed"
+    malformed_receipt = malformed / "evidence/provider-luna-success.json"
+    malformed_receipt.parent.mkdir(parents=True)
+    malformed_receipt.write_text("{}\n", encoding="utf-8")
+    malformed_receipt.chmod(0o400)
+    with pytest.raises(Q65ProbeError, match="fields differ"):
+        _provider_handshake(malformed, _NoProviderRunner()).run()
 
 
 def test_q6_5_provider_failure_index_resumes_only_after_safe_auth_probe(
@@ -1787,17 +1914,7 @@ def test_q6_5_canonicalizes_supported_podman_sha256_image_ids() -> None:
 def test_wf_p0_006_007_provider_three_tier_schema_and_semantic_identity(
     tmp_path: Path,
 ) -> None:
-    selections = {
-        tier: ModelSelection("openai_codex_subscription", alias, f"model-{tier}", tier)
-        for tier, alias in ProviderOperationHandshake.ROUTES
-    }
-    reports = ProviderOperationHandshake(
-        identity=ProbeIdentity(DIGEST, TOOLCHAIN, None),
-        runner=_ProviderRunner(),
-        selections=selections,
-        workspace=tmp_path,
-        evidence_root=tmp_path / "evidence",
-    ).run()
+    reports = _provider_handshake(tmp_path, _ProviderRunner()).run()
     assert [report.operation for report in reports] == [
         "provider.luna.invoke",
         "provider.terra.invoke",

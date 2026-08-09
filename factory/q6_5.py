@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -389,6 +390,18 @@ class ProviderOperationHandshake:
         ("terra", "standard"),
         ("sol", "expert"),
     )
+    MAX_STRUCTURED_ATTEMPTS = 2
+    _RECEIPT_FIELDS = {
+        "schema_version", "candidate_digest", "toolchain_digest",
+        "credential_epoch_id", "tier", "alias", "provider", "model",
+        "cli_provider", "semantic_id", "attempt", "status", "reason_code",
+        "output_digest", "usage_digest", "receipt_digest",
+    }
+    _FAILURE_REASONS = {
+        "provider_invocation_failed", "provider_output_digest_mismatch",
+        "provider_structured_output_invalid_json",
+        "provider_structured_output_contract_mismatch",
+    }
 
     def __init__(
         self,
@@ -405,63 +418,338 @@ class ProviderOperationHandshake:
         self.workspace = workspace
         self.evidence_root = evidence_root
 
+    def _receipt_identity(
+        self,
+        *,
+        tier: str,
+        alias: str,
+        selection: ModelSelection,
+        semantic_id: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "candidate_digest": self.identity.candidate_digest,
+            "toolchain_digest": self.identity.toolchain_digest,
+            "credential_epoch_id": self.identity.credential_epoch_id,
+            "tier": tier,
+            "alias": alias,
+            "provider": selection.provider,
+            "model": selection.model,
+            "cli_provider": selection.cli_provider or selection.provider,
+            "semantic_id": semantic_id,
+        }
+
+    def _success_path(self, tier: str) -> Path:
+        return self.evidence_root / f"provider-{tier}-success.json"
+
+    def _failure_path(self, tier: str, attempt: int) -> Path:
+        return self.evidence_root / f"provider-{tier}-attempt-{attempt}-failure.json"
+
+    def _usage_path(self, tier: str, attempt: int) -> Path:
+        return self.evidence_root / f"provider-{tier}-attempt-{attempt}-usage.json"
+
+    @staticmethod
+    def _immutable_file(path: Path, *, kind: str) -> os.stat_result:
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise Q65ProbeError(f"provider {kind} evidence is unavailable") from error
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or path.is_symlink()
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o222
+            or not 1 <= metadata.st_size <= 1_048_576
+        ):
+            raise Q65ProbeError(f"provider {kind} evidence is not immutable")
+        return metadata
+
+    @classmethod
+    def _read_receipt(cls, path: Path) -> dict[str, Any]:
+        cls._immutable_file(path, kind="receipt")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise Q65ProbeError("provider receipt is malformed") from error
+        if not isinstance(value, dict) or set(value) != cls._RECEIPT_FIELDS:
+            raise Q65ProbeError("provider receipt fields differ")
+        unsigned = dict(value)
+        digest = str(unsigned.pop("receipt_digest", ""))
+        if not re.fullmatch(r"[a-f0-9]{64}", digest) or digest != sha256_text(
+            stable_json(unsigned)
+        ):
+            raise Q65ProbeError("provider receipt digest differs")
+        return value
+
+    @staticmethod
+    def _write_receipt(path: Path, value: Mapping[str, Any]) -> Path:
+        core = dict(value)
+        encoded = (
+            stable_json({**core, "receipt_digest": sha256_text(stable_json(core))}) + "\n"
+        ).encode("utf-8")
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o400,
+            )
+        except FileExistsError as error:
+            raise Q65ProbeError("provider receipt already exists") from error
+        except OSError as error:
+            raise Q65ProbeError("provider receipt cannot be created") from error
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError as error:
+            raise Q65ProbeError("provider receipt cannot be persisted") from error
+        return path
+
+    @classmethod
+    def _usage_digest(cls, path: Path, *, freeze: bool = False) -> str | None:
+        if not path.exists() and not path.is_symlink():
+            return None
+        if freeze:
+            try:
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+                    raise Q65ProbeError("provider usage evidence is invalid")
+                os.chmod(path, 0o400)
+            except OSError as error:
+                raise Q65ProbeError("provider usage evidence is invalid") from error
+        cls._immutable_file(path, kind="usage")
+        return sha256_file(path)
+
+    def _validate_receipt(
+        self,
+        path: Path,
+        *,
+        identity: Mapping[str, Any],
+        expected_status: str,
+        expected_attempt: int | None = None,
+    ) -> dict[str, Any]:
+        receipt = self._read_receipt(path)
+        if any(receipt.get(key) != value for key, value in identity.items()):
+            raise Q65ProbeError("provider receipt identity differs")
+        attempt = receipt.get("attempt")
+        if (
+            not isinstance(attempt, int)
+            or not 1 <= attempt <= self.MAX_STRUCTURED_ATTEMPTS
+            or (expected_attempt is not None and attempt != expected_attempt)
+            or receipt.get("status") != expected_status
+            or re.fullmatch(r"[a-f0-9]{64}", str(receipt.get("output_digest") or ""))
+            is None
+        ):
+            raise Q65ProbeError("provider receipt contract differs")
+        reason = receipt.get("reason_code")
+        if (expected_status == "PASS" and reason is not None) or (
+            expected_status == "FAIL" and reason not in self._FAILURE_REASONS
+        ):
+            raise Q65ProbeError("provider receipt reason differs")
+        usage_digest = receipt.get("usage_digest")
+        usage_path = self._usage_path(str(identity["tier"]), attempt)
+        if usage_digest is None:
+            if usage_path.exists() or usage_path.is_symlink():
+                raise Q65ProbeError("provider usage evidence is orphaned")
+        elif (
+            not isinstance(usage_digest, str)
+            or re.fullmatch(r"[a-f0-9]{64}", usage_digest) is None
+            or self._usage_digest(usage_path) != usage_digest
+        ):
+            raise Q65ProbeError("provider usage evidence differs")
+        return receipt
+
+    def _existing_success(
+        self,
+        *,
+        identity: Mapping[str, Any],
+    ) -> tuple[tuple[Path, dict[str, Any]] | None, int]:
+        tier = str(identity["tier"])
+        success_path = self._success_path(tier)
+        expected_names = {success_path.name}
+        for attempt in range(1, self.MAX_STRUCTURED_ATTEMPTS + 1):
+            expected_names.update(
+                (
+                self._failure_path(tier, attempt).name,
+                self._usage_path(tier, attempt).name,
+                )
+            )
+        try:
+            tier_evidence = tuple(self.evidence_root.glob(f"provider-{tier}-*"))
+        except OSError as error:
+            raise Q65ProbeError("provider evidence cannot be enumerated") from error
+        if any(path.name not in expected_names for path in tier_evidence):
+            raise Q65ProbeError("provider evidence is orphaned")
+        failures: dict[int, dict[str, Any]] = {}
+        for attempt in range(1, self.MAX_STRUCTURED_ATTEMPTS + 1):
+            failure_path = self._failure_path(tier, attempt)
+            if failure_path.exists() or failure_path.is_symlink():
+                failures[attempt] = self._validate_receipt(
+                    failure_path,
+                    identity=identity,
+                    expected_status="FAIL",
+                    expected_attempt=attempt,
+                )
+        if success_path.exists() or success_path.is_symlink():
+            success = self._validate_receipt(
+                success_path, identity=identity, expected_status="PASS"
+            )
+            success_attempt = int(success["attempt"])
+            if set(failures) != set(range(1, success_attempt)):
+                raise Q65ProbeError("provider success evidence conflicts with attempts")
+            return (success_path, success), len(failures)
+        if failures and set(failures) != set(range(1, len(failures) + 1)):
+            raise Q65ProbeError("provider failure evidence is orphaned")
+        for attempt in range(1, self.MAX_STRUCTURED_ATTEMPTS + 1):
+            usage_path = self._usage_path(tier, attempt)
+            if (usage_path.exists() or usage_path.is_symlink()) and attempt not in failures:
+                raise Q65ProbeError("provider usage evidence is orphaned")
+        return None, len(failures)
+
+    def _report_from_success(
+        self,
+        *,
+        tier: str,
+        alias: str,
+        selection: ModelSelection,
+        semantic_id: str,
+        path: Path,
+        receipt: Mapping[str, Any],
+    ) -> CapabilityHandshakeReport:
+        receipts = [sha256_file(path)]
+        usage_digest = receipt.get("usage_digest")
+        if isinstance(usage_digest, str):
+            receipts.append(usage_digest)
+        return CapabilityHandshakeReport.create(
+            candidate_digest=self.identity.candidate_digest,
+            capability=f"provider.{tier}.invoke",
+            operation=f"provider.{tier}.invoke",
+            scope={
+                "alias": alias,
+                "provider": selection.provider,
+                "model": selection.model,
+                "semantic_id": semantic_id,
+                "stdout_contract": "json-only",
+            },
+            status=CapabilityStatus.AVAILABLE,
+            credential_epoch_id=None,
+            toolchain_digest=self.identity.toolchain_digest,
+            receipts=tuple(receipts),
+        )
+
     def run(self) -> tuple[CapabilityHandshakeReport, ...]:
         reports: list[CapabilityHandshakeReport] = []
         semantic_id = sha256_text("q6.5-provider-no-side-effect-v1")
         for tier, alias in self.ROUTES:
             selection = self.selections[tier]
+            identity = self._receipt_identity(
+                tier=tier,
+                alias=alias,
+                selection=selection,
+                semantic_id=semantic_id,
+            )
+            existing, failures = self._existing_success(identity=identity)
+            if existing is not None:
+                path, receipt = existing
+                reports.append(
+                    self._report_from_success(
+                        tier=tier,
+                        alias=alias,
+                        selection=selection,
+                        semantic_id=semantic_id,
+                        path=path,
+                        receipt=receipt,
+                    )
+                )
+                continue
             prompt = (
                 "Do not use tools and do not modify anything. Return exactly one JSON object: "
                 f'{{"schema_version":"1.0","status":"PASS","tier":"{tier}",'
                 f'"semantic_id":"{semantic_id}"}}'
             )
-            usage_path = self.evidence_root / f"provider-{tier}-usage.json"
-            result = self.runner.run(
-                selection=selection,
-                prompt=prompt,
-                cwd=self.workspace,
-                usage_path=usage_path,
-            )
-            if result.status != "PASS":
-                if result.reason_code == "missing_credential":
-                    raise Q65ProviderCapabilityError(
-                        tier=tier,
-                        alias=alias,
-                        selection=selection,
-                        semantic_id=semantic_id,
-                    )
-                raise Q65ProbeError(f"provider {tier} real invocation failed:{result.reason_code}")
-            try:
-                value = json.loads(result.output)
-            except json.JSONDecodeError as error:
-                raise Q65ProbeError(f"provider {tier} output parser failed") from error
             expected = {
                 "schema_version": "1.0",
                 "status": "PASS",
                 "tier": tier,
                 "semantic_id": semantic_id,
             }
-            if value != expected:
-                raise Q65ProbeError(f"provider {tier} output schema differs")
-            receipts = [result.output_digest]
-            if usage_path.is_file() and not usage_path.is_symlink():
-                receipts.append(sha256_file(usage_path))
+            if failures >= self.MAX_STRUCTURED_ATTEMPTS:
+                raise Q65ProbeError(f"provider {tier} structured output attempts exhausted")
+            success: tuple[Path, dict[str, Any]] | None = None
+            for attempt in range(failures + 1, self.MAX_STRUCTURED_ATTEMPTS + 1):
+                usage_path = self._usage_path(tier, attempt)
+                result = self.runner.run(
+                    selection=selection,
+                    prompt=prompt,
+                    cwd=self.workspace,
+                    usage_path=usage_path,
+                )
+                if result.status != "PASS" and result.reason_code == "missing_credential":
+                    if usage_path.exists() or usage_path.is_symlink():
+                        raise Q65ProbeError("provider usage evidence is orphaned")
+                    raise Q65ProviderCapabilityError(
+                        tier=tier,
+                        alias=alias,
+                        selection=selection,
+                        semantic_id=semantic_id,
+                    )
+                output_digest = sha256_text(result.output)
+                usage_digest = self._usage_digest(usage_path, freeze=True)
+                reason: str | None = None
+                if result.output_digest != output_digest:
+                    reason = "provider_output_digest_mismatch"
+                elif result.status != "PASS":
+                    reason = "provider_invocation_failed"
+                else:
+                    try:
+                        value = json.loads(result.output)
+                    except json.JSONDecodeError:
+                        reason = "provider_structured_output_invalid_json"
+                    else:
+                        if value != expected:
+                            reason = "provider_structured_output_contract_mismatch"
+                receipt_core = {
+                    **identity,
+                    "attempt": attempt,
+                    "status": "FAIL" if reason is not None else "PASS",
+                    "reason_code": reason,
+                    "output_digest": output_digest,
+                    "usage_digest": usage_digest,
+                }
+                if reason is not None:
+                    self._write_receipt(self._failure_path(tier, attempt), receipt_core)
+                    continue
+                success_path = self._write_receipt(self._success_path(tier), receipt_core)
+                success = (
+                    success_path,
+                    self._validate_receipt(
+                        success_path,
+                        identity=identity,
+                        expected_status="PASS",
+                        expected_attempt=attempt,
+                    ),
+                )
+                break
+            if success is None:
+                raise Q65ProbeError(f"provider {tier} structured output attempts exhausted")
+            success_path, success_receipt = success
             reports.append(
-                CapabilityHandshakeReport.create(
-                    candidate_digest=self.identity.candidate_digest,
-                    capability=f"provider.{tier}.invoke",
-                    operation=f"provider.{tier}.invoke",
-                    scope={
-                        "alias": alias,
-                        "provider": selection.provider,
-                        "model": selection.model,
-                        "semantic_id": semantic_id,
-                        "stdout_contract": "json-only",
-                    },
-                    status=CapabilityStatus.AVAILABLE,
-                    credential_epoch_id=None,
-                    toolchain_digest=self.identity.toolchain_digest,
-                    receipts=tuple(receipts),
+                self._report_from_success(
+                    tier=tier,
+                    alias=alias,
+                    selection=selection,
+                    semantic_id=semantic_id,
+                    path=success_path,
+                    receipt=success_receipt,
                 )
             )
         return tuple(reports)
