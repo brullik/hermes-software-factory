@@ -391,17 +391,17 @@ class ProviderOperationHandshake:
         ("sol", "expert"),
     )
     MAX_STRUCTURED_ATTEMPTS = 2
-    _RECEIPT_FIELDS = {
+    _RECEIPT_FIELDS = frozenset((
         "schema_version", "candidate_digest", "toolchain_digest",
         "credential_epoch_id", "tier", "alias", "provider", "model",
         "cli_provider", "semantic_id", "attempt", "status", "reason_code",
         "output_digest", "usage_digest", "receipt_digest",
-    }
-    _FAILURE_REASONS = {
+    ))
+    _FAILURE_REASONS = frozenset((
         "provider_invocation_failed", "provider_output_digest_mismatch",
         "provider_structured_output_invalid_json",
         "provider_structured_output_contract_mismatch",
-    }
+    ))
 
     def __init__(
         self,
