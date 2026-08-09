@@ -40,6 +40,7 @@ from factory.functional_readiness import (
     verify_ready_result_manifest,
 )
 from factory.notifications import NotificationOutbox, NotificationRequest, OwnerNotifier
+from factory.path_migration import git_candidate
 from factory.providers import ModelSelection
 from factory.q6_5 import (
     GitHubOperationHandshake,
@@ -1456,6 +1457,44 @@ def test_workspace_snapshot_trusts_only_the_exact_broker_workspace(
         "timeout": 30,
     }
     assert "safe.directory=*" not in observed["argv"]
+
+
+def test_path_migration_git_candidate_trusts_only_exact_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "worktrees" / "product-1"
+    (workspace / ".git").mkdir(parents=True)
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs["cwd"]))
+        stdout = f"{COMMIT}\n" if argv[-2:] == ["rev-parse", "HEAD"] else "tree\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("factory.path_migration.subprocess.run", fake_run)
+    config = SimpleNamespace(raw={"paths": {"worktrees": str(tmp_path / "worktrees")}})
+
+    commit, tree_digest = git_candidate(config, "product-1")  # type: ignore[arg-type]
+
+    resolved = workspace.resolve()
+    assert commit == COMMIT
+    assert tree_digest == f"sha256:{sha256_text('tree\n')}"
+    assert calls == [
+        (["git", "-c", f"safe.directory={resolved}", "rev-parse", "HEAD"], resolved),
+        (
+            [
+                "git",
+                "-c",
+                f"safe.directory={resolved}",
+                "ls-tree",
+                "-r",
+                "--full-tree",
+                "HEAD",
+            ],
+            resolved,
+        ),
+    ]
+    assert all("safe.directory=*" not in argv for argv, _cwd in calls)
 
 
 def test_wf_p0_001_github_operation_handshake_runs_end_to_end_through_broker(
