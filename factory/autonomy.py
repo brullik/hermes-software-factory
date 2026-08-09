@@ -1471,6 +1471,10 @@ class AutonomyStore:
                 (stable_json(dependencies), node_to_task[node_id]),
             )
         if creator_root_problem_signature and recovery_execution_task_ids:
+            governor.reclaim_unused_execution_reservations(
+                product_id=product_id,
+                root_problem_signature=creator_root_problem_signature,
+            )
             reservation = governor.reserve_execution_slots(
                 product_id=product_id,
                 root_problem_signature=creator_root_problem_signature,
