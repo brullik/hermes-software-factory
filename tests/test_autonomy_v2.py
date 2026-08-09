@@ -12,9 +12,11 @@ from test_worker import FakeRunner, make_config, selected_registry
 from factory.artifacts import ArtifactStore
 from factory.autonomy import (
     CAPABILITY_PROFILES,
+    PATH_GOVERNOR_EXECUTION_SLOT_LIMIT,
     FailureData,
     HypothesisData,
     TaskOutcome,
+    path_governor_execution_budget,
     safe_exception_diagnostic,
 )
 from factory.capabilities import CapabilityBroker, CapabilityCheck
@@ -709,6 +711,114 @@ def test_external_target_scope_and_recovery_slot_compile_guards() -> None:
                 remaining_recovery_execution_slots=2,
             ),
         )
+
+
+def test_replanner_reserves_one_post_arbiter_reviewer_correction_slot(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    signature = "7" * 64
+    try:
+        create_v2_product(state)
+        governor = PathGovernor(
+            state._connection,
+            policy_digest=policy_digest(config),
+        )
+        with state._connection:
+            assert governor.consume_budget(
+                product_id="product-autonomy",
+                root_problem_signature=signature,
+                action_kind="arbiter",
+                progress=governor.progress_vector("product-autonomy"),
+                evidence_digest="6" * 64,
+            ) == "CONTINUE"
+
+        budget = path_governor_execution_budget(
+            state._connection,
+            product_id="product-autonomy",
+            root_problem_signature=signature,
+        )
+        assert PATH_GOVERNOR_EXECUTION_SLOT_LIMIT == 2
+        assert budget == {
+            "execution_slot_limit": 2,
+            "execution_attempts_used": 0,
+            "raw_remaining_execution_slots": 2,
+            "reviewer_correction_slots_reserved": 1,
+            "remaining_execution_slots": 1,
+            "status": "ACTIVE",
+        }
+
+        def implementation(index: int) -> dict[str, Any]:
+            return {
+                "node_key": f"repair-{index}",
+                "stage_kind": "implementation_slice",
+                "title": f"Repair causal slice {index}",
+                "objective": "Produce fresh evidence for the mandatory independent review.",
+                "scope": [f"src/repair_{index}.py", f"tests/test_repair_{index}.py"],
+                "depends_on": [],
+                "goal_ids": ["repair"],
+                "acceptance_intents": ["The bounded causal repair passes fresh tests."],
+            }
+
+        proposal = {
+            "schema_version": "1.0",
+            "proposal_kind": "replan_delta",
+            "product_id": "product-autonomy",
+            "parent_plan_id": "PLAN-1",
+            "source_failure_id": "failure-review",
+            "created_at": "2026-08-09T00:00:00Z",
+            "goals": [{"goal_id": "repair", "mandatory": True}],
+            "nodes": [implementation(1), implementation(2)],
+        }
+        context = CompileContext(
+            product_id="product-autonomy",
+            revision=2,
+            parent_plan_id="PLAN-1",
+            source_failure_id="failure-review",
+            created_by_task_id="T-REPLANNER",
+            root_task_id="T-ROOT",
+            root_context_ref="evidence/intake.json",
+            external_repository=True,
+            proposal_artifact_ref="evidence/replan.json",
+            remaining_recovery_execution_slots=int(
+                budget["remaining_execution_slots"]
+            ),
+        )
+        compiler = PlanCompiler(policy_digest="b" * 64)
+        with pytest.raises(
+            PlanContractViolation,
+            match="2 fresh evidence-producing implementation slices but only 1 .* slots remain",
+        ):
+            compiler.compile(proposal, context)
+
+        proposal["nodes"] = [implementation(1)]
+        compiled = compiler.compile(proposal, context)
+        assert sum(
+            node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+            for node in compiled["nodes"]
+        ) == 1
+        with state._connection:
+            assert governor.reserve_execution_slots(
+                product_id="product-autonomy",
+                root_problem_signature=signature,
+                count=1,
+                progress=governor.progress_vector("product-autonomy"),
+            ) == "CONTINUE"
+        assert path_governor_execution_budget(
+            state._connection,
+            product_id="product-autonomy",
+            root_problem_signature=signature,
+        ) == {
+            "execution_slot_limit": 2,
+            "execution_attempts_used": 1,
+            "raw_remaining_execution_slots": 1,
+            "reviewer_correction_slots_reserved": 1,
+            "remaining_execution_slots": 0,
+            "status": "ACTIVE",
+        }
+    finally:
+        state.close()
 
 
 def test_accepted_pipeline_successor_does_not_inherit_resolved_problem_signature(
@@ -1514,6 +1624,18 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                 (signature,),
             )
 
+        assert path_governor_execution_budget(
+            state._connection,
+            product_id="product-autonomy",
+            root_problem_signature=signature,
+        ) == {
+            "execution_slot_limit": 2,
+            "execution_attempts_used": 1,
+            "raw_remaining_execution_slots": 1,
+            "reviewer_correction_slots_reserved": 1,
+            "remaining_execution_slots": 0,
+            "status": "ACTIVE",
+        }
         repair_id = router.route(second_failure_id)
         repair = state.get_task(repair_id)
         assert repair is not None
@@ -1596,6 +1718,18 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
             (signature,),
         ).fetchone()
         assert tuple(budget) == (1, 2, "ACTIVE")
+        assert path_governor_execution_budget(
+            state._connection,
+            product_id="product-autonomy",
+            root_problem_signature=signature,
+        ) == {
+            "execution_slot_limit": 2,
+            "execution_attempts_used": 2,
+            "raw_remaining_execution_slots": 0,
+            "reviewer_correction_slots_reserved": 0,
+            "remaining_execution_slots": 0,
+            "status": "ACTIVE",
+        }
     finally:
         state.close()
 
@@ -2428,6 +2562,16 @@ def test_exact_safe_scope_expansion_compiles_without_provider_call(
                  WHERE task_id='T-ACCEPTED-ARCHITECTURE'
                 """,
                 (sha256_text("architecture-package"),),
+            )
+            state._connection.execute(
+                """
+                UPDATE tasks
+                   SET status='SUCCEEDED', graph_status='ACCEPTED',
+                       result_ref='internal://accepted-unaffected-b',
+                       result_digest=?
+                 WHERE task_id='T-FAILNODEB'
+                """,
+                (sha256_text("accepted-unaffected-b"),),
             )
             state._connection.execute(
                 "UPDATE failures SET actual_json=? WHERE failure_id=?",

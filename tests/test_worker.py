@@ -341,7 +341,9 @@ def test_replanner_context_exposes_exact_remaining_execution_slots() -> None:
         context = json.loads(context_path.read_text(encoding="utf-8"))
         assert context["plan_summary"]["path_governor_execution_budget"] == {
             "root_problem_signature": signature, "execution_slot_limit": 2,
-            "execution_attempts_used": 0, "remaining_execution_slots": 2, "status": "ACTIVE",
+            "execution_attempts_used": 0, "raw_remaining_execution_slots": 2,
+            "reviewer_correction_slots_reserved": 1,
+            "remaining_execution_slots": 1, "status": "ACTIVE",
         }
         assert any("remaining_execution_slots" in decision for decision in spec.decisions)
         assert any(item["type"] == "controller-target-execution-contract" for item in spec.evidence)

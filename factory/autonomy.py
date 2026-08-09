@@ -200,17 +200,25 @@ def path_governor_execution_budget(
     if not re.fullmatch(r"[a-f0-9]{64}", root_problem_signature):
         raise ValueError("root problem signature must be a lowercase SHA-256")
     row = connection.execute(
-        """SELECT execution_attempts_used, status FROM problem_budgets
+        """SELECT arbiter_calls_used, execution_attempts_used, status FROM problem_budgets
             WHERE product_id=? AND root_problem_signature=?""",
         (product_id, root_problem_signature),
     ).fetchone()
-    used = int(row[0]) if row is not None else 0
-    status = str(row[1]) if row is not None else "ACTIVE"
-    remaining = max(0, PATH_GOVERNOR_EXECUTION_SLOT_LIMIT - used) if status == "ACTIVE" else 0
+    arbiter_used = int(row[0]) if row is not None else 0
+    used = int(row[1]) if row is not None else 0
+    status = str(row[2]) if row is not None else "ACTIVE"
+    raw_remaining = (
+        max(0, PATH_GOVERNOR_EXECUTION_SLOT_LIMIT - used)
+        if status == "ACTIVE"
+        else 0
+    )
+    reviewer_reservation = 1 if arbiter_used > 0 and raw_remaining > 0 else 0
     return {
         "execution_slot_limit": PATH_GOVERNOR_EXECUTION_SLOT_LIMIT,
         "execution_attempts_used": used,
-        "remaining_execution_slots": remaining,
+        "raw_remaining_execution_slots": raw_remaining,
+        "reviewer_correction_slots_reserved": reviewer_reservation,
+        "remaining_execution_slots": raw_remaining - reviewer_reservation,
         "status": status,
     }
 
