@@ -1947,6 +1947,9 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     bootstrap = (repository / "scripts/bootstrap/prepare-candidate-plane.sh").read_text(
         encoding="utf-8"
     )
+    podman_preflight = (
+        repository / "scripts/bootstrap/preflight-rootless-podman.sh"
+    ).read_text(encoding="utf-8")
     hermes_install = bootstrap.index('"${HERMES_WHEEL}"')
     lock_reassertion = bootstrap.index(
         '--requirement "${CANDIDATE_RELEASE}/requirements.lock"',
@@ -1978,6 +1981,14 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert 'SERVICE_USER="${CANDIDATE_USER}"' in bootstrap
     assert "q6-capability-attestation.json" in bootstrap
     assert "--q6-capability-attestation-digest" in bootstrap
+    assert (
+        'podman_remote_as_service run --rm --uts=host --network podman "${PROBE_IMAGE}"'
+        in podman_preflight
+    )
+    assert (
+        'podman_remote_as_service run --rm --network podman "${PROBE_IMAGE}"'
+        not in podman_preflight
+    )
     assert "--add-subuids 1200000" not in bootstrap
     assert 'sed "s/@SOURCE_COMMIT@/${SOURCE_COMMIT}/g"' in bootstrap
     assert "hermes-factory-shadow-fail@.service" in bootstrap
