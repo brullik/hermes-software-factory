@@ -190,6 +190,88 @@ incomplete_prequalification_epoch_is_restartable() {
   done
 }
 
+orphaned_prequalification_config_is_restartable() {
+  local old_source_commit="$1"
+  local qualification_config="$2"
+  local candidate_release="${CANDIDATE_ROOT}/releases/${old_source_commit}"
+  local verifier_release="${VERIFIER_ROOT}/releases/${old_source_commit}"
+  local verifier_venv="${VERIFIER_ROOT}/venvs/${old_source_commit}"
+  local expected_governor_database="${VERIFIER_STATE}/governor.db"
+
+  incomplete_prequalification_epoch_is_restartable "${old_source_commit}" \
+    || return 1
+  [[ -f "${qualification_config}" && ! -L "${qualification_config}" ]] \
+    || return 1
+  (
+    cd "${verifier_release}"
+    runuser -u "${VERIFIER_USER}" -- env PYTHONDONTWRITEBYTECODE=1 \
+      "${verifier_venv}/bin/python" - \
+      "${qualification_config}" "${old_source_commit}" \
+      "${candidate_release}" "${expected_governor_database}" <<'PY'
+import os, re, sqlite3, stat, sys
+from pathlib import Path
+from factory.qualification_runner import _immutable_release_tree_digest
+from scripts.qualification_control import _load_config
+
+try:
+    config_path, candidate_release, expected_database_path = map(
+        Path, (sys.argv[1], sys.argv[3], sys.argv[4])
+    )
+    expected_source_commit = sys.argv[2]
+    if re.fullmatch(r"[a-f0-9]{40}", expected_source_commit) is None:
+        raise ValueError
+    config_metadata = config_path.lstat()
+    if not stat.S_ISREG(config_metadata.st_mode) or config_path.is_symlink():
+        raise ValueError
+    config = _load_config(config_path)
+    candidate_digest = str(config["candidate_digest"])
+    valid_digest = re.fullmatch(r"[a-f0-9]{64}", candidate_digest) is not None
+    if str(config["source_commit"]) != expected_source_commit or not valid_digest:
+        raise ValueError
+    if _immutable_release_tree_digest(candidate_release) != candidate_digest:
+        raise ValueError
+    database_path = Path(str(config["governor_database"]))
+    expected_database = expected_database_path.resolve(strict=True)
+    if database_path != expected_database_path or database_path.is_symlink():
+        raise ValueError
+    if database_path.resolve(strict=True) != expected_database:
+        raise ValueError
+    if any(Path(str(database_path) + suffix).exists() for suffix in ("-journal", "-wal", "-shm")): raise ValueError
+    database_metadata = database_path.lstat()
+    if (
+        not stat.S_ISREG(database_metadata.st_mode)
+        or database_metadata.st_uid != os.geteuid()
+        or database_metadata.st_mode & 0o022
+        or database_metadata.st_nlink != 1
+    ):
+        raise ValueError
+    database_uri = f"file:{expected_database.as_posix()}?mode=ro&immutable=1"
+    connection = sqlite3.connect(database_uri, uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        schema = connection.execute("PRAGMA table_info(controller_release_epochs)")
+        columns = {str(row[1]) for row in schema.fetchall()}
+        if not {"source_commit", "candidate_digest", "status"} <= columns:
+            raise ValueError
+        matching = "source_commit=? AND candidate_digest=?"
+        overlap = "source_commit=? OR candidate_digest=?"
+        identity = (expected_source_commit, candidate_digest)
+        query = "SELECT COUNT(*) FROM controller_release_epochs WHERE "
+        matching_epoch_count = int(connection.execute(query + matching, identity).fetchone()[0])
+        identity_overlap_count = int(connection.execute(query + overlap, identity).fetchone()[0])
+        nonterminal_epoch_count = int(connection.execute(
+            query + "status NOT IN ('QUALIFICATION_FAILED','LTS')"
+        ).fetchone()[0])
+        if matching_epoch_count or identity_overlap_count or nonterminal_epoch_count:
+            raise ValueError
+    finally:
+        connection.close()
+except Exception:
+    raise SystemExit(1)
+PY
+  ) >/dev/null 2>&1
+}
+
 ALLOW_EPOCH_SWITCH=0
 if [[ -L "${CANDIDATE_ROOT}/current" ]] \
   && [[ "$(basename "$(readlink -f "${CANDIDATE_ROOT}/current")")" != "${SOURCE_COMMIT}" ]]; then
@@ -204,6 +286,9 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
       printf 'Incomplete pre-qualification Candidate B epoch cannot be identified safely\n' >&2
       exit 73
     fi
+    INCOMPLETE_PREQUALIFICATION_EPOCH=1
+  elif orphaned_prequalification_config_is_restartable \
+    "${OLD_SOURCE_COMMIT}" "${OLD_QUALIFICATION_CONFIG}"; then
     INCOMPLETE_PREQUALIFICATION_EPOCH=1
   fi
   if (( INCOMPLETE_PREQUALIFICATION_EPOCH != 1 )); then

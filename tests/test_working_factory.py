@@ -9,6 +9,7 @@ import runpy
 import sqlite3
 import stat
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -1955,6 +1956,71 @@ def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:
     helper_install_block = bootstrap[askpass_install:unit_install]
     assert "cp " not in helper_install_block
     assert "ReadWritePaths" not in helper_install_block
+
+
+def test_orphaned_prequalification_config_probe_is_read_only_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    bootstrap = (
+        Path(__file__).parents[1] / "scripts/bootstrap/prepare-candidate-plane.sh"
+    ).read_text(encoding="utf-8")
+    function_start = bootstrap.index(
+        "orphaned_prequalification_config_is_restartable()"
+    )
+    program_start = bootstrap.index("import os, re", function_start)
+    program = bootstrap[program_start : bootstrap.index("\nPY\n", program_start)]
+    for package in ("factory", "scripts"):
+        (tmp_path / package).mkdir()
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "factory/qualification_runner.py").write_text(
+        "def _immutable_release_tree_digest(_path): return 'a' * 64\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "scripts/qualification_control.py").write_text(
+        "import json\ndef _load_config(path): return json.loads(path.read_text())\n",
+        encoding="utf-8",
+    )
+    release = tmp_path / "release"
+    release.mkdir()
+    database = tmp_path / "governor.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE controller_release_epochs "
+            "(source_commit TEXT,candidate_digest TEXT,status TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO controller_release_epochs VALUES (?,?,?)",
+            ("b" * 40, "d" * 64, "LTS"),
+        )
+    config = tmp_path / "qualification-control.json"
+    config.write_text(
+        json.dumps(
+            {"source_commit": COMMIT, "candidate_digest": DIGEST,
+             "governor_database": str(database)}
+        ),
+        encoding="utf-8",
+    )
+    def run_probe() -> int:
+        return subprocess.run(
+            [sys.executable, "-", str(config), COMMIT, str(release), str(database)],
+            input=program, text=True, capture_output=True, check=False,
+            cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        ).returncode
+
+    assert run_probe() == 0
+    Path(f"{database}-wal").touch(); assert run_probe() == 1; Path(f"{database}-wal").unlink()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO controller_release_epochs VALUES (?,?,?)",
+            ("e" * 40, "f" * 64, "CANDIDATE_BUILT"),
+        )
+    assert run_probe() == 1
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM controller_release_epochs WHERE status!='LTS'")
+        connection.execute(
+            "UPDATE controller_release_epochs SET source_commit=?", (COMMIT,)
+        )
+    assert run_probe() == 1
 
 
 def test_gnu_install_compare_skips_only_matching_helpers(tmp_path: Path) -> None:
