@@ -1237,6 +1237,139 @@ class PathGovernor:
         )
         return "CONTINUE"
 
+    def reclaim_unused_execution_reservations(
+        self,
+        *,
+        product_id: str,
+        root_problem_signature: str,
+    ) -> int:
+        """Reclaim superseded implementation slots that never ran.
+
+        The plan membership is the durable reservation identity.  Marking it
+        reclaimed makes this operation idempotent without weakening the
+        per-problem two-execution cap.  Attempted, accepted, active, or
+        differently signed work is never eligible.
+        """
+
+        if not product_id:
+            raise ValueError("reservation product identity is required")
+        if not _SHA256.fullmatch(root_problem_signature):
+            raise ValueError("root problem signature must be a lowercase SHA-256")
+        savepoint = "path_governor_unused_reservation_reclaim"
+        self.connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            rows = self.connection.execute(
+                """SELECT membership.plan_id AS membership_plan_id,
+                          membership.semantic_node_id AS membership_node_id,
+                          membership.execution_task_id AS task_id,
+                          task.plan_id AS task_plan_id,
+                          task.semantic_node_id AS task_node_id,
+                          task.status AS task_status,
+                          task.result_ref,
+                          task.result_digest,
+                          task.result_binding_id,
+                          plan.status AS plan_status,
+                          (SELECT COUNT(*) FROM attempts AS attempt
+                            WHERE attempt.task_id=task.task_id) AS attempt_count
+                     FROM plan_memberships AS membership
+                     JOIN tasks AS task
+                       ON task.task_id=membership.execution_task_id
+                LEFT JOIN plans AS plan ON plan.plan_id=membership.plan_id
+                    WHERE membership.membership_state='EXECUTION'
+                      AND task.product_id=?
+                      AND task.root_problem_signature=?
+                      AND task.lifecycle_stage='implementation-slice'
+                      AND task.graph_status='SUPERSEDED'
+                    ORDER BY membership.plan_id, membership.semantic_node_id,
+                             task.task_id""",
+                (product_id, root_problem_signature),
+            ).fetchall()
+            reclaimable: list[tuple[str, str, str]] = []
+            seen_tasks: set[str] = set()
+            for row in rows:
+                task_id = str(row["task_id"] or "")
+                membership_plan_id = str(row["membership_plan_id"] or "")
+                membership_node_id = str(row["membership_node_id"] or "")
+                if (
+                    not task_id
+                    or task_id in seen_tasks
+                    or membership_plan_id != str(row["task_plan_id"] or "")
+                    or membership_node_id != str(row["task_node_id"] or "")
+                    or not row["plan_status"]
+                ):
+                    raise PathDecisionError(
+                        "unused execution reservation identity is ambiguous"
+                    )
+                seen_tasks.add(task_id)
+                if (
+                    str(row["plan_status"]) != "SUPERSEDED"
+                    or str(row["task_status"] or "") != "DONE"
+                    or row["result_ref"] is not None
+                    or row["result_digest"] is not None
+                    or row["result_binding_id"] is not None
+                    or int(row["attempt_count"] or 0) != 0
+                ):
+                    continue
+                reclaimable.append(
+                    (membership_plan_id, membership_node_id, task_id)
+                )
+            if not reclaimable:
+                self.connection.execute(f"RELEASE {savepoint}")
+                return 0
+
+            budget = self.connection.execute(
+                """SELECT execution_attempts_used, status
+                     FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (product_id, root_problem_signature),
+            ).fetchone()
+            count = len(reclaimable)
+            if (
+                budget is None
+                or str(budget["status"]) != "ACTIVE"
+                or int(budget["execution_attempts_used"]) < count
+            ):
+                raise PathDecisionError(
+                    "unused execution reservation accounting is inconsistent"
+                )
+            for plan_id, node_id, task_id in reclaimable:
+                updated = self.connection.execute(
+                    """UPDATE plan_memberships
+                          SET membership_state='RECLAIMED_UNUSED'
+                        WHERE plan_id=? AND semantic_node_id=?
+                          AND execution_task_id=?
+                          AND membership_state='EXECUTION'""",
+                    (plan_id, node_id, task_id),
+                ).rowcount
+                if updated != 1:
+                    raise PathDecisionError(
+                        "unused execution reservation changed during reclaim"
+                    )
+            updated_budget = self.connection.execute(
+                """UPDATE problem_budgets
+                      SET execution_attempts_used=execution_attempts_used-?,
+                          updated_at=?
+                    WHERE product_id=? AND root_problem_signature=?
+                      AND status='ACTIVE' AND execution_attempts_used>=?""",
+                (
+                    count,
+                    utc_now(),
+                    product_id,
+                    root_problem_signature,
+                    count,
+                ),
+            ).rowcount
+            if updated_budget != 1:
+                raise PathDecisionError(
+                    "unused execution reservation budget changed during reclaim"
+                )
+            self.connection.execute(f"RELEASE {savepoint}")
+            return count
+        except Exception:
+            self.connection.execute(f"ROLLBACK TO {savepoint}")
+            self.connection.execute(f"RELEASE {savepoint}")
+            raise
+
     def record_decision(
         self,
         *,

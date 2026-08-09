@@ -479,6 +479,15 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
         ).fetchone()
         assert budget is not None
         assert tuple(budget) == (1, 2, "ACTIVE")
+        assert state.record_attempt(
+            attempt_id="attempt-path-exec-a",
+            task_id="T-PATH-EXEC-A",
+            tier="luna",
+            attempt_kind="initial",
+            prompt_digest=sha256_text("prompt:path-exec-a"),
+            status="started",
+            semantic_counted=True,
+        )
 
         next_plan = executable_plan(
             config,
@@ -487,12 +496,14 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
             root_task_id="T-PATH-ARBITER",
             revision=2,
             parent_plan_id="PLAN-PATH-BUDGET-1",
-            node_specs=[("C", "T-PATH-EXEC-C", "accept-c")],
+            node_specs=[
+                ("C", "T-PATH-EXEC-C", "accept-c"),
+                ("D", "T-PATH-EXEC-D", "accept-d"),
+            ],
             edges=[],
         )
-        next_plan["nodes"][0]["task_contract"]["lifecycle_stage"] = (
-            "implementation-slice"
-        )
+        for node in next_plan["nodes"]:
+            node["task_contract"]["lifecycle_stage"] = "implementation-slice"
         tasks_before = len(state.list_tasks("product-autonomy"))
         with pytest.raises(
             PlanContractViolation,
@@ -514,6 +525,134 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
             ("product-autonomy", signature),
         ).fetchone()
         assert tuple(budget) == (1, 2, "ACTIVE")
+        assert state._connection.execute(
+            """SELECT membership_state FROM plan_memberships
+                 WHERE plan_id='PLAN-PATH-BUDGET-1'
+                   AND execution_task_id='T-PATH-EXEC-B'"""
+        ).fetchone()[0] == "EXECUTION"
+    finally:
+        state.close()
+
+
+def test_replan_reclaims_unused_superseded_implementation_reservation(
+    tmp_path: Path,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    signature = "9" * 64
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-REPLAN-CREATOR",
+            product_id="product-autonomy",
+            title="Create bounded recovery plans",
+            role="replanner",
+            output_schema="plan-proposal-v1.schema.json",
+            root_problem_signature=signature,
+        )
+        governor = PathGovernor(
+            state._connection,
+            policy_digest=policy_digest(config),
+        )
+        with state._connection:
+            assert governor.consume_budget(
+                product_id="product-autonomy",
+                root_problem_signature=signature,
+                action_kind="arbiter",
+                progress=governor.progress_vector("product-autonomy"),
+                evidence_digest="8" * 64,
+            ) == "CONTINUE"
+
+        first_plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-UNUSED-RESERVATION-1",
+            root_task_id="T-REPLAN-CREATOR",
+            node_specs=[("A", "T-UNUSED-IMPLEMENTATION-1", "accept-a")],
+            edges=[],
+        )
+        first_plan["nodes"][0]["task_contract"]["lifecycle_stage"] = (
+            "implementation-slice"
+        )
+        persist_and_ingest_plan(
+            config,
+            state,
+            first_plan,
+            created_by_task_id="T-REPLAN-CREATOR",
+        )
+
+        replacement = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-UNUSED-RESERVATION-2",
+            root_task_id="T-REPLAN-CREATOR",
+            revision=2,
+            parent_plan_id="PLAN-UNUSED-RESERVATION-1",
+            node_specs=[("B", "T-REPLACEMENT-IMPLEMENTATION-2", "accept-b")],
+            edges=[],
+        )
+        replacement["nodes"][0]["task_contract"]["lifecycle_stage"] = (
+            "implementation-slice"
+        )
+        assert persist_and_ingest_plan(
+            config,
+            state,
+            replacement,
+            created_by_task_id="T-REPLAN-CREATOR",
+        ) == ("T-REPLACEMENT-IMPLEMENTATION-2",)
+
+        final_replacement = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-UNUSED-RESERVATION-3",
+            root_task_id="T-REPLAN-CREATOR",
+            revision=3,
+            parent_plan_id="PLAN-UNUSED-RESERVATION-2",
+            node_specs=[("C", "T-REPLACEMENT-IMPLEMENTATION-3", "accept-c")],
+            edges=[],
+        )
+        final_replacement["nodes"][0]["task_contract"]["lifecycle_stage"] = (
+            "implementation-slice"
+        )
+        assert persist_and_ingest_plan(
+            config,
+            state,
+            final_replacement,
+            created_by_task_id="T-REPLAN-CREATOR",
+        ) == ("T-REPLACEMENT-IMPLEMENTATION-3",)
+
+        budget = state._connection.execute(
+            """SELECT arbiter_calls_used, execution_attempts_used, status
+                 FROM problem_budgets
+                WHERE product_id=? AND root_problem_signature=?""",
+            ("product-autonomy", signature),
+        ).fetchone()
+        assert tuple(budget) == (1, 1, "ACTIVE")
+        assert state._connection.execute(
+            """SELECT membership_state FROM plan_memberships
+                 WHERE plan_id='PLAN-UNUSED-RESERVATION-1'
+                   AND execution_task_id='T-UNUSED-IMPLEMENTATION-1'"""
+        ).fetchone()[0] == "RECLAIMED_UNUSED"
+        assert state._connection.execute(
+            """SELECT membership_state FROM plan_memberships
+                 WHERE plan_id='PLAN-UNUSED-RESERVATION-2'
+                   AND execution_task_id='T-REPLACEMENT-IMPLEMENTATION-2'"""
+        ).fetchone()[0] == "RECLAIMED_UNUSED"
+        assert state._connection.execute(
+            """SELECT membership_state FROM plan_memberships
+                 WHERE plan_id='PLAN-UNUSED-RESERVATION-3'
+                   AND execution_task_id='T-REPLACEMENT-IMPLEMENTATION-3'"""
+        ).fetchone()[0] == "EXECUTION"
+        with state._connection:
+            assert governor.reclaim_unused_execution_reservations(
+                product_id="product-autonomy",
+                root_problem_signature=signature,
+            ) == 0
+        assert state._connection.execute(
+            """SELECT execution_attempts_used FROM problem_budgets
+                WHERE product_id=? AND root_problem_signature=?""",
+            ("product-autonomy", signature),
+        ).fetchone()[0] == 1
     finally:
         state.close()
 

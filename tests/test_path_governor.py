@@ -1011,6 +1011,85 @@ def test_failed_safe_reopens_only_through_unused_controller_correction(
         state.close()
 
 
+def test_unused_reservation_reclaim_refuses_cross_signature_and_attempted_task(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    signature = "c" * 64
+    try:
+        with state._connection:
+            state._connection.execute(
+                """INSERT INTO plans
+                   (plan_id, product_id, revision, status, plan_artifact_ref,
+                    plan_digest, goals_json, completion_criteria_json,
+                    created_by_task_id, created_at, activated_at)
+                   VALUES ('PLAN-UNUSED-UNIT', 'product-path-governor', 1,
+                           'SUPERSEDED', 'internal://plan/unused-unit', ?,
+                           '[]', '[]', 'T-ROOT0001',
+                           '2026-08-09T00:00:00Z',
+                           '2026-08-09T00:00:00Z')""",
+                (sha256_text("PLAN-UNUSED-UNIT"),),
+            )
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-UNUSED-UNIT",
+                supersedes_task_id=None,
+                graph_status="SUPERSEDED",
+            )
+            state._connection.execute(
+                """UPDATE tasks
+                      SET plan_id='PLAN-UNUSED-UNIT',
+                          root_problem_signature=?, result_ref=NULL,
+                          result_digest=NULL, result_binding_id=NULL
+                    WHERE task_id='T-UNUSED-UNIT'""",
+                (signature,),
+            )
+            governor = PathGovernor(
+                state._connection,
+                policy_digest=POLICY_DIGEST,
+            )
+            governor.register_execution_membership("T-UNUSED-UNIT")
+            assert governor.reserve_execution_slots(
+                product_id="product-path-governor",
+                root_problem_signature=signature,
+                count=1,
+                progress=governor.progress_vector("product-path-governor"),
+            ) == "CONTINUE"
+            assert governor.reclaim_unused_execution_reservations(
+                product_id="product-path-governor",
+                root_problem_signature="d" * 64,
+            ) == 0
+        assert state.record_attempt(
+            attempt_id="attempt-unused-unit",
+            task_id="T-UNUSED-UNIT",
+            tier="luna",
+            attempt_kind="initial",
+            prompt_digest=sha256_text("prompt:unused-unit"),
+            status="started",
+            semantic_counted=True,
+        )
+        with state._connection:
+            assert governor.reclaim_unused_execution_reservations(
+                product_id="product-path-governor",
+                root_problem_signature=signature,
+            ) == 0
+        budget = state._connection.execute(
+            """SELECT execution_attempts_used,status FROM problem_budgets
+                WHERE product_id='product-path-governor'
+                  AND root_problem_signature=?""",
+            (signature,),
+        ).fetchone()
+        assert tuple(budget) == (1, "ACTIVE")
+        assert state._connection.execute(
+            """SELECT membership_state FROM plan_memberships
+                WHERE plan_id='PLAN-UNUSED-UNIT'
+                  AND execution_task_id='T-UNUSED-UNIT'"""
+        ).fetchone()[0] == "EXECUTION"
+    finally:
+        state.close()
+
+
 def test_LOOP_P0_010_path_arbiter_is_read_only_and_one_shot() -> None:
     signature = "a" * 64
     sandbox = PathArbiterSandbox(
