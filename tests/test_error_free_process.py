@@ -1978,6 +1978,32 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     assert 'venv_ready_marker="${venv_root}/.hermes-bootstrap-complete"' in bootstrap
     assert 'rm -rf -- "${venv_root}"' in bootstrap
     assert "Refusing to rebuild the active incomplete environment" in bootstrap
+    assert "incomplete_prequalification_epoch_is_restartable()" in bootstrap
+    assert (
+        '"$(readlink -f "${CANDIDATE_ROOT}/current")" == "${candidate_release}"'
+        in bootstrap
+    )
+    assert (
+        '"$(readlink -f "${CANDIDATE_ROOT}/venv")" == "${candidate_venv}"'
+        in bootstrap
+    )
+    assert (
+        '"$(readlink -f "${VERIFIER_ROOT}/current")" == "${verifier_release}"'
+        in bootstrap
+    )
+    assert (
+        '"$(readlink -f "${VERIFIER_ROOT}/venv")" == "${verifier_venv}"'
+        in bootstrap
+    )
+    assert bootstrap.count(".hermes-bootstrap-complete") >= 5
+    assert 'release_head="$(git -C "${release_root}" rev-parse HEAD' in bootstrap
+    assert "--porcelain=v1 --untracked-files=all" in bootstrap
+    incomplete_guard = bootstrap.index(
+        'incomplete_prequalification_epoch_is_restartable "${OLD_SOURCE_COMMIT}"'
+    )
+    active_unit_guard = bootstrap.index('ACTIVE_CANDIDATE_UNITS="$(')
+    epoch_switch = bootstrap.index("ALLOW_EPOCH_SWITCH=1")
+    assert incomplete_guard < active_unit_guard < epoch_switch
     assert 'SERVICE_USER="${CANDIDATE_USER}"' in bootstrap
     assert "q6-capability-attestation.json" in bootstrap
     assert "--q6-capability-attestation-digest" in bootstrap
