@@ -111,7 +111,7 @@ if [[ ! -S "${PROBE_SOCKET}" ]]; then
   printf 'Rootless Podman API service did not become ready\n' >&2
   exit 78
 fi
-podman_remote_as_service run --rm --network podman "${PROBE_IMAGE}"
+podman_remote_as_service run --rm --uts=host --network podman "${PROBE_IMAGE}"
 
 IPAM_DATABASE="${expected_runroot}/networks/ipam.db"
 if [[ ! -f "${IPAM_DATABASE}" || -L "${IPAM_DATABASE}" ]]; then

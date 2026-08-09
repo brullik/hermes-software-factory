@@ -2622,6 +2622,9 @@ def test_rootless_bootstrap_enters_trusted_release_root_before_runuser() -> None
     assert probe_created < probe_owned < runuser
     assert helper.index('cd "${STATE_DIR}"') < runuser
     assert 'podman_as_service system service --time=60' in helper
-    assert 'podman_remote_as_service run --rm --network podman "${PROBE_IMAGE}"' in helper
+    assert (
+        'podman_remote_as_service run --rm --uts=host --network podman "${PROBE_IMAGE}"'
+        in helper
+    )
     assert 'podman_remote_as_service network create "${PROBE_NETWORK}"' in helper
     assert 'IPAM_DATABASE="${expected_runroot}/networks/ipam.db"' in helper
