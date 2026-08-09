@@ -2004,6 +2004,18 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
     active_unit_guard = bootstrap.index('ACTIVE_CANDIDATE_UNITS="$(')
     epoch_switch = bootstrap.index("ALLOW_EPOCH_SWITCH=1")
     assert incomplete_guard < active_unit_guard < epoch_switch
+    orphan_function = bootstrap[
+        bootstrap.index("orphaned_prequalification_config_is_restartable()") :
+        bootstrap.index("ALLOW_EPOCH_SWITCH=0")
+    ]
+    assert orphan_function.index(
+        "incomplete_prequalification_epoch_is_restartable"
+    ) < orphan_function.index("_load_config")
+    assert "?mode=ro" in orphan_function and "immutable=1" not in orphan_function
+    assert 'connection.execute("PRAGMA query_only=ON")' in orphan_function
+    assert "identity_overlap_count" in orphan_function and ".exists()" not in orphan_function
+    assert "status NOT IN ('QUALIFICATION_FAILED','LTS')" in orphan_function
+    assert bootstrap.index("orphaned_prequalification_config_is_restartable \\") < bootstrap.index('OLD_STATUS_JSON="$(runuser')
     assert 'SERVICE_USER="${CANDIDATE_USER}"' in bootstrap
     assert "q6-capability-attestation.json" in bootstrap
     assert "--q6-capability-attestation-digest" in bootstrap
