@@ -88,11 +88,20 @@ fi
 if ! getent group hermesshadow >/dev/null 2>&1; then
   groupadd --system hermesshadow
 fi
+group_member() {
+  local member="$1"
+  local group_name="$2"
+  id -nG "${member}" | tr ' ' '\n' | grep -Fqx -- "${group_name}"
+}
 for shadow_member in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}"; do
-  usermod --append --groups hermesshadow "${shadow_member}"
+  if ! group_member "${shadow_member}" hermesshadow; then
+    usermod --append --groups hermesshadow "${shadow_member}"
+  fi
 done
 for functional_member in "${SERVICE_USER}" "${CANDIDATE_USER}" "${VERIFIER_USER}" "${BROKER_USER}"; do
-  usermod --append --groups "${FUNCTIONAL_GROUP}" "${functional_member}"
+  if ! group_member "${functional_member}" "${FUNCTIONAL_GROUP}"; then
+    usermod --append --groups "${FUNCTIONAL_GROUP}" "${functional_member}"
+  fi
 done
 if ! grep -q "^${CANDIDATE_USER}:" /etc/subuid; then
   usermod --add-subuids 1100000-1165535 "${CANDIDATE_USER}"
