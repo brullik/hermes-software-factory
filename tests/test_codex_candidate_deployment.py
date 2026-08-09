@@ -439,3 +439,14 @@ def test_candidate_account_group_reconciliation_is_idempotent() -> None:
         'if ! group_member "${functional_member}" "${FUNCTIONAL_GROUP}"; then'
         in bootstrap
     )
+
+
+def test_candidate_local_package_install_disables_pip_cache() -> None:
+    bootstrap = (
+        ROOT / "scripts/bootstrap/prepare-candidate-plane.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        '--no-cache-dir --no-deps "git+file://${release_root}@${SOURCE_COMMIT}"'
+        in bootstrap
+    )
+    assert "PIP_CACHE_DIR=" not in bootstrap
