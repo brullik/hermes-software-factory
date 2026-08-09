@@ -381,8 +381,16 @@ class CodexSupervisor:
 
     @staticmethod
     def _git_at(workspace: Path, *arguments: str) -> str:
+        trusted_workspace = workspace.resolve(strict=True)
         result = subprocess.run(
-            ["/usr/bin/git", "-C", str(workspace), *arguments],
+            [
+                "/usr/bin/git",
+                "-c",
+                f"safe.directory={trusted_workspace}",
+                "-C",
+                str(trusted_workspace),
+                *arguments,
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -396,8 +404,16 @@ class CodexSupervisor:
 
     @staticmethod
     def _git_bytes_at(workspace: Path, *arguments: str) -> bytes:
+        trusted_workspace = workspace.resolve(strict=True)
         result = subprocess.run(
-            ["/usr/bin/git", "-C", str(workspace), *arguments],
+            [
+                "/usr/bin/git",
+                "-c",
+                f"safe.directory={trusted_workspace}",
+                "-C",
+                str(trusted_workspace),
+                *arguments,
+            ],
             check=False,
             capture_output=True,
             env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"},

@@ -8,6 +8,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 from factory.codex_supervisor import (
     CodexSupervisor,
@@ -272,6 +273,38 @@ class CodexSupervisorTests(unittest.TestCase):
             "InaccessiblePaths=/var/log/hermes-factory",
         ):
             self.assertIn(invariant, unit)
+
+    def test_git_probes_trust_only_the_exact_resolved_workspace(self) -> None:
+        observed: list[tuple[list[str], dict[str, Any]]] = []
+
+        def fake_run(
+            argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[Any]:
+            observed.append((argv, kwargs))
+            stdout: str | bytes = "value\n" if kwargs.get("text") else b"value\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+        resolved = self.workspace.resolve(strict=True)
+        with patch("factory.codex_supervisor.subprocess.run", side_effect=fake_run):
+            self.assertEqual(CodexSupervisor._git_at(self.workspace, "status"), "value")
+            self.assertEqual(
+                CodexSupervisor._git_bytes_at(self.workspace, "diff"), b"value\n"
+            )
+
+        expected_prefix = [
+            "/usr/bin/git",
+            "-c",
+            f"safe.directory={resolved}",
+            "-C",
+            str(resolved),
+        ]
+        self.assertEqual(observed[0][0], [*expected_prefix, "status"])
+        self.assertEqual(observed[1][0], [*expected_prefix, "diff"])
+        self.assertTrue(observed[0][1]["text"])
+        self.assertNotIn("text", observed[1][1])
+        self.assertTrue(
+            all("safe.directory=*" not in argv for argv, _kwargs in observed)
+        )
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
