@@ -6,14 +6,14 @@
     "tests/test_error_free_process.py",
     "tests/test_working_factory.py"
   ],
-  "approval_evidence_digest": "424cea561ede1b7abe726f446e175d01cfebe4954ff54cd6695c94a365571abd",
-  "approval_evidence_ref": "artifact://desktop-bootstrap/424cea561ede1b7abe726f446e175d01cfebe4954ff54cd6695c94a365571abd",
+  "approval_evidence_digest": "4ae6d4ab4b2c1360559057f399ed4861d246436faeb54ada3c117ed2cbda734a",
+  "approval_evidence_ref": "artifact://desktop-bootstrap/4ae6d4ab4b2c1360559057f399ed4861d246436faeb54ada3c117ed2cbda734a",
   "approved_by": "desktop-bootstrap",
-  "branch": "codex/vps-candidate-incomplete-epoch-recovery-20260809",
-  "contract_digest": "084316f249209fab43c81a5fbb6b40a7359958ccfb7ab322b40f0e64e112bb55",
-  "contract_id": "autonomous-factory.vps-candidate-incomplete-epoch-recovery.20260809",
-  "created_at": "2026-08-09T05:12:31Z",
-  "expires_at": "2026-09-08T05:12:31Z",
+  "branch": "codex/vps-candidate-helper-install-idempotency-20260809",
+  "contract_digest": "b057f9c7d4927fc35c1a69cd741f1410effcce1a4f28d0850ec3e464c0f3ed69",
+  "contract_id": "autonomous-factory.vps-candidate-helper-install-idempotency.20260809",
+  "created_at": "2026-08-09T06:01:30Z",
+  "expires_at": "2026-09-08T06:01:30Z",
   "forbidden_paths": [
     ".git/**",
     "config/codex-vps/config.toml",
@@ -27,14 +27,14 @@
     "scripts/github_credential_broker.py",
     "scripts/bootstrap/preflight-rootless-podman.sh"
   ],
-  "max_additions": 180,
+  "max_additions": 80,
   "max_changed_files": 5,
-  "max_deletions": 45,
+  "max_deletions": 20,
   "original_goal_digest": "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497",
-  "parent_contract_digest": "2db87fbfa12b02a88328a2bcd365eb3e7064eb059b10d15526373b72adb8638f",
+  "parent_contract_digest": "084316f249209fab43c81a5fbb6b40a7359958ccfb7ab322b40f0e64e112bb55",
   "product_id": "hermes-software-factory",
-  "rationale": "Repair only the fail-closed restartability gap after immutable request FIVE: recognize an incomplete pre-qualification epoch only when Candidate and Verifier current and venv symlinks, ready markers, and clean immutable releases all bind to one valid old commit, while preserving the terminal qualification-status path and the no-active-Candidate-units gate.",
+  "rationale": "Repair only the two fixed helper installation commands so GNU install --compare skips atomic replacement when source, destination, ownership, and mode already match, while preserving fail-closed replacement for any differing helper.",
   "schema_version": "1.0",
-  "task_id": "codex-vps-candidate-incomplete-epoch-recovery",
-  "trusted_base_sha": "9fdd8ebfeef3b4eb1b9d31dbda29ed6fd1978420"
+  "task_id": "codex-vps-candidate-helper-install-idempotency",
+  "trusted_base_sha": "e21d769d56e4c405184161e7e38ce7b341d414e7"
 }
