@@ -45,4 +45,5 @@ dangerously_allow_all_unix_sockets = false
 dangerously_allow_non_loopback_proxy = false
 
 [permissions.codex-vps-workspace.network.unix_sockets]
+"/run/hermes-codex-candidate-deployment-broker/broker.sock" = "allow"
 "/run/hermes-codex-github-broker/broker.sock" = "allow"

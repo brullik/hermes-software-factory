@@ -1,7 +1,8 @@
 [Unit]
 Description=Hermes Codex VPS durable goal supervisor (%i)
-After=network-online.target hermes-codex-github-broker.service hermes-factory-gateway.service
+After=network-online.target hermes-codex-candidate-deployment-broker.service hermes-codex-github-broker.service hermes-factory-gateway.service
 Wants=network-online.target hermes-codex-github-broker.service
+Requires=hermes-codex-candidate-deployment-broker.service
 
 [Service]
 Type=simple
