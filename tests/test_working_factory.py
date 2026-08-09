@@ -1944,3 +1944,40 @@ def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:
         in incomplete_function
     )
     assert '[[ -z "${release_status}" ]] || return 1' in incomplete_function
+    askpass_install = bootstrap.index(
+        "install --compare -o root -g root -m 0755"
+    )
+    release_submit_install = bootstrap.index(
+        "install --compare -o root -g root -m 0700", askpass_install
+    )
+    unit_install = bootstrap.index("for unit in", release_submit_install)
+    assert askpass_install < release_submit_install < unit_install
+    helper_install_block = bootstrap[askpass_install:unit_install]
+    assert "cp " not in helper_install_block
+    assert "ReadWritePaths" not in helper_install_block
+
+
+def test_gnu_install_compare_skips_only_matching_helpers(tmp_path: Path) -> None:
+    source = tmp_path / "helper-source"
+    destination = tmp_path / "helper-destination"
+    source.write_text("matching helper\n", encoding="utf-8")
+    destination.write_text("matching helper\n", encoding="utf-8")
+    source.chmod(0o755)
+    destination.chmod(0o755)
+    witness = tmp_path / "helper-witness"
+    witness.hardlink_to(destination)
+    command = ["install", "--compare", "-m", "0755", str(source), str(destination)]
+
+    matching_inode = destination.stat().st_ino
+    subprocess.run(command, check=True)
+    assert destination.stat().st_ino == matching_inode
+
+    destination.chmod(0o700)
+    subprocess.run(command, check=True)
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o755
+
+    source.write_text("changed helper\n", encoding="utf-8")
+    subprocess.run(command, check=True)
+    assert destination.stat().st_ino != witness.stat().st_ino
+    assert destination.read_text(encoding="utf-8") == "changed helper\n"
+    assert witness.read_text(encoding="utf-8") == "matching helper\n"
