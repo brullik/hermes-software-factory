@@ -59,6 +59,7 @@ ReadWritePaths=/var/log/hermes-factory-pre-q8
 ReadWritePaths=/var/log/hermes-factory-golden
 ReadWritePaths=/run/systemd
 ReadWritePaths=/run/hermes-factory-candidate
+ReadWritePaths=/etc/.pwd.lock
 ReadWritePaths=/etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/subuid /etc/subgid
 ReadOnlyPaths=/opt/hermes-codex-runtime
 ReadOnlyPaths=/opt/hermes-factory

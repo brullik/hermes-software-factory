@@ -396,6 +396,8 @@ def test_systemd_and_codex_permissions_expose_only_typed_socket() -> None:
         for line in unit.splitlines()
         if line.startswith("ReadWritePaths=")
     }
+    assert "/etc/.pwd.lock" in writable
+    assert "/etc" not in writable
     assert "/opt/hermes-factory" not in writable
     assert "/var/lib/hermes-factory" not in writable
 
@@ -420,3 +422,17 @@ def test_systemd_and_codex_permissions_expose_only_typed_socket() -> None:
         if line.startswith(("After=", "Before=", "BindsTo=", "PartOf=", "Requires=", "Wants="))
     ]
     assert not any("hermes-codex" in line for line in gateway_dependencies)
+
+
+def test_candidate_account_group_reconciliation_is_idempotent() -> None:
+    bootstrap = (
+        ROOT / "scripts/bootstrap/prepare-candidate-plane.sh"
+    ).read_text(encoding="utf-8")
+    assert "ensure_group_member()" in bootstrap
+    assert "id -nG \"${member}\"" in bootstrap
+    assert bootstrap.count("usermod --append --groups") == 1
+    assert 'ensure_group_member "${shadow_member}" hermesshadow' in bootstrap
+    assert (
+        'ensure_group_member "${functional_member}" "${FUNCTIONAL_GROUP}"'
+        in bootstrap
+    )
