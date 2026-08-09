@@ -134,17 +134,19 @@ def git_candidate(config: FactoryConfig, product_id: str) -> tuple[str, str]:
             "candidate repository workspace is missing; pass --repository-commit and "
             "--tree-digest explicitly"
         )
+    trusted_workspace = workspace.resolve()
+    git = ["git", "-c", f"safe.directory={trusted_workspace}"]
     head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=workspace,
+        [*git, "rev-parse", "HEAD"],
+        cwd=trusted_workspace,
         text=True,
         capture_output=True,
         check=False,
         timeout=30,
     )
     tree = subprocess.run(
-        ["git", "ls-tree", "-r", "--full-tree", "HEAD"],
-        cwd=workspace,
+        [*git, "ls-tree", "-r", "--full-tree", "HEAD"],
+        cwd=trusted_workspace,
         text=True,
         capture_output=True,
         check=False,
