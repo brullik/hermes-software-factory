@@ -4444,11 +4444,21 @@ class WorkerTests(unittest.TestCase):
                 gate_ids=["target-secret-scan"],
             )
 
-            evidence, candidates, decisions = worker._security_review_context(
+            independent_spec = replace(
                 spec,
-                repository,
-                preflight,
+                role="independent-reviewer",
+                output_schema="review-result.schema.json",
             )
+            real_run = subprocess.run
+            with patch("factory.worker.subprocess.run", side_effect=real_run) as run:
+                evidence, candidates, decisions = worker._security_review_context(
+                    spec,
+                    repository,
+                    preflight,
+                )
+                independent_evidence, independent_candidates, independent_decisions = (
+                    worker._independent_review_context(independent_spec, repository)
+                )
 
             self.assertTrue(preflight.mandatory_passed)
             self.assertIn(f"subject_sha={subject_sha}", evidence["summary"])
@@ -4464,14 +4474,18 @@ class WorkerTests(unittest.TestCase):
             self.assertNotIn("artifacts/security-review.json", evidence["summary"])
             self.assertTrue(any("Context Pack subject_sha" in item for item in decisions))
 
-            independent_spec = replace(
-                spec,
-                role="independent-reviewer",
-                output_schema="review-result.schema.json",
-            )
-            independent_evidence, independent_candidates, independent_decisions = (
-                worker._independent_review_context(independent_spec, repository)
-            )
+            expected_prefix = [
+                "git",
+                "-c",
+                f"safe.directory={repository.resolve()}",
+                "-C",
+                str(repository.resolve()),
+            ]
+            review_git_commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(len(review_git_commands), 8)
+            for argv in review_git_commands:
+                self.assertEqual(argv[:5], expected_prefix)
+                self.assertNotIn("safe.directory=*", argv)
 
             self.assertIn(
                 f"subject_sha={subject_sha}",
@@ -4485,6 +4499,98 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(
                 any("exact read-only workspace" in item for item in independent_decisions)
             )
+            state.close()
+
+    def test_candidate_review_git_failures_remain_external_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            (repository / ".git").mkdir()
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            spec = TaskExecutionSpec(
+                task_contract={
+                    "product_id": "P-REVIEW-GIT-FAILURE",
+                    "task_id": "T-REVIEW-GIT-FAILURE",
+                    "quality_gates": [],
+                },
+                role="independent-reviewer",
+                output_schema="review-result.schema.json",
+                subject_sha="a" * 64,
+            )
+
+            invalid_head = subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="not-a-sha\n", stderr=""
+            )
+            with (
+                patch("factory.worker.subprocess.run", return_value=invalid_head),
+                self.assertRaisesRegex(
+                    ExternalBlocker,
+                    "could not resolve the candidate base revision",
+                ),
+            ):
+                worker._independent_review_context(spec, repository)
+
+            valid_head = subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="b" * 40 + "\n", stderr=""
+            )
+            failed_listing = subprocess.CompletedProcess(
+                args=["git"], returncode=1, stdout=b"", stderr=b"failed"
+            )
+            with (
+                patch(
+                    "factory.worker.subprocess.run",
+                    side_effect=[valid_head, failed_listing],
+                ),
+                self.assertRaisesRegex(
+                    ExternalBlocker,
+                    "could not enumerate candidate changes",
+                ),
+            ):
+                worker._independent_review_context(spec, repository)
+            state.close()
+
+    def test_candidate_review_keeps_copied_workspace_path_without_git(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root / "state", registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner("{}"),
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+            spec = TaskExecutionSpec(
+                task_contract={
+                    "product_id": "P-COPIED-REVIEW",
+                    "task_id": "T-COPIED-REVIEW",
+                    "quality_gates": [],
+                },
+                role="independent-reviewer",
+                output_schema="review-result.schema.json",
+                subject_sha="c" * 64,
+            )
+
+            with patch("factory.worker.subprocess.run") as run:
+                evidence, candidates, _ = worker._independent_review_context(spec, repository)
+
+            run.assert_not_called()
+            self.assertIn("base_revision=copied-workspace-baseline", evidence["summary"])
+            self.assertEqual(candidates, ())
             state.close()
 
     def test_review_gate_evidence_preserves_optional_failure_provenance(self) -> None:
