@@ -2501,8 +2501,15 @@ class AgentWorker:
         git_workspace = (root / ".git").exists()
 
         if git_workspace:
+            git_prefix = [
+                "git",
+                "-c",
+                f"safe.directory={root}",
+                "-C",
+                str(root),
+            ]
             revision = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                [*git_prefix, "rev-parse", "--verify", "HEAD"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -2516,11 +2523,9 @@ class AgentWorker:
                 )
             base_revision = revision.stdout.strip()
             for argv in (
-                ["git", "-C", str(root), "diff", "--name-only", "-z", "HEAD", "--"],
+                [*git_prefix, "diff", "--name-only", "-z", "HEAD", "--"],
                 [
-                    "git",
-                    "-C",
-                    str(root),
+                    *git_prefix,
                     "ls-files",
                     "-z",
                     "--others",
@@ -2581,9 +2586,7 @@ class AgentWorker:
                 if git_workspace:
                     diff = subprocess.run(
                         [
-                            "git",
-                            "-C",
-                            str(root),
+                            *git_prefix,
                             "diff",
                             "--no-ext-diff",
                             "--no-color",
@@ -2607,9 +2610,7 @@ class AgentWorker:
                 if git_workspace:
                     diff = subprocess.run(
                         [
-                            "git",
-                            "-C",
-                            str(root),
+                            *git_prefix,
                             "diff",
                             "--no-ext-diff",
                             "--no-color",
