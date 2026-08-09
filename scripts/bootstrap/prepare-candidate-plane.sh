@@ -312,7 +312,7 @@ for plane in candidate verifier; do
     "${venv_root}/bin/python" -m pip install --disable-pip-version-check \
       --requirement "${release_root}/requirements.lock"
     "${venv_root}/bin/python" -m pip install --disable-pip-version-check \
-      --no-deps "git+file://${release_root}@${SOURCE_COMMIT}"
+      --no-cache-dir --no-deps "git+file://${release_root}@${SOURCE_COMMIT}"
     "${venv_root}/bin/python" -m pip check
     printf '%s\n' "${SOURCE_COMMIT}" > "${venv_ready_marker}"
   fi
