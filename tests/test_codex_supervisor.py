@@ -16,6 +16,8 @@ from factory.codex_supervisor import (
     SupervisorConfig,
     SupervisorConfigurationError,
 )
+from factory.common import sha256_text, stable_json, utc_now
+from factory.credential_broker import BrokerReceipt, BrokerRequest
 
 SESSION_ID = "019c3fd5-3d61-7d20-a668-a2855efa25b1"
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +117,7 @@ class FakeRunner:
         self.commands: list[list[str]] = []
         self.prompts: list[str] = []
         self.environments: list[dict[str, str]] = []
+        self.working_directories: list[Path] = []
 
     def run(
         self,
@@ -128,6 +131,7 @@ class FakeRunner:
         self.commands.append(command)
         self.prompts.append(prompt)
         self.environments.append(environment)
+        self.working_directories.append(cwd)
         events, outcome = self.steps.pop(0)
         for event in events:
             if event.get("type") == "test.structured_result":
@@ -140,6 +144,88 @@ class FakeRunner:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+class FakeGenerationBroker:
+    def __init__(self, source: Path, allowed_remote: str) -> None:
+        self.source = source
+        self.allowed_remote = allowed_remote
+        self.old_head = self._git(source, "rev-parse", "HEAD")
+        self.old_branch = self._git(source, "branch", "--show-current")
+        self.seed = source.parent / "generation-main-seed"
+        subprocess.run(
+            ["/usr/bin/git", "clone", "--no-hardlinks", str(source), str(self.seed)],
+            check=True,
+            capture_output=True,
+        )
+        self._git(self.seed, "config", "user.name", "Generation Test")
+        self._git(self.seed, "config", "user.email", "generation@example.invalid")
+        self._git(self.seed, "branch", "-m", "main")
+        self._git(self.seed, "commit", "--allow-empty", "-m", "merged main")
+        self.merge_sha = self._git(self.seed, "rev-parse", "HEAD")
+        self.requests: list[BrokerRequest] = []
+
+    @staticmethod
+    def _git(workspace: Path, *arguments: str) -> str:
+        return subprocess.run(
+            ["/usr/bin/git", "-C", str(workspace), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+
+    @staticmethod
+    def _receipt(request: BrokerRequest, object_ids: tuple[str, ...]) -> BrokerReceipt:
+        unsigned = BrokerReceipt(
+            request_id=request.request_id,
+            operation=request.operation,
+            target_slug="brullik/hermes-software-factory",
+            subject_identity="brullik",
+            result="PASS",
+            object_ids=object_ids,
+            credential_epoch_id="CE-GENERATION-TEST",
+            timestamp=utc_now(),
+            request_digest=request.digest(),
+            receipt_digest="",
+        )
+        value = unsigned.as_dict()
+        value.pop("receipt_digest")
+        return BrokerReceipt(
+            **{**value, "object_ids": tuple(value["object_ids"])},
+            receipt_digest=sha256_text(stable_json(value)),
+        )
+
+    def execute(self, request: BrokerRequest) -> BrokerReceipt:
+        self.requests.append(request)
+        query = str(request.payload.get("query") or "")
+        if query == "workspace_generation_for_head_sha":
+            head = str(request.payload["sha"])
+            if head != self.old_head:
+                return self._receipt(
+                    request,
+                    (f"head_sha:{head}", "state:unpublished", "merged:False"),
+                )
+            return self._receipt(
+                request,
+                (
+                    "number:192",
+                    f"head_sha:{self.old_head}",
+                    f"merge_sha:{self.merge_sha}",
+                    "state:closed",
+                    "merged:True",
+                    f"head_ref:{self.old_branch}",
+                    "base:main",
+                ),
+            )
+        destination = Path(str(request.payload["workspace"]))
+        subprocess.run(
+            ["/usr/bin/git", "clone", "--no-hardlinks", str(self.seed), str(destination)],
+            check=True,
+            capture_output=True,
+        )
+        self._git(destination, "remote", "set-url", "origin", self.allowed_remote)
+        return self._receipt(request, (f"sha:{self.merge_sha}", "state:cloned"))
 
 
 class CodexSupervisorTests(unittest.TestCase):
@@ -696,6 +782,113 @@ class CodexSupervisorTests(unittest.TestCase):
         self.supervisor(resumed).run_attempt()
         self.assertIn("publish bounded canary", resumed.prompts[0])
         self.assertIn("Do not mutate the frozen omnibus branch.", resumed.prompts[0])
+
+    def test_merged_head_rolls_same_session_to_new_workspace_generation(self) -> None:
+        config = self.config()
+        config_path = self.goal_dir / "supervisor.json"
+        config_path.write_text(
+            json.dumps(config.as_dict(), sort_keys=True), encoding="utf-8"
+        )
+        bootstrap = CodexSupervisor(
+            config,
+            runner=FakeRunner([]),
+            boundary=self.boundary,
+            config_path=config_path,
+        )
+        state = bootstrap._initial_state()
+        state.session_id = SESSION_ID
+        bootstrap._save_state(state)
+        (self.workspace / "README.md").write_text(
+            "trusted fixture\ncontinued work\n", encoding="utf-8"
+        )
+        notes = self.workspace / "notes" / "progress.txt"
+        notes.parent.mkdir()
+        notes.write_text("bounded follow-up\n", encoding="utf-8")
+        broker = FakeGenerationBroker(self.workspace, self.boundary.allowed_remote)
+        runner = FakeRunner(
+            [
+                (
+                    [
+                        {
+                            "type": "test.structured_result",
+                            "value": ready_result(),
+                        },
+                        {"type": "turn.completed"},
+                    ],
+                    CommandResult(0, ""),
+                )
+            ]
+        )
+
+        completed = CodexSupervisor(
+            config,
+            runner=runner,
+            boundary=self.boundary,
+            config_path=config_path,
+            generation_broker=broker,
+        ).run_attempt()
+
+        self.assertEqual(completed.status, "COMPLETED")
+        self.assertEqual(completed.session_id, SESSION_ID)
+        self.assertEqual(completed.workspace_generation, 2)
+        self.assertEqual(len(completed.generation_history), 1)
+        self.assertEqual(completed.generation_history[0]["status"], "SUPERSEDED")
+        self.assertEqual(completed.generation_history[0]["workspace"], str(self.workspace))
+        new_workspace = Path(completed.workspace)
+        self.assertNotEqual(new_workspace, self.workspace)
+        self.assertTrue(self.workspace.is_dir())
+        self.assertEqual(
+            (new_workspace / "README.md").read_text(encoding="utf-8"),
+            "trusted fixture\ncontinued work\n",
+        )
+        self.assertEqual(
+            (new_workspace / "notes" / "progress.txt").read_text(encoding="utf-8"),
+            "bounded follow-up\n",
+        )
+        self.assertEqual(runner.working_directories, [new_workspace])
+        self.assertIn("resume", runner.commands[0])
+        self.assertIn(SESSION_ID, runner.commands[0])
+        self.assertIn("SUPERSEDED", runner.prompts[0])
+        persisted = SupervisorConfig.load(config_path)
+        self.assertEqual(persisted.workspace, new_workspace)
+        self.assertEqual(persisted.trusted_base_sha, broker.merge_sha)
+        evidence = Path(completed.generation_history[0]["evidence_ref"])
+        manifest = json.loads(evidence.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "SUPERSEDED")
+        self.assertGreater(manifest["dirty_patch"]["size"], 0)
+        self.assertEqual(manifest["untracked"][0]["path"], "notes/progress.txt")
+        subprocess.run(
+            ["/usr/bin/git", "bundle", "verify", str(evidence.parent / "committed-head.bundle")],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_generation_closeout_rejects_secret_named_untracked_file(self) -> None:
+        config = self.config()
+        bootstrap = CodexSupervisor(
+            config,
+            runner=FakeRunner([]),
+            boundary=self.boundary,
+        )
+        state = bootstrap._initial_state()
+        state.session_id = SESSION_ID
+        bootstrap._save_state(state)
+        (self.workspace / ".env.production").write_text(
+            "not-a-real-secret\n", encoding="utf-8"
+        )
+        broker = FakeGenerationBroker(self.workspace, self.boundary.allowed_remote)
+
+        with self.assertRaisesRegex(
+            SupervisorConfigurationError, "untracked path is unsafe"
+        ):
+            CodexSupervisor(
+                config,
+                runner=FakeRunner([]),
+                boundary=self.boundary,
+                generation_broker=broker,
+            ).run_attempt()
+
+        self.assertEqual(len(broker.requests), 1)
 
     def test_github_outage_has_bounded_retries_on_same_session(self) -> None:
         runner = FakeRunner(

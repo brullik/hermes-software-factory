@@ -826,6 +826,62 @@ class GitHubCredentialBroker:
                     "head_sha": expected_sha,
                     "state": matches[0].get("state"),
                 }
+            if query == "workspace_generation_for_head_sha":
+                expected_sha = str(payload.get("sha") or "")
+                if not re.fullmatch(r"[a-f0-9]{40}", expected_sha):
+                    raise CredentialBrokerError("workspace generation head SHA is invalid")
+                pulls = self._run(
+                    [
+                        "gh",
+                        "api",
+                        f"{endpoint}/pulls?state=all&per_page=100&sort=updated&direction=desc",
+                    ],
+                    environment=environment,
+                )
+                if not isinstance(pulls, list):
+                    raise CredentialBrokerError("workspace generation pull list is invalid")
+                matches = [
+                    item
+                    for item in pulls
+                    if isinstance(item, dict)
+                    and isinstance(item.get("head"), dict)
+                    and str(item["head"].get("sha") or "") == expected_sha
+                ]
+                if not matches:
+                    return {
+                        "head_sha": expected_sha,
+                        "state": "unpublished",
+                        "merged": False,
+                    }
+                if len(matches) != 1:
+                    raise CredentialBrokerError(
+                        "workspace generation pull request head is ambiguous"
+                    )
+                number = int(matches[0].get("number") or 0)
+                if number < 1:
+                    raise CredentialBrokerError(
+                        "workspace generation pull request number is invalid"
+                    )
+                pull = self._pull_request(endpoint, number, environment)
+                head = pull.get("head")
+                base = pull.get("base")
+                if not isinstance(head, dict) or head.get("sha") != expected_sha:
+                    raise CredentialBrokerError(
+                        "workspace generation pull request head differs"
+                    )
+                merged = pull.get("merged") is True
+                merge_sha = pull.get("merge_commit_sha") if merged else None
+                return {
+                    "number": number,
+                    "head_sha": expected_sha,
+                    "merge_sha": merge_sha,
+                    "state": pull.get("state"),
+                    "merged": merged,
+                    "object_ids": [
+                        f"head_ref:{head.get('ref') or ''}",
+                        f"base:{base.get('ref') if isinstance(base, dict) else ''}",
+                    ],
+                }
             if query == "pull_request":
                 number = int(payload.get("number") or 0)
                 if number < 1:

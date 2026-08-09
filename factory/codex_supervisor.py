@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
 from .codex_owner_actions import CodexOwnerActionStore
 from .common import redact_text, sha256_text, stable_json, utc_now
+from .credential_broker import BrokerReceipt, BrokerRequest
 
 SUPERVISOR_STATES = frozenset(
     {
@@ -34,6 +37,12 @@ _SHA = re.compile(r"[a-f0-9]{40}\Z")
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}\Z")
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _ALLOWED_REMOTE = "https://github.com/brullik/hermes-software-factory.git"
+_UNSAFE_UNTRACKED = re.compile(
+    r"(?:^|/)(?:\.env(?:\.|$)|[^/]*(?:credential|secret|token|auth)[^/]*)",
+    re.IGNORECASE,
+)
+_MAX_UNTRACKED_FILES = 256
+_MAX_UNTRACKED_BYTES = 16 * 1024 * 1024
 _RESUME_PROMPT = (
     "Продолжи ровно эту сохранённую задачу с последней безопасной контрольной точки. "
     "Не создавай новый thread, не используй fork/внешний checkout и не ослабляй gates."
@@ -96,6 +105,21 @@ class SupervisorConfig:
     quota_retry_seconds: float = 300.0
     loop_threshold: int = 3
 
+    def as_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        for key in (
+            "workspace",
+            "state_path",
+            "event_log_path",
+            "result_path",
+            "goal_path",
+            "output_schema_path",
+            "codex_binary",
+            "owner_action_db",
+        ):
+            value[key] = str(value[key])
+        return value
+
     @classmethod
     def load(cls, path: Path) -> SupervisorConfig:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -142,6 +166,9 @@ class SupervisorBoundary:
     state_root: Path = Path("/var/lib/hermes-codex/state")
     codex_binary: Path = Path("/home/hermescodex/.local/bin/codex")
     owner_action_db: Path = Path("/var/lib/hermes-codex-owner-actions/actions.sqlite3")
+    github_broker_socket: Path = Path(
+        "/run/hermes-codex-github-broker/broker.sock"
+    )
     allowed_remote: str = _ALLOWED_REMOTE
 
 
@@ -168,6 +195,9 @@ class SupervisorState:
     completed_at: str | None
     last_continuation_digest: str | None = None
     repeated_continuation_count: int = 0
+    workspace_generation: int = 1
+    generation_history: list[dict[str, Any]] = field(default_factory=list)
+    last_merge_receipt_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +216,10 @@ class CommandRunner(Protocol):
         environment: dict[str, str],
         on_event: Callable[[dict[str, Any]], None],
     ) -> CommandResult: ...
+
+
+class GenerationBroker(Protocol):
+    def execute(self, request: BrokerRequest) -> BrokerReceipt: ...
 
 
 class SubprocessCommandRunner:
@@ -268,6 +302,22 @@ def _write_private(path: Path, text: str) -> None:
         raise
 
 
+def _write_private_bytes(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 class CodexSupervisor:
     def __init__(
         self,
@@ -277,12 +327,16 @@ class CodexSupervisor:
         notification_store: CodexOwnerActionStore | None = None,
         sleep: Callable[[float], None] = time.sleep,
         boundary: SupervisorBoundary | None = None,
+        config_path: Path | None = None,
+        generation_broker: GenerationBroker | None = None,
     ) -> None:
         self.config = config
         self.runner = runner or SubprocessCommandRunner()
         self.notification_store = notification_store
         self.sleep = sleep
         self.boundary = boundary or SupervisorBoundary()
+        self.config_path = config_path
+        self.generation_broker = generation_broker
         self._validate_static_config()
 
     def _validate_static_config(self) -> None:
@@ -323,8 +377,12 @@ class CodexSupervisor:
         self._validate_git_workspace(workspace)
 
     def _git(self, *arguments: str) -> str:
+        return self._git_at(self.config.workspace, *arguments)
+
+    @staticmethod
+    def _git_at(workspace: Path, *arguments: str) -> str:
         result = subprocess.run(
-            ["/usr/bin/git", "-C", str(self.config.workspace), *arguments],
+            ["/usr/bin/git", "-C", str(workspace), *arguments],
             check=False,
             capture_output=True,
             text=True,
@@ -335,6 +393,384 @@ class CodexSupervisor:
         if result.returncode != 0:
             raise SupervisorConfigurationError(f"trusted Git probe failed: {arguments[0]}")
         return result.stdout.strip()
+
+    @staticmethod
+    def _git_bytes_at(workspace: Path, *arguments: str) -> bytes:
+        result = subprocess.run(
+            ["/usr/bin/git", "-C", str(workspace), *arguments],
+            check=False,
+            capture_output=True,
+            env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"},
+        )
+        if result.returncode != 0:
+            raise SupervisorConfigurationError(f"trusted Git probe failed: {arguments[0]}")
+        return result.stdout
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _receipt_fields(receipt: BrokerReceipt) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        for item in receipt.object_ids:
+            key, separator, value = item.partition(":")
+            if separator and key not in fields:
+                fields[key] = value
+        return fields
+
+    def _persist_config(self) -> None:
+        if self.config_path is None:
+            return
+        path = self.config_path.resolve(strict=False)
+        if not _is_within(path, self.boundary.state_root.resolve(strict=True)):
+            raise SupervisorConfigurationError("supervisor config path is outside state root")
+        _write_private(
+            path,
+            json.dumps(
+                self.config.as_dict(), ensure_ascii=False, indent=2, sort_keys=True
+            )
+            + "\n",
+        )
+
+    def _generation_probe(
+        self, state: SupervisorState, *, head_sha: str
+    ) -> tuple[BrokerReceipt, dict[str, str]] | None:
+        if self.generation_broker is None:
+            return None
+        request = BrokerRequest(
+            request_id=(
+                f"CODEX-GENERATION-{head_sha[:12]}-"
+                f"{state.resume_count:08d}-{state.transition_sequence:08d}"
+            ),
+            operation="repository.read",
+            owner="brullik",
+            repository="hermes-software-factory",
+            payload={"query": "workspace_generation_for_head_sha", "sha": head_sha},
+        )
+        receipt = self.generation_broker.execute(request)
+        if receipt.result != "PASS":
+            raise SupervisorConfigurationError("workspace generation broker result differs")
+        fields = self._receipt_fields(receipt)
+        if fields.get("head_sha") != head_sha:
+            raise SupervisorConfigurationError("workspace generation receipt head differs")
+        if fields.get("state") in {"unpublished", "open"}:
+            return None
+        if (
+            fields.get("state") != "closed"
+            or fields.get("merged") != "True"
+            or _SHA.fullmatch(fields.get("merge_sha", "")) is None
+            or fields.get("base") != "main"
+            or fields.get("head_ref") != self._branch()
+        ):
+            raise SupervisorConfigurationError(
+                "workspace generation merge receipt is not an exact merged task branch"
+            )
+        return receipt, fields
+
+    def _capture_generation(
+        self,
+        state: SupervisorState,
+        *,
+        head_sha: str,
+        branch: str,
+        receipt: BrokerReceipt,
+        fields: dict[str, str],
+    ) -> tuple[Path, dict[str, Any]]:
+        evidence_dir = (
+            self.config.state_path.parent
+            / "workspace-generations"
+            / f"g{state.workspace_generation:04d}-{head_sha[:12]}"
+        )
+        manifest_path = evidence_dir / "generation-closeout.json"
+        if manifest_path.is_file() and not manifest_path.is_symlink():
+            value = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(value, dict)
+                or value.get("old_head_sha") != head_sha
+                or value.get("old_workspace") != str(self.config.workspace)
+                or value.get("merge_receipt_digest") != receipt.receipt_digest
+                or value.get("status") not in {
+                    "CAPTURED",
+                    "RESTORED",
+                    "SUPERSEDED",
+                }
+            ):
+                raise SupervisorConfigurationError(
+                    "workspace generation evidence differs on replay"
+                )
+            return manifest_path, value
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(evidence_dir, 0o700)
+        bundle_path = evidence_dir / "committed-head.bundle"
+        bundle = subprocess.run(
+            [
+                "/usr/bin/git",
+                "-C",
+                str(self.config.workspace),
+                "bundle",
+                "create",
+                str(bundle_path),
+                branch,
+            ],
+            check=False,
+            capture_output=True,
+            env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"},
+        )
+        if bundle.returncode != 0:
+            raise SupervisorConfigurationError("workspace generation bundle failed")
+        os.chmod(bundle_path, 0o600)
+        patch = self._git_bytes_at(
+            self.config.workspace, "diff", "--binary", "--full-index", "HEAD"
+        )
+        patch_path = evidence_dir / "dirty.patch"
+        _write_private_bytes(patch_path, patch)
+        status = self._git_bytes_at(
+            self.config.workspace,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        )
+        untracked_root = evidence_dir / "untracked"
+        untracked: list[dict[str, Any]] = []
+        total_bytes = 0
+        for raw in status.split(b"\0"):
+            if not raw.startswith(b"?? "):
+                continue
+            relative = raw[3:].decode("utf-8", errors="strict")
+            normalized = relative.replace("\\", "/")
+            if (
+                not normalized
+                or normalized.startswith("/")
+                or ".." in Path(normalized).parts
+                or _UNSAFE_UNTRACKED.search(normalized)
+            ):
+                raise SupervisorConfigurationError(
+                    "workspace generation untracked path is unsafe"
+                )
+            source = (self.config.workspace / relative).resolve(strict=True)
+            if (
+                not _is_within(source, self.config.workspace.resolve(strict=True))
+                or source.is_symlink()
+                or not source.is_file()
+            ):
+                raise SupervisorConfigurationError(
+                    "workspace generation untracked file is unsafe"
+                )
+            value = source.read_bytes()
+            total_bytes += len(value)
+            if (
+                len(untracked) >= _MAX_UNTRACKED_FILES
+                or total_bytes > _MAX_UNTRACKED_BYTES
+            ):
+                raise SupervisorConfigurationError(
+                    "workspace generation untracked budget exceeded"
+                )
+            target = untracked_root / normalized
+            _write_private_bytes(target, value)
+            untracked.append(
+                {
+                    "path": normalized,
+                    "sha256": hashlib.sha256(value).hexdigest(),
+                    "size": len(value),
+                }
+            )
+        manifest: dict[str, Any] = {
+            "schema_version": "1.0",
+            "goal_id": state.goal_id,
+            "session_id": state.session_id,
+            "generation": state.workspace_generation,
+            "status": "CAPTURED",
+            "old_workspace": str(self.config.workspace),
+            "old_branch": branch,
+            "old_head_sha": head_sha,
+            "old_trusted_base_sha": self.config.trusted_base_sha,
+            "pull_request_number": int(fields["number"]),
+            "merge_sha": fields["merge_sha"],
+            "merge_receipt": receipt.as_dict(),
+            "merge_receipt_digest": receipt.receipt_digest,
+            "bundle": {
+                "path": bundle_path.name,
+                "sha256": self._sha256_file(bundle_path),
+                "size": bundle_path.stat().st_size,
+            },
+            "dirty_patch": {
+                "path": patch_path.name,
+                "sha256": hashlib.sha256(patch).hexdigest(),
+                "size": len(patch),
+            },
+            "untracked": untracked,
+            "captured_at": utc_now(),
+        }
+        _write_private(
+            manifest_path,
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        return manifest_path, manifest
+
+    def _new_generation_workspace(
+        self,
+        state: SupervisorState,
+        *,
+        merge_sha: str,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+    ) -> tuple[Path, str, str]:
+        next_generation = state.workspace_generation + 1
+        destination = (
+            self.boundary.worktree_root
+            / f"{state.goal_id}-g{next_generation:04d}-{merge_sha[:8]}"
+        )
+        if not destination.exists():
+            if self.generation_broker is None:
+                raise SupervisorConfigurationError("workspace generation broker is missing")
+            request = BrokerRequest(
+                request_id=(
+                    f"CODEX-GENERATION-CLONE-{next_generation:04d}-"
+                    f"{manifest['merge_receipt_digest'][:20]}"
+                ),
+                operation="repository.read",
+                owner="brullik",
+                repository="hermes-software-factory",
+                payload={"workspace": str(destination)},
+            )
+            clone_receipt = self.generation_broker.execute(request)
+            if clone_receipt.result != "PASS":
+                raise SupervisorConfigurationError("workspace generation clone failed")
+            manifest["clone_receipt"] = clone_receipt.as_dict()
+            _write_private(
+                manifest_path,
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
+            )
+        if not destination.is_dir() or not (destination / ".git").is_dir():
+            raise SupervisorConfigurationError("workspace generation clone is incomplete")
+        if self._git_at(destination, "remote", "get-url", "origin") != self.boundary.allowed_remote:
+            raise SupervisorConfigurationError("workspace generation origin differs")
+        if self._git_at(destination, "branch", "--show-current") not in {
+            "main",
+            f"codex/generation-{next_generation:04d}-{self._git_at(destination, 'rev-parse', 'HEAD')[:12]}",
+        }:
+            raise SupervisorConfigurationError("workspace generation clone branch differs")
+        latest_main = self._git_at(destination, "rev-parse", "HEAD")
+        if _SHA.fullmatch(latest_main) is None:
+            raise SupervisorConfigurationError("workspace generation latest main is invalid")
+        self._git_at(destination, "merge-base", "--is-ancestor", merge_sha, latest_main)
+        branch = f"codex/generation-{next_generation:04d}-{latest_main[:12]}"
+        current = self._git_at(destination, "branch", "--show-current")
+        if current == "main":
+            self._git_at(destination, "switch", "-c", branch)
+        elif current != branch:
+            raise SupervisorConfigurationError("workspace generation task branch differs")
+        if manifest.get("status") == "CAPTURED":
+            patch_path = manifest_path.parent / str(manifest["dirty_patch"]["path"])
+            if int(manifest["dirty_patch"]["size"]) > 0:
+                self._git_at(
+                    destination,
+                    "apply",
+                    "--3way",
+                    "--whitespace=nowarn",
+                    str(patch_path),
+                )
+            for item in manifest["untracked"]:
+                relative = str(item["path"])
+                source = manifest_path.parent / "untracked" / relative
+                if self._sha256_file(source) != item["sha256"]:
+                    raise SupervisorConfigurationError(
+                        "workspace generation untracked digest differs"
+                    )
+                target = destination / relative
+                if target.exists() or target.is_symlink():
+                    raise SupervisorConfigurationError(
+                        "workspace generation untracked restore target exists"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            manifest["status"] = "RESTORED"
+            manifest["restored_at"] = utc_now()
+            _write_private(
+                manifest_path,
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
+            )
+        return destination, branch, latest_main
+
+    def _rollover_after_merge(self, state: SupervisorState) -> SupervisorState:
+        if self.generation_broker is None or state.session_id is None:
+            return state
+        branch = self._branch()
+        head_sha = self._git("rev-parse", "HEAD")
+        probe = self._generation_probe(state, head_sha=head_sha)
+        if probe is None:
+            return state
+        receipt, fields = probe
+        manifest_path, manifest = self._capture_generation(
+            state,
+            head_sha=head_sha,
+            branch=branch,
+            receipt=receipt,
+            fields=fields,
+        )
+        destination, new_branch, latest_main = self._new_generation_workspace(
+            state,
+            merge_sha=fields["merge_sha"],
+            manifest_path=manifest_path,
+            manifest=manifest,
+        )
+        old_workspace = state.workspace
+        old_branch = branch
+        old_base = state.trusted_base_sha
+        state.workspace_generation += 1
+        state.workspace = str(destination)
+        state.branch = new_branch
+        state.trusted_base_sha = latest_main
+        state.last_merge_receipt_digest = receipt.receipt_digest
+        superseded_at = utc_now()
+        manifest.update(
+            {
+                "status": "SUPERSEDED",
+                "new_generation": state.workspace_generation,
+                "new_workspace": str(destination),
+                "new_branch": new_branch,
+                "new_trusted_base_sha": latest_main,
+                "superseded_at": superseded_at,
+            }
+        )
+        encoded_manifest = (
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        )
+        _write_private(
+            manifest_path,
+            encoded_manifest,
+        )
+        state.generation_history.append(
+            {
+                "generation": state.workspace_generation - 1,
+                "status": "SUPERSEDED",
+                "workspace": old_workspace,
+                "branch": old_branch,
+                "trusted_base_sha": old_base,
+                "head_sha": head_sha,
+                "merge_sha": fields["merge_sha"],
+                "evidence_ref": str(manifest_path),
+                "evidence_digest": hashlib.sha256(
+                    encoded_manifest.encode("utf-8")
+                ).hexdigest(),
+                "superseded_at": superseded_at,
+            }
+        )
+        self._save_state(state)
+        self.config = replace(
+            self.config, workspace=destination, trusted_base_sha=latest_main
+        )
+        self._validate_static_config()
+        self._persist_config()
+        return state
 
     def _validate_git_workspace(self, workspace: Path) -> None:
         if Path(self._git("rev-parse", "--show-toplevel")).resolve() != workspace:
@@ -393,11 +829,41 @@ class CodexSupervisor:
             raise SupervisorConfigurationError("supervisor state must be an object")
         raw.setdefault("last_continuation_digest", None)
         raw.setdefault("repeated_continuation_count", 0)
+        raw.setdefault("workspace_generation", 1)
+        raw.setdefault("generation_history", [])
+        raw.setdefault("last_merge_receipt_digest", None)
         state = SupervisorState(**raw)
         if state.status not in SUPERVISOR_STATES:
             raise SupervisorConfigurationError("unknown supervisor state")
-        if state.goal_id != self.config.goal_id or state.workspace != str(self.config.workspace):
+        if state.goal_id != self.config.goal_id:
             raise SupervisorConfigurationError("supervisor state identity mismatch")
+        if (
+            not isinstance(state.workspace_generation, int)
+            or isinstance(state.workspace_generation, bool)
+            or state.workspace_generation < 1
+            or not isinstance(state.generation_history, list)
+            or len(state.generation_history) != state.workspace_generation - 1
+        ):
+            raise SupervisorConfigurationError("workspace generation state is invalid")
+        if state.last_merge_receipt_digest is not None and _SHA256.fullmatch(
+            state.last_merge_receipt_digest
+        ) is None:
+            raise SupervisorConfigurationError("workspace generation receipt digest is invalid")
+        if state.workspace != str(self.config.workspace):
+            if (
+                not state.generation_history
+                or state.generation_history[-1].get("status") != "SUPERSEDED"
+                or state.generation_history[-1].get("evidence_ref") is None
+                or _SHA.fullmatch(state.trusted_base_sha) is None
+            ):
+                raise SupervisorConfigurationError("supervisor state identity mismatch")
+            self.config = replace(
+                self.config,
+                workspace=Path(state.workspace),
+                trusted_base_sha=state.trusted_base_sha,
+            )
+            self._validate_static_config()
+            self._persist_config()
         if state.prompt_digest != sha256_text(self._goal()):
             raise SupervisorConfigurationError("immutable goal text changed")
         if state.session_id is not None and _SESSION_ID.fullmatch(state.session_id) is None:
@@ -455,8 +921,17 @@ class CodexSupervisor:
 
     def _continuation_prompt(self, state: SupervisorState) -> str:
         path = self.config.goal_path.with_name("continuation-handoff.json")
+        generation_note = ""
+        if state.generation_history:
+            latest = state.generation_history[-1]
+            generation_note = (
+                "\n\nWorkspace generation closeout verified: generation "
+                f"{latest['generation']} is SUPERSEDED; continue the same session only in "
+                f"generation {state.workspace_generation} from trusted main "
+                f"{state.trusted_base_sha}. Never reuse the superseded branch as authority."
+            )
         if not path.exists():
-            return _RESUME_PROMPT
+            return _RESUME_PROMPT + generation_note
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 32_768:
             raise SupervisorConfigurationError("continuation handoff path is unsafe")
         try:
@@ -509,6 +984,7 @@ class CodexSupervisor:
             + supplied_digest
             + f" (replay guard {replay_guard}). Active obligation: {obligation}.\n"
             + rendered
+            + generation_note
         )
 
     def _command(self, state: SupervisorState) -> tuple[list[str], str]:
@@ -751,6 +1227,7 @@ class CodexSupervisor:
 
     def run_attempt(self) -> SupervisorState:
         state = self.load_state()
+        state = self._rollover_after_merge(state)
         if state.status in _TERMINAL_STATES:
             return state
         was_resume = state.session_id is not None

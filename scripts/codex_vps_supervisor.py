@@ -8,6 +8,7 @@ from pathlib import Path
 
 from factory.codex_owner_actions import CodexOwnerActionStore
 from factory.codex_supervisor import CodexSupervisor, SupervisorConfig
+from factory.credential_broker import BrokerClient
 
 
 def main() -> int:
@@ -17,7 +18,14 @@ def main() -> int:
     config = SupervisorConfig.load(args.config.resolve(strict=True))
     notifications = CodexOwnerActionStore(config.owner_action_db)
     try:
-        return CodexSupervisor(config, notification_store=notifications).run_until_stable()
+        return CodexSupervisor(
+            config,
+            notification_store=notifications,
+            config_path=args.config.resolve(strict=True),
+            generation_broker=BrokerClient(
+                Path("/run/hermes-codex-github-broker/broker.sock")
+            ),
+        ).run_until_stable()
     finally:
         notifications.close()
 
