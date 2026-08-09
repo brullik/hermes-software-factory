@@ -1921,3 +1921,26 @@ def test_candidate_epoch_switch_binds_terminal_status_to_old_commit() -> None:
     assert 'OLD_EPOCH_SOURCE_COMMIT="$(OLD_STATUS_JSON=' in bootstrap
     assert '"${OLD_EPOCH_SOURCE_COMMIT}" != "${OLD_SOURCE_COMMIT}"' in bootstrap
     assert "Previous Candidate B epoch status identity differs" in bootstrap
+    incomplete_path = bootstrap.index(
+        'if ! incomplete_prequalification_epoch_is_restartable "${OLD_SOURCE_COMMIT}"'
+    )
+    normal_path = bootstrap.index("if (( INCOMPLETE_PREQUALIFICATION_EPOCH != 1 ))")
+    status_path = bootstrap.index('OLD_STATUS_JSON="$(runuser', normal_path)
+    terminal_path = bootstrap.index("Previous Candidate B epoch is not terminal")
+    active_unit_path = bootstrap.index('ACTIVE_CANDIDATE_UNITS="$(')
+    switch_path = bootstrap.index("ALLOW_EPOCH_SWITCH=1")
+    assert incomplete_path < normal_path < status_path < terminal_path
+    assert terminal_path < active_unit_path < switch_path
+    incomplete_function = bootstrap[
+        bootstrap.index("incomplete_prequalification_epoch_is_restartable()") :
+        bootstrap.index("ALLOW_EPOCH_SWITCH=0")
+    ]
+    assert "rm -rf" not in incomplete_function
+    assert "mv --" not in incomplete_function
+    assert "ln -s" not in incomplete_function
+    assert incomplete_function.count(".hermes-bootstrap-complete") == 6
+    assert (
+        'for release_root in "${candidate_release}" "${verifier_release}"'
+        in incomplete_function
+    )
+    assert '[[ -z "${release_status}" ]] || return 1' in incomplete_function

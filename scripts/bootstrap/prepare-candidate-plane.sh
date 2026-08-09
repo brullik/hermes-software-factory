@@ -149,6 +149,47 @@ retire_legacy_candidate_notifier() {
 
 retire_legacy_candidate_notifier
 
+incomplete_prequalification_epoch_is_restartable() {
+  local old_source_commit="$1"
+  local candidate_release="${CANDIDATE_ROOT}/releases/${old_source_commit}"
+  local candidate_venv="${CANDIDATE_ROOT}/venvs/${old_source_commit}"
+  local verifier_release="${VERIFIER_ROOT}/releases/${old_source_commit}"
+  local verifier_venv="${VERIFIER_ROOT}/venvs/${old_source_commit}"
+  local release_root release_head release_status
+
+  [[ "${old_source_commit}" =~ ^[a-f0-9]{40}$ ]] || return 1
+  [[ -L "${CANDIDATE_ROOT}/current" ]] \
+    && [[ "$(readlink -f "${CANDIDATE_ROOT}/current")" == "${candidate_release}" ]] \
+    && [[ -L "${CANDIDATE_ROOT}/venv" ]] \
+    && [[ "$(readlink -f "${CANDIDATE_ROOT}/venv")" == "${candidate_venv}" ]] \
+    && [[ -L "${VERIFIER_ROOT}/current" ]] \
+    && [[ "$(readlink -f "${VERIFIER_ROOT}/current")" == "${verifier_release}" ]] \
+    && [[ -L "${VERIFIER_ROOT}/venv" ]] \
+    && [[ "$(readlink -f "${VERIFIER_ROOT}/venv")" == "${verifier_venv}" ]] \
+    || return 1
+  [[ -d "${candidate_venv}" && ! -L "${candidate_venv}" ]] \
+    && [[ -x "${candidate_venv}/bin/python" ]] \
+    && [[ -f "${candidate_venv}/.hermes-bootstrap-complete" ]] \
+    && [[ ! -L "${candidate_venv}/.hermes-bootstrap-complete" ]] \
+    && [[ "$(<"${candidate_venv}/.hermes-bootstrap-complete")" == "${old_source_commit}" ]] \
+    && [[ -d "${verifier_venv}" && ! -L "${verifier_venv}" ]] \
+    && [[ -x "${verifier_venv}/bin/python" ]] \
+    && [[ -f "${verifier_venv}/.hermes-bootstrap-complete" ]] \
+    && [[ ! -L "${verifier_venv}/.hermes-bootstrap-complete" ]] \
+    && [[ "$(<"${verifier_venv}/.hermes-bootstrap-complete")" == "${old_source_commit}" ]] \
+    || return 1
+  for release_root in "${candidate_release}" "${verifier_release}"; do
+    [[ -d "${release_root}" && ! -L "${release_root}" ]] \
+      && [[ -d "${release_root}/.git" && ! -L "${release_root}/.git" ]] \
+      || return 1
+    release_head="$(git -C "${release_root}" rev-parse HEAD 2>/dev/null)" || return 1
+    [[ "${release_head}" == "${old_source_commit}" ]] || return 1
+    release_status="$(git -C "${release_root}" status \
+      --porcelain=v1 --untracked-files=all 2>/dev/null)" || return 1
+    [[ -z "${release_status}" ]] || return 1
+  done
+}
+
 ALLOW_EPOCH_SWITCH=0
 if [[ -L "${CANDIDATE_ROOT}/current" ]] \
   && [[ "$(basename "$(readlink -f "${CANDIDATE_ROOT}/current")")" != "${SOURCE_COMMIT}" ]]; then
@@ -157,6 +198,15 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
   if [[ ! -f "${OLD_QUALIFICATION_CONFIG}" ]]; then
     OLD_QUALIFICATION_CONFIG="${CONFIG_ROOT}/qualification-epochs/${OLD_SOURCE_COMMIT}/qualification-control.yaml"
   fi
+  INCOMPLETE_PREQUALIFICATION_EPOCH=0
+  if [[ ! -f "${OLD_QUALIFICATION_CONFIG}" ]]; then
+    if ! incomplete_prequalification_epoch_is_restartable "${OLD_SOURCE_COMMIT}"; then
+      printf 'Incomplete pre-qualification Candidate B epoch cannot be identified safely\n' >&2
+      exit 73
+    fi
+    INCOMPLETE_PREQUALIFICATION_EPOCH=1
+  fi
+  if (( INCOMPLETE_PREQUALIFICATION_EPOCH != 1 )); then
   if [[ ! "${OLD_SOURCE_COMMIT}" =~ ^[a-f0-9]{40}$ ]] \
     || [[ ! -x "${VERIFIER_ROOT}/venv/bin/python" ]] \
     || [[ ! -f "${OLD_QUALIFICATION_CONFIG}" ]]; then
@@ -206,6 +256,7 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
   if [[ "${OLD_EPOCH_STATUS}" != QUALIFICATION_FAILED && "${OLD_EPOCH_STATUS}" != LTS ]]; then
     printf 'Previous Candidate B epoch is not terminal: %s\n' "${OLD_EPOCH_STATUS}" >&2
     exit 73
+  fi
   fi
   stop_functional_candidate_services
   systemctl disable --now hermes-factory-owner-notifier.path >/dev/null 2>&1 || true
