@@ -90,7 +90,7 @@ class CandidateDeploymentError(RuntimeError):
 
     def __init__(self, reason_code: str) -> None:
         if re.fullmatch(r"[a-z][a-z0-9_]{2,95}", reason_code) is None:
-            reason_code = "candidate_deployment_rejected"
+            reason_code = "controller_runtime_precondition_failed"
         self.reason_code = reason_code
         super().__init__(reason_code)
 
@@ -705,18 +705,18 @@ def serve_candidate_deployment_broker(
                         "receipt": receipt,
                     }
                     if receipt["result"] != "PASS":
-                        response["reason_code"] = "candidate_deployment_failed"
+                        response["reason_code"] = "deployment_health_failed"
                 except CandidateDeploymentError as error:
                     response = {"status": "FAILED", "reason_code": error.reason_code}
                 except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                     response = {
                         "status": "FAILED",
-                        "reason_code": "deployment_request_invalid",
+                        "reason_code": "malformed_transport",
                     }
                 except OSError:
                     response = {
                         "status": "FAILED",
-                        "reason_code": "candidate_deployment_internal_failure",
+                        "reason_code": "worker_internal_error",
                     }
                 try:
                     connection.sendall((stable_json(response) + "\n").encode("utf-8"))
