@@ -428,11 +428,12 @@ def test_candidate_account_group_reconciliation_is_idempotent() -> None:
     bootstrap = (
         ROOT / "scripts/bootstrap/prepare-candidate-plane.sh"
     ).read_text(encoding="utf-8")
-    assert "ensure_group_member()" in bootstrap
+    assert "group_member()" in bootstrap
     assert "id -nG \"${member}\"" in bootstrap
-    assert bootstrap.count("usermod --append --groups") == 1
-    assert 'ensure_group_member "${shadow_member}" hermesshadow' in bootstrap
+    assert bootstrap.count("usermod --append --groups") == 2
+    assert 'if ! group_member "${shadow_member}" hermesshadow; then' in bootstrap
+    assert 'usermod --append --groups hermesshadow "${shadow_member}"' in bootstrap
     assert (
-        'ensure_group_member "${functional_member}" "${FUNCTIONAL_GROUP}"'
+        'if ! group_member "${functional_member}" "${FUNCTIONAL_GROUP}"; then'
         in bootstrap
     )
