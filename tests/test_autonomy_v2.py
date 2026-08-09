@@ -1026,6 +1026,105 @@ def failed_two_node_graph(
     return config, state, artifacts, failure_id, root_id
 
 
+def transitive_repair_graph(tmp_path: Path, *, reviewer: bool = False):
+    config, state, _, failure_id, root_id = failed_two_node_graph(tmp_path)
+    if reviewer:
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET role='security-reviewer', "
+                "capability_profile='reviewer_readonly', stage_key='security-review' "
+                "WHERE task_id='T-FAILNODEA'"
+            )
+
+    def add_repair(task_id: str, source_id: str, graph_status: str) -> None:
+        source = state.get_task(source_id)
+        assert source is not None
+        state.add_task(
+            task_id=task_id, product_id="product-autonomy",
+            title=f"Repair {source_id}", role="builder",
+            output_schema="attempt-result.schema.json", stage_key="repair",
+            contract_ref=f"evidence/task-{task_id}.json", priority=200,
+            graph_status=graph_status, parent_task_id=source_id,
+            root_task_id=str(source["root_task_id"]),
+            source_task_id=source_id, plan_id=str(source["plan_id"]),
+            plan_node_id=f"A:{task_id}",
+            root_context_ref=str(source["root_context_ref"]),
+            active_context_ref=f"evidence/task-{task_id}.json",
+            failure_id=failure_id, capability_profile="builder_workspace",
+            hypothesis_id=str(source["hypothesis_id"] or "") or None,
+            supersedes_task_id=source_id,
+        )
+
+    add_repair("T-FIRST-REPAIR", "T-FAILNODEA", "FAILED_SEMANTIC")
+    add_repair("T-SECOND-REPAIR", "T-FIRST-REPAIR", "READY")
+    return config, state, root_id
+
+
+@pytest.mark.parametrize("reviewer", [False, True])
+def test_accepted_repair_closes_transitive_chain_without_spending_budget(tmp_path: Path, reviewer: bool) -> None:
+    _, state, _ = transitive_repair_graph(tmp_path, reviewer=reviewer)
+    try:
+        budget_sql = "SELECT semantic_budget,attempts_used FROM hypotheses ORDER BY hypothesis_id"
+        before = [tuple(row) for row in state._connection.execute(budget_sql)]
+        claimed = state.claim_task(worker_id="transitive-repair-worker")
+        assert claimed is not None and claimed["task_id"] == "T-SECOND-REPAIR"
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-SECOND-REPAIR", worker_id="transitive-repair-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_plan_revision=1, status="ACCEPTED",
+                idempotency_key=sha256_text(f"transitive-repair:{reviewer}"),
+                result_ref="internal://transitive-repair",
+                result_digest=sha256_text("transitive-repair"),
+            )
+        )
+        assert state.get_task("T-FIRST-REPAIR")["graph_status"] == "SUPERSEDED"
+        expected = "READY" if reviewer else "SUPERSEDED"
+        assert state.get_task("T-FAILNODEA")["graph_status"] == expected
+        downstream = "BLOCKED_DEPENDENCY" if reviewer else "READY"
+        assert state.get_task("T-FAILNODEB")["graph_status"] == downstream
+        assert [tuple(row) for row in state._connection.execute(budget_sql)] == before
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize(
+    ("boundary", "message"),
+    [("cycle", "cycle"), ("plan", "plan boundary"), ("product", "product boundary")],
+)
+def test_transitive_repair_chain_boundary_failure_is_atomic(tmp_path: Path, boundary: str, message: str) -> None:
+    _, state, root_id = transitive_repair_graph(tmp_path)
+    try:
+        target = "T-SECOND-REPAIR" if boundary == "cycle" else root_id
+        if boundary == "product":
+            create_v2_product(state, product_id="foreign-product")
+            state.add_task(
+                task_id="T-FOREIGN", product_id="foreign-product",
+                title="Foreign task", graph_status="FAILED_SEMANTIC"
+            )
+            target = "T-FOREIGN"
+        with state._lock, state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET supersedes_task_id=? WHERE task_id='T-FIRST-REPAIR'",
+                (target,),
+            )
+        claimed = state.claim_task(worker_id="boundary-worker")
+        assert claimed is not None and claimed["task_id"] == "T-SECOND-REPAIR"
+        with pytest.raises(ValueError, match=message):
+            state.commit_task_outcome(
+                TaskOutcome(
+                    task_id="T-SECOND-REPAIR", worker_id="boundary-worker",
+                    lease_token=str(claimed["lease_token"]), expected_plan_revision=1,
+                    idempotency_key=sha256_text(f"boundary:{boundary}"), status="ACCEPTED",
+                    result_ref="internal://boundary", result_digest=sha256_text("boundary")
+                )
+            )
+        assert state.get_task("T-SECOND-REPAIR")["graph_status"] == "CLAIMED"
+        assert state.get_task("T-FIRST-REPAIR")["graph_status"] == "FAILED_SEMANTIC"
+    finally:
+        state.close()
+
+
 def test_AUT_P0_005_lineage_is_preserved_through_repair(tmp_path: Path) -> None:
     config, state, artifacts, failure_id, root_id = failed_two_node_graph(tmp_path)
     try:

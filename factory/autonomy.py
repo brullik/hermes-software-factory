@@ -1929,6 +1929,66 @@ class AutonomyStore:
         )
         return failure_ids
 
+    @staticmethod
+    def _supersession_chain(
+        connection: sqlite3.Connection,
+        task: sqlite3.Row,
+    ) -> tuple[sqlite3.Row, ...]:
+        supersedes_task_id = str(task["supersedes_task_id"] or "")
+        if not supersedes_task_id:
+            return ()
+        product_id = str(task["product_id"])
+        plan_id = task["plan_id"]
+        transitive_repair = bool(
+            str(task["stage_key"] or "") == "repair"
+            and str(task["role"] or "") not in _REVIEW_PROFILE_ROLES
+            and str(task["capability_profile"] or "") != "reviewer_readonly"
+        )
+        plan_task_count = int(
+            connection.execute(
+                """SELECT COUNT(*) FROM tasks
+                    WHERE product_id=?
+                      AND ((plan_id IS NULL AND ? IS NULL) OR plan_id=?)""",
+                (product_id, plan_id, plan_id),
+            ).fetchone()[0]
+        )
+        chain: list[sqlite3.Row] = []
+        visited = {str(task["task_id"])}
+        while supersedes_task_id:
+            if supersedes_task_id in visited:
+                raise ValueError("supersession chain contains a cycle")
+            if len(chain) >= plan_task_count:
+                raise ValueError("supersession chain exceeds its plan task bound")
+            ancestor = connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?",
+                (supersedes_task_id,),
+            ).fetchone()
+            if ancestor is None:
+                raise ValueError("supersession ancestor is missing")
+            if str(ancestor["product_id"]) != product_id:
+                raise ValueError("supersession chain crosses product boundary")
+            if ancestor["plan_id"] != plan_id:
+                raise ValueError("supersession chain crosses plan boundary")
+            chain.append(ancestor)
+            visited.add(supersedes_task_id)
+            if not transitive_repair:
+                break
+            if (
+                str(ancestor["role"] or "") in _REVIEW_PROFILE_ROLES
+                and str(ancestor["capability_profile"] or "")
+                == "reviewer_readonly"
+            ):
+                break
+            next_task_id = str(ancestor["supersedes_task_id"] or "")
+            if not next_task_id:
+                break
+            if str(ancestor["stage_key"] or "") != "repair":
+                raise ValueError(
+                    "supersession chain continues through a non-repair task"
+                )
+            supersedes_task_id = next_task_id
+        return tuple(chain)
+
     def commit_task_outcome(
         self,
         outcome: TaskOutcome,
@@ -2199,51 +2259,77 @@ class AutonomyStore:
                         )
                     supersedes_task_id = str(task["supersedes_task_id"] or "")
                     if supersedes_task_id:
-                        superseded_task = self.connection.execute(
-                            """SELECT role,capability_profile FROM tasks
-                                WHERE task_id=? AND product_id=?""",
-                            (
-                                supersedes_task_id,
-                                str(task["product_id"]),
-                            ),
-                        ).fetchone()
+                        supersession_chain = self._supersession_chain(
+                            self.connection,
+                            task,
+                        )
+                        chain_task_ids = [
+                            str(ancestor["task_id"])
+                            for ancestor in supersession_chain
+                        ]
+                        reviewer_task = (
+                            supersession_chain[-1]
+                            if supersession_chain
+                            and str(supersession_chain[-1]["role"] or "")
+                            in _REVIEW_PROFILE_ROLES
+                            and str(
+                                supersession_chain[-1]["capability_profile"] or ""
+                            )
+                            == "reviewer_readonly"
+                            else None
+                        )
                         reviewer_revalidation = bool(
-                            superseded_task is not None
+                            reviewer_task is not None
                             and str(task["role"] or "") == "builder"
                             and str(task["stage_key"] or "") == "repair"
-                            and str(superseded_task["role"] or "")
-                            in {"security-reviewer", "independent-reviewer"}
-                            and str(superseded_task["capability_profile"] or "")
-                            == "reviewer_readonly"
                         )
-                        sibling_failure_ids = [
-                            str(row[0])
-                            for row in self.connection.execute(
-                                """SELECT failure_id FROM failures
-                                   WHERE product_id=? AND task_id=?
-                                     AND status!='RESOLVED'
-                                   ORDER BY first_seen_at, failure_id""",
-                                (
-                                    str(task["product_id"]),
-                                    supersedes_task_id,
-                                ),
-                            ).fetchall()
+                        if reviewer_task is not None and not reviewer_revalidation:
+                            raise ValueError(
+                                "reviewer supersession requires builder revalidation"
+                            )
+                        reviewer_task_id = (
+                            str(reviewer_task["task_id"])
+                            if reviewer_task is not None
+                            else None
+                        )
+                        superseded_task_ids = [
+                            task_id
+                            for task_id in chain_task_ids
+                            if task_id != reviewer_task_id
                         ]
                         resolved_sibling_ids: set[str] = set()
-                        for sibling_failure_id in sibling_failure_ids:
-                            resolved_sibling_ids.update(
-                                self._resolve_failure_chain(
-                                    self.connection,
-                                    sibling_failure_id,
-                                    resolved_at=now,
+                        for ancestor_task_id in chain_task_ids:
+                            sibling_failure_ids = [
+                                str(row[0])
+                                for row in self.connection.execute(
+                                    """SELECT failure_id FROM failures
+                                       WHERE product_id=? AND task_id=?
+                                         AND status!='RESOLVED'
+                                       ORDER BY first_seen_at, failure_id""",
+                                    (
+                                        str(task["product_id"]),
+                                        ancestor_task_id,
+                                    ),
+                                ).fetchall()
+                            ]
+                            for sibling_failure_id in sibling_failure_ids:
+                                resolved_sibling_ids.update(
+                                    self._resolve_failure_chain(
+                                        self.connection,
+                                        sibling_failure_id,
+                                        resolved_at=now,
+                                    )
                                 )
-                            )
-                        redundant_repair_ids = [
-                            str(row[0])
+                        excluded_repair_ids = set(chain_task_ids)
+                        excluded_repair_ids.add(outcome.task_id)
+                        redundant_repair_ids: list[str] = []
+                        for ancestor_task_id in chain_task_ids:
                             for row in self.connection.execute(
                                 """SELECT task_id FROM tasks
                                    WHERE product_id=? AND supersedes_task_id=?
-                                     AND task_id!=? AND stage_key='repair'
+                                     AND stage_key='repair'
+                                     AND ((plan_id IS NULL AND ? IS NULL)
+                                          OR plan_id=?)
                                      AND graph_status IN (
                                          'BLOCKED_DEPENDENCY',
                                          'BLOCKED_CAPABILITY',
@@ -2256,11 +2342,17 @@ class AutonomyStore:
                                    ORDER BY created_at, task_id""",
                                 (
                                     str(task["product_id"]),
-                                    supersedes_task_id,
-                                    outcome.task_id,
+                                    ancestor_task_id,
+                                    task["plan_id"],
+                                    task["plan_id"],
                                 ),
-                            ).fetchall()
-                        ]
+                            ).fetchall():
+                                redundant_task_id = str(row[0])
+                                if (
+                                    redundant_task_id not in excluded_repair_ids
+                                    and redundant_task_id not in redundant_repair_ids
+                                ):
+                                    redundant_repair_ids.append(redundant_task_id)
                         if redundant_repair_ids:
                             placeholders = ",".join(
                                 "?" for _ in redundant_repair_ids
@@ -2283,7 +2375,42 @@ class AutonomyStore:
                                     *redundant_repair_ids,
                                 ),
                             )
+                        transitive_superseded_ids = superseded_task_ids
+                        if not reviewer_revalidation:
+                            transitive_superseded_ids = superseded_task_ids[1:]
+                        if transitive_superseded_ids:
+                            placeholders = ",".join(
+                                "?" for _ in transitive_superseded_ids
+                            )
+                            self.connection.execute(
+                                f"""UPDATE tasks
+                                   SET graph_status='SUPERSEDED', status='DONE',
+                                       updated_at=?
+                                   WHERE task_id IN ({placeholders})
+                                     AND product_id=?
+                                     AND graph_status NOT IN
+                                         ('ACCEPTED','CANCELLED')""",
+                                (
+                                    now,
+                                    *transitive_superseded_ids,
+                                    str(task["product_id"]),
+                                ),
+                            )
+                            for ancestor_task_id in transitive_superseded_ids:
+                                self.connection.execute(
+                                    """INSERT OR IGNORE INTO task_edges
+                                       (plan_id, from_task_id, to_task_id,
+                                        edge_type, required, created_at)
+                                       VALUES (?, ?, ?, 'supersedes', 0, ?)""",
+                                    (
+                                        str(task["plan_id"]),
+                                        ancestor_task_id,
+                                        outcome.task_id,
+                                        now,
+                                    ),
+                                )
                         if reviewer_revalidation:
+                            assert reviewer_task_id is not None
                             self.connection.execute(
                                 """UPDATE tasks
                                    SET graph_status='READY', status='PENDING',
@@ -2302,7 +2429,7 @@ class AutonomyStore:
                                      AND graph_status NOT IN ('ACCEPTED','CANCELLED')""",
                                 (
                                     now,
-                                    supersedes_task_id,
+                                    reviewer_task_id,
                                     str(task["product_id"]),
                                 ),
                             )
@@ -2314,17 +2441,17 @@ class AutonomyStore:
                                 (
                                     str(task["plan_id"]),
                                     outcome.task_id,
-                                    supersedes_task_id,
+                                    reviewer_task_id,
                                     now,
                                 ),
                             )
                             self.state._record_event(
                                 str(task["product_id"]),
-                                supersedes_task_id,
+                                reviewer_task_id,
                                 "reviewer_revalidation_scheduled",
                                 {
                                     "accepted_repair_task_id": outcome.task_id,
-                                    "reviewer_task_id": supersedes_task_id,
+                                    "reviewer_task_id": reviewer_task_id,
                                     "fresh_reviewer_acceptance_required": True,
                                 },
                             )
@@ -2353,18 +2480,26 @@ class AutonomyStore:
                                     now,
                                 ),
                             )
-                        if resolved_sibling_ids or redundant_repair_ids:
+                        if (
+                            resolved_sibling_ids
+                            or redundant_repair_ids
+                            or len(chain_task_ids) > 1
+                        ):
                             self.state._record_event(
                                 str(task["product_id"]),
                                 outcome.task_id,
                                 "redundant_repair_work_suppressed",
                                 {
                                     "superseded_task_id": supersedes_task_id,
+                                    "superseded_task_ids": superseded_task_ids,
                                     "accepted_replacement_task_id": outcome.task_id,
                                     "resolved_failure_ids": sorted(
                                         resolved_sibling_ids
                                     ),
                                     "suppressed_task_ids": redundant_repair_ids,
+                                    "reviewer_revalidation_task_id": (
+                                        reviewer_task_id
+                                    ),
                                 },
                             )
                 self._recompute_frontier(
