@@ -2,17 +2,17 @@
   "allowed_paths": [
     ".hermes/task-scope-contract.json",
     "SHA256SUMS",
-    "factory/autonomy.py",
-    "tests/test_autonomy_v2.py"
+    "factory/q6_5.py",
+    "tests/test_working_factory.py"
   ],
-  "approval_evidence_digest": "86221ca8145736696681a5fac14fcfb8873ca6998d6cfff9fb45f684a2e14ba8",
-  "approval_evidence_ref": "artifact://desktop-bootstrap/86221ca8145736696681a5fac14fcfb8873ca6998d6cfff9fb45f684a2e14ba8",
+  "approval_evidence_digest": "b1637b65676f9fa9f1611cd162793f74ae024a477812a547b98710d9443a8f31",
+  "approval_evidence_ref": "artifact://desktop-bootstrap/b1637b65676f9fa9f1611cd162793f74ae024a477812a547b98710d9443a8f31",
   "approved_by": "desktop-bootstrap",
-  "branch": "codex/vps-pre-q8-transitive-repair-closure-20260809",
-  "contract_digest": "0fb4519fefb5d3b75b84c4cabf139d789c1b4e1636dd87c4561cdb333f7fe0e0",
-  "contract_id": "autonomous-factory.pre-q8-transitive-repair-closure.20260809",
-  "created_at": "2026-08-09T15:40:25Z",
-  "expires_at": "2026-09-08T15:40:25Z",
+  "branch": "codex/vps-q65-provider-restart-idempotence-20260809",
+  "contract_digest": "d82be2c6af7f9c2bdbeacc852c53dac56c5f67dacd6dce1f6eda04f516706088",
+  "contract_id": "autonomous-factory.q65-provider-restart-idempotence.20260809",
+  "created_at": "2026-08-09T18:41:00Z",
+  "expires_at": "2026-09-08T18:41:00Z",
   "forbidden_paths": [
     ".git/**",
     ".github/**",
@@ -29,14 +29,14 @@
     "policies/**",
     "scripts/**"
   ],
-  "max_additions": 300,
+  "max_additions": 480,
   "max_changed_files": 4,
-  "max_deletions": 80,
+  "max_deletions": 120,
   "original_goal_digest": "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497",
-  "parent_contract_digest": "e0181903535ae4a44937745cb643465dbf3752eb524d9ce10a2258e753e343ba",
+  "parent_contract_digest": "0fb4519fefb5d3b75b84c4cabf139d789c1b4e1636dd87c4561cdb333f7fe0e0",
   "product_id": "hermes-software-factory",
-  "rationale": "Repair only the confirmed repair-of-repair liveness defect in AutonomyStore.commit_task_outcome. An accepted non-reviewer repair may close its bounded same-product/same-plan supersession ancestors so the original dependency is satisfied. Preserve reviewer revalidation, reject cycles or cross-plan/product chains fail-closed, resolve only the proven failure chain, and preserve finite budgets. Add focused regressions and run full controller parity. Request ELEVEN and its failed PRE-Q8 epoch are immutable/non-retryable; only a newly merged exact main may receive one fresh deployment request. Do not touch Stable, databases, systemd, brokers, credentials, Telegram, PR173 evidence, gates, or recursive-improvement authority.",
+  "rationale": "Repair only the confirmed Q6.5 provider reconciliation defect. Preserve exact JSON and semantic-ID equality. Permit at most two structured-output attempts per tier across process restarts; persist immutable sanitized failure and validated success receipts, reuse a validated tier success without another provider call, reject orphan/conflicting evidence fail-closed, and retain no raw invalid output. Add focused restart, finite-budget, sanitization, conflict, and no-retry-on-auth-failure tests, then run full controller parity. Candidate TWELVE deployment request and epoch RE-4388630D9EEA32048F767B0D remain immutable and non-retryable; only a newly merged exact main may receive one fresh deployment request. Do not touch Stable, databases, systemd, brokers, credentials, Telegram behavior, PR173 evidence, gates, or recursive-improvement authority.",
   "schema_version": "1.0",
-  "task_id": "codex-vps-pre-q8-transitive-repair-closure",
-  "trusted_base_sha": "0ba5cd2eb0313d11d378942afb7b4a4d7c34c602"
+  "task_id": "codex-vps-q65-provider-restart-idempotence",
+  "trusted_base_sha": "2ffe4c19abebf67897351e044548840bcd2529c5"
 }
