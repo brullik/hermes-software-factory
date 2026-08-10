@@ -129,6 +129,26 @@ class StrictPrepareRunner:
         )
 
 
+class StrictFailureProbeRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, str], Path, float]] = []
+        self.responses: dict[str, subprocess.CompletedProcess[str]] = {}
+
+    def __call__(
+        self,
+        argv: list[str],
+        environment: dict[str, str],
+        cwd: Path,
+        timeout_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append((argv, environment, cwd, timeout_seconds))
+        scenario_id = Path(argv[-2]).parent.name
+        return self.responses.get(
+            scenario_id,
+            subprocess.CompletedProcess(argv, 1, "", "sanitizer unavailable"),
+        )
+
+
 def _merge_receipt(receipt_root: Path) -> str:
     core: dict[str, Any] = {
         "credential_epoch_id": "CE-CODEX-TEST-1",
@@ -183,6 +203,7 @@ def _fixture(
     CandidateDeploymentRequest,
     StrictGitRunner,
     StrictPrepareRunner,
+    StrictFailureProbeRunner,
 ]:
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
@@ -199,6 +220,8 @@ def _fixture(
     remote = "https://example.invalid/canonical.git"
     git_runner = StrictGitRunner(source, remote)
     prepare_runner = StrictPrepareRunner()
+    failure_probe_runner = StrictFailureProbeRunner()
+    pre_q8_state_root = tmp_path / "pre-q8"
     broker = CandidateDeploymentBroker(
         source_root=source,
         state_root=state,
@@ -208,19 +231,25 @@ def _fixture(
         expected_remote_url=remote,
         git_runner=git_runner,
         prepare_runner=prepare_runner,
+        failure_probe_runner=failure_probe_runner,
+        pre_q8_state_root=pre_q8_state_root,
+        verifier_python=tmp_path / "verifier-python",
     )
-    return broker, _request(digest), git_runner, prepare_runner
+    return broker, _request(digest), git_runner, prepare_runner, failure_probe_runner
 
 
 def test_exact_main_merge_invokes_only_prepare_and_replays_receipt(tmp_path: Path) -> None:
-    broker, request, _git, prepare = _fixture(tmp_path)
+    broker, request, _git, prepare, failure_probe = _fixture(tmp_path)
 
     first = broker.execute(request.__dict__)
     second = broker.execute(request.__dict__)
 
     assert first == second
     assert first["result"] == "PASS"
+    assert first["failure_classification"] == ""
+    assert first["failure_evidence_ref"] == ""
     assert len(prepare.calls) == 1
+    assert failure_probe.calls == []
     argv, environment, cwd, timeout = prepare.calls[0]
     assert argv == [str(broker.source_root / PREPARE_SCRIPT)]
     assert cwd == broker.source_root
@@ -241,7 +270,7 @@ def test_exact_main_merge_invokes_only_prepare_and_replays_receipt(tmp_path: Pat
 
 
 def test_secret_free_client_sends_only_the_typed_request(tmp_path: Path) -> None:
-    broker, request, _git, _prepare = _fixture(tmp_path)
+    broker, request, _git, _prepare, _failure_probe = _fixture(tmp_path)
     receipt = broker.execute(request.__dict__)
     socket_path = tmp_path / "client.sock"
     observed: list[dict[str, str]] = []
@@ -281,7 +310,7 @@ def test_request_rejects_every_generic_authority_field(extra_field: str) -> None
 
 
 def test_stale_non_main_commit_is_rejected_before_prepare(tmp_path: Path) -> None:
-    broker, request, git_runner, prepare = _fixture(tmp_path)
+    broker, request, git_runner, prepare, _failure_probe = _fixture(tmp_path)
     git_runner.remote_commit = "9" * 40
     with pytest.raises(CandidateDeploymentError, match="origin_main_commit_differs"):
         broker.execute(request.__dict__)
@@ -289,7 +318,7 @@ def test_stale_non_main_commit_is_rejected_before_prepare(tmp_path: Path) -> Non
 
 
 def test_dirty_or_writable_source_checkout_is_rejected(tmp_path: Path) -> None:
-    broker, request, git_runner, prepare = _fixture(tmp_path)
+    broker, request, git_runner, prepare, _failure_probe = _fixture(tmp_path)
     git_runner.dirty = True
     with pytest.raises(CandidateDeploymentError, match="source_checkout_not_clean"):
         broker.execute(request.__dict__)
@@ -304,7 +333,7 @@ def test_dirty_or_writable_source_checkout_is_rejected(tmp_path: Path) -> None:
 
 
 def test_forged_merge_receipt_and_tree_are_rejected(tmp_path: Path) -> None:
-    broker, request, _git, prepare = _fixture(tmp_path)
+    broker, request, _git, prepare, _failure_probe = _fixture(tmp_path)
     forged = replace(request, merge_receipt_digest="8" * 64)
     with pytest.raises(CandidateDeploymentError, match="merge_receipt_digest_differs"):
         broker.execute(forged.__dict__)
@@ -316,7 +345,7 @@ def test_forged_merge_receipt_and_tree_are_rejected(tmp_path: Path) -> None:
 
 
 def test_replay_conflict_and_new_request_cannot_repeat_commit(tmp_path: Path) -> None:
-    broker, request, _git, prepare = _fixture(tmp_path)
+    broker, request, _git, prepare, _failure_probe = _fixture(tmp_path)
     broker.execute(request.__dict__)
     conflict = replace(request, tree_sha="6" * 40)
     with pytest.raises(CandidateDeploymentError, match="deployment_replay_conflict"):
@@ -330,7 +359,7 @@ def test_replay_conflict_and_new_request_cannot_repeat_commit(tmp_path: Path) ->
 
 
 def test_exclusive_lock_rejects_concurrent_deployment(tmp_path: Path) -> None:
-    broker, request, _git, _prepare = _fixture(tmp_path)
+    broker, request, _git, _prepare, _failure_probe = _fixture(tmp_path)
     broker._prepare_state()
     descriptor = os.open(broker.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -342,7 +371,7 @@ def test_exclusive_lock_rejects_concurrent_deployment(tmp_path: Path) -> None:
 
 
 def test_result_receipt_redacts_output_and_failure_is_immutable(tmp_path: Path) -> None:
-    broker, request, _git, prepare = _fixture(tmp_path)
+    broker, request, _git, prepare, failure_probe = _fixture(tmp_path)
     marker = "ghp_" + "A" * 24
     prepare.returncode = 1
     prepare.stderr = f"bootstrap failed near {marker}"
@@ -352,8 +381,83 @@ def test_result_receipt_redacts_output_and_failure_is_immutable(tmp_path: Path) 
     assert marker not in encoded
     assert receipt["stdout_tail"] == ""
     assert receipt["stderr_tail"] == ""
+    assert receipt["failure_classification"] == "sanitized_failure_evidence_unavailable"
+    expected_evidence = {
+        "schema_version": "1.0",
+        "commit_sha": request.commit_sha,
+        "tree_sha": request.tree_sha,
+        "classification": "sanitized_failure_evidence_unavailable",
+    }
+    assert receipt["failure_evidence_ref"] == (
+        "artifact://candidate-deployment-failure/"
+        + sha256_text(stable_json(expected_evidence))
+    )
     assert receipt["redactions"] == [{"type": "github_token", "count": 1}]
+    assert failure_probe.calls == []
     assert not (broker.result_root / f"{request.request_id}.json").stat().st_mode & 0o222
+
+
+def test_failed_receipt_uses_only_allowlisted_sanitized_cause_and_replays(
+    tmp_path: Path,
+) -> None:
+    broker, request, _git, prepare, failure_probe = _fixture(tmp_path)
+    database = (
+        broker.pre_q8_state_root / request.commit_sha / "deploy-rollback" / "controller.db"
+    )
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"synthetic fixture")
+    raw_marker = "raw-provider-payload-must-not-cross-boundary"
+    truth = {
+        "product_status": "FAILED_SAFE",
+        "scenario_status": "TERMINAL_FAILURE",
+        "task_statuses": ["DONE", "FAILED_SAFE"],
+        "failure_reasons": [raw_marker, "model_requested_repair"],
+        "open_incidents": ["path_governor_problem_budget_exhausted"],
+        "completion_manifest_count": 0,
+        "liveness_finding": False,
+    }
+    command = ["candidate-truth"]
+    failure_probe.responses["deploy-rollback"] = subprocess.CompletedProcess(
+        command, 0, stable_json(truth), ""
+    )
+    prepare.returncode = 1
+    prepare.stdout = ""
+    prepare.stderr = ""
+
+    first = broker.execute(request.__dict__)
+    second = broker.execute(request.__dict__)
+
+    assert first == second
+    assert first["result"] == "FAILED"
+    assert first["stdout_tail"] == first["stderr_tail"] == ""
+    assert first["failure_classification"] == "path_governor_problem_budget_exhausted"
+    safe_evidence = {
+        "schema_version": "1.0",
+        "commit_sha": request.commit_sha,
+        "tree_sha": request.tree_sha,
+        "classification": "path_governor_problem_budget_exhausted",
+    }
+    assert first["failure_evidence_ref"] == (
+        "artifact://candidate-deployment-failure/"
+        + sha256_text(stable_json(safe_evidence))
+    )
+    assert raw_marker not in stable_json(first)
+    assert len(prepare.calls) == 1
+    assert len(failure_probe.calls) == 1
+    argv, environment, cwd, timeout = failure_probe.calls[0]
+    assert argv[:5] == [
+        "/usr/sbin/runuser",
+        "-u",
+        "hermesverifier",
+        "--",
+        str(broker.verifier_python),
+    ]
+    assert argv[5:7] == ["-m", "scripts.candidate_truth"]
+    assert argv[-2:] == [str(database), "--worker-idle"]
+    assert cwd == broker.source_root
+    assert timeout == 30.0
+    assert not any("telegram" in item or "notif" in item for item in argv)
+    assert not any("telegram" in key.lower() or "notif" in key.lower() for key in environment)
 
 
 def test_linux_peer_credentials_are_exact() -> None:

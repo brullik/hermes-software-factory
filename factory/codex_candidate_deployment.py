@@ -17,11 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from factory.common import redact_text, sha256_text, stable_json, utc_now
+from factory.failure_catalog import failure_disposition
+from factory.functional_readiness import PRE_Q8_SCENARIOS
 
 CANONICAL_REPOSITORY = "brullik/hermes-software-factory"
 CANONICAL_REMOTE = "https://github.com/brullik/hermes-software-factory.git"
 DEPLOY_OPERATION = "candidate.deploy"
 PREPARE_SCRIPT = "scripts/bootstrap/prepare-candidate-plane.sh"
+PRE_Q8_STATE_ROOT = Path("/var/lib/hermes-factory-pre-q8")
+VERIFIER_PYTHON = Path("/opt/hermes-factory-verifier/venv/bin/python")
 
 _SHA = re.compile(r"[a-f0-9]{40}\Z")
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
@@ -80,8 +84,24 @@ _RESULT_FIELDS = {
     "stderr_digest",
     "stdout_tail",
     "stderr_tail",
+    "failure_classification",
+    "failure_evidence_ref",
     "redactions",
     "receipt_digest",
+}
+_CANDIDATE_TRUTH_FIELDS = {
+    "product_status",
+    "scenario_status",
+    "task_statuses",
+    "failure_reasons",
+    "open_incidents",
+    "completion_manifest_count",
+    "liveness_finding",
+}
+_TERMINAL_SCENARIO_STATUSES = {"TERMINAL_FAILURE", "LIVENESS_FINDING"}
+_FALLBACK_FAILURE_CLASSIFICATIONS = {
+    "candidate_liveness_finding",
+    "sanitized_failure_evidence_unavailable",
 }
 
 
@@ -222,6 +242,10 @@ class CandidateDeploymentBroker:
         git_runner: GitRunner = _default_git_runner,
         prepare_runner: PrepareRunner = _default_prepare_runner,
         prepare_timeout_seconds: float = 21_600.0,
+        failure_probe_runner: PrepareRunner = _default_prepare_runner,
+        failure_probe_timeout_seconds: float = 30.0,
+        pre_q8_state_root: Path = PRE_Q8_STATE_ROOT,
+        verifier_python: Path = VERIFIER_PYTHON,
     ) -> None:
         self.state_root = state_root.resolve()
         self.source_root = source_root.resolve()
@@ -234,6 +258,10 @@ class CandidateDeploymentBroker:
         self.git_runner = git_runner
         self.prepare_runner = prepare_runner
         self.prepare_timeout_seconds = prepare_timeout_seconds
+        self.failure_probe_runner = failure_probe_runner
+        self.failure_probe_timeout_seconds = failure_probe_timeout_seconds
+        self.pre_q8_state_root = pre_q8_state_root.resolve()
+        self.verifier_python = verifier_python
         self.result_root = self.state_root / "receipts"
         self.intent_root = self.state_root / "intents"
         self.commit_guard_root = self.state_root / "commit-guards"
@@ -542,6 +570,121 @@ class CandidateDeploymentBroker:
         except FileExistsError as error:
             raise CandidateDeploymentError("deployment_commit_already_attempted") from error
 
+    @staticmethod
+    def _failure_reference(request: CandidateDeploymentRequest, classification: str) -> str:
+        evidence = {
+            "schema_version": "1.0",
+            "commit_sha": request.commit_sha,
+            "tree_sha": request.tree_sha,
+            "classification": classification,
+        }
+        return "artifact://candidate-deployment-failure/" + sha256_text(
+            stable_json(evidence)
+        )
+
+    @staticmethod
+    def _candidate_truth(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or set(value) != _CANDIDATE_TRUTH_FIELDS:
+            return None
+        if not all(
+            isinstance(value[field], str)
+            for field in ("product_status", "scenario_status")
+        ):
+            return None
+        for field in ("task_statuses", "failure_reasons", "open_incidents"):
+            items = value[field]
+            if (
+                not isinstance(items, list)
+                or len(items) > 1_000
+                or not all(isinstance(item, str) for item in items)
+            ):
+                return None
+        if (
+            not isinstance(value["completion_manifest_count"], int)
+            or isinstance(value["completion_manifest_count"], bool)
+            or value["completion_manifest_count"] < 0
+            or not isinstance(value["liveness_finding"], bool)
+        ):
+            return None
+        return value
+
+    def _sanitized_failure_evidence(
+        self, request: CandidateDeploymentRequest
+    ) -> tuple[str, str]:
+        fallback = "sanitized_failure_evidence_unavailable"
+        classification = fallback
+        for scenario_id in PRE_Q8_SCENARIOS:
+            database = (
+                self.pre_q8_state_root
+                / request.commit_sha
+                / scenario_id
+                / "controller.db"
+            )
+            try:
+                metadata = database.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                break
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or database.is_symlink()
+                or metadata.st_nlink != 1
+            ):
+                break
+            command = [
+                "/usr/sbin/runuser",
+                "-u",
+                "hermesverifier",
+                "--",
+                str(self.verifier_python),
+                "-m",
+                "scripts.candidate_truth",
+                str(database),
+                "--worker-idle",
+            ]
+            try:
+                result = self.failure_probe_runner(
+                    command,
+                    self._environment(),
+                    self.source_root,
+                    self.failure_probe_timeout_seconds,
+                )
+            except (OSError, subprocess.SubprocessError):
+                break
+            if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 1_048_576:
+                break
+            try:
+                truth = self._candidate_truth(json.loads(result.stdout))
+            except json.JSONDecodeError:
+                truth = None
+            if truth is None:
+                break
+            scenario_status = str(truth["scenario_status"])
+            product_status = str(truth["product_status"])
+            if product_status == "COMPLETED" and scenario_status in {"PASS", "VERIFY_FAILED"}:
+                continue
+            if scenario_status not in _TERMINAL_SCENARIO_STATUSES:
+                continue
+            registered_reasons = [
+                reason
+                for reason in [*truth["open_incidents"], *truth["failure_reasons"]]
+                if failure_disposition(reason).registered
+            ]
+            if registered_reasons:
+                classification = registered_reasons[0]
+            elif scenario_status == "LIVENESS_FINDING":
+                classification = "candidate_liveness_finding"
+            else:
+                classification = fallback
+            break
+        if (
+            not failure_disposition(classification).registered
+            and classification not in _FALLBACK_FAILURE_CLASSIFICATIONS
+        ):
+            classification = fallback
+        return classification, self._failure_reference(request, classification)
+
     def _result_receipt(
         self,
         request: CandidateDeploymentRequest,
@@ -551,6 +694,11 @@ class CandidateDeploymentBroker:
     ) -> dict[str, Any]:
         stdout, stdout_redactions = redact_text(result.stdout[-16_384:])
         stderr, stderr_redactions = redact_text(result.stderr[-16_384:])
+        failure_classification, failure_evidence_ref = (
+            ("", "")
+            if result.returncode == 0
+            else self._sanitized_failure_evidence(request)
+        )
         core: dict[str, Any] = {
             "schema_version": "1.0",
             "request_id": request.request_id,
@@ -571,6 +719,8 @@ class CandidateDeploymentBroker:
             # Digests and typed redaction counts are sufficient for correlation.
             "stdout_tail": "",
             "stderr_tail": "",
+            "failure_classification": failure_classification,
+            "failure_evidence_ref": failure_evidence_ref,
             "redactions": [*stdout_redactions, *stderr_redactions],
         }
         return {**core, "receipt_digest": sha256_text(stable_json(core))}
