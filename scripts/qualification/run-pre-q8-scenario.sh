@@ -166,6 +166,7 @@ fi
 FAILURE_CLASS=CANDIDATE_PREPARE_FAILED
 run_as_candidate "${CANDIDATE_PYTHON}" -m scripts.canary_candidate \
   --config "${CANDIDATE_CONFIG}" prepare
+run_as_candidate /usr/bin/chmod 0660 -- "${CANDIDATE_DATABASE}"
 FAILURE_CLASS=CONTROLLER_UNIT_FAILED
 systemctl reset-failed "hermes-factory-pre-q8-controller@${SCENARIO_ID}.service" \
   "hermes-factory-pre-q8-worker@${SCENARIO_ID}.service" >/dev/null 2>&1 || true

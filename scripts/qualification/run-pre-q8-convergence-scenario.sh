@@ -135,6 +135,7 @@ fi
 FAILURE_CLASS=CANDIDATE_PREPARE_FAILED
 run_as_candidate "${CANDIDATE_PYTHON}" -m scripts.canary_candidate \
   --config "${CONFIG}" prepare >/dev/null
+run_as_candidate /usr/bin/chmod 0660 -- "${DATABASE}"
 run_as_verifier "${VERIFIER_PYTHON}" -m scripts.pre_q8_convergence \
   --database "${STATE_ROOT}/convergence.db" --run-id "${RUN_ID}" fresh \
   --config "${CONFIG}" --evidence-root "${EVIDENCE_ROOT}" >/dev/null

@@ -148,3 +148,22 @@ def test_pre_q8_runtime_units_share_sqlite_wal_with_verifier_group() -> None:
             encoding="utf-8"
         )
         assert "UMask=0007" in unit
+
+    runners = {
+        "run-pre-q8-convergence-scenario.sh": (
+            '--config "${CONFIG}" prepare',
+            'run_as_candidate /usr/bin/chmod 0660 -- "${DATABASE}"',
+            ' --run-id "${RUN_ID}" fresh',
+        ),
+        "run-pre-q8-scenario.sh": (
+            '--config "${CANDIDATE_CONFIG}" prepare',
+            'run_as_candidate /usr/bin/chmod 0660 -- "${CANDIDATE_DATABASE}"',
+            "FAILURE_CLASS=CONTROLLER_UNIT_FAILED",
+        ),
+    }
+    for runner_name, ordered_markers in runners.items():
+        runner = (
+            ROOT / "scripts" / "qualification" / runner_name
+        ).read_text(encoding="utf-8")
+        offsets = [runner.index(marker) for marker in ordered_markers]
+        assert offsets == sorted(offsets)
