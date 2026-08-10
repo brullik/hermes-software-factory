@@ -45,7 +45,8 @@ NO_PROGRESS_SECONDS="${PRE_Q8_CONVERGENCE_NO_PROGRESS_SECONDS:-1800}"
 run_as_candidate() {
   "${SETPRIV}" --reuid=hermescandidate --regid=hermescandidate --init-groups \
     --no-new-privs -- /usr/bin/env HOME=/var/lib/hermes-factory-candidate \
-    USER=hermescandidate LOGNAME=hermescandidate "$@"
+    USER=hermescandidate LOGNAME=hermescandidate \
+    HERMES_GITHUB_BROKER_SOCKET=/run/hermes-factory-github-broker/broker.sock "$@"
 }
 
 run_as_verifier() {
@@ -194,13 +195,18 @@ while true; do
   [[ "${WORKER_IDLE}" == true ]] && TRUTH_ARGS+=(--worker-idle)
   TRUTH_JSON="$(run_as_verifier "${VERIFIER_PYTHON}" \
     -m scripts.candidate_truth "${TRUTH_ARGS[@]}")"
-  SCENARIO_STATUS="$(printf '%s' "${TRUTH_JSON}" | "${VERIFIER_PYTHON}" -c \
-    'import json,sys; print(json.load(sys.stdin)["scenario_status"])')"
-  case "${SCENARIO_STATUS}" in
-    PASS) break ;;
-    TERMINAL_FAILURE) FAILURE_CLASS=PRODUCT_TERMINAL_FAILURE; exit 1 ;;
-    LIVENESS_FINDING) FAILURE_CLASS=CANDIDATE_LIVENESS_FAILURE; exit 1 ;;
-    VERIFY_FAILED|WAITING_CAPABILITY|RUNNING) ;;
+  DECISION_JSON="$(printf '%s' "${TRUTH_JSON}" | \
+    "${VERIFIER_PYTHON}" -m scripts.pre_q8_runtime completion-decision)"
+  DECISION_ACTION="$(printf '%s' "${DECISION_JSON}" | "${VERIFIER_PYTHON}" -c \
+    'import json,sys; print(json.load(sys.stdin)["action"])')"
+  case "${DECISION_ACTION}" in
+    VERIFY) break ;;
+    WAIT) ;;
+    FAIL)
+      FAILURE_CLASS="$(printf '%s' "${DECISION_JSON}" | "${VERIFIER_PYTHON}" -c \
+        'import json,sys; print(json.load(sys.stdin)["failure_class"])')"
+      exit 1
+      ;;
     *) FAILURE_CLASS=AUTHORITATIVE_STATE_UNKNOWN; exit 1 ;;
   esac
   if (( NOW - STARTED_AT >= TIMEOUT_SECONDS )); then
@@ -215,6 +221,10 @@ while true; do
   sleep 15
 done
 
+FAILURE_CLASS=RUNTIME_FREEZE_FAILED
+systemctl stop \
+  "hermes-factory-pre-q8-convergence-worker@${UNIT_INSTANCE}.service" \
+  "hermes-factory-pre-q8-convergence-controller@${UNIT_INSTANCE}.service"
 FAILURE_CLASS=OBSERVATION_VERIFICATION_FAILED
 run_as_verifier "${VERIFIER_PYTHON}" -m scripts.pre_q8_convergence \
   --database "${STATE_ROOT}/convergence.db" --run-id "${RUN_ID}" observe \

@@ -369,6 +369,39 @@ def worker_observation(
     }
 
 
+def completion_decision(value: Mapping[str, Any]) -> dict[str, str | None]:
+    """Route Candidate truth to wait, failure, or independent verification."""
+
+    scenario_status = str(value.get("scenario_status") or "")
+    product_status = str(value.get("product_status") or "")
+    try:
+        manifest_count = int(value.get("completion_manifest_count", 0))
+    except (TypeError, ValueError) as error:
+        raise RuntimeControlError("completion manifest count is invalid") from error
+    if manifest_count < 0:
+        raise RuntimeControlError("completion manifest count is invalid")
+    if scenario_status in {"PASS", "VERIFY_FAILED"}:
+        if product_status == "COMPLETED" and manifest_count == 1:
+            return {"action": "VERIFY", "failure_class": None}
+        return {
+            "action": "FAIL",
+            "failure_class": "COMPLETION_PRECONDITION_INVALID",
+        }
+    if scenario_status in {"RUNNING", "WAITING_CAPABILITY"}:
+        return {"action": "WAIT", "failure_class": None}
+    failures = {
+        "TERMINAL_FAILURE": "PRODUCT_TERMINAL_FAILURE",
+        "LIVENESS_FINDING": "CANDIDATE_LIVENESS_FAILURE",
+    }
+    return {
+        "action": "FAIL",
+        "failure_class": failures.get(
+            scenario_status,
+            "AUTHORITATIVE_STATE_UNKNOWN",
+        ),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -394,12 +427,14 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--intentional-restart-receipt-verified", action="store_true")
     worker.add_argument("--output", type=Path)
     worker.add_argument("--progress-output", type=Path)
+    commands.add_parser("completion-decision")
     commands.add_parser("epoch-switch-guard")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    result: dict[str, Any]
     try:
         if args.command == "config-identity":
             result = config_identity(
@@ -448,6 +483,13 @@ def main(argv: list[str] | None = None) -> int:
                     encoding="utf-8",
                     newline="\n",
                 )
+        elif args.command == "completion-decision":
+            raw = json.load(sys.stdin)
+            if not isinstance(raw, Mapping):
+                raise RuntimeControlError("Candidate truth is not an object")
+            result = completion_decision(
+                {str(key): item for key, item in raw.items()}
+            )
         else:
             result = epoch_switch_guard()
     except (OSError, RuntimeControlError, ValueError) as error:

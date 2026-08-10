@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from factory.canary_qualification import load_canary_catalog
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig, validate_config
 from factory.functional_readiness import PRE_Q8_SCENARIOS as CANONICAL_CANARY_SCENARIOS
+from factory.lifecycle import LIFECYCLE_VERSION, STAGES
 from factory.pre_q8_seal import qualification_config_semantic_digest
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -25,11 +27,100 @@ _PLANES = frozenset({"CONVERGENCE", "PRE_Q8", "Q8"})
 
 
 def _write_immutable(path: Path, content: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"clean canary artifact path is unsafe: {path.name}")
     if path.exists():
-        if path.is_symlink() or path.read_text(encoding="utf-8") != content:
+        if not path.is_file() or path.read_text(encoding="utf-8") != content:
             raise ValueError(f"clean canary config conflicts: {path.name}")
         return
     path.write_text(content, encoding="utf-8", newline="\n")
+
+
+def _build_schema_registry(root: Path) -> Path:
+    """Materialize an immutable PRE-Q8 registry from the exact Candidate tree."""
+
+    source_root = Path(__file__).resolve().parents[2] / "schemas"
+    if not root.is_absolute() or not source_root.is_dir() or source_root.is_symlink():
+        raise ValueError("PRE-Q8 schema registry roots are invalid")
+    sources = sorted(source_root.glob("*.json"), key=lambda path: path.name)
+    if not sources or any(not path.is_file() or path.is_symlink() for path in sources):
+        raise ValueError("Candidate schema registry is incomplete")
+    rendered: dict[str, str] = {}
+    for source in sources:
+        content = source.read_text(encoding="utf-8")
+        if source.name == "task-contract-v2.schema.json":
+            schema = json.loads(content)
+            try:
+                lifecycle = schema["properties"]["lifecycle_stage"]
+            except (KeyError, TypeError) as error:
+                raise ValueError("Candidate task lifecycle schema is invalid") from error
+            if not isinstance(lifecycle, dict) or not isinstance(lifecycle.get("enum"), list):
+                raise ValueError("Candidate task lifecycle enum is invalid")
+            lifecycle["enum"] = list(STAGES)
+            content = json.dumps(
+                schema,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ) + "\n"
+        rendered[source.name] = content
+    registry_digest = sha256_text(
+        stable_json(
+            [
+                [name, sha256_text(content)]
+                for name, content in rendered.items()
+            ]
+        )
+    )
+    if root.exists() and (not root.is_dir() or root.is_symlink()):
+        raise ValueError("PRE-Q8 schema registry root is unsafe")
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(
+        stat.S_IRUSR
+        | stat.S_IWUSR
+        | stat.S_IXUSR
+        | stat.S_IRGRP
+        | stat.S_IXGRP
+        | stat.S_IROTH
+        | stat.S_IXOTH
+    )
+    destination = root / registry_digest
+    if destination.exists() and (
+        not destination.is_dir() or destination.is_symlink()
+    ):
+        raise ValueError("PRE-Q8 schema registry destination is unsafe")
+    destination.mkdir(parents=True, exist_ok=True)
+    destination.chmod(
+        stat.S_IRUSR
+        | stat.S_IWUSR
+        | stat.S_IXUSR
+        | stat.S_IRGRP
+        | stat.S_IXGRP
+        | stat.S_IROTH
+        | stat.S_IXOTH
+    )
+    for name, content in rendered.items():
+        path = destination / name
+        _write_immutable(path, content)
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    manifest = {
+        "schema_version": "1.0",
+        "registry_digest": registry_digest,
+        "lifecycle_version": LIFECYCLE_VERSION,
+        "lifecycle_stages": list(STAGES),
+        "files": [
+            {"name": name, "digest": sha256_text(content)}
+            for name, content in rendered.items()
+        ],
+    }
+    manifest["manifest_digest"] = sha256_text(stable_json(manifest))
+    manifest_path = destination / "pre-q8-schema-registry.json"
+    _write_immutable(
+        manifest_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    manifest_path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    return destination
 
 
 def build_configs(
@@ -55,6 +146,7 @@ def build_configs(
     matrix_digest: str,
     capability_attestation_path: Path,
     capability_attestation_digest: str,
+    schema_registry_root: Path,
     existing_repository_url: str,
     first_port: int,
 ) -> dict[str, Any]:
@@ -93,6 +185,7 @@ def build_configs(
             state_root,
             log_root,
             capability_attestation_path,
+            schema_registry_root,
         )
     ):
         raise ValueError("clean canary paths must be absolute")
@@ -107,6 +200,7 @@ def build_configs(
             ]
         )
     )
+    schema_registry = _build_schema_registry(schema_registry_root)
     output_root.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
     for index, scenario_id in enumerate(CANONICAL_CANARY_SCENARIOS):
@@ -124,6 +218,7 @@ def build_configs(
         )
         payload["paths"].update(
             {
+                "schemas": str(schema_registry),
                 "state": str(scenario_state),
                 "worktrees": str(scenario_state / "worktrees"),
                 "logs": str(scenario_logs),
@@ -265,6 +360,7 @@ def main() -> int:
     parser.add_argument("--matrix-digest", required=True)
     parser.add_argument("--capability-attestation-path", type=Path, required=True)
     parser.add_argument("--capability-attestation-digest", required=True)
+    parser.add_argument("--schema-registry-root", type=Path, required=True)
     parser.add_argument("--existing-repository-url", default="")
     parser.add_argument("--first-port", type=int, default=8800)
     args = parser.parse_args()
@@ -293,6 +389,7 @@ def main() -> int:
         matrix_digest=args.matrix_digest,
         capability_attestation_path=args.capability_attestation_path,
         capability_attestation_digest=args.capability_attestation_digest,
+        schema_registry_root=args.schema_registry_root,
         existing_repository_url=args.existing_repository_url,
         first_port=args.first_port,
     )

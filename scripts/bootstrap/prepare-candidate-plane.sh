@@ -795,6 +795,7 @@ CANARY_ATTESTATION_DIGEST="$(sha256sum "${CANARY_ATTESTATION}" | awk '{print $1}
   --matrix-digest "${Q8_MATRIX_DIGEST}" \
   --capability-attestation-path "${CANARY_ATTESTATION}" \
   --capability-attestation-digest "${CANARY_ATTESTATION_DIGEST}" \
+  --schema-registry-root "${CONFIG_ROOT}/pre-q8-schema-registry" \
   --existing-repository-url "${CANARY_EXISTING_REPOSITORY_URL}" >/dev/null
 chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/canaries"/*.yaml
 chmod 0640 "${CONFIG_ROOT}/canaries"/*.yaml

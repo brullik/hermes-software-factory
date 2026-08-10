@@ -15,6 +15,9 @@ CONTROL=/etc/hermes-factory/qualification-control.yaml
 BASE_CONFIG=/etc/hermes-factory/candidate.yaml
 CANDIDATE_ROOT=/opt/hermes-factory-candidate/current
 TOKEN_FILE=/etc/hermes-factory/candidate-credentials.d/github-token
+if [[ -n "${CREDENTIALS_DIRECTORY:-}" ]]; then
+  TOKEN_FILE="${CREDENTIALS_DIRECTORY}/github-token"
+fi
 FIXTURE_PROVISIONED=0
 FIXTURE_RECEIPT=""
 FIXTURE_ARCHIVE_RECEIPT=""
@@ -38,6 +41,35 @@ run_as_candidate() {
   "${SETPRIV}" --reuid=hermescandidate --regid=hermescandidate --init-groups \
     --no-new-privs -- /usr/bin/env HOME=/var/lib/hermes-factory-candidate \
     USER=hermescandidate LOGNAME=hermescandidate "$@"
+}
+
+install_admitted_seal() {
+  local source="$1"
+  local destination="$2"
+  local temporary
+  if [[ ! -f "${source}" || -L "${source}" ]]; then
+    printf 'signed convergence seal source is unsafe\n' >&2
+    return 66
+  fi
+  install -d -o root -g hermesfunctional -m 0750 "$(dirname -- "${destination}")"
+  if [[ -e "${destination}" ]]; then
+    if [[ ! -f "${destination}" || -L "${destination}" ]]; then
+      printf 'admitted convergence seal path is unsafe\n' >&2
+      return 73
+    fi
+    if cmp -s -- "${source}" "${destination}"; then
+      return 0
+    fi
+    printf 'admitted convergence seal conflicts\n' >&2
+    return 73
+  fi
+  temporary="${destination}.tmp.$$"
+  rm -f -- "${temporary}"
+  install -o root -g hermesfunctional -m 0640 "${source}" "${temporary}"
+  cmp -s -- "${source}" "${temporary}"
+  sync -f "${temporary}"
+  mv -T -- "${temporary}" "${destination}"
+  sync -f "$(dirname -- "${destination}")"
 }
 
 cleanup_fixture() {
@@ -130,13 +162,13 @@ if [[ -n "${1:-}" ]]; then
     --matrix-digest "${MATRIX_DIGEST}" \
     --capability-attestation-path "${ATTESTATION_PATH}" \
     --capability-attestation-digest "${ATTESTATION_DIGEST}" \
+    --schema-registry-root /etc/hermes-factory/pre-q8-schema-registry \
     --existing-repository-url "${FIXTURE_URL}" --first-port 8890 >/dev/null
   chown root:hermesfunctional /etc/hermes-factory/pre-q8/*.yaml
   chmod 0640 /etc/hermes-factory/pre-q8/*.yaml
   chown root:root "${INDEX}"
   chmod 0644 "${INDEX}"
-  install -d -o root -g hermesfunctional -m 0750 "$(dirname "${SEAL}")"
-  install -o root -g hermesfunctional -m 0640 "${SEAL_INPUT}" "${SEAL}"
+  install_admitted_seal "${SEAL_INPUT}" "${SEAL}"
 fi
 
 if [[ ! -f "${INDEX}" || ! -f "${SEAL}" ]]; then

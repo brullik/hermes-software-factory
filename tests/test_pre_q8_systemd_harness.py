@@ -126,6 +126,10 @@ def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
         assert "umask 0007" in scenario_runner
         assert "run_as_verifier /usr/bin/mkdir -p --" in scenario_runner
         assert "install -d -o hermesverifier" not in scenario_runner
+        assert (
+            "HERMES_GITHUB_BROKER_SOCKET="
+            "/run/hermes-factory-github-broker/broker.sock"
+        ) in scenario_runner
 
     official = (
         ROOT / "scripts" / "qualification" / "run-all-pre-q8.sh"
@@ -184,3 +188,48 @@ def test_bootstrap_extends_broker_only_for_convergence_workspace() -> None:
     assert bootstrap.count(convergence_root) >= 5
     assert "printf '[Service]\\nExecStart=\\nExecStart=%s\\nReadWritePaths=\\n" in bootstrap
     assert "systemctl daemon-reload" in bootstrap
+
+
+def test_completed_runtime_is_frozen_before_independent_observation() -> None:
+    for runner_name in (
+        "run-pre-q8-convergence-scenario.sh",
+        "run-pre-q8-scenario.sh",
+    ):
+        runner = (
+            ROOT / "scripts" / "qualification" / runner_name
+        ).read_text(encoding="utf-8")
+        assert "scripts.pre_q8_runtime completion-decision" in runner
+        assert "VERIFY_FAILED|WAITING_CAPABILITY|RUNNING" not in runner
+        freeze = runner.rfind("FAILURE_CLASS=RUNTIME_FREEZE_FAILED")
+        observe = runner.rfind("FAILURE_CLASS=OBSERVATION_VERIFICATION_FAILED")
+        assert 0 <= freeze < observe
+
+
+def test_admitted_seal_is_idempotent_and_published() -> None:
+    official = (
+        ROOT / "scripts" / "qualification" / "run-all-pre-q8.sh"
+    ).read_text(encoding="utf-8")
+    convergence = (
+        ROOT / "scripts" / "qualification" / "run-pre-q8-convergence.sh"
+    ).read_text(encoding="utf-8")
+    assert "install_admitted_seal()" in official
+    assert 'cmp -s -- "${source}" "${destination}"' in official
+    assert 'install_admitted_seal "${SEAL_INPUT}" "${SEAL}"' in official
+    assert "publish_admitted_seal()" in convergence
+    assert 'publish_admitted_seal "${SEAL}" "${ADMITTED_SEAL}"' in convergence
+
+
+def test_resume_uses_projected_fixture_credential() -> None:
+    unit = (
+        ROOT / "config" / "systemd" / "hermes-factory-pre-q8.service"
+    ).read_text(encoding="utf-8")
+    runner = (
+        ROOT / "scripts" / "qualification" / "run-all-pre-q8.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        "LoadCredential=github-token:"
+        "/etc/hermes-factory/candidate-credentials.d/github-token"
+    ) in unit
+    assert "InaccessiblePaths=" in unit
+    assert "/etc/hermes-factory/candidate-credentials.d" in unit
+    assert 'TOKEN_FILE="${CREDENTIALS_DIRECTORY}/github-token"' in runner

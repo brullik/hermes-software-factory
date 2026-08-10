@@ -286,6 +286,7 @@ def test_generated_convergence_and_official_configs_have_same_semantics(
         "matrix_digest": "3" * 64,
         "capability_attestation_path": attestation,
         "capability_attestation_digest": hashlib.sha256(b"{}\n").hexdigest(),
+        "schema_registry_root": (tmp_path / "schema-registry").resolve(),
     }
     convergence = builder(
         **common,
@@ -335,6 +336,28 @@ def test_generated_convergence_and_official_configs_have_same_semantics(
     }
     assert q8["schema_version"] == "1.0"
     assert all("seal_config_digest" not in entry for entry in q8["scenarios"])
+    convergence_config = yaml.safe_load(
+        (tmp_path / "convergence-config" / "zero-dependency-cli.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    official_config = yaml.safe_load(
+        (tmp_path / "official-config" / "zero-dependency-cli.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert convergence_config["paths"]["schemas"] == official_config["paths"]["schemas"]
+    schema_root = Path(convergence_config["paths"]["schemas"])
+    task_schema = json.loads(
+        (schema_root / "task-contract-v2.schema.json").read_text(encoding="utf-8")
+    )
+    from factory.lifecycle import STAGES
+
+    assert task_schema["properties"]["lifecycle_stage"]["enum"] == list(STAGES)
+    registry_manifest = json.loads(
+        (schema_root / "pre-q8-schema-registry.json").read_text(encoding="utf-8")
+    )
+    assert registry_manifest["registry_digest"] == schema_root.name
 
 
 def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:

@@ -420,3 +420,53 @@ def test_functional_database_forward_migration_preserves_existing_epoch(
     assert migration is not None
     assert governor.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     governor.connection.close()
+
+
+def test_completed_candidate_routes_to_independent_verifier() -> None:
+    for status in ("VERIFY_FAILED", "PASS"):
+        assert runtime_control.completion_decision(
+            {
+                "scenario_status": status,
+                "product_status": "COMPLETED",
+                "completion_manifest_count": 1,
+            }
+        ) == {"action": "VERIFY", "failure_class": None}
+
+
+def test_incomplete_completion_proof_fails_closed() -> None:
+    for count in (0, 2):
+        assert runtime_control.completion_decision(
+            {
+                "scenario_status": "VERIFY_FAILED",
+                "product_status": "COMPLETED",
+                "completion_manifest_count": count,
+            }
+        ) == {
+            "action": "FAIL",
+            "failure_class": "COMPLETION_PRECONDITION_INVALID",
+        }
+
+
+def test_nonterminal_waits_and_terminal_fails() -> None:
+    for status in ("RUNNING", "WAITING_CAPABILITY"):
+        assert runtime_control.completion_decision(
+            {
+                "scenario_status": status,
+                "product_status": "BUILDING",
+                "completion_manifest_count": 0,
+            }
+        ) == {"action": "WAIT", "failure_class": None}
+    assert runtime_control.completion_decision(
+        {
+            "scenario_status": "TERMINAL_FAILURE",
+            "product_status": "FAILED_SAFE",
+            "completion_manifest_count": 0,
+        }
+    ) == {"action": "FAIL", "failure_class": "PRODUCT_TERMINAL_FAILURE"}
+    assert runtime_control.completion_decision(
+        {
+            "scenario_status": "LIVENESS_FINDING",
+            "product_status": "BUILDING",
+            "completion_manifest_count": 0,
+        }
+    ) == {"action": "FAIL", "failure_class": "CANDIDATE_LIVENESS_FAILURE"}

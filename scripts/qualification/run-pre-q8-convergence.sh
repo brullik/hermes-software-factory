@@ -26,6 +26,7 @@ STATE_ROOT=""
 DATABASE=""
 MATRIX=""
 SEAL=""
+ADMITTED_SEAL=/var/lib/hermes-factory-convergence/admitted/seal.json
 FIXTURE_RECEIPT=""
 FIXTURE_ARCHIVE_RECEIPT=""
 TOKEN_FILE=/etc/hermes-factory/candidate-credentials.d/github-token
@@ -37,6 +38,35 @@ run_as_verifier() {
   "${SETPRIV}" --reuid=hermesverifier --regid=hermesverifier --init-groups \
     --no-new-privs -- /usr/bin/env HOME=/var/lib/hermes-factory-verifier \
     USER=hermesverifier LOGNAME=hermesverifier "$@"
+}
+
+publish_admitted_seal() {
+  local source="$1"
+  local destination="$2"
+  local temporary
+  if [[ ! -f "${source}" || -L "${source}" ]]; then
+    printf 'signed convergence seal source is unsafe\n' >&2
+    return 66
+  fi
+  install -d -o root -g hermesfunctional -m 0750 "$(dirname -- "${destination}")"
+  if [[ -e "${destination}" ]]; then
+    if [[ ! -f "${destination}" || -L "${destination}" ]]; then
+      printf 'admitted convergence seal path is unsafe\n' >&2
+      return 73
+    fi
+    if cmp -s -- "${source}" "${destination}"; then
+      return 0
+    fi
+    printf 'admitted convergence seal conflicts\n' >&2
+    return 73
+  fi
+  temporary="${destination}.tmp.$$"
+  rm -f -- "${temporary}"
+  install -o root -g hermesfunctional -m 0640 "${source}" "${temporary}"
+  cmp -s -- "${source}" "${temporary}"
+  sync -f "${temporary}"
+  mv -T -- "${temporary}" "${destination}"
+  sync -f "$(dirname -- "${destination}")"
 }
 
 cleanup_fixture() {
@@ -122,6 +152,7 @@ FIXTURE_URL="$(printf '%s' "${FIXTURE_JSON}" | "${PYTHON}" -c \
   --matrix-digest "${MATRIX_PENDING_DIGEST}" \
   --capability-attestation-path "${ATTESTATION_PATH}" \
   --capability-attestation-digest "${ATTESTATION_DIGEST}" \
+  --schema-registry-root /etc/hermes-factory/pre-q8-schema-registry \
   --existing-repository-url "${FIXTURE_URL}" --first-port 9000 >/dev/null
 chown root:hermesfunctional "${CONFIG_ROOT}"/*.yaml
 chmod 0640 "${CONFIG_ROOT}"/*.yaml
@@ -172,3 +203,4 @@ fi
 run_as_verifier "${PYTHON}" -m scripts.pre_q8_convergence --database "${DATABASE}" \
   --run-id "${RUN_ID}" seal --official-index "${CONFIG_ROOT}/index.json" \
   --matrix "${MATRIX}" --private-key "${KEY_FILE}" --output "${SEAL}"
+publish_admitted_seal "${SEAL}" "${ADMITTED_SEAL}"
