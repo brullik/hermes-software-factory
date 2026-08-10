@@ -83,12 +83,16 @@ def _token(path: Path) -> str:
 
 
 def _optional_request(
-    client: GitHubClient, method: str, path: str
+    client: GitHubClient,
+    method: str,
+    path: str,
+    *,
+    absent_statuses: tuple[int, ...] = (404,),
 ) -> dict[str, Any] | None:
     try:
         return client.request(method, path)
     except GitHubAPIError as error:
-        if error.status == 404:
+        if error.status in absent_statuses:
             return None
         raise
 
@@ -257,7 +261,12 @@ def provision(
     ):
         raise FixtureControlError("created fixture repository identity differs")
     branch_path = f"/repos/{owner}/{repository_name}/git/ref/heads/main"
-    branch = _optional_request(client, "GET", branch_path)
+    branch = _optional_request(
+        client,
+        "GET",
+        branch_path,
+        absent_statuses=(404, 409),
+    )
     if branch is not None:
         branch_commit = str(branch.get("object", {}).get("sha") or "")
         try:

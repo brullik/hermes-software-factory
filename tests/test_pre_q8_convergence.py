@@ -485,7 +485,8 @@ def test_fixture_provision_initializes_empty_repository_and_resumes(
             if path.endswith("/git/ref/heads/main"):
                 if method == "GET":
                     if not self.branch_commit:
-                        raise GitHubAPIError(404)
+                        # GitHub uses 409 for a ref lookup in an empty repository.
+                        raise GitHubAPIError(409)
                     return {"object": {"sha": self.branch_commit}}
                 if method == "PATCH":
                     assert payload is not None
