@@ -27,9 +27,11 @@ QUALIFICATION_BACKUP_ROOT="${QUALIFICATION_BACKUP_ROOT:-/var/lib/hermes-factory-
 FUNCTIONAL_STATE="${FUNCTIONAL_STATE:-/var/lib/hermes-factory-functional}"
 PRE_Q8_STATE="${PRE_Q8_STATE:-/var/lib/hermes-factory-pre-q8}"
 PRE_Q8_LOG_ROOT="${PRE_Q8_LOG_ROOT:-/var/log/hermes-factory-pre-q8}"
+PRE_Q8_CONVERGENCE_STATE="${PRE_Q8_CONVERGENCE_STATE:-/var/lib/hermes-factory-pre-q8-convergence}"
+PRE_Q8_CONVERGENCE_LOG_ROOT="${PRE_Q8_CONVERGENCE_LOG_ROOT:-/var/log/hermes-factory-pre-q8-convergence}"
 IMPROVEMENT_STATE="${IMPROVEMENT_STATE:-/var/lib/hermes-factory-improvement-lab}"
 CONFIG_ROOT="${CONFIG_ROOT:-/etc/hermes-factory}"
-CANARY_EXISTING_REPOSITORY_URL="${CANARY_EXISTING_REPOSITORY_URL:-https://github.com/brullik/hermes-path-governor-shadow-20260803}"
+CANARY_EXISTING_REPOSITORY_URL="${CANARY_EXISTING_REPOSITORY_URL:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 HERMES_AGENT_VERSION="${HERMES_AGENT_VERSION:-0.19.0}"
 HERMES_AGENT_SHA256="${HERMES_AGENT_SHA256:-bd0bac012aee38a60894781f4597dc29ee7bedb3448540249921f10d3bef327f}"
@@ -237,9 +239,14 @@ try:
     database_metadata = database_path.lstat()
     if (
         not stat.S_ISREG(database_metadata.st_mode)
-        or database_metadata.st_uid != os.geteuid()
-        or database_metadata.st_mode & 0o022
-        or database_metadata.st_nlink != 1
+        or (
+            os.name != "nt"
+            and (
+                database_metadata.st_uid != os.geteuid()
+                or database_metadata.st_mode & 0o022
+                or database_metadata.st_nlink != 1
+            )
+        )
     ):
         raise ValueError
     database_uri = f"file:{expected_database.as_posix()}?mode=ro"
@@ -353,6 +360,11 @@ if [[ -L "${CANDIDATE_ROOT}/current" ]] \
     printf 'Previous Candidate B processes are still active\n' >&2
     exit 73
   fi
+  (
+    cd "${SOURCE_ROOT}"
+    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" -m scripts.pre_q8_runtime \
+      epoch-switch-guard >/dev/null
+  )
   ALLOW_EPOCH_SWITCH=1
 fi
 install -d -o "${CANDIDATE_USER}" -g "${CANDIDATE_USER}" -m 0750 \
@@ -388,7 +400,13 @@ install -d -o root -g "${CANDIDATE_USER}" -m 0750 \
 install -d -o root -g root -m 0755 "${CONFIG_ROOT}/qualification-manifests"
 install -d -o root -g root -m 0700 "${QUALIFICATION_BACKUP_ROOT}"
 install -d -o root -g "${CANDIDATE_USER}" -m 0750 "${CONFIG_ROOT}/canaries"
-install -d -o root -g "${CANDIDATE_USER}" -m 0750 "${CONFIG_ROOT}/pre-q8"
+install -d -o root -g "${FUNCTIONAL_GROUP}" -m 0750 "${CONFIG_ROOT}/pre-q8"
+install -d -o root -g "${FUNCTIONAL_GROUP}" -m 0750 \
+  "${CONFIG_ROOT}/pre-q8-convergence"
+install -d -o "${CANDIDATE_USER}" -g "${FUNCTIONAL_GROUP}" -m 2770 \
+  "${PRE_Q8_CONVERGENCE_STATE}" "${PRE_Q8_CONVERGENCE_LOG_ROOT}"
+install -d -o root -g "${FUNCTIONAL_GROUP}" -m 0750 \
+  /var/lib/hermes-factory-convergence /var/lib/hermes-factory-convergence/admitted
 chown root:root "${CONFIG_ROOT}"
 chmod 0711 "${CONFIG_ROOT}"
 
@@ -509,6 +527,14 @@ if (( ALLOW_EPOCH_SWITCH == 1 )); then
     fi
     mv -- "${CONFIG_ROOT}/pre-q8" "${EPOCH_CONFIG_ARCHIVE}/pre-q8"
   fi
+  if [[ -d "${CONFIG_ROOT}/pre-q8-convergence" ]]; then
+    if [[ -e "${EPOCH_CONFIG_ARCHIVE}/pre-q8-convergence" ]]; then
+      printf 'Previous convergence config archive conflicts\n' >&2
+      exit 73
+    fi
+    mv -- "${CONFIG_ROOT}/pre-q8-convergence" \
+      "${EPOCH_CONFIG_ARCHIVE}/pre-q8-convergence"
+  fi
   for q65_index in report-index.json failure-index.json; do
     if [[ ! -f "${FUNCTIONAL_STATE}/q6-5/${q65_index}" ]]; then
       continue
@@ -518,6 +544,25 @@ if (( ALLOW_EPOCH_SWITCH == 1 )); then
     mv -- "${FUNCTIONAL_STATE}/q6-5/${q65_index}" \
       "${FUNCTIONAL_STATE}/q6-5/${OLD_SOURCE_COMMIT}/${q65_index}"
   done
+  chmod -R a-w "${EPOCH_CONFIG_ARCHIVE}"
+  for retired_root in \
+    "${CANARY_STATE}/${OLD_SOURCE_COMMIT}" \
+    "${PRE_Q8_STATE}/${OLD_SOURCE_COMMIT}" \
+    "${VERIFIER_STATE}/evidence/${OLD_SOURCE_COMMIT}"; do
+    if [[ -d "${retired_root}" && ! -L "${retired_root}" ]]; then
+      chmod -R a-w "${retired_root}"
+    fi
+  done
+  while read -r retired_unit _rest; do
+    [[ -n "${retired_unit}" ]] && systemctl reset-failed "${retired_unit}" >/dev/null 2>&1 || true
+  done < <(systemctl list-units --all --no-legend --plain \
+    'hermes-factory-pre-q8@*' 'hermes-factory-pre-q8-worker@*' \
+    'hermes-factory-pre-q8-controller@*' \
+    'hermes-factory-pre-q8-convergence@*' \
+    'hermes-factory-pre-q8-convergence-controller@*' \
+    'hermes-factory-pre-q8-convergence-worker@*' \
+    'hermes-factory-pre-q8-convergence-scenario@*' \
+    'hermes-factory-golden-*.service')
   ln -sfn "${VERIFIER_ROOT}/venvs/${SOURCE_COMMIT}" "${VERIFIER_ROOT}/venv"
   ln -sfn "${VERIFIER_RELEASE}" "${VERIFIER_ROOT}/current"
   ln -sfn "${CANDIDATE_ROOT}/venvs/${SOURCE_COMMIT}" "${CANDIDATE_ROOT}/venv"
@@ -580,6 +625,25 @@ POLICY_DIGEST="$(FACTORY_CONFIG="${CONFIG_ROOT}/candidate.yaml" \
 TOOLCHAIN_DIGEST="$(CONTROLLER_DIGEST="${CONTROLLER_DIGEST}" \
   "${VERIFIER_ROOT}/venv/bin/python" -c \
   'from factory.proof_obligations import local_toolchain_manifest; import os; print(local_toolchain_manifest(os.environ["CONTROLLER_DIGEST"]).manifest_digest)')"
+GIT_TREE="$(git -C "${SOURCE_ROOT}" rev-parse 'HEAD^{tree}')"
+REQUIREMENTS_LOCK_DIGEST="$(sha256sum "${CANDIDATE_RELEASE}/requirements.lock" | awk '{print $1}')"
+SYSTEMD_BUNDLE_DIGEST="$(SYSTEMD_ROOT="${CANDIDATE_RELEASE}/config/systemd" \
+  "${VERIFIER_ROOT}/venv/bin/python" -c \
+  'from pathlib import Path; from factory.pre_q8_seal import systemd_bundle_digest; import os; print(systemd_bundle_digest(Path(os.environ["SYSTEMD_ROOT"])))')"
+FIXTURE_SEED_DIGEST="$("${VERIFIER_ROOT}/venv/bin/python" -c \
+  'from factory.pre_q8_fixture import fixture_manifest; print(fixture_manifest()["fixture_seed_digest"])')"
+Q8_MATRIX_DIGEST="$("${VERIFIER_ROOT}/venv/bin/python" -c \
+  'from factory.common import sha256_text; print(sha256_text("not-applicable:q8"))')"
+Q8_RUN_ID="q8-${SOURCE_COMMIT:0:12}"
+if [[ -z "${CANARY_EXISTING_REPOSITORY_URL}" ]]; then
+  Q8_GITHUB_OWNER="$("${VERIFIER_ROOT}/venv/bin/python" -c \
+    'import sys,yaml; print(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))["github"]["owner"])' \
+    "${CONFIG_ROOT}/candidate.yaml")"
+  Q8_FIXTURE_NAME="$(Q8_RUN_ID="${Q8_RUN_ID}" CANDIDATE_DIGEST="${CANDIDATE_DIGEST}" \
+    "${VERIFIER_ROOT}/venv/bin/python" -c \
+    'from factory.pre_q8_convergence import resource_namespace; import os; print(resource_namespace(plane="q8",run_id=os.environ["Q8_RUN_ID"],candidate_digest=os.environ["CANDIDATE_DIGEST"],scenario_id="existing-repository-repair"))')"
+  CANARY_EXISTING_REPOSITORY_URL="https://github.com/${Q8_GITHUB_OWNER}/${Q8_FIXTURE_NAME}"
+fi
 VERIFIER_IDENTITY_JSON="$(runuser -u "${VERIFIER_USER}" -- \
   "${VERIFIER_ROOT}/venv/bin/python" -m scripts.release_qualify key-info \
   --private-key "${VERIFIER_STATE}/verifier-ed25519.key" \
@@ -706,10 +770,21 @@ CANARY_ATTESTATION_DIGEST="$(sha256sum "${CANARY_ATTESTATION}" | awk '{print $1}
   --base-config "${CONFIG_ROOT}/candidate.yaml" \
   --catalog "${CANDIDATE_RELEASE}/qualification/canaries/catalog.yaml" \
   --output-root "${CONFIG_ROOT}/canaries" \
-  --state-root "${CANARY_STATE}/${SOURCE_COMMIT}" \
-  --log-root "${CANARY_LOG_ROOT}/${SOURCE_COMMIT}" \
+  --state-root "${CANARY_STATE}" \
+  --log-root "${CANARY_LOG_ROOT}" \
   --candidate-digest "${CANDIDATE_DIGEST}" \
   --controller-release-digest "${CONTROLLER_DIGEST}" \
+  --source-commit "${SOURCE_COMMIT}" \
+  --stable-release-digest "${STABLE_DIGEST}" \
+  --policy-digest "${POLICY_DIGEST}" \
+  --toolchain-digest "${TOOLCHAIN_DIGEST}" \
+  --git-tree "${GIT_TREE}" \
+  --requirements-lock-digest "${REQUIREMENTS_LOCK_DIGEST}" \
+  --systemd-bundle-digest "${SYSTEMD_BUNDLE_DIGEST}" \
+  --qualification-plane Q8 \
+  --run-id "${Q8_RUN_ID}" \
+  --fixture-seed-digest "${FIXTURE_SEED_DIGEST}" \
+  --matrix-digest "${Q8_MATRIX_DIGEST}" \
   --capability-attestation-path "${CANARY_ATTESTATION}" \
   --capability-attestation-digest "${CANARY_ATTESTATION_DIGEST}" \
   --existing-repository-url "${CANARY_EXISTING_REPOSITORY_URL}" >/dev/null
@@ -717,23 +792,6 @@ chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/canaries"/*.yaml
 chmod 0640 "${CONFIG_ROOT}/canaries"/*.yaml
 chown root:root "${CONFIG_ROOT}/canaries/index.json"
 chmod 0644 "${CONFIG_ROOT}/canaries/index.json"
-"${VERIFIER_ROOT}/venv/bin/python" \
-  "${VERIFIER_ROOT}/current/scripts/bootstrap/build-canary-configs.py" \
-  --base-config "${CONFIG_ROOT}/candidate.yaml" \
-  --catalog "${CANDIDATE_RELEASE}/qualification/canaries/catalog.yaml" \
-  --output-root "${CONFIG_ROOT}/pre-q8" \
-  --state-root "${PRE_Q8_STATE}/${SOURCE_COMMIT}" \
-  --log-root "${PRE_Q8_LOG_ROOT}/${SOURCE_COMMIT}" \
-  --candidate-digest "${CANDIDATE_DIGEST}" \
-  --controller-release-digest "${CONTROLLER_DIGEST}" \
-  --capability-attestation-path "${CANARY_ATTESTATION}" \
-  --capability-attestation-digest "${CANARY_ATTESTATION_DIGEST}" \
-  --first-port 8890 \
-  --existing-repository-url "${CANARY_EXISTING_REPOSITORY_URL}" >/dev/null
-chown root:"${CANDIDATE_USER}" "${CONFIG_ROOT}/pre-q8"/*.yaml
-chmod 0640 "${CONFIG_ROOT}/pre-q8"/*.yaml
-chown root:root "${CONFIG_ROOT}/pre-q8/index.json"
-chmod 0644 "${CONFIG_ROOT}/pre-q8/index.json"
 "${VERIFIER_ROOT}/venv/bin/python" \
   "${VERIFIER_ROOT}/current/scripts/bootstrap/build-golden-config.py" \
   --candidate-config "${CONFIG_ROOT}/candidate.yaml" \
@@ -788,6 +846,11 @@ for unit in \
   hermes-factory-pre-q8-worker@.service \
   hermes-factory-pre-q8@.service \
   hermes-factory-pre-q8.service \
+  hermes-factory-pre-q8-convergence-controller@.service \
+  hermes-factory-pre-q8-convergence-worker@.service \
+  hermes-factory-pre-q8-convergence-scenario@.service \
+  hermes-factory-pre-q8-convergence@.service \
+  hermes-factory-pre-q8-official.service \
   hermes-factory-golden-product.service \
   hermes-factory-golden-controller.service \
   hermes-factory-golden-worker.service \

@@ -23,9 +23,12 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .common import sha256_text, stable_json, utc_now
+from .release_qualification import CANONICAL_CANARY_SCENARIOS
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
+_RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
+_FAILURE_CLASS = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 
 
 class FunctionalReadinessError(RuntimeError):
@@ -62,18 +65,7 @@ MANDATORY_Q6_5_OPERATIONS: Final[tuple[str, ...]] = (
 )
 
 
-PRE_Q8_SCENARIOS: Final[tuple[str, ...]] = (
-    "zero-dependency-cli",
-    "small-python-service",
-    "telegram-bot",
-    "existing-repository-repair",
-    "high-fan-in",
-    "external-blocker-resume",
-    "provider-timeout-restart",
-    "failed-product-test-one-repair",
-    "package-only",
-    "deploy-rollback",
-)
+PRE_Q8_SCENARIOS: Final[tuple[str, ...]] = CANONICAL_CANARY_SCENARIOS
 
 
 @dataclass(frozen=True)
@@ -367,6 +359,76 @@ class FunctionalQualificationGovernor:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(epoch_id,scenario_id)
             );
+            CREATE TABLE IF NOT EXISTS pre_q8_admissions (
+                epoch_id TEXT PRIMARY KEY REFERENCES functional_epochs(epoch_id),
+                run_id TEXT NOT NULL,
+                seal_digest TEXT NOT NULL UNIQUE,
+                git_tree TEXT NOT NULL,
+                release_tree_digest TEXT NOT NULL,
+                candidate_digest TEXT NOT NULL,
+                admitted_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pre_q8_runs (
+                epoch_id TEXT NOT NULL REFERENCES functional_epochs(epoch_id),
+                scenario_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL CHECK(attempt=1),
+                status TEXT NOT NULL CHECK(status IN ('RUNNING','PASS','FAIL')),
+                database_path TEXT NOT NULL,
+                config_digest TEXT NOT NULL,
+                product_id TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                PRIMARY KEY(epoch_id,scenario_id)
+            );
+            CREATE TABLE IF NOT EXISTS pre_q8_progress (
+                epoch_id TEXT NOT NULL REFERENCES functional_epochs(epoch_id),
+                scenario_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL CHECK(attempt=1),
+                progress_fingerprint TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                first_observed_at TEXT NOT NULL,
+                last_changed_at TEXT NOT NULL,
+                checked_at TEXT NOT NULL,
+                PRIMARY KEY(epoch_id,scenario_id)
+            );
+            CREATE TABLE IF NOT EXISTS pre_q8_failures (
+                epoch_id TEXT NOT NULL REFERENCES functional_epochs(epoch_id),
+                scenario_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL CHECK(attempt=1),
+                failure_class TEXT NOT NULL,
+                failure_digest TEXT NOT NULL UNIQUE,
+                evidence_ref TEXT NOT NULL,
+                evidence_digest TEXT NOT NULL,
+                candidate_database_ref TEXT NOT NULL,
+                config_digest TEXT NOT NULL,
+                support_bundle_ref TEXT NOT NULL,
+                support_bundle_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(epoch_id,scenario_id)
+            );
+            CREATE TABLE IF NOT EXISTS functional_schema_migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_pre_q8_pass_excludes_failure
+            BEFORE INSERT ON pre_q8_scenarios
+            WHEN EXISTS (
+                SELECT 1 FROM pre_q8_failures
+                 WHERE epoch_id=NEW.epoch_id AND scenario_id=NEW.scenario_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'PRE-Q8 PASS conflicts with durable failure');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_pre_q8_failure_excludes_pass
+            BEFORE INSERT ON pre_q8_failures
+            WHEN EXISTS (
+                SELECT 1 FROM pre_q8_scenarios
+                 WHERE epoch_id=NEW.epoch_id AND scenario_id=NEW.scenario_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'PRE-Q8 failure conflicts with PASS');
+            END;
             CREATE TABLE IF NOT EXISTS golden_products (
                 epoch_id TEXT PRIMARY KEY REFERENCES functional_epochs(epoch_id),
                 product_id TEXT NOT NULL,
@@ -403,6 +465,12 @@ class FunctionalQualificationGovernor:
             );
             """
         )
+        with self.connection:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO functional_schema_migrations "
+                "(version,description,applied_at) VALUES (2,?,?)",
+                ("durable PRE-Q8 admission, run, progress, and failure state", utc_now()),
+            )
 
     def register_epoch(
         self,
@@ -670,6 +738,314 @@ class FunctionalQualificationGovernor:
             )
         return True
 
+    def admit_pre_q8(
+        self,
+        *,
+        epoch_id: str,
+        run_id: str,
+        seal_digest: str,
+        git_tree: str,
+        release_tree_digest: str,
+        candidate_digest: str,
+    ) -> bool:
+        """Persist an independently verified convergence seal before official execution."""
+
+        epoch = self.epoch(epoch_id)
+        if (
+            str(epoch["q6_5_status"]) != "PASS"
+            or str(epoch["status"]) not in {"PRE_Q8_PENDING", "PRE_Q8_RUNNING"}
+        ):
+            raise FunctionalReadinessError("PRE-Q8 admission requires Q6.5 PASS")
+        if str(epoch["candidate_digest"]) != candidate_digest:
+            raise FunctionalReadinessError("PRE-Q8 admission Candidate differs")
+        if (
+            _RUN_ID.fullmatch(run_id) is None
+            or _SHA256.fullmatch(seal_digest) is None
+            or _SHA40.fullmatch(git_tree) is None
+            or _SHA256.fullmatch(release_tree_digest) is None
+        ):
+            raise FunctionalReadinessError("PRE-Q8 admission identity is invalid")
+        open_actions = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM functional_owner_actions "
+                "WHERE epoch_id=? AND status='OPEN'",
+                (epoch_id,),
+            ).fetchone()[0]
+        )
+        if open_actions:
+            raise FunctionalReadinessError("PRE-Q8 admission requires zero open owner actions")
+        identity = (
+            run_id,
+            seal_digest,
+            git_tree,
+            release_tree_digest,
+            candidate_digest,
+        )
+        existing = self.connection.execute(
+            "SELECT run_id,seal_digest,git_tree,release_tree_digest,candidate_digest "
+            "FROM pre_q8_admissions WHERE epoch_id=?",
+            (epoch_id,),
+        ).fetchone()
+        if existing is not None:
+            if tuple(str(value) for value in existing) != identity:
+                raise FunctionalReadinessError("immutable PRE-Q8 admission conflicts")
+            return False
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO pre_q8_admissions
+                   (epoch_id,run_id,seal_digest,git_tree,release_tree_digest,
+                    candidate_digest,admitted_at) VALUES (?,?,?,?,?,?,?)""",
+                (epoch_id, *identity, now),
+            )
+            self.connection.execute(
+                "UPDATE functional_epochs SET status='PRE_Q8_RUNNING',"
+                "pre_q8_status='0/10 RUNNING',updated_at=? WHERE epoch_id=?",
+                (now, epoch_id),
+            )
+        return True
+
+    def start_pre_q8_scenario(
+        self,
+        *,
+        epoch_id: str,
+        scenario_id: str,
+        attempt: int,
+        database_path: str,
+        config_digest: str,
+    ) -> bool:
+        epoch = self.epoch(epoch_id)
+        if str(epoch["status"]) != "PRE_Q8_RUNNING":
+            raise FunctionalReadinessError("official PRE-Q8 is not admitted")
+        if scenario_id not in PRE_Q8_SCENARIOS or attempt != 1:
+            raise FunctionalReadinessError("PRE-Q8 requires exact first-run scenario")
+        if not database_path or _SHA256.fullmatch(config_digest) is None:
+            raise FunctionalReadinessError("PRE-Q8 run identity is incomplete")
+        if (
+            self.connection.execute(
+                "SELECT 1 FROM pre_q8_admissions WHERE epoch_id=?", (epoch_id,)
+            ).fetchone()
+            is None
+        ):
+            raise FunctionalReadinessError("official PRE-Q8 lacks convergence admission")
+        position = PRE_Q8_SCENARIOS.index(scenario_id)
+        passed = {
+            str(row[0])
+            for row in self.connection.execute(
+                "SELECT scenario_id FROM pre_q8_scenarios "
+                "WHERE epoch_id=? AND status='PASS'",
+                (epoch_id,),
+            ).fetchall()
+        }
+        if passed != set(PRE_Q8_SCENARIOS[:position]):
+            raise FunctionalReadinessError("PRE-Q8 scenario order differs from canonical order")
+        existing = self.connection.execute(
+            "SELECT attempt,database_path,config_digest,status FROM pre_q8_runs "
+            "WHERE epoch_id=? AND scenario_id=?",
+            (epoch_id, scenario_id),
+        ).fetchone()
+        identity = (attempt, database_path, config_digest)
+        if existing is not None:
+            if tuple(existing[:3]) != identity:
+                raise FunctionalReadinessError("immutable PRE-Q8 run identity conflicts")
+            return False
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO pre_q8_runs
+                   (epoch_id,scenario_id,attempt,status,database_path,config_digest,
+                    started_at) VALUES (?,?,1,'RUNNING',?,?,?)""",
+                (epoch_id, scenario_id, database_path, config_digest, utc_now()),
+            )
+        return True
+
+    def pre_q8_run(self, *, epoch_id: str, scenario_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM pre_q8_runs WHERE epoch_id=? AND scenario_id=?",
+            (epoch_id, scenario_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_pre_q8_progress(
+        self,
+        *,
+        epoch_id: str,
+        scenario_id: str,
+        attempt: int,
+        progress_fingerprint: str,
+        snapshot: Mapping[str, Any],
+        observed_at: str | None = None,
+    ) -> bool:
+        run = self.pre_q8_run(epoch_id=epoch_id, scenario_id=scenario_id)
+        if run is None or str(run["status"]) != "RUNNING" or attempt != 1:
+            raise FunctionalReadinessError("PRE-Q8 progress requires a running first attempt")
+        if _SHA256.fullmatch(progress_fingerprint) is None:
+            raise FunctionalReadinessError("PRE-Q8 progress fingerprint is invalid")
+        encoded = stable_json(dict(snapshot))
+        if sha256_text(encoded) != progress_fingerprint:
+            raise FunctionalReadinessError("PRE-Q8 progress snapshot differs from fingerprint")
+        now = observed_at or utc_now()
+        existing = self.connection.execute(
+            "SELECT progress_fingerprint,first_observed_at,last_changed_at "
+            "FROM pre_q8_progress WHERE epoch_id=? AND scenario_id=?",
+            (epoch_id, scenario_id),
+        ).fetchone()
+        changed = existing is None or str(existing[0]) != progress_fingerprint
+        first = str(existing[1]) if existing is not None else now
+        last_changed = now if changed else str(existing[2])
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO pre_q8_progress
+                   (epoch_id,scenario_id,attempt,progress_fingerprint,snapshot_json,
+                    first_observed_at,last_changed_at,checked_at)
+                   VALUES (?,?,1,?,?,?,?,?)
+                   ON CONFLICT(epoch_id,scenario_id) DO UPDATE SET
+                     progress_fingerprint=excluded.progress_fingerprint,
+                     snapshot_json=excluded.snapshot_json,
+                     last_changed_at=excluded.last_changed_at,
+                     checked_at=excluded.checked_at""",
+                (
+                    epoch_id,
+                    scenario_id,
+                    progress_fingerprint,
+                    encoded,
+                    first,
+                    last_changed,
+                    now,
+                ),
+            )
+        return changed
+
+    def record_pre_q8_failure(
+        self,
+        *,
+        epoch_id: str,
+        scenario_id: str,
+        attempt: int,
+        failure_class: str,
+        failure_digest: str,
+        evidence_ref: str,
+        evidence_digest: str,
+        candidate_database_ref: str,
+        config_digest: str,
+        support_bundle_ref: str,
+        support_bundle_digest: str,
+    ) -> bool:
+        """Atomically terminalize one official Candidate on its first PRE-Q8 failure."""
+
+        epoch = self.epoch(epoch_id)
+        if str(epoch["q6_5_status"]) != "PASS" or str(epoch["status"]) not in {
+            "PRE_Q8_PENDING",
+            "PRE_Q8_RUNNING",
+            "QUALIFICATION_FAILED",
+        }:
+            raise FunctionalReadinessError("PRE-Q8 failure requires a qualified Candidate")
+        if scenario_id not in PRE_Q8_SCENARIOS or attempt != 1:
+            raise FunctionalReadinessError("PRE-Q8 failure requires exact first attempt")
+        if _FAILURE_CLASS.fullmatch(failure_class) is None:
+            raise FunctionalReadinessError("PRE-Q8 failure class is invalid")
+        if any(
+            _SHA256.fullmatch(value) is None
+            for value in (
+                failure_digest,
+                evidence_digest,
+                config_digest,
+                support_bundle_digest,
+            )
+        ) or not all(
+            (evidence_ref, candidate_database_ref, support_bundle_ref)
+        ):
+            raise FunctionalReadinessError("PRE-Q8 failure evidence is incomplete")
+        identity = (
+            attempt,
+            failure_class,
+            failure_digest,
+            evidence_ref,
+            evidence_digest,
+            candidate_database_ref,
+            config_digest,
+            support_bundle_ref,
+            support_bundle_digest,
+        )
+        existing = self.connection.execute(
+            """SELECT attempt,failure_class,failure_digest,evidence_ref,evidence_digest,
+                      candidate_database_ref,config_digest,support_bundle_ref,
+                      support_bundle_digest
+                 FROM pre_q8_failures WHERE epoch_id=? AND scenario_id=?""",
+            (epoch_id, scenario_id),
+        ).fetchone()
+        if existing is not None:
+            if tuple(existing) != identity:
+                raise FunctionalReadinessError("immutable PRE-Q8 failure conflicts")
+            if str(epoch["status"]) != "QUALIFICATION_FAILED":
+                raise FunctionalReadinessError("PRE-Q8 failure did not terminalize Candidate")
+            return False
+        if str(epoch["status"]) == "QUALIFICATION_FAILED":
+            raise FunctionalReadinessError("terminal Candidate cannot record another PRE-Q8 failure")
+        if (
+            self.connection.execute(
+                "SELECT 1 FROM pre_q8_scenarios WHERE epoch_id=? AND scenario_id=?",
+                (epoch_id, scenario_id),
+            ).fetchone()
+            is not None
+        ):
+            raise FunctionalReadinessError("PRE-Q8 failure conflicts with PASS")
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO pre_q8_failures
+                   (epoch_id,scenario_id,attempt,failure_class,failure_digest,
+                    evidence_ref,evidence_digest,candidate_database_ref,
+                    config_digest,support_bundle_ref,support_bundle_digest,created_at)
+                   VALUES (?,?,1,?,?,?,?,?,?,?,?,?)""",
+                (
+                    epoch_id,
+                    scenario_id,
+                    failure_class,
+                    failure_digest,
+                    evidence_ref,
+                    evidence_digest,
+                    candidate_database_ref,
+                    config_digest,
+                    support_bundle_ref,
+                    support_bundle_digest,
+                    now,
+                ),
+            )
+            run = self.pre_q8_run(epoch_id=epoch_id, scenario_id=scenario_id)
+            if run is None:
+                self.connection.execute(
+                    """INSERT INTO pre_q8_runs
+                       (epoch_id,scenario_id,attempt,status,database_path,config_digest,
+                        started_at,finished_at) VALUES (?,?,1,'FAIL',?,?,?,?)""",
+                    (
+                        epoch_id,
+                        scenario_id,
+                        candidate_database_ref,
+                        config_digest,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                if (
+                    str(run["database_path"]) != candidate_database_ref
+                    or str(run["config_digest"]) != config_digest
+                ):
+                    raise FunctionalReadinessError(
+                        "PRE-Q8 failure run identity conflicts"
+                    )
+                self.connection.execute(
+                    "UPDATE pre_q8_runs SET status='FAIL',finished_at=? "
+                    "WHERE epoch_id=? AND scenario_id=?",
+                    (now, epoch_id, scenario_id),
+                )
+            self.connection.execute(
+                "UPDATE functional_epochs SET status='QUALIFICATION_FAILED',"
+                "pre_q8_status=?,updated_at=? WHERE epoch_id=?",
+                (f"FAIL {scenario_id}", now, epoch_id),
+            )
+        return True
+
     def record_pre_q8_pass(
         self,
         *,
@@ -681,10 +1057,10 @@ class FunctionalQualificationGovernor:
         evidence_digest: str,
     ) -> None:
         epoch = self.epoch(epoch_id)
-        if str(epoch["q6_5_status"]) != "PASS":
-            raise FunctionalReadinessError("PRE-Q8 requires Q6.5 PASS")
         if scenario_id not in PRE_Q8_SCENARIOS or attempt != 1:
             raise FunctionalReadinessError("PRE-Q8 requires exact first-run scenario")
+        if str(epoch["q6_5_status"]) != "PASS" or str(epoch["status"]) != "PRE_Q8_RUNNING":
+            raise FunctionalReadinessError("PRE-Q8 requires verified admission")
         if not product_id or not completion_manifest_ref or not _SHA256.fullmatch(
             evidence_digest
         ):
@@ -692,11 +1068,29 @@ class FunctionalQualificationGovernor:
         now = utc_now()
         with self.connection:
             existing = self.connection.execute(
-                "SELECT evidence_digest FROM pre_q8_scenarios WHERE epoch_id=? AND scenario_id=?",
+                "SELECT product_id,completion_manifest_ref,evidence_digest "
+                "FROM pre_q8_scenarios WHERE epoch_id=? AND scenario_id=?",
                 (epoch_id, scenario_id),
             ).fetchone()
-            if existing is not None and str(existing[0]) != evidence_digest:
-                raise FunctionalReadinessError("PRE-Q8 immutable evidence conflicts")
+            if existing is not None:
+                if tuple(str(value) for value in existing) != (
+                    product_id,
+                    completion_manifest_ref,
+                    evidence_digest,
+                ):
+                    raise FunctionalReadinessError("PRE-Q8 immutable evidence conflicts")
+                return
+            run = self.pre_q8_run(epoch_id=epoch_id, scenario_id=scenario_id)
+            if run is None or str(run["status"]) != "RUNNING":
+                raise FunctionalReadinessError("PRE-Q8 PASS requires one running attempt")
+            if (
+                self.connection.execute(
+                    "SELECT 1 FROM pre_q8_failures WHERE epoch_id=? AND scenario_id=?",
+                    (epoch_id, scenario_id),
+                ).fetchone()
+                is not None
+            ):
+                raise FunctionalReadinessError("PRE-Q8 PASS conflicts with durable failure")
             self.connection.execute(
                 """INSERT OR IGNORE INTO pre_q8_scenarios
                    (epoch_id,scenario_id,attempt,status,product_id,
@@ -711,18 +1105,51 @@ class FunctionalQualificationGovernor:
                     now,
                 ),
             )
+            self.connection.execute(
+                "UPDATE pre_q8_runs SET status='PASS',product_id=?,finished_at=? "
+                "WHERE epoch_id=? AND scenario_id=?",
+                (product_id, now, epoch_id, scenario_id),
+            )
             count = int(
                 self.connection.execute(
                     "SELECT COUNT(*) FROM pre_q8_scenarios WHERE epoch_id=? AND status='PASS'",
                     (epoch_id,),
                 ).fetchone()[0]
             )
-            if count == len(PRE_Q8_SCENARIOS):
-                self.connection.execute(
-                    "UPDATE functional_epochs SET pre_q8_status='10/10 PASS',"
-                    "status='GOLDEN_PRODUCT_PENDING',updated_at=? WHERE epoch_id=?",
-                    (now, epoch_id),
-                )
+            self.connection.execute(
+                "UPDATE functional_epochs SET pre_q8_status=?,updated_at=? WHERE epoch_id=?",
+                (f"{count}/10 PASS", now, epoch_id),
+            )
+
+    def finalize_pre_q8(self, epoch_id: str) -> bool:
+        epoch = self.epoch(epoch_id)
+        if str(epoch["status"]) == "GOLDEN_PRODUCT_PENDING":
+            return False
+        if str(epoch["status"]) != "PRE_Q8_RUNNING":
+            raise FunctionalReadinessError("PRE-Q8 cannot be finalized from current state")
+        rows = self.connection.execute(
+            "SELECT scenario_id,attempt,status FROM pre_q8_runs "
+            "WHERE epoch_id=? ORDER BY rowid",
+            (epoch_id,),
+        ).fetchall()
+        identity = tuple((str(row[0]), int(row[1]), str(row[2])) for row in rows)
+        expected = tuple((scenario, 1, "PASS") for scenario in PRE_Q8_SCENARIOS)
+        if identity != expected:
+            raise FunctionalReadinessError("PRE-Q8 finalization requires canonical 10/10 attempt=1")
+        if (
+            self.connection.execute(
+                "SELECT COUNT(*) FROM pre_q8_failures WHERE epoch_id=?", (epoch_id,)
+            ).fetchone()[0]
+            != 0
+        ):
+            raise FunctionalReadinessError("PRE-Q8 finalization conflicts with failure")
+        with self.connection:
+            self.connection.execute(
+                "UPDATE functional_epochs SET pre_q8_status='10/10 PASS',"
+                "status='GOLDEN_PRODUCT_PENDING',updated_at=? WHERE epoch_id=?",
+                (utc_now(), epoch_id),
+            )
+        return True
 
     def record_golden_product(
         self,

@@ -38,6 +38,10 @@ class CanaryFaultContract:
     faults: tuple[str, ...]
     receipt_root: Path
     isolated_target_root: Path
+    qualification_plane: str = "Q8"
+    run_id: str = "legacy-q8"
+    epoch_id: str = "RE-LEGACY"
+    fixture_seed_digest: str = sha256_text("legacy-clean-canary-fixture")
 
     @classmethod
     def from_config(cls, config: FactoryConfig) -> CanaryFaultContract:
@@ -45,6 +49,15 @@ class CanaryFaultContract:
         if not isinstance(qualification, Mapping) or qualification.get("plane") != "CLEAN_CANARY":
             raise CanaryFaultError("fault injection is allowed only in CLEAN_CANARY")
         contract = cls(
+            qualification_plane=str(
+                qualification.get("qualification_plane") or "Q8"
+            ),
+            run_id=str(qualification.get("run_id") or "legacy-q8"),
+            epoch_id=str(qualification.get("epoch_id") or "RE-LEGACY"),
+            fixture_seed_digest=str(
+                qualification.get("fixture_seed_digest")
+                or sha256_text("legacy-clean-canary-fixture")
+            ),
             scenario_id=str(qualification["scenario_id"]),
             scenario_digest=str(qualification["scenario_digest"]),
             controller_release_digest=str(
@@ -64,6 +77,10 @@ class CanaryFaultContract:
         return sha256_text(
             stable_json(
                 {
+                    "qualification_plane": self.qualification_plane,
+                    "run_id": self.run_id,
+                    "epoch_id": self.epoch_id,
+                    "fixture_seed_digest": self.fixture_seed_digest,
                     "scenario_id": self.scenario_id,
                     "scenario_digest": self.scenario_digest,
                     "controller_release_digest": self.controller_release_digest,
@@ -108,6 +125,10 @@ class CanaryFaultJournal:
         self.root.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema_version": "1.0",
+            "qualification_plane": self.contract.qualification_plane,
+            "run_id": self.contract.run_id,
+            "epoch_id": self.contract.epoch_id,
+            "fixture_seed_digest": self.contract.fixture_seed_digest,
             "scenario_id": self.contract.scenario_id,
             "scenario_digest": self.contract.scenario_digest,
             "candidate_digest": self.contract.candidate_digest,
@@ -157,6 +178,12 @@ class CanaryFaultJournal:
         receipt_digest = str(payload.pop("receipt_digest", ""))
         if (
             sha256_text(stable_json(payload)) != receipt_digest
+            or payload.get("qualification_plane")
+            != self.contract.qualification_plane
+            or payload.get("run_id") != self.contract.run_id
+            or payload.get("epoch_id") != self.contract.epoch_id
+            or payload.get("fixture_seed_digest")
+            != self.contract.fixture_seed_digest
             or payload.get("scenario_id") != self.contract.scenario_id
             or payload.get("scenario_digest") != self.contract.scenario_digest
             or payload.get("candidate_digest") != self.contract.candidate_digest

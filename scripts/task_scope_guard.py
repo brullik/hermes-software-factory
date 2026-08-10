@@ -16,7 +16,7 @@ from typing import Any, Literal, overload
 CONTRACT_PATH = ".hermes/task-scope-contract.json"
 SHA40 = re.compile(r"^[a-f0-9]{40}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
-BRANCH = re.compile(r"^codex/[A-Za-z0-9][A-Za-z0-9._/-]{1,118}$")
+BRANCH = re.compile(r"^(?:codex|agent)/[A-Za-z0-9][A-Za-z0-9._/-]{1,118}$")
 REQUIRED_FIELDS = {
     "schema_version", "contract_id", "original_goal_digest", "product_id",
     "task_id", "branch", "trusted_base_sha", "allowed_paths",

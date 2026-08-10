@@ -54,20 +54,51 @@ QUALIFICATION_STAGES: Final[tuple[str, ...]] = (
     "Q7_SHADOW_DIFFERENTIAL",
 )
 
-REQUIRED_CANARY_SCENARIOS: Final[frozenset[str]] = frozenset(
-    {
-        "zero-dependency-cli",
-        "small-python-service",
-        "telegram-bot",
-        "existing-repository-repair",
-        "high-fan-in",
-        "external-blocker-resume",
-        "provider-timeout-restart",
-        "failed-product-test-one-repair",
-        "package-only",
-        "deploy-rollback",
-    }
+CANONICAL_CANARY_SCENARIOS: Final[tuple[str, ...]] = (
+    "zero-dependency-cli",
+    "small-python-service",
+    "telegram-bot",
+    "existing-repository-repair",
+    "high-fan-in",
+    "external-blocker-resume",
+    "provider-timeout-restart",
+    "failed-product-test-one-repair",
+    "package-only",
+    "deploy-rollback",
 )
+REQUIRED_CANARY_SCENARIOS: Final[frozenset[str]] = frozenset(
+    CANONICAL_CANARY_SCENARIOS
+)
+
+
+def release_epoch_id(
+    *,
+    source_commit: str,
+    controller_release_digest: str,
+    candidate_digest: str,
+    policy_digest: str,
+    toolchain_manifest_digest: str,
+    stable_release_digest: str,
+) -> str:
+    """Return the reproducible epoch namespace for one immutable Candidate."""
+
+    if not _SHA40.fullmatch(source_commit):
+        raise QualificationError("source_commit must be a lowercase Git SHA")
+    identity = {
+        "controller_release_digest": _digest(
+            "controller_release_digest", controller_release_digest
+        ),
+        "candidate_digest": _digest("candidate_digest", candidate_digest),
+        "policy_digest": _digest("policy_digest", policy_digest),
+        "toolchain_manifest_digest": _digest(
+            "toolchain_manifest_digest", toolchain_manifest_digest
+        ),
+        "stable_release_digest": _digest(
+            "stable_release_digest", stable_release_digest
+        ),
+    }
+    seed = sha256_text(stable_json(["release-epoch-v2", source_commit, identity]))
+    return f"RE-{seed[:24].upper()}"
 
 _CANARY_REPORT_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -334,8 +365,6 @@ class ReleaseQualificationGovernor:
         toolchain_manifest_digest: str,
         stable_release_digest: str,
     ) -> str:
-        if not _SHA40.fullmatch(source_commit):
-            raise QualificationError("source_commit must be a lowercase Git SHA")
         values = {
             "controller_release_digest": _digest(
                 "controller_release_digest", controller_release_digest
@@ -350,8 +379,14 @@ class ReleaseQualificationGovernor:
             ),
         }
         now = utc_now()
-        seed = sha256_text(stable_json([source_commit, *values.values(), now]))
-        epoch_id = f"RE-{seed[:24].upper()}"
+        epoch_id = release_epoch_id(
+            source_commit=source_commit,
+            controller_release_digest=values["controller_release_digest"],
+            candidate_digest=values["candidate_digest"],
+            policy_digest=values["policy_digest"],
+            toolchain_manifest_digest=values["toolchain_manifest_digest"],
+            stable_release_digest=values["stable_release_digest"],
+        )
         active = self.connection.execute(
             """SELECT epoch_id FROM controller_release_epochs
                  WHERE status NOT IN ('QUALIFICATION_FAILED','LTS') LIMIT 1"""

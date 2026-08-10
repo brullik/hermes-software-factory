@@ -220,12 +220,20 @@ def _connection(database: Path) -> sqlite3.Connection:
 
 def _write_evidence(root: Path, label: str, payload: dict[str, Any]) -> tuple[str, str, str]:
     body_digest = sha256_text(stable_json(payload))
-    envelope = {**payload, "report_digest": body_digest}
+    observation_time = utc_now()
+    envelope = {**payload, "report_digest": body_digest, "observed_at": observation_time}
     encoded = json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     root.mkdir(parents=True, exist_ok=True)
     destination = root / f"{label}-{body_digest}.json"
     if destination.exists():
-        if destination.is_symlink() or destination.read_text(encoding="utf-8") != encoded:
+        if destination.is_symlink():
+            raise CanaryObservationError("immutable canary evidence conflicts")
+        existing = json.loads(destination.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            raise CanaryObservationError("immutable canary evidence conflicts")
+        observed_at = str(existing.pop("observed_at", ""))
+        report_digest = str(existing.pop("report_digest", ""))
+        if not observed_at or report_digest != body_digest or existing != payload:
             raise CanaryObservationError("immutable canary evidence conflicts")
     else:
         descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o440)
@@ -307,7 +315,7 @@ def prove_fresh_state(database: Path, evidence_root: Path) -> FreshStateProof:
         "database_integrity": integrity,
     }
     initial_digest = sha256_text(stable_json(identity))
-    payload = {**identity, "initial_state_digest": initial_digest, "observed_at": utc_now()}
+    payload = {**identity, "initial_state_digest": initial_digest}
     _, evidence_ref, report_path = _write_evidence(
         evidence_root, "fresh-state", payload
     )
@@ -330,6 +338,7 @@ def observe_completion(
     scenario: CleanCanaryScenario | None = None,
     fault_receipt_root: Path | None = None,
     expected_candidate_digest: str | None = None,
+    fault_contract: CanaryFaultContract | None = None,
 ) -> CanaryCompletionObservation:
     """Read final candidate state without mutation and derive every Q8 counter."""
 
@@ -437,15 +446,51 @@ def observe_completion(
     if scenario is not None:
         if fault_receipt_root is None or expected_candidate_digest is None:
             raise CanaryObservationError("canary fault verification contract is incomplete")
-        contract = CanaryFaultContract(
-            scenario_id=scenario.scenario_id,
-            scenario_digest=scenario.scenario_digest,
-            controller_release_digest=expected_controller_release_digest,
-            candidate_digest=expected_candidate_digest,
-            faults=scenario.injected_faults,
-            receipt_root=fault_receipt_root,
-            isolated_target_root=fault_receipt_root.parent / "isolated-target",
-        )
+        contract = fault_contract
+        if contract is None and scenario.injected_faults:
+            first_receipt = fault_receipt_root / f"{scenario.injected_faults[0]}.json"
+            try:
+                namespace = json.loads(first_receipt.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise CanaryObservationError(
+                    "canary fault receipt namespace is unavailable"
+                ) from error
+            if not isinstance(namespace, dict):
+                raise CanaryObservationError(
+                    "canary fault receipt namespace is not an object"
+                )
+            contract = CanaryFaultContract(
+                qualification_plane=str(namespace.get("qualification_plane", "")),
+                run_id=str(namespace.get("run_id", "")),
+                epoch_id=str(namespace.get("epoch_id", "")),
+                fixture_seed_digest=str(namespace.get("fixture_seed_digest", "")),
+                scenario_id=scenario.scenario_id,
+                scenario_digest=scenario.scenario_digest,
+                controller_release_digest=expected_controller_release_digest,
+                candidate_digest=expected_candidate_digest,
+                faults=scenario.injected_faults,
+                receipt_root=fault_receipt_root,
+                isolated_target_root=fault_receipt_root.parent / "isolated-target",
+            )
+        if contract is None:
+            contract = CanaryFaultContract(
+                scenario_id=scenario.scenario_id,
+                scenario_digest=scenario.scenario_digest,
+                controller_release_digest=expected_controller_release_digest,
+                candidate_digest=expected_candidate_digest,
+                faults=scenario.injected_faults,
+                receipt_root=fault_receipt_root,
+                isolated_target_root=fault_receipt_root.parent / "isolated-target",
+            )
+        if (
+            contract.scenario_id != scenario.scenario_id
+            or contract.scenario_digest != scenario.scenario_digest
+            or contract.controller_release_digest
+            != expected_controller_release_digest
+            or contract.candidate_digest != expected_candidate_digest
+            or contract.receipt_root != fault_receipt_root
+        ):
+            raise CanaryObservationError("canary fault contract identity differs")
         journal = CanaryFaultJournal(contract)
         existing_receipts = (
             {
@@ -511,7 +556,6 @@ def observe_completion(
         "decision_trace": sorted(decisions),
         "fault_receipt_digests": list(fault_receipt_digests),
         "database_integrity": integrity,
-        "observed_at": utc_now(),
     }
     observation_digest, evidence_ref, report_path = _write_evidence(
         evidence_root, f"completion-{product_id}", payload

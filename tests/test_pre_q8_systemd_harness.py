@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import subprocess
+
+import pytest
+
+from scripts import pre_q8_runtime
+
+
+class FakeSystemd:
+    def __init__(self, *, active: str = "", jobs: str = "") -> None:
+        self.active = active
+        self.jobs = jobs
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        normalized = tuple(command)
+        self.calls.append(normalized)
+        if normalized[:2] == ("systemctl", "list-units"):
+            return subprocess.CompletedProcess(command, 0, self.active, "")
+        if normalized[:2] == ("systemctl", "list-jobs"):
+            return subprocess.CompletedProcess(command, 0, self.jobs, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
+def test_epoch_switch_rejects_active_pre_q8_units() -> None:
+    stubborn_unit = (
+        "hermes-factory-pre-q8-convergence-worker@run-a--telegram-bot.service "
+        "loaded active running"
+    )
+    fake = FakeSystemd(active=stubborn_unit)
+    with pytest.raises(
+        pre_q8_runtime.RuntimeControlError,
+        match="units are still active",
+    ):
+        pre_q8_runtime.epoch_switch_guard(runner=fake.run)
+
+    stop = fake.calls[0]
+    for required_pattern in (
+        "hermes-factory-pre-q8@*.service",
+        "hermes-factory-pre-q8-controller@*.service",
+        "hermes-factory-pre-q8-worker@*.service",
+        "hermes-factory-pre-q8-convergence@*.service",
+        "hermes-factory-pre-q8-convergence-controller@*.service",
+        "hermes-factory-pre-q8-convergence-worker@*.service",
+        "hermes-factory-pre-q8-convergence-scenario@*.service",
+        "hermes-factory-pre-q8-official.service",
+        "hermes-factory-golden-*.service",
+    ):
+        assert required_pattern in stop
+
+
+def test_epoch_switch_rejects_pending_restart_jobs() -> None:
+    fake = FakeSystemd(
+        jobs="17 hermes-factory-pre-q8@telegram-bot.service restart running"
+    )
+    with pytest.raises(
+        pre_q8_runtime.RuntimeControlError,
+        match="restart jobs are still scheduled",
+    ):
+        pre_q8_runtime.epoch_switch_guard(runner=fake.run)
+
+
+def test_epoch_switch_accepts_drained_systemd() -> None:
+    fake = FakeSystemd()
+
+    result = pre_q8_runtime.epoch_switch_guard(runner=fake.run)
+
+    assert result["active_units"] == []
+    assert [call[1] for call in fake.calls] == ["stop", "list-units", "list-jobs"]

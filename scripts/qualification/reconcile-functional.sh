@@ -38,8 +38,30 @@ if [[ "${STATUS}" == Q6_5_PROBE_REQUIRED ]]; then
   fi
 fi
 
+if [[ "${STATUS}" == QUALIFICATION_FAILED ]]; then
+  # A terminal official Candidate is immutable. Future timer ticks are no-ops.
+  exit 0
+fi
+
 if [[ "${STATUS}" == PRE_Q8_PENDING ]]; then
-  systemctl start --wait hermes-factory-pre-q8.service
+  # Official execution is gated by an independently signed convergence seal.
+  exit 0
+fi
+
+if [[ "${STATUS}" == PRE_Q8_RUNNING ]]; then
+  if ! systemctl start --wait hermes-factory-pre-q8.service; then
+    FAILURE_STATUS="$("${CONTROL[@]}" status)"
+    FAILURE_EPOCH_STATUS="$(printf '%s' "${FAILURE_STATUS}" | "${PYTHON}" -c \
+      'import json,sys; print(json.load(sys.stdin)["epoch"]["status"])')"
+    if [[ "${FAILURE_EPOCH_STATUS}" != QUALIFICATION_FAILED ]]; then
+      FAILURE_SCENARIO="$(printf '%s' "${FAILURE_STATUS}" | "${PYTHON}" -c \
+        'import json,sys; v=json.load(sys.stdin); runs=v.get("pre_q8_runs",[]); print(next((x["scenario_id"] for x in runs if x["status"]=="RUNNING"),"zero-dependency-cli"))')"
+      "${CONTROL[@]}" pre-q8-fail "${FAILURE_SCENARIO}" \
+        AGGREGATE_UNIT_FAILED "/etc/hermes-factory/pre-q8/${FAILURE_SCENARIO}.yaml" \
+        >/dev/null
+    fi
+    exit 1
+  fi
   RESULT="$("${CONTROL[@]}" status)"
   STATUS="$(printf '%s' "${RESULT}" | "${PYTHON}" -c \
     'import json,sys; print(json.load(sys.stdin)["epoch"]["status"])')"

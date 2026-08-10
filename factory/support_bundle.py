@@ -22,6 +22,7 @@ def build_support_bundle(
     allowed_roots: tuple[Path, ...],
     output_root: Path,
     metadata: dict[str, Any],
+    created_at: str | None = None,
 ) -> tuple[Path, str]:
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", incident_id):
         raise SupportBundleError("support incident id is invalid")
@@ -39,11 +40,13 @@ def build_support_bundle(
         total += len(data)
         if total > 20 * 1024 * 1024:
             raise SupportBundleError("support bundle exceeds size limit")
+        if any(name == path.name for name, _data in records):
+            raise SupportBundleError("support source basenames must be unique")
         records.append((path.name, data))
     manifest = {
         "schema_version": "1.0",
         "incident_id": incident_id,
-        "created_at": utc_now(),
+        "created_at": created_at or utc_now(),
         "metadata": metadata,
         "files": [
             {"name": name, "digest": sha256_text(data.decode("utf-8")), "size": len(data)}
@@ -57,6 +60,13 @@ def build_support_bundle(
     if destination.exists():
         if destination.is_symlink():
             raise SupportBundleError("support bundle path is a symlink")
+        try:
+            with zipfile.ZipFile(destination) as archive:
+                existing = json.loads(archive.read("manifest.json").decode("utf-8"))
+        except (KeyError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile) as error:
+            raise SupportBundleError("existing support bundle is invalid") from error
+        if not isinstance(existing, dict) or existing.get("manifest_digest") != manifest_digest:
+            raise SupportBundleError("existing support bundle identity conflicts")
         return destination, sha256_file(destination)
     try:
         # ZipFile's exclusive mode performs the O_EXCL create itself.  Making an

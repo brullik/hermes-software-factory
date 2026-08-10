@@ -1443,7 +1443,7 @@ def test_clean_canary_catalog_is_exact_and_fresh_state_is_observed(tmp_path: Pat
         prove_fresh_state(database, tmp_path / "second-evidence")
 
 
-def test_completed_canary_observation_derives_zero_intervention_counts(
+def test_observation_digest_is_repeatable(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "canary.db"
@@ -1490,6 +1490,15 @@ def test_completed_canary_observation_derives_zero_intervention_counts(
     assert observation.recovery_applications == 0
     assert observation.routine_owner_actions == 0
     assert observation.duplicate_side_effects == 0
+    repeated = observe_completion(
+        database,
+        tmp_path / "evidence",
+        product_id="product-clean",
+        expected_controller_release_digest=controller_digest,
+    )
+    assert repeated.observation_digest == observation.observation_digest
+    assert repeated.evidence_ref == observation.evidence_ref
+    assert repeated.report_path == observation.report_path
 
 
 def test_qualification_control_initializes_one_idempotent_epoch(tmp_path: Path) -> None:

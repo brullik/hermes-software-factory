@@ -20,11 +20,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     functional_root = Path("/var/lib/hermes-factory-functional")
     verifier_root = Path("/var/lib/hermes-factory-verifier")
+    pre_q8_state_root = Path("/var/lib/hermes-factory-pre-q8")
+    pre_q8_log_root = Path("/var/log/hermes-factory-pre-q8")
     try:
         bundle, digest = build_support_bundle(
             incident_id=args.incident_id,
             source_files=tuple(args.source),
-            allowed_roots=(functional_root, verifier_root),
+            allowed_roots=(
+                functional_root,
+                verifier_root,
+                pre_q8_state_root,
+                pre_q8_log_root,
+            ),
             output_root=functional_root / "support-bundles",
             metadata={"status": "ASSISTANCE_REQUIRED_GPT_CODEX"},
         )

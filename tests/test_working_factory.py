@@ -727,7 +727,22 @@ def _pass_q6_5(governor: FunctionalQualificationGovernor) -> None:
 
 
 def _pass_pre_q8(governor: FunctionalQualificationGovernor) -> None:
+    governor.admit_pre_q8(
+        epoch_id="RE-FUNCTIONAL-1",
+        run_id="run-functional-1",
+        seal_digest="1" * 64,
+        git_tree="2" * 40,
+        release_tree_digest="3" * 64,
+        candidate_digest=DIGEST,
+    )
     for scenario in PRE_Q8_SCENARIOS:
+        governor.start_pre_q8_scenario(
+            epoch_id="RE-FUNCTIONAL-1",
+            scenario_id=scenario,
+            attempt=1,
+            database_path=f"/var/lib/hermes-preq8/{scenario}/controller.db",
+            config_digest=sha256_text(f"config:{scenario}"),
+        )
         governor.record_pre_q8_pass(
             epoch_id="RE-FUNCTIONAL-1",
             scenario_id=scenario,
@@ -736,6 +751,7 @@ def _pass_pre_q8(governor: FunctionalQualificationGovernor) -> None:
             completion_manifest_ref=f"artifact://completion/{scenario}",
             evidence_digest=sha256_text(scenario),
         )
+    governor.finalize_pre_q8("RE-FUNCTIONAL-1")
 
 
 def _pass_golden(governor: FunctionalQualificationGovernor) -> None:
@@ -1032,6 +1048,90 @@ def test_wf_p0_017_preq8_rejects_second_attempt() -> None:
             completion_manifest_ref="artifact://completion/product",
             evidence_digest="a" * 64,
         )
+
+
+def _start_first_pre_q8(governor: FunctionalQualificationGovernor) -> str:
+    scenario = PRE_Q8_SCENARIOS[0]
+    governor.admit_pre_q8(
+        epoch_id="RE-FUNCTIONAL-1",
+        run_id="run-functional-1",
+        seal_digest="1" * 64,
+        git_tree="2" * 40,
+        release_tree_digest="3" * 64,
+        candidate_digest=DIGEST,
+    )
+    governor.start_pre_q8_scenario(
+        epoch_id="RE-FUNCTIONAL-1",
+        scenario_id=scenario,
+        attempt=1,
+        database_path=f"/var/lib/hermes-preq8/{scenario}/controller.db",
+        config_digest="4" * 64,
+    )
+    return scenario
+
+
+def _record_first_pre_q8_failure(
+    governor: FunctionalQualificationGovernor, scenario: str
+) -> bool:
+    return governor.record_pre_q8_failure(
+        epoch_id="RE-FUNCTIONAL-1",
+        scenario_id=scenario,
+        attempt=1,
+        failure_class="WORKER_UNIT_FAILED",
+        failure_digest="5" * 64,
+        evidence_ref=f"artifact://pre-q8/{scenario}/failure",
+        evidence_digest="6" * 64,
+        candidate_database_ref=f"/var/lib/hermes-preq8/{scenario}/controller.db",
+        config_digest="4" * 64,
+        support_bundle_ref=f"artifact://support/{scenario}",
+        support_bundle_digest="7" * 64,
+    )
+
+
+def test_pre_q8_failure_transaction_is_idempotent() -> None:
+    governor = _functional_governor()
+    _pass_q6_5(governor)
+    scenario = _start_first_pre_q8(governor)
+    assert _record_first_pre_q8_failure(governor, scenario)
+    assert not _record_first_pre_q8_failure(governor, scenario)
+    assert governor.epoch("RE-FUNCTIONAL-1")["status"] == "QUALIFICATION_FAILED"
+    assert governor.epoch("RE-FUNCTIONAL-1")["pre_q8_status"] == f"FAIL {scenario}"
+    assert (
+        governor.connection.execute(
+            "SELECT COUNT(*) FROM pre_q8_failures WHERE epoch_id='RE-FUNCTIONAL-1'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_pre_q8_pass_and_failure_are_mutually_exclusive() -> None:
+    failed = _functional_governor()
+    _pass_q6_5(failed)
+    scenario = _start_first_pre_q8(failed)
+    _record_first_pre_q8_failure(failed, scenario)
+    with pytest.raises(FunctionalReadinessError, match="verified admission|conflicts"):
+        failed.record_pre_q8_pass(
+            epoch_id="RE-FUNCTIONAL-1",
+            scenario_id=scenario,
+            attempt=1,
+            product_id="product",
+            completion_manifest_ref="artifact://completion/product",
+            evidence_digest="8" * 64,
+        )
+
+    passed = _functional_governor()
+    _pass_q6_5(passed)
+    scenario = _start_first_pre_q8(passed)
+    passed.record_pre_q8_pass(
+        epoch_id="RE-FUNCTIONAL-1",
+        scenario_id=scenario,
+        attempt=1,
+        product_id="product",
+        completion_manifest_ref="artifact://completion/product",
+        evidence_digest="8" * 64,
+    )
+    with pytest.raises(FunctionalReadinessError, match="conflicts"):
+        _record_first_pre_q8_failure(passed, scenario)
 
 
 def _candidate_database(tmp_path: Path, *, product_status: str, task_status: str) -> Path:
