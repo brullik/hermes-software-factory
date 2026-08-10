@@ -482,17 +482,16 @@ def test_fixture_provision_initializes_empty_repository_and_resumes(
                     }
                 if method == "PATCH":
                     return {"default_branch": "main"}
-            if path.endswith("/git/ref/heads/main"):
-                if method == "GET":
-                    if not self.branch_commit:
-                        # GitHub uses 409 for a ref lookup in an empty repository.
-                        raise GitHubAPIError(409)
-                    return {"object": {"sha": self.branch_commit}}
-                if method == "PATCH":
-                    assert payload is not None
-                    self.ref_patches += 1
-                    self.branch_commit = str(payload["sha"])
-                    return {"object": {"sha": self.branch_commit}}
+            if method == "GET" and path.endswith("/git/ref/heads/main"):
+                if not self.branch_commit:
+                    # GitHub uses 409 for a ref lookup in an empty repository.
+                    raise GitHubAPIError(409)
+                return {"object": {"sha": self.branch_commit}}
+            if method == "PATCH" and path.endswith("/git/refs/heads/main"):
+                assert payload is not None
+                self.ref_patches += 1
+                self.branch_commit = str(payload["sha"])
+                return {"object": {"sha": self.branch_commit}}
             if method == "PUT" and "/contents/.hermes-bootstrap" in path:
                 self.bootstrap_puts += 1
                 self.branch_commit = "a" * 40

@@ -260,11 +260,12 @@ def provision(
         or repository.get("archived") is True
     ):
         raise FixtureControlError("created fixture repository identity differs")
-    branch_path = f"/repos/{owner}/{repository_name}/git/ref/heads/main"
+    branch_get_path = f"/repos/{owner}/{repository_name}/git/ref/heads/main"
+    branch_update_path = f"/repos/{owner}/{repository_name}/git/refs/heads/main"
     branch = _optional_request(
         client,
         "GET",
-        branch_path,
+        branch_get_path,
         absent_statuses=(404, 409),
     )
     if branch is not None:
@@ -358,7 +359,11 @@ def provision(
             },
         },
     )
-    client.request("PATCH", branch_path, {"sha": commit["sha"], "force": True})
+    client.request(
+        "PATCH",
+        branch_update_path,
+        {"sha": commit["sha"], "force": True},
+    )
     client.request(
         "PATCH", f"/repos/{owner}/{repository_name}", {"default_branch": "main"}
     )
