@@ -106,5 +106,7 @@ def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
     runner = (
         ROOT / "scripts" / "qualification" / "run-pre-q8-convergence.sh"
     ).read_text(encoding="utf-8")
-    assert 'run_as_verifier /usr/bin/install -d -m 2770 \\\n' in runner
+    assert "umask 0007" in runner
+    assert 'run_as_verifier /usr/bin/mkdir -p -- \\\n' in runner
+    assert "run_as_verifier /usr/bin/install" not in runner
     assert "install -d -o hermesverifier" not in runner
