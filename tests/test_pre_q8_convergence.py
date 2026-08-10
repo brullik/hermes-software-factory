@@ -359,11 +359,26 @@ def test_generated_convergence_and_official_configs_have_same_semantics(
             encoding="utf-8"
         )
     )
+    assert registry_manifest["layout_version"] == "2.0"
     assert registry_manifest["registry_digest"] == schema_root.name
+    assert {path.name for path in schema_root.iterdir()} == {
+        path.name for path in (ROOT / "schemas").glob("*.json")
+    }
     assert all(
         "$schema" in json.loads(path.read_text(encoding="utf-8"))
         for path in schema_root.glob("*.json")
     )
+
+
+def test_schema_registry_rejects_unexpected_runtime_files(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/bootstrap/build-canary-configs.py"))
+    builder = cast(Callable[[Path], Path], namespace["_build_schema_registry"])
+    registry_root = (tmp_path / "schema-registry").resolve()
+    schema_root = builder(registry_root)
+    (schema_root / "stale-manifest.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="contains unexpected files"):
+        builder(registry_root)
 
 
 def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:

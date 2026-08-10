@@ -24,6 +24,7 @@ _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
 _RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
 _PLANES = frozenset({"CONVERGENCE", "PRE_Q8", "Q8"})
+_SCHEMA_REGISTRY_LAYOUT_VERSION = "2.0"
 
 
 def _write_immutable(path: Path, content: str) -> None:
@@ -66,10 +67,13 @@ def _build_schema_registry(root: Path) -> Path:
         rendered[source.name] = content
     registry_digest = sha256_text(
         stable_json(
-            [
-                [name, sha256_text(content)]
-                for name, content in rendered.items()
-            ]
+            {
+                "layout_version": _SCHEMA_REGISTRY_LAYOUT_VERSION,
+                "files": [
+                    [name, sha256_text(content)]
+                    for name, content in rendered.items()
+                ],
+            }
         )
     )
     if root.exists() and (not root.is_dir() or root.is_symlink()):
@@ -103,8 +107,11 @@ def _build_schema_registry(root: Path) -> Path:
         path = destination / name
         _write_immutable(path, content)
         path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    if {path.name for path in destination.iterdir()} != set(rendered):
+        raise ValueError("PRE-Q8 schema registry destination contains unexpected files")
     manifest = {
         "schema_version": "1.0",
+        "layout_version": _SCHEMA_REGISTRY_LAYOUT_VERSION,
         "registry_digest": registry_digest,
         "lifecycle_version": LIFECYCLE_VERSION,
         "lifecycle_stages": list(STAGES),
