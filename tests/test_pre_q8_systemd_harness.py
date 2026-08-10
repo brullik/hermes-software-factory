@@ -133,3 +133,18 @@ def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
     assert "umask 0007" in official
     assert 'run_as_candidate /usr/bin/mkdir -p -- \\' in official
     assert "install -d -o hermescandidate" not in official
+
+
+def test_pre_q8_runtime_units_share_sqlite_wal_with_verifier_group() -> None:
+    for unit_name in (
+        "hermes-factory-pre-q8-convergence-scenario@.service",
+        "hermes-factory-pre-q8-convergence-controller@.service",
+        "hermes-factory-pre-q8-convergence-worker@.service",
+        "hermes-factory-pre-q8@.service",
+        "hermes-factory-pre-q8-controller@.service",
+        "hermes-factory-pre-q8-worker@.service",
+    ):
+        unit = (ROOT / "config" / "systemd" / unit_name).read_text(
+            encoding="utf-8"
+        )
+        assert "UMask=0007" in unit

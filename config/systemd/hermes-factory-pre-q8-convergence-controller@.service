@@ -8,6 +8,7 @@ Requires=hermes-factory-github-broker.service
 Type=simple
 User=hermescandidate
 Group=hermescandidate
+UMask=0007
 WorkingDirectory=/opt/hermes-factory-candidate/current
 Environment=HOME=/var/lib/hermes-factory-candidate
 Environment=XDG_RUNTIME_DIR=/run/hermes-factory-pre-q8-convergence-%i
