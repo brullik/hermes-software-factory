@@ -88,10 +88,8 @@ GITHUB_OWNER="$("${PYTHON}" -c \
   'import sys,yaml; print(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))["github"]["owner"])' \
   "${BASE_CONFIG}")"
 
-install -d -o hermesverifier -g hermesfunctional -m 2770 \
+run_as_verifier /usr/bin/install -d -m 2770 \
   "${STATE_ROOT}" "${STATE_ROOT}/results" "${STATE_ROOT}/evidence"
-install -d -o hermescandidate -g hermesfunctional -m 2770 \
-  "${STATE_BASE}" "${LOG_ROOT}"
 install -d -o root -g hermesfunctional -m 0750 "${CONFIG_ROOT}"
 
 FIXTURE_JSON="$("${PYTHON}" -m scripts.pre_q8_fixture \

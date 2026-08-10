@@ -100,4 +100,11 @@ def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
 
     assert "SupplementaryGroups=hermesverifier hermesfunctional" in unit
     assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID" in unit
+    assert "CAP_CHOWN" not in unit
     assert "CAP_DAC_OVERRIDE" not in unit
+
+    runner = (
+        ROOT / "scripts" / "qualification" / "run-pre-q8-convergence.sh"
+    ).read_text(encoding="utf-8")
+    assert 'run_as_verifier /usr/bin/install -d -m 2770 \\\n' in runner
+    assert "install -d -o hermesverifier" not in runner
