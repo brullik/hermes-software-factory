@@ -919,6 +919,38 @@ install -o root -g root -m 0644 "${BROKER_DROPIN_TMP}" \
 rm -f "${BROKER_DROPIN_TMP}"
 systemctl daemon-reload
 stop_functional_candidate_services
+"${PYTHON_BIN}" - "${FUNCTIONAL_STATE}/functional.db" "${FUNCTIONAL_GROUP}" <<'PY'
+import grp
+import os
+import stat
+import sys
+
+path, group_name = sys.argv[1:]
+nofollow = getattr(os, "O_NOFOLLOW", None)
+if nofollow is None:
+    raise SystemExit("O_NOFOLLOW is required for the functional database")
+flags = os.O_RDWR | os.O_CLOEXEC | nofollow
+try:
+    descriptor = os.open(path, flags)
+except FileNotFoundError:
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o660)
+    except OSError as error:
+        raise SystemExit(
+            f"Functional database cannot be created safely: {error}"
+        ) from error
+except OSError as error:
+    raise SystemExit(f"Functional database cannot be opened safely: {error}") from error
+try:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise SystemExit("Functional database must be a single-link regular file")
+    if metadata.st_gid != grp.getgrnam(group_name).gr_gid:
+        raise SystemExit("Functional database group differs from the functional group")
+    os.fchmod(descriptor, 0o660)
+finally:
+    os.close(descriptor)
+PY
 for reset_unit in \
   hermes-factory-shadow-export.service \
   hermes-factory-shadow-evaluate.service \

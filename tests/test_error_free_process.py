@@ -1984,6 +1984,10 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         'chown root:"${VERIFIER_USER}" '
         '"${CONFIG_ROOT}/qualification-control.yaml"' not in bootstrap
     )
+    assert '"${FUNCTIONAL_STATE}/functional.db" "${FUNCTIONAL_GROUP}"' in bootstrap
+    assert 'nofollow = getattr(os, "O_NOFOLLOW", None)' in bootstrap
+    assert "flags | os.O_CREAT | os.O_EXCL, 0o660" in bootstrap
+    assert "os.fchmod(descriptor, 0o660)" in bootstrap
     assert 'venv_ready_marker="${venv_root}/.hermes-bootstrap-complete"' in bootstrap
     assert 'rm -rf -- "${venv_root}"' in bootstrap
     assert "Refusing to rebuild the active incomplete environment" in bootstrap
