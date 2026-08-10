@@ -7,6 +7,7 @@ Requires=hermes-factory-github-broker.service
 Type=oneshot
 User=root
 Group=root
+SupplementaryGroups=hermesverifier hermesfunctional
 WorkingDirectory=/opt/hermes-factory-verifier/current
 Environment=PRE_Q8_CONVERGENCE_TIMEOUT_SECONDS=172800
 Environment=PRE_Q8_CONVERGENCE_NO_PROGRESS_SECONDS=1800

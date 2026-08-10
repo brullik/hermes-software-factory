@@ -94,14 +94,19 @@ def test_epoch_switch_recreates_pre_q8_mount_roots_after_archive() -> None:
 
 
 def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
-    unit = (
-        ROOT / "config" / "systemd" / "hermes-factory-pre-q8-convergence@.service"
-    ).read_text(encoding="utf-8")
-
-    assert "SupplementaryGroups=hermesverifier hermesfunctional" in unit
-    assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID" in unit
-    assert "CAP_CHOWN" not in unit
-    assert "CAP_DAC_OVERRIDE" not in unit
+    for unit_name in (
+        "hermes-factory-pre-q8-convergence@.service",
+        "hermes-factory-pre-q8-convergence-scenario@.service",
+        "hermes-factory-pre-q8@.service",
+        "hermes-factory-pre-q8-official.service",
+    ):
+        unit = (ROOT / "config" / "systemd" / unit_name).read_text(
+            encoding="utf-8"
+        )
+        assert "SupplementaryGroups=hermesverifier hermesfunctional" in unit
+        assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID" in unit
+        assert "CAP_CHOWN" not in unit
+        assert "CAP_DAC_OVERRIDE" not in unit
 
     runner = (
         ROOT / "scripts" / "qualification" / "run-pre-q8-convergence.sh"
@@ -110,3 +115,21 @@ def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
     assert 'run_as_verifier /usr/bin/mkdir -p -- \\\n' in runner
     assert "run_as_verifier /usr/bin/install" not in runner
     assert "install -d -o hermesverifier" not in runner
+
+    for runner_name in (
+        "run-pre-q8-convergence-scenario.sh",
+        "run-pre-q8-scenario.sh",
+    ):
+        scenario_runner = (
+            ROOT / "scripts" / "qualification" / runner_name
+        ).read_text(encoding="utf-8")
+        assert "umask 0007" in scenario_runner
+        assert "run_as_verifier /usr/bin/mkdir -p --" in scenario_runner
+        assert "install -d -o hermesverifier" not in scenario_runner
+
+    official = (
+        ROOT / "scripts" / "qualification" / "run-all-pre-q8.sh"
+    ).read_text(encoding="utf-8")
+    assert "umask 0007" in official
+    assert 'run_as_candidate /usr/bin/mkdir -p -- \\' in official
+    assert "install -d -o hermescandidate" not in official

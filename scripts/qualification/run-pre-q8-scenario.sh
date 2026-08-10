@@ -137,7 +137,10 @@ UNIT_PROPERTIES_PATH="${RUNTIME_ROOT}/unit-properties.txt"
 SAFE_JOURNAL_PATH="${RUNTIME_ROOT}/safe-journal.json"
 STATUS_SUMMARY_PATH="${RUNTIME_ROOT}/official-status.json"
 FIXTURE_RECEIPT="${PRE_Q8_ROOT}/${EPOCH_ID}/${RUN_ID}/fixture-provision.json"
-install -d -o hermesverifier -g hermesfunctional -m 2770 "${RUNTIME_ROOT}"
+(
+  umask 0007
+  run_as_verifier /usr/bin/mkdir -p -- "${RUNTIME_ROOT}"
+)
 
 OFFICIAL_STARTED=1
 RECONCILE_JSON="$(run_as_verifier "${VERIFIER_PYTHON}" \

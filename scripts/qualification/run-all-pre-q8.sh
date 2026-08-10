@@ -34,6 +34,12 @@ run_as_verifier() {
     USER=hermesverifier LOGNAME=hermesverifier "$@"
 }
 
+run_as_candidate() {
+  "${SETPRIV}" --reuid=hermescandidate --regid=hermescandidate --init-groups \
+    --no-new-privs -- /usr/bin/env HOME=/var/lib/hermes-factory-candidate \
+    USER=hermescandidate LOGNAME=hermescandidate "$@"
+}
+
 cleanup_fixture() {
   exit_status=$?
   trap - EXIT
@@ -93,8 +99,11 @@ if [[ -n "${1:-}" ]]; then
   RUN_ROOT="/var/lib/hermes-factory-pre-q8/${EPOCH_ID}/${RUN_ID}"
   FIXTURE_RECEIPT="${RUN_ROOT}/fixture-provision.json"
   FIXTURE_ARCHIVE_RECEIPT="${RUN_ROOT}/fixture-archive.json"
-  install -d -o hermescandidate -g hermesfunctional -m 2770 \
-    /var/lib/hermes-factory-pre-q8 "${RUN_ROOT}" /var/log/hermes-factory-pre-q8
+  (
+    umask 0007
+    run_as_candidate /usr/bin/mkdir -p -- \
+      /var/lib/hermes-factory-pre-q8 "${RUN_ROOT}" /var/log/hermes-factory-pre-q8
+  )
   FIXTURE_JSON="$("${PYTHON}" -m scripts.pre_q8_fixture \
     --token-file "${TOKEN_FILE}" --owner "${GITHUB_OWNER}" provision \
     --plane pre-q8 --run-id "${RUN_ID}" --candidate-digest "${CANDIDATE_DIGEST}" \

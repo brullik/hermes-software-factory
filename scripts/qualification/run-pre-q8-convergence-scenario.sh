@@ -115,8 +115,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-install -d -o hermesverifier -g hermesfunctional -m 2770 \
-  "${EVIDENCE_ROOT}" "${RUNTIME_ROOT}" "$(dirname "${RESULT_PATH}")"
+(
+  umask 0007
+  run_as_verifier /usr/bin/mkdir -p -- \
+    "${EVIDENCE_ROOT}" "${RUNTIME_ROOT}" "$(dirname "${RESULT_PATH}")"
+)
 IDENTITY_JSON="$(run_as_verifier "${VERIFIER_PYTHON}" -m scripts.pre_q8_runtime \
   config-identity --config "${CONFIG}" --expected-plane CONVERGENCE \
   --expected-scenario "${SCENARIO_ID}" \
