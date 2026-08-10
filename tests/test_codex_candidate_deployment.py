@@ -238,6 +238,25 @@ def _fixture(
     return broker, _request(digest), git_runner, prepare_runner, failure_probe_runner
 
 
+def _replace_with_legacy_receipt(
+    broker: CandidateDeploymentBroker,
+    request: CandidateDeploymentRequest,
+    receipt: dict[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_digest")
+    unsigned.pop("failure_classification")
+    unsigned.pop("failure_evidence_ref")
+    legacy = {
+        **unsigned,
+        "receipt_digest": sha256_text(stable_json(unsigned)),
+    }
+    path = broker.result_root / f"{request.request_id}.json"
+    path.unlink()
+    broker._write_immutable(path, legacy)
+    return path, legacy
+
+
 def test_exact_main_merge_invokes_only_prepare_and_replays_receipt(tmp_path: Path) -> None:
     broker, request, _git, prepare, failure_probe = _fixture(tmp_path)
 
@@ -267,6 +286,61 @@ def test_exact_main_merge_invokes_only_prepare_and_replays_receipt(tmp_path: Pat
     receipt = broker.result_root / f"{request.request_id}.json"
     assert receipt.stat().st_mode & 0o777 == 0o400
     assert not receipt.stat().st_mode & 0o222
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_classification"),
+    [(0, ""), (1, "sanitized_failure_evidence_unavailable")],
+)
+def test_exact_legacy_receipt_replays_as_current_schema_without_side_effects(
+    tmp_path: Path,
+    returncode: int,
+    expected_classification: str,
+) -> None:
+    broker, request, _git, prepare, failure_probe = _fixture(tmp_path)
+    raw_marker = "ghp_" + "R" * 24
+    prepare.returncode = returncode
+    prepare.stderr = raw_marker
+    first = broker.execute(request.__dict__)
+    path, legacy = _replace_with_legacy_receipt(broker, request, first)
+
+    replayed = broker.execute(request.__dict__)
+    repeated = broker.execute(request.__dict__)
+
+    assert replayed == repeated
+    assert replayed["result"] == ("PASS" if returncode == 0 else "FAILED")
+    assert replayed["failure_classification"] == expected_classification
+    expected_ref = (
+        ""
+        if not expected_classification
+        else broker._failure_reference(request, expected_classification)
+    )
+    assert replayed["failure_evidence_ref"] == expected_ref
+    replayed_unsigned = dict(replayed)
+    replayed_digest = replayed_unsigned.pop("receipt_digest")
+    assert replayed_digest == sha256_text(stable_json(replayed_unsigned))
+    assert json.loads(path.read_text(encoding="utf-8")) == legacy
+    assert raw_marker not in stable_json(replayed)
+    assert len(prepare.calls) == 1
+    assert failure_probe.calls == []
+    assert not path.stat().st_mode & 0o222
+
+
+def test_unknown_legacy_receipt_shape_still_fails_closed(tmp_path: Path) -> None:
+    broker, request, _git, _prepare, _failure_probe = _fixture(tmp_path)
+    first = broker.execute(request.__dict__)
+    path, legacy = _replace_with_legacy_receipt(broker, request, first)
+    unsigned = dict(legacy)
+    unsigned.pop("receipt_digest")
+    unsigned.pop("stderr_digest")
+    malformed = {**unsigned, "receipt_digest": sha256_text(stable_json(unsigned))}
+    path.unlink()
+    broker._write_immutable(path, malformed)
+
+    with pytest.raises(
+        CandidateDeploymentError, match="deployment_result_fields_differ"
+    ):
+        broker.execute(request.__dict__)
 
 
 def test_secret_free_client_sends_only_the_typed_request(tmp_path: Path) -> None:

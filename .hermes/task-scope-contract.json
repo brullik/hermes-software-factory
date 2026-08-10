@@ -8,10 +8,10 @@
   "approval_evidence_digest": "4fa6677968ce2a5f72689a7757e99271be39a28cb399c7441bb5ace729a883b6",
   "approval_evidence_ref": "artifact://hermes-path-arbiter/4fa6677968ce2a5f72689a7757e99271be39a28cb399c7441bb5ace729a883b6",
   "approved_by": "hermes-path-arbiter",
-  "branch": "codex/generation-0007-23e804e94da9",
-  "contract_digest": "0671205e33aebb43e095816f0bfda4dd4f22520ca15f46d470cd3dfcbbeb73fc",
-  "contract_id": "autonomous-factory.candidate-deployment-sanitized-failure-evidence.20260810",
-  "created_at": "2026-08-10T01:59:28+00:00",
+  "branch": "codex/vps-candidate-deployment-receipt-replay-compatibility-20260810-v2",
+  "contract_digest": "bb41d0a2a14970d1cd41730f5ee21427755cfc9d8d253933c97ca8a4a57a0c2a",
+  "contract_id": "autonomous-factory.candidate-deployment-receipt-replay-compatibility.20260810",
+  "created_at": "2026-08-10T03:09:33+00:00",
   "expires_at": "2026-09-09T01:59:28+00:00",
   "forbidden_paths": [
     ".git/**",
@@ -28,14 +28,14 @@
     "factory/state.py",
     "factory/telegram.py"
   ],
-  "max_additions": 360,
+  "max_additions": 180,
   "max_changed_files": 4,
-  "max_deletions": 100,
+  "max_deletions": 40,
   "original_goal_digest": "031b0f3414532cb26781bb6637ae0f456c94a5270aeaca7c852e13b29bce6497",
-  "parent_contract_digest": "130d8933a6923b384e962dc60f31df620df63acf2dec5b60c397999d02eee8e3",
+  "parent_contract_digest": "0671205e33aebb43e095816f0bfda4dd4f22520ca15f46d470cd3dfcbbeb73fc",
   "product_id": "hermes-software-factory",
-  "rationale": "Repair only the proven Candidate deployment observability gap: when the atomic prepare or qualification boundary fails and child tails remain intentionally empty, invoke the existing read-only candidate_truth sanitizer inside the Candidate contour, accept only fixed PRE-Q8 scenario/status values and registered Failure Catalog reason codes, and bind the resulting safe classification to a deterministic digest reference in the immutable deployment receipt. Preserve PASS behavior, exact request and commit replay guards, immutable receipts, Stable isolation, all qualification truth and gates, and zero notification side effects. Sanitizer absence, malformed output, unregistered reasons, conflicting identities or execution errors remain fail-closed and never expose raw product, provider, credential or database content. Candidate FIFTEEN and all historical receipts remain immutable and non-retryable.",
+  "rationale": "Correct only the post-deploy idempotence defect proven when an immutable legacy Candidate deployment receipt, written before activation of the observability schema, is replayed by the exact merged runtime. Accept only the exact prior receipt field set with a valid immutable digest and identical request digest, deterministically project the two new allowlisted failure-evidence fields in memory, and preserve the stored receipt unchanged. New-schema receipts, PASS truth, request and commit replay guards, Stable isolation, qualification gates and zero notification side effects remain unchanged; malformed, conflicting or unknown schemas fail closed. Candidate FIFTEEN, Candidate SIXTEEN and all historical receipts remain immutable and non-retryable.",
   "schema_version": "1.0",
-  "task_id": "candidate-deployment-sanitized-failure-evidence",
-  "trusted_base_sha": "23e804e94da9fcf8f0eb36a119c3571b066ac56b"
+  "task_id": "candidate-deployment-receipt-replay-compatibility",
+  "trusted_base_sha": "568e92922ea3053f0e928646f008e4e230c60efe"
 }
