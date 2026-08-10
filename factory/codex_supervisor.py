@@ -523,11 +523,14 @@ class CodexSupervisor:
         evidence_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(evidence_dir, 0o700)
         bundle_path = evidence_dir / "committed-head.bundle"
+        trusted_workspace = self.config.workspace.resolve(strict=True)
         bundle = subprocess.run(
             [
                 "/usr/bin/git",
+                "-c",
+                f"safe.directory={trusted_workspace}",
                 "-C",
-                str(self.config.workspace),
+                str(trusted_workspace),
                 "bundle",
                 "create",
                 str(bundle_path),

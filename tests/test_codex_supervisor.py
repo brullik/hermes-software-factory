@@ -816,6 +816,58 @@ class CodexSupervisorTests(unittest.TestCase):
         self.assertIn("publish bounded canary", resumed.prompts[0])
         self.assertIn("Do not mutate the frozen omnibus branch.", resumed.prompts[0])
 
+    def test_generation_bundle_trusts_only_exact_resolved_workspace(self) -> None:
+        supervisor = self.supervisor(FakeRunner([]))
+        state = supervisor._initial_state()
+        request = BrokerRequest(
+            request_id="CODEX-GENERATION-CAPTURE-TEST",
+            operation="repository.read",
+            owner="brullik",
+            repository="hermes-software-factory",
+            payload={"query": "workspace_generation_for_head_sha"},
+        )
+        receipt = FakeGenerationBroker._receipt(request, ())
+        real_run = subprocess.run
+        observed: list[list[str]] = []
+
+        def observe_run(
+            argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[Any]:
+            observed.append(list(argv))
+            return real_run(argv, **kwargs)
+
+        with patch(
+            "factory.codex_supervisor.subprocess.run", side_effect=observe_run
+        ):
+            manifest_path, _manifest = supervisor._capture_generation(
+                state,
+                head_sha=self.base_sha,
+                branch="codex/test-supervisor",
+                receipt=receipt,
+                fields={"number": "202", "merge_sha": self.base_sha},
+            )
+
+        resolved = self.workspace.resolve(strict=True)
+        bundle_path = manifest_path.parent / "committed-head.bundle"
+        bundle_argv = [
+            argv for argv in observed if "bundle" in argv and "create" in argv
+        ]
+        self.assertEqual(
+            bundle_argv,
+            [[
+                "/usr/bin/git",
+                "-c",
+                f"safe.directory={resolved}",
+                "-C",
+                str(resolved),
+                "bundle",
+                "create",
+                str(bundle_path),
+                "codex/test-supervisor",
+            ]],
+        )
+        self.assertNotIn("safe.directory=*", bundle_argv[0])
+
     def test_merged_head_rolls_same_session_to_new_workspace_generation(self) -> None:
         config = self.config()
         config_path = self.goal_dir / "supervisor.json"
