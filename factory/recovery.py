@@ -3439,6 +3439,7 @@ def resume_unverified_container_repair_failure(
         acceptance=acceptance,
         quality_gates=quality_gates,
         model_floor="terra",
+        supersede_failed=False,
     )
     repair_path = router._write_repair_brief(
         failed=failed,
@@ -3451,6 +3452,7 @@ def resume_unverified_container_repair_failure(
         ),
         repair_task_id=str(contract["task_id"]),
         allowed_paths=allowed_paths,
+        supersedes_task_id=None,
         acceptance=acceptance,
     )
     repair_ref = f"evidence/{repair_path.name}"
@@ -3535,7 +3537,7 @@ def resume_unverified_container_repair_failure(
                     hypothesis_id,
                     str(contract["capability_profile"]),
                     str(contract["idempotency_key"]),
-                    str(contract["supersedes_task_id"]),
+                    contract.get("supersedes_task_id"),
                     root_problem_signature,
                     stable_json(contract["required_capabilities"]),
                     repair_ref,

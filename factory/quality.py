@@ -39,6 +39,7 @@ class QualityGateEngine:
         packaged_catalog = Path(__file__).resolve().parents[1] / "config" / "quality-gates.yaml"
         configured = config.raw.get("paths", {}).get("quality_gates")
         self.catalog_path = Path(str(configured)) if configured else packaged_catalog
+        self.temporary_root = config.state_dir / "tmp" / "quality-gates"
 
     @staticmethod
     def _python_executable(cwd: Path) -> str:
@@ -81,6 +82,7 @@ class QualityGateEngine:
                 cwd,
                 subject_sha,
                 python_executable=self._python_executable(cwd),
+                temporary_root=self.temporary_root,
             )
             filename = f"gate-{task_id}-{attempt_id}-{gate_id}.json"
             evidence_path = self.artifacts.write("gate-evidence.schema.json", evidence, filename=filename)

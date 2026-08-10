@@ -24,6 +24,8 @@ from factory.attempts import IdenticalAttemptError
 from factory.autonomy import CAPABILITY_PROFILES, FailureData
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig
+from factory.controller_envelope import CONTROLLER_OWNED_FIELDS
+from factory.delivery_profile_obligations import delivery_profile_obligations
 from factory.hermes_stdin import _invoke_hermes, read_stdin_prompt
 from factory.intake import IntakeService
 from factory.path_governor import PathGovernor, ResultLineageIdentityError
@@ -281,6 +283,150 @@ def test_solution_architect_gets_trusted_capacity_evidence() -> None:
         state.close()
 
 
+def test_delivery_profile_obligations_enter_architecture_prompt() -> None:
+    expected_profile_ids = {
+        "CLI_PACKAGE": {"CLI-CANON-001", "CLI-INSTALL-001"},
+        "DEPLOYED_SERVICE": {"HTTP-HEAD-001", "DEPLOY-ROLLBACK-001"},
+        "TELEGRAM_BOT": {"TG-RETRY-001", "TG-AUTH-001", "TG-DB-ROLLBACK-001"},
+        "OFFLINE_BATCH": {"BATCH-PATH-001", "BATCH-LIMIT-001"},
+        "GITHUB_AUTOMATION": {"GH-IDEMPOTENCY-001", "GH-RESUME-001"},
+        "LIBRARY_PACKAGE": {"LIB-CONSUMER-001", "LIB-SIGN-001"},
+    }
+    universal = {
+        "PY-PACKAGE-001",
+        "PY-DEPS-001",
+        "PY-LICENSE-001",
+        "PY-DOCS-001",
+        "PY-TOOLCHAIN-001",
+    }
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-terra"),
+        )
+        state = StateStore(config.database_path)
+        artifacts = ArtifactStore(config)
+        pipeline = PipelineCoordinator(config, state, artifacts)
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=ROOT,
+        )
+        try:
+            for profile, profile_ids in expected_profile_ids.items():
+                product_id = f"P-OBLIGATION-{profile}"
+                state.create_product_v2(
+                    product_id=product_id,
+                    owner_id="owner",
+                    source="test",
+                    goal_text=f"Deliver profile {profile}",
+                    delivery_mode="new_repository",
+                    repository_url=None,
+                    repository_name=profile.lower().replace("_", "-"),
+                    repository_visibility="private",
+                    root_goal_ref=f"evidence/intake-{product_id}.json",
+                    constraints_ref=None,
+                    owner_defaults_ref=None,
+                    idempotency_key=sha256_text(f"intake:{product_id}"),
+                    rate_limit=None,
+                    delivery_profile=profile,
+                )
+                task_path = pipeline.create_task(product_id, "solution-architect")
+                task_id = str(json.loads(task_path.read_text(encoding="utf-8"))["task_id"])
+                task = state.get_task(task_id)
+                assert task is not None
+                with patch(
+                    "factory.worker._host_capacity_snapshot",
+                    return_value={"schema_version": "1.0", "status": "AVAILABLE"},
+                ):
+                    spec = worker.default_spec(task)
+                prompt, _, _ = worker._context_and_prompt(spec)
+                expected_ids = universal | profile_ids
+                contract = delivery_profile_obligations(profile, "new_repository")
+                assert set(contract.obligation_ids) == expected_ids
+                assert all(obligation_id in prompt for obligation_id in expected_ids)
+                assert contract.digest in prompt
+        finally:
+            state.close()
+
+
+def test_same_obligations_enter_independent_review() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-terra"),
+        )
+        config.raw["qualification"] = {"faults": ["ONE_PROVIDER_TIMEOUT"]}
+        state = StateStore(config.database_path)
+        artifacts = ArtifactStore(config)
+        product_id = "P-OBLIGATION-REVIEW"
+        state.create_product_v2(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            goal_text="Deliver a deployed service with timeout recovery",
+            delivery_mode="new_repository",
+            repository_url=None,
+            repository_name="obligation-review",
+            repository_visibility="private",
+            root_goal_ref=f"evidence/intake-{product_id}.json",
+            constraints_ref=None,
+            owner_defaults_ref=None,
+            idempotency_key=sha256_text(f"intake:{product_id}"),
+            rate_limit=None,
+            delivery_profile="DEPLOYED_SERVICE",
+        )
+        pipeline = PipelineCoordinator(config, state, artifacts)
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=ROOT,
+        )
+
+        def obligation_payload(stage: str) -> tuple[dict[str, Any], str]:
+            task_path = pipeline.create_task(product_id, stage)
+            task_id = str(json.loads(task_path.read_text(encoding="utf-8"))["task_id"])
+            task = state.get_task(task_id)
+            assert task is not None
+            with patch(
+                "factory.worker._host_capacity_snapshot",
+                return_value={"schema_version": "1.0", "status": "AVAILABLE"},
+            ), patch.object(
+                worker,
+                "_completed_review_evidence",
+                return_value=[],
+            ):
+                spec = worker.default_spec(task)
+            item = next(
+                evidence
+                for evidence in spec.evidence
+                if evidence["type"] == "controller-delivery-profile-obligations"
+            )
+            payload = json.loads(
+                item["summary"].removeprefix("TRUSTED_CONTROLLER_EVIDENCE: ")
+            )
+            prompt, _, _ = worker._context_and_prompt(spec)
+            return payload, prompt
+
+        try:
+            architecture, architecture_prompt = obligation_payload("solution-architect")
+            reviewer, reviewer_prompt = obligation_payload("independent-reviewer")
+            assert reviewer == architecture
+            assert reviewer["obligation_set_digest"] in architecture_prompt
+            assert reviewer["obligation_set_digest"] in reviewer_prompt
+            assert "FAULT-TIMEOUT-001" in reviewer["obligation_ids"]
+            assert all(
+                obligation_id in reviewer_prompt
+                for obligation_id in reviewer["obligation_ids"]
+            )
+        finally:
+            state.close()
+
+
 def test_external_planning_roles_and_builder_get_binding_python_contract() -> None:
     product = {"repository_url": "https://github.com/example/service"}
     for role in ("solution-architect", "task-specifier", "replanner", "builder"):
@@ -342,12 +488,105 @@ def test_replanner_context_exposes_exact_remaining_execution_slots() -> None:
         assert context["plan_summary"]["path_governor_execution_budget"] == {
             "root_problem_signature": signature, "execution_slot_limit": 2,
             "execution_attempts_used": 0, "raw_remaining_execution_slots": 2,
-            "reviewer_correction_slots_reserved": 1,
-            "remaining_execution_slots": 1, "status": "ACTIVE",
+            "reviewer_correction_slots_reserved": 0,
+            "remaining_execution_slots": 2, "status": "ACTIVE",
         }
         assert any("remaining_execution_slots" in decision for decision in spec.decisions)
         assert any(item["type"] == "controller-target-execution-contract" for item in spec.evidence)
         state.close()
+
+
+def test_replanner_receives_controller_mandatory_goals() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+        )
+        state = StateStore(config.database_path)
+        product_id, task_id = "P-REPLANNER-GOALS", "T-REPLANNER-GOALS"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Build a product with controller-owned mandatory goals",
+            idempotency_key="replanner-mandatory-goal-context",
+        )
+        contract = replanner_task_contract(config, product_id, task_id)
+        active_plan_id = str(contract["plan_id"])
+        with state._connection:
+            state._connection.execute(
+                """INSERT INTO plans
+                   (plan_id, product_id, revision, parent_plan_id,
+                    source_failure_id, status, plan_artifact_ref, plan_digest,
+                    goals_json, completion_criteria_json, created_by_task_id,
+                    created_at, activated_at)
+                   VALUES (?, ?, 1, NULL, NULL, 'ACTIVE', ?, ?, ?, '[]', ?, ?, ?)""",
+                (
+                    active_plan_id,
+                    product_id,
+                    "evidence/plan-replanner-goals.json",
+                    "a" * 64,
+                    json.dumps(
+                        [
+                            {
+                                "goal_id": "goal-runtime",
+                                "statement": "Deliver the runtime.",
+                                "mandatory": True,
+                            },
+                            {
+                                "goal_id": "goal-optional",
+                                "statement": "Add optional polish.",
+                                "mandatory": False,
+                            },
+                        ]
+                    ),
+                    task_id,
+                    "2026-08-10T00:00:00Z",
+                    "2026-08-10T00:00:00Z",
+                ),
+            )
+            state._connection.execute(
+                """UPDATE products
+                      SET active_plan_id=?, active_plan_revision=1
+                    WHERE product_id=?""",
+                (active_plan_id, product_id),
+            )
+        contract_path = ArtifactStore(config).write(
+            "task-contract-v2.schema.json",
+            contract,
+            filename=f"task-{task_id}.json",
+        )
+        state.add_task(
+            task_id=task_id,
+            product_id=product_id,
+            title=str(contract["title"]),
+            role="replanner",
+            output_schema=str(contract["output_schema"]),
+            contract_ref=f"evidence/{contract_path.name}",
+            plan_id=active_plan_id,
+            plan_node_id=str(contract["plan_node_id"]),
+            capability_profile="planning_readonly",
+            required_capabilities=list(contract["required_capabilities"]),
+        )
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=ROOT,
+        )
+        task = state.get_task(task_id)
+        assert task is not None
+
+        _, _, context_path = worker._context_and_prompt(worker.default_spec(task))
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+
+        try:
+            assert context["plan_summary"]["uncovered_mandatory_goal_ids"] == [
+                "goal-runtime"
+            ]
+        finally:
+            state.close()
 
 
 def test_plan_contract_violation_has_typed_worker_classification() -> None:
@@ -1586,11 +1825,20 @@ class WorkerTests(unittest.TestCase):
             with state._lock, state._connection:
                 state._connection.execute(
                     """UPDATE tasks
-                          SET result_ref=?, result_digest=?
+                          SET result_ref=?, result_digest=?,
+                              semantic_node_key=?, lifecycle_stage=?,
+                              review_kind=?, evidence_profile=?,
+                              semantic_node_id=?, contract_digest=?
                         WHERE task_id=?""",
                     (
                         original["result_ref"],
                         original["result_digest"],
+                        original.get("semantic_node_key"),
+                        original.get("lifecycle_stage"),
+                        original.get("review_kind"),
+                        original.get("evidence_profile"),
+                        original.get("semantic_node_id"),
+                        original.get("contract_digest"),
                         reused_id,
                     ),
                 )
@@ -1667,16 +1915,30 @@ class WorkerTests(unittest.TestCase):
                 role=str(accepted_repair["role"]),
                 output_schema=str(accepted_repair["output_schema"]),
                 contract_ref=f"evidence/task-{failed_id}.json",
-                stage_key="test",
+                stage_key=str(accepted_repair["stage_key"] or "test"),
                 root_task_id=str(accepted_repair["root_task_id"]),
                 root_context_ref=str(accepted_repair["root_context_ref"]),
+                semantic_node_key=str(
+                    accepted_repair["semantic_node_key"]
+                    or accepted_repair["semantic_node_id"]
+                ),
                 graph_status="SUPERSEDED",
             )
             with state._lock, state._connection:
                 state._connection.execute(
                     """UPDATE tasks
-                          SET supersedes_task_id=?, parent_task_id=?,
-                              source_task_id=?
+                          SET lifecycle_stage=?, review_kind=?, evidence_profile=?
+                        WHERE task_id=?""",
+                    (
+                        accepted_repair["lifecycle_stage"],
+                        accepted_repair["review_kind"],
+                        accepted_repair["evidence_profile"],
+                        failed_id,
+                    ),
+                )
+                state._connection.execute(
+                    """UPDATE tasks
+                          SET supersedes_task_id=?, parent_task_id=?, source_task_id=?
                         WHERE task_id=?""",
                     (
                         failed_id,
@@ -2932,7 +3194,14 @@ class WorkerTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(len(executor.calls), 1)
-            self.assertEqual(executor.calls[0]["proposed"], proposed)
+            bound_proposal = executor.calls[0]["proposed"]
+            assert isinstance(bound_proposal, dict)
+            for key, value in proposed.items():
+                if key not in CONTROLLER_OWNED_FIELDS:
+                    self.assertEqual(bound_proposal[key], value)
+            self.assertNotEqual(bound_proposal["artifact_id"], proposed["artifact_id"])
+            self.assertEqual(bound_proposal["product_id"], product_id)
+            self.assertEqual(bound_proposal["policy_digest"], policy_digest(config))
             output_paths = list(config.evidence_dir.glob("release-operation-result-*.json"))
             self.assertEqual(len(output_paths), 1)
             persisted = json.loads(output_paths[0].read_text(encoding="utf-8"))
@@ -3157,7 +3426,16 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(second.status, "completed")
             self.assertEqual(len(runner.prompts), 2)
             self.assertIn("UNTRUSTED_DATA accepted output for dependency", runner.prompts[1])
-            self.assertIn("product-contract-worker-test", runner.prompts[1])
+            director_task = next(
+                item
+                for item in state.list_tasks(intake_result.product_id)
+                if item["role"] == "product-director"
+            )
+            _, controller_output, _ = worker._accepted_task_artifacts(
+                str(director_task["task_id"])
+            )
+            self.assertIn(str(controller_output["artifact_id"]), runner.prompts[1])
+            self.assertNotIn("product-contract-worker-test", runner.prompts[1])
             self.assertIn(
                 "Do not run repository commands such as pytest or make", runner.prompts[1]
             )

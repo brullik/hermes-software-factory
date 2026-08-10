@@ -30,6 +30,22 @@ PROPERTY_SETTINGS = settings(
 CARDINALITIES = (0, 1, 2, 32, 99, 100, 101, 500, 10_000)
 
 
+def test_locked_controller_reason_codes_are_registered_exactly() -> None:
+    reason_codes = {
+        "controller_result_provenance_invalid",
+        "cross_role_supersession_invalid",
+        "active_result_binding_conflict",
+        "controller_envelope_conflict",
+        "canonical_fault_gate_missing",
+    }
+
+    for reason_code in reason_codes:
+        disposition = failure_disposition(reason_code)
+        assert disposition.reason_code == reason_code
+        assert disposition.registered
+        assert disposition.action is FailureAction.CONTROLLER_QUARANTINE
+
+
 @PROPERTY_SETTINGS
 @given(
     task_id=st.text(alphabet=string.ascii_letters + string.digits, min_size=1, max_size=32),

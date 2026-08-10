@@ -9,6 +9,7 @@ from typing import Any
 
 from .autonomy import CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
+from .delivery_profile_obligations import delivery_profile_obligations
 from .delivery_profiles import delivery_profile
 from .lifecycle import (
     LIFECYCLE_VERSION,
@@ -34,8 +35,11 @@ class CompileContext:
     mandatory_replan_gate_ids: tuple[str, ...] = ()
     blocked_replan_scope_paths: tuple[str, ...] = ()
     required_replan_scope_paths: tuple[str, ...] = ()
+    uncovered_mandatory_goal_ids: tuple[str, ...] = ()
     remaining_recovery_execution_slots: int | None = None
     delivery_profile: str = "DEPLOYED_SERVICE"
+    delivery_mode: str = "new_repository"
+    declared_faults: tuple[str, ...] = ()
 
 
 def _node_key(value: str) -> str:
@@ -166,6 +170,7 @@ class PlanCompiler:
         mandatory_gate_ids: Sequence[str],
         blocked_scope_paths: Sequence[str],
         required_scope_paths: Sequence[str],
+        uncovered_mandatory_goal_ids: Sequence[str],
         remaining_execution_slots: int | None,
     ) -> None:
         """Require a replan to schedule fresh work for every failed mandatory gate."""
@@ -180,6 +185,25 @@ class PlanCompiler:
             raise PlanContractViolation(
                 "replan_delta has no fresh implementation slice; accepted inherited "
                 "nodes cannot repair the causal failure"
+            )
+        fresh_goal_ids = {
+            str(goal_id)
+            for node in fresh_slices
+            for goal_id in node.get("goal_ids", [])
+            if isinstance(node.get("goal_ids", []), list) and str(goal_id)
+        }
+        uncovered_without_fresh_slice = [
+            goal_id
+            for goal_id in dict.fromkeys(
+                str(value) for value in uncovered_mandatory_goal_ids if str(value)
+            )
+            if goal_id not in fresh_goal_ids
+        ]
+        if uncovered_without_fresh_slice:
+            raise PlanContractViolation(
+                "uncovered mandatory goal requires a fresh implementation slice: "
+                + ", ".join(uncovered_without_fresh_slice),
+                reason_code="completion_unreachable",
             )
         if (
             remaining_execution_slots is not None
@@ -352,6 +376,7 @@ class PlanCompiler:
                 context.mandatory_replan_gate_ids,
                 context.blocked_replan_scope_paths,
                 context.required_replan_scope_paths,
+                context.uncovered_mandatory_goal_ids,
                 context.remaining_recovery_execution_slots,
             )
         merged_by_key = dict(inherited_by_key)
@@ -364,6 +389,19 @@ class PlanCompiler:
         self._validate_semantic_proposal(proposal, slices, raw_keys)
 
         selected_delivery_profile = delivery_profile(context.delivery_profile)
+        delivery_obligations = delivery_profile_obligations(
+            context.delivery_profile,
+            context.delivery_mode,
+            context.declared_faults,
+        )
+        obligation_acceptance = tuple(
+            f"{item.obligation_id}: {item.text}"
+            for item in delivery_obligations.obligations
+        ) + (
+            "The immutable delivery obligation set digest is "
+            + delivery_obligations.digest
+            + ".",
+        )
         proposal_digest = sha256_text(stable_json(proposal))
         accepted = dict(accepted_nodes or {})
         for reuse_key in tuple(accepted):
@@ -537,7 +575,10 @@ class PlanCompiler:
             "architecture-review",
             "Review architecture independently",
             "Review the accepted architecture before any implementation begins.",
-            ("Architecture review is accepted without depending on Builder or Test evidence.",),
+            (
+                "Architecture review is accepted without depending on Builder or Test evidence.",
+                *obligation_acceptance,
+            ),
             external_dependencies=(
                 context.architecture_source_task_id or context.created_by_task_id,
             ),
@@ -560,6 +601,19 @@ class PlanCompiler:
                 if isinstance(intents_value, list) and intents_value
                 else ["The implementation slice satisfies its observable product outcome."]
             )
+            if index == 1:
+                scope = list(
+                    dict.fromkeys(
+                        [
+                            *scope,
+                            "pyproject.toml",
+                            "README.md",
+                            "LICENSE",
+                            "tests/**",
+                        ]
+                    )
+                )
+                intents = list(dict.fromkeys([*intents, *obligation_acceptance]))
             goal_ids_value = proposal_node.get("goal_ids", [])
             goal_ids = (
                 [str(value) for value in goal_ids_value] if isinstance(goal_ids_value, list) else []
@@ -608,7 +662,10 @@ class PlanCompiler:
             "release-readiness-review",
             "Review release readiness independently",
             "Independently verify implementation, test, security, and release evidence.",
-            ("The immutable candidate is independently accepted for staging.",),
+            (
+                "The immutable candidate is independently accepted for staging.",
+                *obligation_acceptance,
+            ),
         )
         release_stage_ids: list[str] = []
         release_titles = {

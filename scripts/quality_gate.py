@@ -502,6 +502,7 @@ def _dependency_audit(
     cwd: Path,
     subject_sha: str,
     python_executable: str | None,
+    temporary_root: Path,
 ) -> dict[str, Any]:
     command = str(gate.get("command", ""))
     started = utc_now()
@@ -604,7 +605,10 @@ def _dependency_audit(
                 }
             ]
         }
-        with tempfile.TemporaryDirectory(prefix="hermes-osv-audit-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="hermes-osv-audit-",
+            dir=temporary_root,
+        ) as directory:
             inventory_path = Path(directory) / "osv-scanner.json"
             inventory_path.write_text(
                 json.dumps(scanner_input, sort_keys=True),
@@ -882,6 +886,7 @@ def _container_image_scan(
     cwd: Path,
     subject_sha: str,
     python_executable: str | None,
+    temporary_root: Path,
 ) -> dict[str, Any]:
     """Build and scan the exact candidate image under controller ownership."""
 
@@ -965,7 +970,10 @@ def _container_image_scan(
         timeout = int(gate.get("timeout_seconds", 900))
         if timeout < 1:
             raise RuntimeError("container image scan timeout must be positive")
-        with tempfile.TemporaryDirectory(prefix="hermes-container-gate-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="hermes-container-gate-",
+            dir=temporary_root,
+        ) as directory:
             temporary = Path(directory)
             environment = os.environ.copy()
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -1143,18 +1151,44 @@ def run_gate(
     subject_sha: str,
     *,
     python_executable: str | None = None,
+    temporary_root: Path | None = None,
 ) -> dict[str, Any]:
+    workspace = cwd.resolve(strict=True)
+    controller_temp_root = (
+        temporary_root
+        if temporary_root is not None
+        else workspace.parent / ".hermes-controller-tmp"
+    ).resolve()
+    try:
+        controller_temp_root.relative_to(workspace)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("controller quality-gate temp root must be outside the workspace")
+    controller_temp_root.mkdir(parents=True, exist_ok=True)
     adapter = gate.get("adapter")
     if adapter == _TARGET_SECRET_ADAPTER:
         return _changed_file_secret_scan(gate, cwd, subject_sha)
     if adapter == _TARGET_SAST_ADAPTER:
         return _changed_file_sast(gate, cwd, subject_sha, python_executable)
     if adapter == _TARGET_DEPENDENCY_ADAPTER:
-        return _dependency_audit(gate, cwd, subject_sha, python_executable)
+        return _dependency_audit(
+            gate,
+            cwd,
+            subject_sha,
+            python_executable,
+            controller_temp_root,
+        )
     if adapter == _TARGET_LICENSE_ADAPTER:
         return _license_check(gate, cwd, subject_sha, python_executable)
     if adapter == _TARGET_CONTAINER_IMAGE_ADAPTER:
-        return _container_image_scan(gate, cwd, subject_sha, python_executable)
+        return _container_image_scan(
+            gate,
+            cwd,
+            subject_sha,
+            python_executable,
+            controller_temp_root,
+        )
     if adapter is not None:
         return _adapter_evidence(
             gate,
@@ -1179,7 +1213,8 @@ def run_gate(
             if python_executable and argv and argv[0].lower() in {"python", "python3", "python.exe"}:
                 argv[0] = python_executable
             with tempfile.TemporaryDirectory(
-                prefix="hermes-gate-pycache-"
+                prefix="hermes-gate-pycache-",
+                dir=controller_temp_root,
             ) as pycache_directory:
                 gate_environment = os.environ.copy()
                 gate_environment["PYTHONPYCACHEPREFIX"] = pycache_directory

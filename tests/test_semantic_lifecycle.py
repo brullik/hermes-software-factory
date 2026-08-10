@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_worker import make_config, selected_registry
+from test_worker import make_config, replanner_task_contract, selected_registry
 
 from factory.artifacts import ArtifactStore
 from factory.autonomy import TaskOutcome
@@ -956,15 +956,31 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
     first_implementation = refreshed_implementation
 
     replanner_id = "T-LINEAGE-REPLANNER"
+    replanner_contract = replanner_task_contract(config, product_id, replanner_id)
+    replanner_contract.update(
+        {
+            "plan_id": first_plan_id,
+            "failure_id": "failure-runtime-extension",
+            "root_task_id": creator_id,
+            "parent_task_id": creator_id,
+            "source_task_id": creator_id,
+        }
+    )
+    replanner_contract_path = artifacts.write(
+        "task-contract-v2.schema.json",
+        replanner_contract,
+        filename=f"task-{replanner_id}.json",
+    )
     state.add_task(
         task_id=replanner_id,
         product_id=product_id,
         title="Repair the affected runtime slice",
         role="replanner",
         output_schema="plan-proposal-v1.schema.json",
-        contract_ref=f"evidence/task-{replanner_id}.json",
+        contract_ref=f"evidence/{replanner_contract_path.name}",
         stage_key="replan",
         plan_id=first_plan_id,
+        failure_id="failure-runtime-extension",
         graph_status="ACCEPTED",
     )
     replan = proposal(config, product_id=product_id)
@@ -1004,6 +1020,35 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
     replanner = state.get_task(replanner_id)
     assert replanner is not None
     runtime_plan = pipeline._compile_proposal(replanner, replan, replan_path)
+    for node in runtime_plan["nodes"]:
+        replacement = node["task_contract"]
+        source_id = replacement.get("supersedes_task_id")
+        if not source_id:
+            continue
+        source = state.get_task(str(source_id))
+        assert source is not None
+        replacement["semantic_node_key"] = str(
+            source.get("semantic_node_key") or source.get("semantic_node_id")
+        )
+        for field in ("lifecycle_stage", "review_kind", "evidence_profile"):
+            value = source.get(field)
+            if value is None or value == "":
+                replacement.pop(field, None)
+            else:
+                replacement[field] = value
+        node["task_contract_digest"] = artifacts.digest(replacement)
+    rebound_plan = {
+        key: value
+        for key, value in runtime_plan.items()
+        if key not in {"plan_artifact_ref", "plan_digest"}
+    }
+    rebound_path = artifacts.write(
+        "backlog-plan-v2.schema.json",
+        rebound_plan,
+        filename=f"backlog-plan-{runtime_plan['plan_id']}-lineage-bound.json",
+    )
+    runtime_plan["plan_artifact_ref"] = f"evidence/{rebound_path.name}"
+    runtime_plan["plan_digest"] = artifacts.digest(rebound_plan)
     implementation_contracts = {
         str(node["task_contract"]["semantic_node_key"]): node["task_contract"]
         for node in runtime_plan["nodes"]

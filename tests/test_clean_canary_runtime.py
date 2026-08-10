@@ -642,13 +642,29 @@ class PassingQuality:
     def __init__(self, artifacts: ArtifactStore) -> None:
         self.artifacts = artifacts
         self.calls = 0
+        self.gate_calls: list[list[str]] = []
 
     def run(self, **values: Any) -> QualityGateRun:
         self.calls += 1
-        return QualityGateRun((), (), True)
+        gate_ids = [str(value) for value in values.get("gate_ids", [])]
+        self.gate_calls.append(gate_ids)
+        return QualityGateRun(
+            tuple(
+                {
+                    "gate_id": gate_id,
+                    "status": "PASS",
+                    "evidence_ref": f"evidence/{gate_id}.json",
+                }
+                for gate_id in gate_ids
+            ),
+            (),
+            True,
+        )
 
 
-def test_product_test_fault_fails_exactly_one_mandatory_gate(tmp_path: Path) -> None:
+def _product_test_fault_gate(
+    tmp_path: Path,
+) -> tuple[FaultInjectingQualityGate, PassingQuality, CanaryFaultJournal]:
     config = make_config(
         tmp_path,
         selected_registry(tmp_path / "registry.yaml", selected="gpt-5.6-luna"),
@@ -660,23 +676,92 @@ def test_product_test_fault_fails_exactly_one_mandatory_gate(tmp_path: Path) -> 
         journal,
         task_lookup=lambda _task_id: {"lifecycle_stage": "test"},
     )
+    return gate, delegate, journal
+
+
+def test_product_test_fault_injects_target_tests_only(tmp_path: Path) -> None:
+    gate, _, journal = _product_test_fault_gate(tmp_path)
     values = {
         "cwd": tmp_path,
         "subject_sha": "a" * 64,
         "task_id": "task-product-test",
         "attempt_id": "attempt-product-test",
-        "gate_ids": ["unit-tests"],
+        "gate_ids": ["target-environment", "target-tests", "target-compile"],
     }
 
     injected = gate.run(**values)
-    normal = gate.run(**values)
 
     assert injected.mandatory_passed is False
-    assert injected.results[0]["status"] == "FAIL"
-    evidence = json.loads(injected.evidence_paths[0].read_text(encoding="utf-8"))
+    failed = [item for item in injected.results if item["status"] == "FAIL"]
+    assert [item["gate_id"] for item in failed] == ["target-tests"]
+    evidence = json.loads(injected.evidence_paths[-1].read_text(encoding="utf-8"))
     assert evidence["status"] == "FAIL"
+    receipt = journal.load("ONE_PRODUCT_TEST_FAILURE")
+    assert receipt["point"] == "mandatory_product_test"
+    assert receipt["observed"]["gate_id"] == "target-tests"
+
+
+def test_product_test_fault_runs_preceding_gates_first(tmp_path: Path) -> None:
+    gate, delegate, _ = _product_test_fault_gate(tmp_path)
+
+    injected = gate.run(
+        cwd=tmp_path,
+        subject_sha="b" * 64,
+        task_id="task-product-test",
+        attempt_id="attempt-product-test",
+        gate_ids=["target-environment", "target-secret-scan", "target-tests"],
+    )
+
+    assert delegate.gate_calls == [["target-environment", "target-secret-scan"]]
+    assert [item["gate_id"] for item in injected.results] == [
+        "target-environment",
+        "target-secret-scan",
+        "target-tests",
+    ]
+
+
+def test_product_test_fault_is_consumed_once(tmp_path: Path) -> None:
+    gate, delegate, journal = _product_test_fault_gate(tmp_path)
+    first = {
+        "cwd": tmp_path,
+        "subject_sha": "c" * 64,
+        "task_id": "task-product-test",
+        "attempt_id": "attempt-product-test-first",
+        "gate_ids": ["target-environment", "target-tests"],
+    }
+
+    injected = gate.run(**first)
+    normal = gate.run(
+        **{
+            **first,
+            "attempt_id": "attempt-product-test-second",
+        }
+    )
+
+    assert injected.mandatory_passed is False
     assert normal.mandatory_passed is True
-    assert delegate.calls == 1
+    assert delegate.gate_calls == [
+        ["target-environment"],
+        ["target-environment", "target-tests"],
+    ]
+    assert delegate.calls == 2
+    assert journal.consumed("ONE_PRODUCT_TEST_FAILURE")
+
+
+def test_product_test_fault_requires_canonical_target_gate(tmp_path: Path) -> None:
+    gate, delegate, journal = _product_test_fault_gate(tmp_path)
+
+    with pytest.raises(CanaryFaultError, match="canonical fault gate is missing"):
+        gate.run(
+            cwd=tmp_path,
+            subject_sha="d" * 64,
+            task_id="task-product-test",
+            attempt_id="attempt-product-test",
+            gate_ids=["target-environment", "target-compile"],
+        )
+
+    assert delegate.calls == 0
+    assert not journal.consumed("ONE_PRODUCT_TEST_FAILURE")
 
 
 def _git(workspace: Path, *arguments: str) -> str:

@@ -44,6 +44,10 @@ class ResultLineageIdentityError(ResultLineageError):
     """A legacy reuse edge changed the semantic identity of accepted work."""
 
 
+class ActiveResultBindingConflictError(ResultLineageIdentityError):
+    """More than one result claims the active slot for one semantic node."""
+
+
 class PathDecisionError(RuntimeError):
     """A proposed trajectory violates the controller progress contract."""
 
@@ -327,7 +331,7 @@ def _json_array(value: object) -> list[Any]:
 
 
 def _identity(task: Mapping[str, Any]) -> tuple[str, ...]:
-    return tuple(
+    fixed = tuple(
         str(task.get(field) or "")
         for field in (
             "product_id",
@@ -336,9 +340,32 @@ def _identity(task: Mapping[str, Any]) -> tuple[str, ...]:
             "lifecycle_stage",
             "review_kind",
             "evidence_profile",
-            "semantic_node_key",
         )
     )
+    semantic_identity = str(
+        task.get("semantic_node_key") or task.get("semantic_node_id") or ""
+    )
+    return (*fixed, semantic_identity)
+
+
+def supersession_is_compatible(
+    source: Mapping[str, Any],
+    replacement: Mapping[str, Any],
+) -> bool:
+    """Return whether two tasks describe one exact replaceable contract identity."""
+
+    return _identity(source) == _identity(replacement)
+
+
+def execution_slot_cost(task: Mapping[str, Any]) -> int:
+    """Return the closed-world repository execution cost for one task."""
+
+    role = str(task.get("role") or "").replace("_", "-")
+    capability_profile = str(task.get("capability_profile") or "")
+    stage = str(task.get("lifecycle_stage") or task.get("stage_key") or "")
+    repository_writer = role == "builder" and capability_profile == "builder_workspace"
+    evidence_execution = stage in {"implementation-slice", "repair"}
+    return int(repository_writer and evidence_execution)
 
 
 class PathGovernor:
@@ -435,7 +462,7 @@ class PathGovernor:
                     )
                 if replacements:
                     replacement = dict(replacements[0])
-                    if _identity(replacement) != _identity(current):
+                    if not supersession_is_compatible(current, replacement):
                         raise ResultLineageIdentityError(
                             f"accepted task replacement identity conflicts for {task_id}"
                         )
@@ -463,7 +490,7 @@ class PathGovernor:
                 str(current.get("graph_status") or "") != "ACCEPTED"
                 or str(predecessor.get("graph_status") or "") != "ACCEPTED"
                 or str(predecessor.get("status") or "") != "DONE"
-                or _identity(current) != _identity(predecessor)
+                or not supersession_is_compatible(predecessor, current)
                 or not str(current.get("result_ref") or "")
                 or str(current.get("result_ref") or "")
                 != str(predecessor.get("result_ref") or "")
@@ -511,7 +538,7 @@ class PathGovernor:
         source = dict(source_row)
         if (
             str(task.get("product_id") or "") != str(source.get("product_id") or "")
-            or _identity(task) != _identity(source)
+            or not supersession_is_compatible(source, task)
             or str(task.get("graph_status") or "") not in _TERMINAL_ACCEPTED
             or str(source.get("status") or "") != "DONE"
             or str(source.get("graph_status") or "") not in _TERMINAL_ACCEPTED
@@ -584,23 +611,51 @@ class PathGovernor:
                 now,
             ),
         )
-        existing = self.connection.execute(
-            """SELECT * FROM result_bindings
-                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'""",
-            (str(task["product_id"]), node_id),
+        exact = self.connection.execute(
+            "SELECT * FROM result_bindings WHERE binding_id=?",
+            (binding_id,),
         ).fetchone()
-        if existing is None:
-            raise RuntimeError("active result binding was not persisted")
-        binding = ResultBinding.from_row(existing)
+        if exact is None:
+            competing = self.connection.execute(
+                """SELECT binding_id FROM result_bindings
+                     WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'
+                     ORDER BY binding_id""",
+                (str(task["product_id"]), node_id),
+            ).fetchall()
+            if competing:
+                raise ActiveResultBindingConflictError(
+                    f"active result binding conflicts for {task_id}"
+                )
+            raise RuntimeError("exact result binding was not persisted")
+        binding = ResultBinding.from_row(exact)
         if (
-            binding.binding_id != binding_id
+            binding.product_id != str(task["product_id"])
+            or binding.semantic_node_id != node_id
             or binding.result_ref != result_ref
             or binding.result_digest != result_digest
             or binding.source_task_id != source_task_id
             or binding.source_attempt_id != source_attempt_id
+            or binding.output_schema != output_schema
+            or binding.contract_digest != contract
+            or binding.policy_digest != self.policy_digest
+            or binding.candidate_digest != candidate_digest
+            or binding.status not in {"ACTIVE", "SUPERSEDED"}
         ):
             raise ResultLineageIdentityError(
                 f"immutable accepted-result binding conflicts for {task_id}"
+            )
+        if binding.status == "SUPERSEDED":
+            return binding
+        competing = self.connection.execute(
+            """SELECT binding_id FROM result_bindings
+                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'
+                   AND binding_id!=?
+                 ORDER BY binding_id""",
+            (str(task["product_id"]), node_id, binding_id),
+        ).fetchall()
+        if competing:
+            raise ActiveResultBindingConflictError(
+                f"active result binding conflicts for {task_id}"
             )
         self.connection.execute(
             """UPDATE tasks
@@ -619,6 +674,41 @@ class PathGovernor:
                 (plan_id, node_id, binding_id, int(task.get("mandatory") or 0), now),
             )
         return binding
+
+    def retire_active_binding_for_replacement(
+        self,
+        *,
+        product_id: str,
+        semantic_node_id: str,
+    ) -> str | None:
+        """Retire the one active binding before executing a changed semantic node."""
+
+        if not product_id or not semantic_node_id:
+            raise ValueError("binding replacement identity is required")
+        rows = self.connection.execute(
+            """SELECT binding_id FROM result_bindings
+                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'
+                 ORDER BY binding_id""",
+            (product_id, semantic_node_id),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ActiveResultBindingConflictError(
+                "multiple active result bindings exist for one semantic node"
+            )
+        if not rows:
+            return None
+        binding_id = str(rows[0]["binding_id"])
+        updated = self.connection.execute(
+            """UPDATE result_bindings SET status='SUPERSEDED'
+                 WHERE binding_id=? AND product_id=?
+                   AND semantic_node_id=? AND status='ACTIVE'""",
+            (binding_id, product_id, semantic_node_id),
+        ).rowcount
+        if updated != 1:
+            raise ActiveResultBindingConflictError(
+                "active result binding changed during replacement"
+            )
+        return binding_id
 
     def register_execution_membership(self, task_id: str) -> str:
         task_row = self.connection.execute(
@@ -823,14 +913,35 @@ class PathGovernor:
             raise ValueError("candidate snapshot requires its architecture binding")
         placeholders = ",".join("?" for _ in ordered)
         rows = self.connection.execute(
-            f"""SELECT binding_id, semantic_node_id, product_id
-                  FROM result_bindings
-                 WHERE binding_id IN ({placeholders}) AND status='ACTIVE'
-                 ORDER BY binding_id""",
+            f"""SELECT binding.binding_id, binding.semantic_node_id,
+                       binding.product_id, binding.result_ref,
+                       binding.result_digest, binding.contract_digest,
+                       binding.policy_digest, binding.source_task_id,
+                       binding.source_attempt_id, binding.status,
+                       source.product_id AS source_product_id,
+                       attempt.task_id AS attempt_task_id,
+                       attempt.status AS attempt_status
+                   FROM result_bindings
+                   AS binding
+                   JOIN tasks AS source
+                     ON source.task_id=binding.source_task_id
+                   JOIN attempts AS attempt
+                     ON attempt.attempt_id=binding.source_attempt_id
+                  WHERE binding.binding_id IN ({placeholders})
+                    AND binding.status IN ('ACTIVE','SUPERSEDED')
+                  ORDER BY binding.binding_id""",
             ordered,
         ).fetchall()
         if len(rows) != len(ordered) or any(
-            str(row["product_id"]) != product_id for row in rows
+            str(row["product_id"]) != product_id
+            or str(row["source_product_id"]) != product_id
+            or str(row["attempt_task_id"]) != str(row["source_task_id"])
+            or str(row["attempt_status"]) not in {"completed", "repair_required"}
+            or not str(row["result_ref"] or "")
+            or not _SHA256.fullmatch(str(row["result_digest"] or ""))
+            or not _SHA256.fullmatch(str(row["contract_digest"] or ""))
+            or not _SHA256.fullmatch(str(row["policy_digest"] or ""))
+            for row in rows
         ):
             raise ResultLineageIdentityError(
                 "candidate snapshot contains a missing or cross-product binding"
@@ -934,16 +1045,77 @@ class PathGovernor:
         rows = self.connection.execute(
             """SELECT item.semantic_node_id, item.binding_id,
                       binding.result_ref, binding.result_digest,
-                      binding.output_schema
+                      binding.output_schema, binding.contract_digest,
+                      binding.policy_digest, binding.source_task_id,
+                      binding.source_attempt_id, binding.product_id,
+                      binding.status AS binding_status,
+                      source.product_id AS source_product_id,
+                      attempt.task_id AS attempt_task_id,
+                      attempt.status AS attempt_status
                  FROM candidate_snapshot_items AS item
                  JOIN result_bindings AS binding
                    ON binding.binding_id=item.binding_id
-                WHERE item.snapshot_id=? AND binding.status='ACTIVE'
+                 JOIN tasks AS source
+                   ON source.task_id=binding.source_task_id
+                 JOIN attempts AS attempt
+                   ON attempt.attempt_id=binding.source_attempt_id
+                WHERE item.snapshot_id=?
+                  AND binding.status IN ('ACTIVE','SUPERSEDED')
                 ORDER BY item.semantic_node_id""",
             (snapshot_id,),
         ).fetchall()
+        expected_items = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM candidate_snapshot_items WHERE snapshot_id=?",
+                (snapshot_id,),
+            ).fetchone()[0]
+        )
+        product_id = str(snapshot["product_id"])
+        if len(rows) != expected_items or any(
+            str(row["product_id"]) != product_id
+            or str(row["source_product_id"]) != product_id
+            or str(row["attempt_task_id"]) != str(row["source_task_id"])
+            or str(row["attempt_status"]) not in {"completed", "repair_required"}
+            or not str(row["result_ref"] or "")
+            or not _SHA256.fullmatch(str(row["result_digest"] or ""))
+            or not _SHA256.fullmatch(str(row["contract_digest"] or ""))
+            or not _SHA256.fullmatch(str(row["policy_digest"] or ""))
+            for row in rows
+        ):
+            raise ResultLineageIdentityError(
+                "frozen candidate snapshot binding provenance conflicts"
+            )
+        binding_ids = tuple(sorted(str(row["binding_id"]) for row in rows))
+        expected_digest = sha256_text(
+            stable_json(
+                {
+                    "product_id": product_id,
+                    "plan_id": str(snapshot["plan_id"]),
+                    "repository_commit": str(snapshot["repository_commit"]),
+                    "tree_digest": str(snapshot["tree_digest"]),
+                    "architecture_binding_id": str(snapshot["architecture_binding_id"]),
+                    "result_binding_ids": binding_ids,
+                }
+            )
+        )
+        if expected_digest != str(snapshot["snapshot_digest"]):
+            raise ResultLineageIdentityError(
+                "frozen candidate snapshot digest conflicts"
+            )
         payload = dict(snapshot)
-        payload["result_bindings"] = [dict(row) for row in rows]
+        payload["result_bindings"] = [
+            {
+                key: row[key]
+                for key in (
+                    "semantic_node_id",
+                    "binding_id",
+                    "result_ref",
+                    "result_digest",
+                    "output_schema",
+                )
+            }
+            for row in rows
+        ]
         payload["schema_version"] = "1.0"
         return payload
 
@@ -1236,6 +1408,101 @@ class PathGovernor:
             ),
         )
         return "CONTINUE"
+
+    def reserve_task_execution_once(
+        self,
+        *,
+        task_id: str,
+        root_problem_signature: str,
+        progress: ProgressVector,
+    ) -> str:
+        """Reserve one real Builder execution, keyed by its plan membership."""
+
+        if not _SHA256.fullmatch(root_problem_signature):
+            raise ValueError("root problem signature must be a lowercase SHA-256")
+        task_row = self.connection.execute(
+            "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if task_row is None:
+            raise KeyError(task_id)
+        task = dict(task_row)
+        if execution_slot_cost(task) == 0:
+            return "CONTINUE"
+        if str(task.get("root_problem_signature") or "") != root_problem_signature:
+            raise PathDecisionError("execution reservation signature conflicts")
+        plan_id = str(task.get("plan_id") or "")
+        if not plan_id:
+            raise PathDecisionError("execution reservation lacks a plan identity")
+        existing = self.connection.execute(
+            """SELECT semantic_node_id, membership_state
+                 FROM plan_memberships
+                WHERE plan_id=? AND execution_task_id=?""",
+            (plan_id, task_id),
+        ).fetchall()
+        if existing:
+            if len(existing) != 1 or str(existing[0]["membership_state"]) != "EXECUTION":
+                raise PathDecisionError("execution reservation membership conflicts")
+            return "CONTINUE"
+
+        savepoint = "path_governor_task_execution_reservation"
+        self.connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            now = utc_now()
+            self.connection.execute(
+                """INSERT OR IGNORE INTO problem_budgets
+                   (product_id, root_problem_signature, deterministic_actions_used,
+                    arbiter_calls_used, execution_attempts_used,
+                    last_progress_vector_json, last_evidence_digest, status,
+                    created_at, updated_at)
+                   VALUES (?, ?, 0, 0, 0, ?, NULL, 'ACTIVE', ?, ?)""",
+                (
+                    str(task["product_id"]),
+                    root_problem_signature,
+                    stable_json(progress.as_dict()),
+                    now,
+                    now,
+                ),
+            )
+            budget = self.connection.execute(
+                """SELECT execution_attempts_used, status FROM problem_budgets
+                    WHERE product_id=? AND root_problem_signature=?""",
+                (str(task["product_id"]), root_problem_signature),
+            ).fetchone()
+            if budget is None:
+                raise RuntimeError("problem budget was not persisted")
+            if (
+                str(budget["status"]) != "ACTIVE"
+                or int(budget["execution_attempts_used"]) >= 2
+            ):
+                self.connection.execute(
+                    """UPDATE problem_budgets SET status='EXHAUSTED', updated_at=?
+                        WHERE product_id=? AND root_problem_signature=?""",
+                    (now, str(task["product_id"]), root_problem_signature),
+                )
+                self.connection.execute(f"RELEASE {savepoint}")
+                return "FAIL_SAFE"
+            self.register_execution_membership(task_id)
+            updated = self.connection.execute(
+                """UPDATE problem_budgets
+                      SET execution_attempts_used=execution_attempts_used+1,
+                          last_progress_vector_json=?, updated_at=?
+                    WHERE product_id=? AND root_problem_signature=?
+                      AND status='ACTIVE' AND execution_attempts_used<2""",
+                (
+                    stable_json(progress.as_dict()),
+                    now,
+                    str(task["product_id"]),
+                    root_problem_signature,
+                ),
+            ).rowcount
+            if updated != 1:
+                raise PathDecisionError("execution reservation changed concurrently")
+            self.connection.execute(f"RELEASE {savepoint}")
+            return "CONTINUE"
+        except Exception:
+            self.connection.execute(f"ROLLBACK TO {savepoint}")
+            self.connection.execute(f"RELEASE {savepoint}")
+            raise
 
     def reclaim_unused_execution_reservations(
         self,

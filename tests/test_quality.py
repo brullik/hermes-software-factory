@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 from test_worker import make_config, selected_registry
 
@@ -17,6 +18,144 @@ from factory.artifacts import ArtifactStore
 from factory.config import FactoryConfig
 from factory.quality import QualityGateEngine, UnknownQualityGatesError
 from scripts.quality_gate import _git_changed_paths, run_gate
+
+
+def _single_python_gate_engine(
+    root: Path,
+    *,
+    gate_id: str,
+    command: str,
+) -> QualityGateEngine:
+    base_config = make_config(
+        root,
+        selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+    )
+    catalog = root / "quality-gates-test.yaml"
+    catalog.write_text(
+        yaml.safe_dump(
+            {
+                "version": "1.0",
+                "gates": [
+                    {
+                        "id": gate_id,
+                        "command": command,
+                        "allowlist_prefixes": ["python3 -m"],
+                        "timeout_seconds": 10,
+                        "mandatory": True,
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    config = FactoryConfig(base_config.raw, root / "factory.yaml")
+    config.raw["paths"]["quality_gates"] = str(catalog)
+    return QualityGateEngine(config, ArtifactStore(config))
+
+
+def test_python_gates_use_candidate_interpreter(tmp_path: Path) -> None:
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    candidate_python = tmp_path / "venv" / (
+        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    )
+    candidate_python.parent.mkdir(parents=True)
+    candidate_python.write_text("candidate interpreter fixture\n", encoding="utf-8")
+    engine = _single_python_gate_engine(
+        tmp_path,
+        gate_id="target-tests",
+        command="python3 -m pytest -q",
+    )
+    calls: list[list[str]] = []
+
+    def record(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="pass", stderr="")
+
+    with patch("scripts.quality_gate.subprocess.run", side_effect=record):
+        result = engine.run(
+            cwd=workspace,
+            subject_sha="1" * 64,
+            task_id="T-CANDIDATE-PYTHON",
+            attempt_id="A-CANDIDATE-PYTHON",
+            gate_ids=["target-tests"],
+        )
+
+    assert result.mandatory_passed
+    assert calls[0][0] == str(candidate_python)
+    assert calls[0][1:] == ["-m", "pytest", "-q"]
+
+
+def test_controller_helper_is_outside_workspace_diff(tmp_path: Path) -> None:
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    tracked = workspace / "README.md"
+    tracked.write_text("candidate\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Hermes Test",
+            "-c",
+            "user.email=hermes@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    engine = _single_python_gate_engine(
+        tmp_path,
+        gate_id="target-compile",
+        command="python3 -m compileall -q src tests",
+    )
+    observed_helper: list[Path] = []
+
+    def record_helper(
+        argv: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        helper = Path(str(environment["PYTHONPYCACHEPREFIX"])) / "controller-helper.py"
+        helper.write_text("controller owned\n", encoding="utf-8")
+        observed_helper.append(helper)
+        return subprocess.CompletedProcess(argv, 0, stdout="pass", stderr="")
+
+    with patch("scripts.quality_gate.subprocess.run", side_effect=record_helper):
+        result = engine.run(
+            cwd=workspace,
+            subject_sha="2" * 64,
+            task_id="T-HELPER-SCOPE",
+            attempt_id="A-HELPER-SCOPE",
+            gate_ids=["target-compile"],
+        )
+
+    assert result.mandatory_passed
+    assert len(observed_helper) == 1
+    observed_helper[0].relative_to(engine.config.state_dir)
+    with pytest.raises(ValueError):
+        observed_helper[0].relative_to(workspace)
+    assert _git_changed_paths(workspace) == []
 
 
 class QualityGateTests(unittest.TestCase):
@@ -77,7 +216,13 @@ class QualityGateTests(unittest.TestCase):
     def test_allowlisted_gates_persist_evidence_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            base_config = make_config(root, selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"))
+            state_root = root / "state"
+            workspace = root / "candidate"
+            workspace.mkdir()
+            base_config = make_config(
+                state_root,
+                selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"),
+            )
             config_root = root / "config"
             config_root.mkdir()
             (config_root / "factory.yaml").write_text("version: '1.0'\n", encoding="utf-8")
@@ -119,7 +264,7 @@ class QualityGateTests(unittest.TestCase):
             engine = QualityGateEngine(config, ArtifactStore(config))
 
             run = engine.run(
-                cwd=root,
+                cwd=workspace,
                 subject_sha="a" * 64,
                 task_id="T-QUALITY-001",
                 attempt_id="attempt-quality-001",
@@ -136,7 +281,7 @@ class QualityGateTests(unittest.TestCase):
                 self.assertEqual(ArtifactStore(config).validate("gate-evidence.schema.json", yaml.safe_load(path.read_text(encoding="utf-8"))), [])
             with self.assertRaises(UnknownQualityGatesError) as caught:
                 engine.run(
-                    cwd=root,
+                    cwd=workspace,
                     subject_sha="a" * 64,
                     task_id="T-QUALITY-002",
                     attempt_id="attempt-quality-002",

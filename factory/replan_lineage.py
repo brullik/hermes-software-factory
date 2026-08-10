@@ -24,6 +24,37 @@ class ImplementationLineageNode:
     result_digest: str
 
 
+def uncovered_mandatory_goal_ids(
+    goals: object,
+    preserved_nodes: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Return mandatory plan goals not covered by preserved implementation work.
+
+    The active plan, rather than a Replanner response, owns the mandatory goal
+    inventory.  Callers must pass only nodes whose accepted result binding will
+    actually be preserved into the next plan revision.
+    """
+
+    if not isinstance(goals, list):
+        return ()
+    mandatory = tuple(
+        dict.fromkeys(
+            str(goal.get("goal_id") or "")
+            for goal in goals
+            if isinstance(goal, dict)
+            and bool(goal.get("mandatory", True))
+            and str(goal.get("goal_id") or "")
+        )
+    )
+    covered = {
+        str(goal_id)
+        for node in preserved_nodes
+        for goal_id in node.get("goal_ids", [])
+        if isinstance(node.get("goal_ids", []), list) and str(goal_id)
+    }
+    return tuple(goal_id for goal_id in mandatory if goal_id not in covered)
+
+
 def _safe_artifact(evidence_dir: Path, reference: str) -> dict[str, Any]:
     name = Path(reference).name
     if reference not in {f"evidence/{name}", str(evidence_dir / name)}:

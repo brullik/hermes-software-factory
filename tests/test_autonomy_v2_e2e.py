@@ -130,6 +130,30 @@ def write_plan_for_outcome(
     return enriched
 
 
+def bind_test_supersession_identities(
+    state: StateStore,
+    plan: dict[str, Any],
+) -> None:
+    """Make fixture replacements name the exact source semantic contract."""
+
+    for node in plan["nodes"]:
+        contract = node["task_contract"]
+        source_id = contract.get("supersedes_task_id")
+        if not source_id:
+            continue
+        source = state.get_task(str(source_id))
+        assert source is not None
+        contract["semantic_node_key"] = str(
+            source.get("semantic_node_key") or source.get("semantic_node_id")
+        )
+        for field in ("lifecycle_stage", "review_kind", "evidence_profile"):
+            value = source.get(field)
+            if value is None or value == "":
+                contract.pop(field, None)
+            else:
+                contract[field] = value
+
+
 def record_completion_evidence(
     state: StateStore,
     *,
@@ -547,6 +571,7 @@ def test_AUT_P0_022_private_repository_repair_replan_full_e2e(
                 "C2": "T-PRIVC001",
             },
         )
+        bind_test_supersession_identities(state, plan2)
         enriched_plan2 = write_plan_for_outcome(config, plan2)
         claimed_replanner = state.claim_task(worker_id="private-replanner")
         assert claimed_replanner is not None
@@ -709,6 +734,7 @@ def test_AUT_P1_002_plan_supersession_removes_old_ready_tasks(
             edges=[],
             supersedes={"A2": "T-SUPEROLD1"},
         )
+        bind_test_supersession_identities(state, second)
         persist_and_ingest_plan(
             config,
             state,
@@ -769,6 +795,7 @@ def test_AUT_P1_003_replan_reuses_accepted_unaffected_node(
             edges=[],
             supersedes={"A2": "T-REUSEOLD1"},
         )
+        bind_test_supersession_identities(state, second)
         persist_and_ingest_plan(
             config,
             state,

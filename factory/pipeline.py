@@ -25,6 +25,7 @@ from .replan_lineage import (
     accepted_stage_task_id,
     architecture_source_task_id,
     implementation_lineage,
+    uncovered_mandatory_goal_ids,
 )
 from .state import StateStore
 from .workflow import WorkflowEngine
@@ -1025,21 +1026,40 @@ class PipelineCoordinator:
             raise ValueError("replan proposal must name the active parent plan")
         if expected_kind == "initial" and proposed_parent is not None:
             raise ValueError("initial proposal cannot name a parent plan")
-        source_failure_id = (
-            str(proposal.get("source_failure_id") or "")
-            or str(task.get("failure_id") or "")
-            or None
-        )
         task_failure_id = str(task.get("failure_id") or "") or None
+        if expected_kind == "replan_delta":
+            contract_ref = str(task.get("contract_ref") or "")
+            expected_ref = f"evidence/task-{task['task_id']}.json"
+            if contract_ref != expected_ref:
+                raise PlanCompilationInvariantError(
+                    "replanner task contract reference is not exact"
+                )
+            contract_path = self.config.evidence_dir / Path(contract_ref).name
+            try:
+                immutable_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise PlanCompilationInvariantError(
+                    "replanner immutable task contract is unreadable"
+                ) from error
+            if (
+                not isinstance(immutable_contract, dict)
+                or str(immutable_contract.get("task_id") or "") != str(task["task_id"])
+                or str(immutable_contract.get("product_id") or "") != product_id
+            ):
+                raise PlanCompilationInvariantError(
+                    "replanner immutable task contract identity conflicts"
+                )
+            self.schemas.validate("task-contract-v2.schema.json", immutable_contract)
+            task_failure_id = str(immutable_contract.get("failure_id") or "") or None
+        source_failure_id = str(proposal.get("source_failure_id") or "") or None
         if (
             expected_kind == "replan_delta"
-            and task_failure_id is not None
             and source_failure_id != task_failure_id
         ):
             raise PlanContractViolation(
                 "replan proposal source_failure_id conflicts with its task contract"
             )
-        if expected_kind == "replan_delta" and task_failure_id is not None:
+        if expected_kind == "replan_delta":
             source_failure_id = task_failure_id
         mandatory_replan_gate_ids = (
             _replan_mandatory_gate_ids(
@@ -1067,6 +1087,7 @@ class PipelineCoordinator:
         )
         inherited_nodes: list[dict[str, Any]] = []
         accepted_nodes: dict[str, str] = {}
+        uncovered_goal_ids: tuple[str, ...] = ()
         architecture_source: str | None = None
         if expected_kind == "replan_delta" and parent_plan_id is not None:
             lineage_nodes = implementation_lineage(
@@ -1081,6 +1102,28 @@ class PipelineCoordinator:
                 if node.graph_status == "ACCEPTED" and node.result_ref and node.result_digest
             ]
             inherited_nodes = [dict(node.proposal_node) for node in accepted_implementation]
+            parent_plan = next(
+                (
+                    plan
+                    for plan in self.state.list_plans(product_id)
+                    if str(plan.get("plan_id") or "") == parent_plan_id
+                ),
+                None,
+            )
+            if parent_plan is None:
+                raise PlanCompilationInvariantError(
+                    "active parent plan is unavailable for mandatory-goal coverage"
+                )
+            try:
+                active_goals = json.loads(str(parent_plan.get("goals_json") or "[]"))
+            except json.JSONDecodeError as error:
+                raise PlanCompilationInvariantError(
+                    "active plan mandatory goals are unreadable"
+                ) from error
+            uncovered_goal_ids = uncovered_mandatory_goal_ids(
+                active_goals,
+                inherited_nodes,
+            )
             accepted_nodes.update(
                 {
                     "semantic:" + str(node.proposal_node["node_key"]): node.task_id
@@ -1137,6 +1180,7 @@ class PipelineCoordinator:
                 mandatory_replan_gate_ids=mandatory_replan_gate_ids,
                 blocked_replan_scope_paths=blocked_replan_scope_paths,
                 required_replan_scope_paths=required_replan_scope_paths,
+                uncovered_mandatory_goal_ids=uncovered_goal_ids,
                 remaining_recovery_execution_slots=(
                     int(execution_budget["remaining_execution_slots"])
                     if execution_budget is not None
@@ -1144,6 +1188,18 @@ class PipelineCoordinator:
                 ),
                 delivery_profile=str(
                     product.get("delivery_profile") or "DEPLOYED_SERVICE"
+                ),
+                delivery_mode=str(
+                    product.get("delivery_mode") or "new_repository"
+                ),
+                declared_faults=tuple(
+                    str(value)
+                    for value in (
+                        self.config.raw.get("qualification", {}).get("faults", [])
+                        if isinstance(self.config.raw.get("qualification", {}), dict)
+                        else []
+                    )
+                    if str(value)
                 ),
             ),
             accepted_nodes=accepted_nodes,

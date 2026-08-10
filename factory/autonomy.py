@@ -19,9 +19,11 @@ from .common import redact_text, sha256_text, stable_json, utc_now
 from .failure_catalog import failure_disposition
 from .path_governor import (
     PathGovernor,
+    execution_slot_cost,
     occurrence_epoch_key,
     root_cause_key,
     semantic_node_id,
+    supersession_is_compatible,
     task_contract_digest,
 )
 from .plan_semantics import PlanContractViolation
@@ -204,7 +206,6 @@ def path_governor_execution_budget(
             WHERE product_id=? AND root_problem_signature=?""",
         (product_id, root_problem_signature),
     ).fetchone()
-    arbiter_used = int(row[0]) if row is not None else 0
     used = int(row[1]) if row is not None else 0
     status = str(row[2]) if row is not None else "ACTIVE"
     raw_remaining = (
@@ -212,7 +213,9 @@ def path_governor_execution_budget(
         if status == "ACTIVE"
         else 0
     )
-    reviewer_reservation = 1 if arbiter_used > 0 and raw_remaining > 0 else 0
+    # Reviewer and architecture corrections have their own finite semantic
+    # budgets and cannot reserve repository execution capacity.
+    reviewer_reservation = 0
     return {
         "execution_slot_limit": PATH_GOVERNOR_EXECUTION_SLOT_LIMIT,
         "execution_attempts_used": used,
@@ -1287,13 +1290,16 @@ class AutonomyStore:
             initial_legacy_status = "WAITING"
             if supersedes_task_id:
                 superseded = connection.execute(
-                    """SELECT product_id, graph_status, result_ref, result_digest,
-                              result_binding_id
-                       FROM tasks WHERE task_id=?""",
+                    "SELECT * FROM tasks WHERE task_id=?",
                     (str(supersedes_task_id),),
                 ).fetchone()
                 if superseded is None or str(superseded["product_id"]) != product_id:
                     raise ValueError("supersedes_task_id is outside this product")
+                if not supersession_is_compatible(dict(superseded), contract):
+                    raise PlanContractViolation(
+                        "cross-role supersession is incompatible with the source task contract",
+                        reason_code="cross_role_supersession_invalid",
+                    )
                 if str(superseded["graph_status"]) == "ACCEPTED":
                     initial_graph_status = "ACCEPTED"
                     initial_legacy_status = "DONE"
@@ -1306,6 +1312,11 @@ class AutonomyStore:
                     )
             semantic_contract_digest = task_contract_digest(contract)
             semantic_identity = semantic_node_id(contract, semantic_contract_digest)
+            if not reused_binding_id:
+                governor.retire_active_binding_for_replacement(
+                    product_id=product_id,
+                    semantic_node_id=semantic_identity,
+                )
             if reused_binding_id:
                 bound = connection.execute(
                     """SELECT semantic_node_id, source_task_id, contract_digest
@@ -1409,13 +1420,13 @@ class AutonomyStore:
                     creator_root_problem_signature,
                 ),
             )
-            governor.register_execution_membership(task_id)
             if (
                 creator_root_problem_signature
-                and str(contract.get("lifecycle_stage") or "")
-                == "implementation-slice"
+                and execution_slot_cost(contract) == 1
             ):
                 recovery_execution_task_ids.append(task_id)
+            else:
+                governor.register_execution_membership(task_id)
             if supersedes_task_id:
                 connection.execute(
                     """INSERT OR IGNORE INTO task_edges
@@ -1483,16 +1494,16 @@ class AutonomyStore:
                 product_id=product_id,
                 root_problem_signature=creator_root_problem_signature,
             )
-            reservation = governor.reserve_execution_slots(
-                product_id=product_id,
-                root_problem_signature=creator_root_problem_signature,
-                count=len(recovery_execution_task_ids),
-                progress=governor.progress_vector(product_id),
-            )
-            if reservation != "CONTINUE":
-                raise PlanContractViolation(
-                    "Path Governor execution budget is exhausted for this plan delta"
+            for task_id in recovery_execution_task_ids:
+                reservation = governor.reserve_task_execution_once(
+                    task_id=task_id,
+                    root_problem_signature=creator_root_problem_signature,
+                    progress=governor.progress_vector(product_id),
                 )
+                if reservation != "CONTINUE":
+                    raise PlanContractViolation(
+                        "Path Governor execution budget is exhausted for this plan delta"
+                    )
         connection.execute(
             """UPDATE products
                SET active_plan_id=?, active_plan_revision=?, updated_at=?
@@ -1667,6 +1678,23 @@ class AutonomyStore:
         graph_status = str(successor.get("graph_status", "DRAFT"))
         if graph_status not in TASK_STATUSES:
             raise ValueError("successor graph status is invalid")
+        supersedes_task_id = successor.get("supersedes_task_id")
+        if supersedes_task_id:
+            source = connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?",
+                (str(supersedes_task_id),),
+            ).fetchone()
+            replacement = {
+                **successor,
+                "product_id": str(predecessor["product_id"]),
+            }
+            if source is None or not supersession_is_compatible(
+                dict(source), replacement
+            ):
+                raise PlanContractViolation(
+                    "cross-role supersession is incompatible with the source task contract",
+                    reason_code="cross_role_supersession_invalid",
+                )
         now = utc_now()
         connection.execute(
             """INSERT OR IGNORE INTO tasks

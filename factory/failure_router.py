@@ -12,7 +12,13 @@ from .autonomy import CANONICAL_ROLE_OUTPUT_SCHEMAS, CAPABILITY_PROFILES
 from .common import sha256_text, stable_json
 from .config import FactoryConfig
 from .failure_catalog import FailureAction, failure_disposition
-from .path_governor import PathGovernor, stable_root_problem_signature
+from .path_governor import (
+    PathGovernor,
+    execution_slot_cost,
+    stable_root_problem_signature,
+    supersession_is_compatible,
+)
+from .plan_semantics import PlanContractViolation
 from .policy import policy_digest
 from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
@@ -141,7 +147,10 @@ class FailureRouter:
                     "product_id": failed["product_id"],
                     "failure_class": item.get("failure_class"),
                     "reason_code": item.get("reason_code"),
-                    "semantic_node_key": source_task.get("semantic_node_key"),
+                    "semantic_node_key": (
+                        source_task.get("semantic_node_key")
+                        or source_task.get("semantic_node_id")
+                    ),
                     "lifecycle_stage": source_task.get("lifecycle_stage"),
                     "failed_gate_ids": failed_gates,
                     "required_paths": _required_paths,
@@ -237,7 +246,10 @@ class FailureRouter:
                 "product_id": product_id,
                 "failure_class": chosen.get("failure_class"),
                 "reason_code": chosen.get("reason_code"),
-                "semantic_node_key": source_task.get("semantic_node_key"),
+                "semantic_node_key": (
+                    source_task.get("semantic_node_key")
+                    or source_task.get("semantic_node_id")
+                ),
                 "lifecycle_stage": source_task.get("lifecycle_stage"),
                 "failed_gate_ids": chosen_gates,
                 "required_paths": required_scope_paths,
@@ -289,6 +301,36 @@ class FailureRouter:
             status="APPLIED" if result == "CONTINUE" else "FAILED_SAFE",
         )
         return result
+
+    def _record_path_action(
+        self,
+        *,
+        failed: dict[str, Any],
+        failure: dict[str, Any],
+        root_problem_signature: str,
+        action: str,
+        status: str = "APPLIED",
+    ) -> None:
+        governor = PathGovernor(
+            self.state._connection,
+            policy_digest=policy_digest(self.config),
+        )
+        progress = governor.progress_vector(str(failed["product_id"]))
+        governor.record_decision(
+            product_id=str(failed["product_id"]),
+            root_problem_signature=root_problem_signature,
+            action=action,
+            path_snapshot_digest=governor.path_snapshot_digest(
+                product_id=str(failed["product_id"]),
+                root_problem_signature=root_problem_signature,
+                progress=progress,
+                evidence_digest=str(failure["fingerprint"]),
+            ),
+            progress_before=progress,
+            expected_progress_after=progress,
+            evidence_digest=str(failure["fingerprint"]),
+            status=status,
+        )
 
     def _terminate_path_governor_budget(
         self,
@@ -689,7 +731,7 @@ class FailureRouter:
         acceptance: list[dict[str, Any]] | None = None,
         quality_gates: list[str] | None = None,
         model_floor: str = "terra",
-        supersede_failed: bool = True,
+        supersede_failed: bool = False,
         produces_evidence_types: list[str] | None = None,
     ) -> tuple[dict[str, Any], Path]:
         task_id = (
@@ -702,7 +744,9 @@ class FailureRouter:
         plan_id = str(failed["plan_id"])
         plan_node_id = f"{failed['plan_node_id']}:{node_suffix}"
         semantic_node_key = (
-            f"{plan_node_id}@plan:{plan_id}"
+            failed.get("semantic_node_key") or failed.get("semantic_node_id")
+            if supersede_failed
+            else f"{plan_node_id}@plan:{plan_id}"
             if role in {"replanner", "path-arbiter"}
             else None
         )
@@ -764,6 +808,16 @@ class FailureRouter:
             "critical_path_rank": 0,
             "quality_gates": list(quality_gates or []),
         }
+        if supersede_failed:
+            for field in ("lifecycle_stage", "review_kind", "evidence_profile"):
+                value = failed.get(field)
+                if value is not None and (field == "review_kind" or str(value)):
+                    contract[field] = value
+            if not supersession_is_compatible(failed, contract):
+                raise PlanContractViolation(
+                    "cross-role supersession is incompatible with the source task contract",
+                    reason_code="cross_role_supersession_invalid",
+                )
         if produces_evidence_types is not None:
             contract["produces_evidence_types"] = list(produces_evidence_types)
         self.schemas.validate("task-contract-v2.schema.json", contract)
@@ -839,6 +893,7 @@ class FailureRouter:
             node_suffix="replan-after-arbiter",
             acceptance=self._product_replan_acceptance(),
             model_floor="terra",
+            supersede_failed=False,
         )
         return {
             "task_id": str(contract["task_id"]),
@@ -863,7 +918,7 @@ class FailureRouter:
             "hypothesis_id": contract.get("hypothesis_id"),
             "capability_profile": "planning_readonly",
             "idempotency_key": str(contract["idempotency_key"]),
-            "supersedes_task_id": str(contract["supersedes_task_id"]),
+            "supersedes_task_id": contract.get("supersedes_task_id"),
             "root_problem_signature": root_problem_signature,
             "required_capabilities": list(
                 CAPABILITY_PROFILES["planning_readonly"]
@@ -881,6 +936,7 @@ class FailureRouter:
         parent_hypothesis_id: str | None,
         repair_task_id: str,
         allowed_paths: list[str],
+        supersedes_task_id: str | None,
         acceptance: list[dict[str, Any]] | None = None,
     ) -> Path:
         original = self._contract(failed)
@@ -945,7 +1001,7 @@ class FailureRouter:
             "evidence_refs": [str(failure["evidence_ref"])],
             "allowed_paths": allowed_paths or ["artifacts/**"],
             "capability_gaps": [],
-            "supersedes_task_id": str(failed["task_id"]),
+            "supersedes_task_id": supersedes_task_id,
             "definition_of_done": [str(item["verification"]) for item in inherited_acceptance],
         }
         return self.artifacts.write(
@@ -1023,6 +1079,7 @@ class FailureRouter:
                 else None
             ),
             quality_gates=(self._quality_gates(original) if role != "replanner" else None),
+            supersede_failed=False,
         )
         task_id = str(contract["task_id"])
         if self.state.get_task(task_id) is None:
@@ -1056,7 +1113,12 @@ class FailureRouter:
                 ),
                 capability_profile=capability_profile,
                 idempotency_key=str(contract["idempotency_key"]),
-                supersedes_task_id=str(routed["task_id"]),
+                supersedes_task_id=None,
+                root_problem_signature=(
+                    str(routed["root_problem_signature"])
+                    if routed.get("root_problem_signature")
+                    else None
+                ),
                 required_capabilities=[str(value) for value in contract["required_capabilities"]],
                 graph_status="READY",
             )
@@ -1064,7 +1126,7 @@ class FailureRouter:
             self.state._connection.execute(
                 """
                 UPDATE tasks
-                   SET status='DONE', graph_status='SUPERSEDED',
+                   SET status='DONE', graph_status='CANCELLED',
                        lease_owner=NULL, lease_until=NULL, lease_token=NULL,
                        heartbeat_at=NULL, available_at=NULL, updated_at=?
                  WHERE task_id=?
@@ -1078,7 +1140,7 @@ class FailureRouter:
                 "recovery_task_reanchored",
                 {
                     "failure_id": str(failure["failure_id"]),
-                    "supersedes_task_id": str(routed["task_id"]),
+                    "source_task_id": str(routed["task_id"]),
                     "active_plan_id": active_plan_id,
                 },
             )
@@ -1312,6 +1374,11 @@ class FailureRouter:
                     reason == "mandatory_gate_failed"
                     and str(failed.get("capability_profile") or "") != "builder_workspace"
                 )
+                or (
+                    reason == "model_requested_repair"
+                    and str(failed.get("capability_profile") or "")
+                    in {"test_workspace", "reviewer_readonly"}
+                )
                 or attempts_used >= 3
                 or repeated_problem_requires_reassessment
                 or scope_reassessment_required
@@ -1338,24 +1405,40 @@ class FailureRouter:
                 and str(failed.get("lifecycle_stage") or failed.get("stage_key") or "")
                 == "architecture-review"
             )
+            actual_builder_repair = bool(
+                bounded_reviewer_gate_repair
+                and not bounded_architecture_review_repair
+                or (
+                    not needs_replan
+                    and str(failed.get("role") or "").replace("_", "-") == "builder"
+                    and str(failed.get("capability_profile") or "")
+                    == "builder_workspace"
+                )
+            )
             if needs_replan and not bounded_reviewer_gate_repair:
-                budget_action_kind = "arbiter"
                 path_action = FailureAction.RECOMPILE_AFFECTED_SUBGRAPH.value
             else:
-                budget_action_kind = "execution"
                 path_action = FailureAction.REPAIR_NODE_VERSION.value
-            if self._consume_path_budget(
-                failed=failed,
-                failure=failure,
-                root_problem_signature=root_problem_signature,
-                action_kind=budget_action_kind,
-                action=path_action,
-                reserve_execution=False,
-            ) != "CONTINUE":
-                return self._terminate_path_governor_budget(
+            if needs_replan and not bounded_reviewer_gate_repair:
+                if self._consume_path_budget(
                     failed=failed,
                     failure=failure,
                     root_problem_signature=root_problem_signature,
+                    action_kind="arbiter",
+                    action=path_action,
+                    reserve_execution=False,
+                ) != "CONTINUE":
+                    return self._terminate_path_governor_budget(
+                        failed=failed,
+                        failure=failure,
+                        root_problem_signature=root_problem_signature,
+                    )
+            elif not actual_builder_repair:
+                self._record_path_action(
+                    failed=failed,
+                    failure=failure,
+                    root_problem_signature=root_problem_signature,
+                    action=path_action,
                 )
             if bounded_reviewer_gate_repair:
                 role = (
@@ -1371,7 +1454,7 @@ class FailureRouter:
                 )
                 suffix = "repair"
                 objective = (
-                    "Use the remaining bounded execution slot to replace the rejected "
+                    "Use the bounded architecture-correction hypothesis to replace the rejected "
                     "architecture_package. Resolve every exact architecture-review finding "
                     "from the controller repair brief, remain read-only, preserve the root "
                     "problem signature and require fresh independent reviewer acceptance."
@@ -1457,7 +1540,7 @@ class FailureRouter:
                             + ", ".join(required_scope_paths)
                             + "."
                         )
-                if budget_action_kind == "arbiter":
+                if needs_replan and not bounded_reviewer_gate_repair:
                     suffix = "path-arbiter"
                     role = "path-arbiter"
                     output_schema = "path-decision-proposal.schema.json"
@@ -1564,11 +1647,22 @@ class FailureRouter:
                 quality_gates=repair_quality_gates,
                 model_floor=(
                     "sol"
-                    if budget_action_kind == "arbiter"
+                    if needs_replan and not bounded_reviewer_gate_repair
                     or suffix == "scope-contract-correction"
                     else "terra"
                 ),
-                supersede_failed=not bounded_architecture_review_repair,
+                supersede_failed=(
+                    suffix == "repair"
+                    and role
+                    not in {
+                        "replanner",
+                        "path-arbiter",
+                        "solution-architect",
+                        "solution_architect",
+                    }
+                    and role == str(failed.get("role") or "")
+                    and output_schema == str(failed.get("output_schema") or "")
+                ),
                 produces_evidence_types=(
                     ["architecture_package"]
                     if bounded_architecture_review_repair
@@ -1589,9 +1683,48 @@ class FailureRouter:
                     ),
                     repair_task_id=str(contract["task_id"]),
                     allowed_paths=allowed_paths,
+                    supersedes_task_id=(
+                        str(contract["supersedes_task_id"])
+                        if contract.get("supersedes_task_id")
+                        else None
+                    ),
                     acceptance=contract_acceptance,
                 )
                 repair_ref = f"evidence/{repair_path.name}"
+            execution_candidate = {**contract, "stage_key": suffix}
+            if execution_slot_cost(execution_candidate) == 1:
+                budget = self.state._connection.execute(
+                    """SELECT execution_attempts_used, status
+                         FROM problem_budgets
+                        WHERE product_id=? AND root_problem_signature=?""",
+                    (str(failed["product_id"]), root_problem_signature),
+                ).fetchone()
+                if budget is not None and (
+                    str(budget["status"] or "") != "ACTIVE"
+                    or int(budget["execution_attempts_used"] or 0) >= 2
+                ):
+                    self.state._connection.execute(
+                        """UPDATE problem_budgets
+                              SET status='EXHAUSTED', updated_at=?
+                            WHERE product_id=? AND root_problem_signature=?""",
+                        (
+                            str(failure["last_seen_at"]),
+                            str(failed["product_id"]),
+                            root_problem_signature,
+                        ),
+                    )
+                    self._record_path_action(
+                        failed=failed,
+                        failure=failure,
+                        root_problem_signature=root_problem_signature,
+                        action=path_action,
+                        status="FAILED_SAFE",
+                    )
+                    return self._terminate_path_governor_budget(
+                        failed=failed,
+                        failure=failure,
+                        root_problem_signature=root_problem_signature,
+                    )
             # The persisted compatibility spelling normalizes to the canonical
             # solution-architect prompt role, while preventing the legacy v1
             # solution-architect -> task-specifier pipeline from recompiling an
@@ -1636,6 +1769,40 @@ class FailureRouter:
                 required_capabilities=[str(value) for value in contract["required_capabilities"]],
                 graph_status="READY",
             )
+            new_routed_task = self.state.get_task(str(contract["task_id"]))
+            if new_routed_task is None:
+                raise RuntimeError("routed task disappeared before budget reservation")
+            if execution_slot_cost(new_routed_task) == 1:
+                governor = PathGovernor(
+                    self.state._connection,
+                    policy_digest=policy_digest(self.config),
+                )
+                reservation = governor.reserve_task_execution_once(
+                    task_id=str(contract["task_id"]),
+                    root_problem_signature=root_problem_signature,
+                    progress=governor.progress_vector(str(failed["product_id"])),
+                )
+                if reservation != "CONTINUE":
+                    with self.state._connection:
+                        self.state._connection.execute(
+                            """UPDATE tasks
+                                  SET status='FAILED_SAFE', graph_status='CANCELLED',
+                                      terminal_reason='path_governor_problem_budget_exhausted',
+                                      updated_at=?
+                                WHERE task_id=?""",
+                            (failure["last_seen_at"], contract["task_id"]),
+                        )
+                    return self._terminate_path_governor_budget(
+                        failed=failed,
+                        failure=failure,
+                        root_problem_signature=root_problem_signature,
+                    )
+                self._record_path_action(
+                    failed=failed,
+                    failure=failure,
+                    root_problem_signature=root_problem_signature,
+                    action=path_action,
+                )
             if repair_ref is not None:
                 with self.state._lock, self.state._connection:
                     self.state._connection.execute(

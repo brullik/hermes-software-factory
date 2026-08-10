@@ -263,6 +263,8 @@ class FaultInjectingHermesRunner:
 class FaultInjectingQualityGate:
     """Fail one product-test gate after every earlier gate passed normally."""
 
+    _PRODUCT_TEST_GATE = "target-tests"
+
     def __init__(
         self,
         delegate: QualityGateEngine,
@@ -299,15 +301,34 @@ class FaultInjectingQualityGate:
                 attempt_id=attempt_id,
                 gate_ids=gate_ids,
             )
+        try:
+            target_index = gate_ids.index(self._PRODUCT_TEST_GATE)
+        except ValueError as error:
+            raise CanaryFaultError(
+                "canonical fault gate is missing: target-tests"
+            ) from error
+        if target_index == 0:
+            raise CanaryFaultError(
+                "target-tests cannot be the first gate in a product-test fault batch"
+            )
+        preceding = self.delegate.run(
+            cwd=cwd,
+            subject_sha=subject_sha,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            gate_ids=gate_ids[:target_index],
+        )
+        if not preceding.mandatory_passed:
+            return preceding
         receipt = self.journal.consume(
             "ONE_PRODUCT_TEST_FAILURE",
             point="mandatory_product_test",
             task_id=task_id,
-            observed={"gate_id": gate_ids[0], "status": "FAIL"},
+            observed={"gate_id": self._PRODUCT_TEST_GATE, "status": "FAIL"},
         )
         evidence = {
             "schema_version": "1.0",
-            "gate_id": gate_ids[0],
+            "gate_id": self._PRODUCT_TEST_GATE,
             "status": "FAIL",
             "subject_sha": subject_sha,
             "command_digest": sha256_text("qualification-one-product-test-failure"),
@@ -321,16 +342,18 @@ class FaultInjectingQualityGate:
         evidence_path = self.delegate.artifacts.write(
             "gate-evidence.schema.json",
             evidence,
-            filename=f"gate-{task_id}-{attempt_id}-{gate_ids[0]}-fault.json",
+            filename=(
+                f"gate-{task_id}-{attempt_id}-{self._PRODUCT_TEST_GATE}-fault.json"
+            ),
         )
         return QualityGateRun(
-            (
+            (*preceding.results,
                 {
-                    "gate_id": gate_ids[0],
+                    "gate_id": self._PRODUCT_TEST_GATE,
                     "status": "FAIL",
                     "evidence_ref": str(evidence_path),
                 },
             ),
-            (evidence_path,),
+            (*preceding.evidence_paths, evidence_path),
             False,
         )

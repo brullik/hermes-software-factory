@@ -25,7 +25,11 @@ from factory.context_builder import ContextBuilder
 from factory.failure_router import FailureRouter
 from factory.intake import IntakeService
 from factory.migrations import MIGRATIONS, apply_migrations
-from factory.path_governor import PathGovernor, task_contract_digest
+from factory.path_governor import (
+    PathGovernor,
+    supersession_is_compatible,
+    task_contract_digest,
+)
 from factory.pipeline import PipelineCoordinator
 from factory.plan_compiler import CompileContext, PlanCompiler
 from factory.plan_semantics import PlanContractViolation
@@ -659,6 +663,110 @@ def test_replan_reclaims_unused_superseded_implementation_reservation(
         state.close()
 
 
+def test_plan_delta_retires_previous_active_binding(tmp_path: Path) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    try:
+        create_v2_product(state)
+        state.add_task(
+            task_id="T-BINDING-ROOT",
+            product_id="product-autonomy",
+            title="Compile binding replacement plans",
+            role="task-specifier",
+            graph_status="ACCEPTED",
+        )
+        first_plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-BINDING-1",
+            root_task_id="T-BINDING-ROOT",
+            node_specs=[("A", "T-BINDING-OLD", "accept-old")],
+            edges=[],
+        )
+        old_contract = first_plan["nodes"][0]["task_contract"]
+        old_contract["semantic_node_key"] = "stable-implementation"
+        old_contract["lifecycle_stage"] = "implementation-slice"
+        persist_and_ingest_plan(
+            config,
+            state,
+            first_plan,
+            created_by_task_id="T-BINDING-ROOT",
+        )
+        claimed = state.claim_task(worker_id="binding-old-worker")
+        assert claimed is not None and claimed["task_id"] == "T-BINDING-OLD"
+        state.record_attempt(
+            attempt_id="attempt-binding-old",
+            task_id="T-BINDING-OLD",
+            tier="luna",
+            attempt_kind="initial",
+            prompt_digest="1" * 64,
+            status="started",
+            semantic_counted=True,
+        )
+        state.commit_task_outcome(
+            TaskOutcome(
+                task_id="T-BINDING-OLD",
+                worker_id="binding-old-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                expected_plan_revision=1,
+                idempotency_key="2" * 64,
+                result_ref="evidence/attempt-binding-old.json",
+                result_digest="3" * 64,
+                status="ACCEPTED",
+                attempt_id="attempt-binding-old",
+                attempt_status="completed",
+                accepted_result_ref="evidence/output-binding-old.json",
+                accepted_result_digest="4" * 64,
+                accepted_policy_digest=policy_digest(config),
+            )
+        )
+        old = state.get_task("T-BINDING-OLD")
+        assert old is not None and old["result_binding_id"]
+        old_binding_id = str(old["result_binding_id"])
+        semantic_node_id = str(old["semantic_node_id"])
+
+        replacement_plan = executable_plan(
+            config,
+            product_id="product-autonomy",
+            plan_id="PLAN-BINDING-2",
+            root_task_id="T-BINDING-ROOT",
+            revision=2,
+            parent_plan_id="PLAN-BINDING-1",
+            node_specs=[("A2", "T-BINDING-NEW", "accept-new")],
+            edges=[],
+        )
+        replacement_contract = replacement_plan["nodes"][0]["task_contract"]
+        replacement_contract["semantic_node_key"] = "stable-implementation"
+        replacement_contract["lifecycle_stage"] = "implementation-slice"
+        replacement_contract["objective"] = (
+            "Implement the corrected behavior and produce fresh immutable evidence."
+        )
+        persist_and_ingest_plan(
+            config,
+            state,
+            replacement_plan,
+            created_by_task_id="T-BINDING-ROOT",
+        )
+
+        assert state._connection.execute(
+            "SELECT status FROM result_bindings WHERE binding_id=?",
+            (old_binding_id,),
+        ).fetchone()[0] == "SUPERSEDED"
+        assert state._connection.execute(
+            """SELECT binding_id,membership_state FROM plan_memberships
+                 WHERE plan_id='PLAN-BINDING-1' AND semantic_node_id=?""",
+            (semantic_node_id,),
+        ).fetchone()[:] == (old_binding_id, "BOUND")
+        assert state._connection.execute(
+            """SELECT execution_task_id,membership_state FROM plan_memberships
+                 WHERE plan_id='PLAN-BINDING-2' AND semantic_node_id=?""",
+            (semantic_node_id,),
+        ).fetchone()[:] == ("T-BINDING-NEW", "EXECUTION")
+    finally:
+        state.close()
+
+
 def test_external_target_scope_and_recovery_slot_compile_guards() -> None:
     def implementation(key: str, scope: list[str]) -> dict[str, Any]:
         return {
@@ -713,7 +821,133 @@ def test_external_target_scope_and_recovery_slot_compile_guards() -> None:
         )
 
 
-def test_replanner_reserves_one_post_arbiter_reviewer_correction_slot(
+def test_uncovered_mandatory_goal_requires_implementation_slice() -> None:
+    proposal = {
+        "schema_version": "1.0",
+        "proposal_kind": "replan_delta",
+        "product_id": "P-MANDATORY-GOAL",
+        "parent_plan_id": "PLAN-1",
+        "source_failure_id": "failure-1",
+        "created_at": "2026-08-10T00:00:00Z",
+        "goals": [
+            {"goal_id": "goal-covered", "statement": "Preserve covered goal.", "mandatory": True},
+            {"goal_id": "goal-uncovered", "statement": "Repair uncovered goal.", "mandatory": True},
+        ],
+        "nodes": [
+            {
+                "node_key": "covered-slice",
+                "stage_kind": "implementation_slice",
+                "title": "Preserve accepted slice",
+                "objective": "Preserve the accepted result binding.",
+                "scope": ["src/covered.py"],
+                "depends_on": [],
+                "goal_ids": ["goal-covered"],
+                "acceptance_intents": ["The accepted behavior remains unchanged."],
+            },
+            {
+                "node_key": "fresh-but-wrong-goal",
+                "stage_kind": "implementation_slice",
+                "title": "Repair a different coordinate",
+                "objective": "Produce fresh evidence without addressing the uncovered goal.",
+                "scope": ["src/other.py"],
+                "depends_on": [],
+                "goal_ids": ["goal-covered"],
+                "acceptance_intents": ["Fresh tests pass for the other coordinate."],
+            },
+        ],
+    }
+    inherited = [dict(proposal["nodes"][0])]
+    context = CompileContext(
+        product_id="P-MANDATORY-GOAL",
+        revision=2,
+        parent_plan_id="PLAN-1",
+        source_failure_id="failure-1",
+        created_by_task_id="T-REPLANNER",
+        root_task_id="T-ROOT",
+        root_context_ref="evidence/intake.json",
+        external_repository=False,
+        proposal_artifact_ref="evidence/replan.json",
+        uncovered_mandatory_goal_ids=("goal-uncovered",),
+    )
+
+    with pytest.raises(
+        PlanContractViolation,
+        match="uncovered mandatory goal requires a fresh implementation slice: goal-uncovered",
+    ) as raised:
+        PlanCompiler(policy_digest="c" * 64).compile(
+            proposal,
+            context,
+            accepted_nodes={"semantic:covered-slice": "T-COVERED"},
+            inherited_nodes=inherited,
+        )
+
+    assert raised.value.reason_code == "completion_unreachable"
+
+
+def test_preserved_binding_satisfies_goal_coverage() -> None:
+    preserved = {
+        "node_key": "covered-slice",
+        "stage_kind": "implementation_slice",
+        "title": "Preserve accepted slice",
+        "objective": "Preserve the accepted result binding.",
+        "scope": ["src/covered.py"],
+        "depends_on": [],
+        "goal_ids": ["goal-covered"],
+        "acceptance_intents": ["The accepted behavior remains unchanged."],
+    }
+    fresh = {
+        "node_key": "repair-slice",
+        "stage_kind": "implementation_slice",
+        "title": "Repair uncovered goal",
+        "objective": "Produce fresh evidence for the uncovered mandatory goal.",
+        "scope": ["src/repair.py"],
+        "depends_on": ["covered-slice"],
+        "goal_ids": ["goal-uncovered"],
+        "acceptance_intents": ["Fresh repair tests pass."],
+    }
+    proposal = {
+        "schema_version": "1.0",
+        "proposal_kind": "replan_delta",
+        "product_id": "P-PRESERVED-GOAL",
+        "parent_plan_id": "PLAN-1",
+        "source_failure_id": "failure-1",
+        "created_at": "2026-08-10T00:00:00Z",
+        "goals": [
+            {"goal_id": "goal-covered", "statement": "Preserve covered goal.", "mandatory": True},
+            {"goal_id": "goal-uncovered", "statement": "Repair uncovered goal.", "mandatory": True},
+        ],
+        "nodes": [preserved, fresh],
+    }
+    compiled = PlanCompiler(policy_digest="d" * 64).compile(
+        proposal,
+        CompileContext(
+            product_id="P-PRESERVED-GOAL",
+            revision=2,
+            parent_plan_id="PLAN-1",
+            source_failure_id="failure-1",
+            created_by_task_id="T-REPLANNER",
+            root_task_id="T-ROOT",
+            root_context_ref="evidence/intake.json",
+            external_repository=False,
+            proposal_artifact_ref="evidence/replan.json",
+            uncovered_mandatory_goal_ids=("goal-uncovered",),
+        ),
+        accepted_nodes={"semantic:covered-slice": "T-COVERED"},
+        inherited_nodes=[preserved],
+    )
+
+    implementation = [
+        node["task_contract"]
+        for node in compiled["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+    ]
+    covered_contract = next(
+        contract for contract in implementation if contract["semantic_node_key"] == "covered-slice"
+    )
+    assert covered_contract["supersedes_task_id"] == "T-COVERED"
+
+
+def test_replanner_can_use_two_post_arbiter_builder_execution_slots(
     tmp_path: Path,
 ) -> None:
     config = configured(tmp_path)
@@ -744,8 +978,8 @@ def test_replanner_reserves_one_post_arbiter_reviewer_correction_slot(
             "execution_slot_limit": 2,
             "execution_attempts_used": 0,
             "raw_remaining_execution_slots": 2,
-            "reviewer_correction_slots_reserved": 1,
-            "remaining_execution_slots": 1,
+            "reviewer_correction_slots_reserved": 0,
+            "remaining_execution_slots": 2,
             "status": "ACTIVE",
         }
 
@@ -786,23 +1020,16 @@ def test_replanner_reserves_one_post_arbiter_reviewer_correction_slot(
             ),
         )
         compiler = PlanCompiler(policy_digest="b" * 64)
-        with pytest.raises(
-            PlanContractViolation,
-            match="2 fresh evidence-producing implementation slices but only 1 .* slots remain",
-        ):
-            compiler.compile(proposal, context)
-
-        proposal["nodes"] = [implementation(1)]
         compiled = compiler.compile(proposal, context)
         assert sum(
             node["task_contract"]["lifecycle_stage"] == "implementation-slice"
             for node in compiled["nodes"]
-        ) == 1
+        ) == 2
         with state._connection:
             assert governor.reserve_execution_slots(
                 product_id="product-autonomy",
                 root_problem_signature=signature,
-                count=1,
+                count=2,
                 progress=governor.progress_vector("product-autonomy"),
             ) == "CONTINUE"
         assert path_governor_execution_budget(
@@ -811,9 +1038,9 @@ def test_replanner_reserves_one_post_arbiter_reviewer_correction_slot(
             root_problem_signature=signature,
         ) == {
             "execution_slot_limit": 2,
-            "execution_attempts_used": 1,
-            "raw_remaining_execution_slots": 1,
-            "reviewer_correction_slots_reserved": 1,
+            "execution_attempts_used": 2,
+            "raw_remaining_execution_slots": 0,
+            "reviewer_correction_slots_reserved": 0,
             "remaining_execution_slots": 0,
             "status": "ACTIVE",
         }
@@ -1511,6 +1738,147 @@ def test_actionable_failure_from_readonly_reviewer_routes_to_replanner(
         state.close()
 
 
+def test_test_engineer_code_repair_routes_to_builder(tmp_path: Path) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "test-engineer",
+                "output_schema": "test-package-result.schema.json",
+                "capability_profile": "test_workspace",
+                "required_capabilities": list(CAPABILITY_PROFILES["test_workspace"]),
+                "lifecycle_stage": "test",
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                      SET role='test-engineer',
+                          output_schema='test-package-result.schema.json',
+                          capability_profile='test_workspace',
+                          lifecycle_stage='test', stage_key='test',
+                          required_capabilities_json=?
+                    WHERE task_id='T-FAILNODEA'""",
+                (stable_json(list(CAPABILITY_PROFILES["test_workspace"])),),
+            )
+
+        routed_id = FailureRouter(config, state, artifacts).route(failure_id)
+        routed = state.get_task(routed_id)
+        assert routed is not None
+        assert routed["role"] == "path-arbiter"
+        assert routed["capability_profile"] == "planning_readonly"
+        assert routed["supersedes_task_id"] is None
+        budget = state._connection.execute(
+            "SELECT arbiter_calls_used, execution_attempts_used FROM problem_budgets"
+        ).fetchone()
+        assert budget is not None and tuple(budget) == (1, 0)
+    finally:
+        state.close()
+
+
+def test_cross_role_recovery_never_sets_supersedes_task_id(tmp_path: Path) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="needs_replan",
+    )
+    try:
+        source = state.get_task("T-FAILNODEA")
+        assert source is not None
+
+        arbiter_id = FailureRouter(config, state, artifacts).route(failure_id)
+        arbiter = state.get_task(arbiter_id)
+        assert arbiter is not None
+        assert arbiter["role"] == "path-arbiter"
+        assert arbiter["parent_task_id"] == source["task_id"]
+        assert arbiter["source_task_id"] == source["task_id"]
+        assert arbiter["failure_id"] == failure_id
+        assert arbiter["root_problem_signature"]
+        assert arbiter["supersedes_task_id"] is None
+
+        replanner_id = accept_path_arbiter_and_prepare_replanner(
+            config,
+            state,
+            artifacts,
+            arbiter_id,
+        )
+        replanner = state.get_task(replanner_id)
+        assert replanner is not None
+        assert replanner["role"] == "replanner"
+        assert replanner["parent_task_id"] == arbiter_id
+        assert replanner["source_task_id"] == arbiter_id
+        assert replanner["failure_id"] == failure_id
+        assert replanner["root_problem_signature"] == arbiter["root_problem_signature"]
+        assert replanner["supersedes_task_id"] is None
+    finally:
+        state.close()
+
+
+def test_same_identity_repair_may_supersede(tmp_path: Path) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        source = state.get_task("T-FAILNODEA")
+        assert source is not None
+
+        repair_id = FailureRouter(config, state, artifacts).route(failure_id)
+        repair = state.get_task(repair_id)
+        assert repair is not None
+        assert repair["supersedes_task_id"] == source["task_id"]
+        assert supersession_is_compatible(source, repair)
+    finally:
+        state.close()
+
+
+def test_cross_role_supersession_is_rejected_before_insert(tmp_path: Path) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(tmp_path)
+    try:
+        source = state.get_task("T-FAILNODEA")
+        assert source is not None
+        failure = next(
+            item
+            for item in state.list_failures("product-autonomy")
+            if item["failure_id"] == failure_id
+        )
+        tasks_before = tuple(
+            task["task_id"] for task in state.list_tasks("product-autonomy")
+        )
+        artifacts_before = tuple(sorted(config.evidence_dir.glob("task-T-*.json")))
+
+        with pytest.raises(PlanContractViolation) as captured:
+            FailureRouter(config, state, artifacts)._write_contract(
+                failed=source,
+                failure=failure,
+                hypothesis_id=(
+                    str(source["hypothesis_id"])
+                    if source.get("hypothesis_id")
+                    else None
+                ),
+                role="path-arbiter",
+                output_schema="path-decision-proposal.schema.json",
+                capability_profile="planning_readonly",
+                objective="Attempt an invalid cross-role replacement for validation.",
+                allowed_paths=["artifacts/**"],
+                task_revision=int(source["task_revision"]) + 1,
+                node_suffix="invalid-cross-role-replacement",
+                supersede_failed=True,
+            )
+
+        assert captured.value.reason_code == "cross_role_supersession_invalid"
+        assert tuple(
+            task["task_id"] for task in state.list_tasks("product-autonomy")
+        ) == tasks_before
+        assert tuple(sorted(config.evidence_dir.glob("task-T-*.json"))) == artifacts_before
+    finally:
+        state.close()
+
+
 @pytest.mark.parametrize(
     ("second_reason", "failed_gate_id", "review_stage"),
     [
@@ -1632,8 +2000,8 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
             "execution_slot_limit": 2,
             "execution_attempts_used": 1,
             "raw_remaining_execution_slots": 1,
-            "reviewer_correction_slots_reserved": 1,
-            "remaining_execution_slots": 0,
+            "reviewer_correction_slots_reserved": 0,
+            "remaining_execution_slots": 1,
             "status": "ACTIVE",
         }
         repair_id = router.route(second_failure_id)
@@ -1693,6 +2061,8 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         if "CONTAINER" in failed_gate_id:
             expected_gates.append("target-container-image-scan")
         assert repair_contract["quality_gates"] == expected_gates
+        assert repair_contract["supersedes_task_id"] is None
+        assert repair["supersedes_task_id"] is None
         assert repair_contract["acceptance"][0]["criterion_id"] == (
             "AC-ARCHITECTURE-REPAIR" if architecture else "AC-REVIEWER-GATE-ROOT-CAUSE"
         )
@@ -1717,17 +2087,18 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                   AND root_problem_signature=?""",
             (signature,),
         ).fetchone()
-        assert tuple(budget) == (1, 2, "ACTIVE")
+        expected_execution_used = 1 if architecture else 2
+        assert tuple(budget) == (1, expected_execution_used, "ACTIVE")
         assert path_governor_execution_budget(
             state._connection,
             product_id="product-autonomy",
             root_problem_signature=signature,
         ) == {
             "execution_slot_limit": 2,
-            "execution_attempts_used": 2,
-            "raw_remaining_execution_slots": 0,
+            "execution_attempts_used": expected_execution_used,
+            "raw_remaining_execution_slots": 2 - expected_execution_used,
             "reviewer_correction_slots_reserved": 0,
-            "remaining_execution_slots": 0,
+            "remaining_execution_slots": 2 - expected_execution_used,
             "status": "ACTIVE",
         }
     finally:
@@ -4508,7 +4879,6 @@ def test_AUT_P0_011_needs_replan_activates_real_plan_revision(
                 ("B2", "T-REPLACEMENTB", "accept-b2"),
             ],
             edges=[("A2", "B2")],
-            supersedes={"A2": "T-FAILNODEA"},
         )
         for node in replacement_plan["nodes"]:
             contract = node["task_contract"]
@@ -4556,12 +4926,7 @@ def test_AUT_P0_011_needs_replan_activates_real_plan_revision(
             if task["plan_id"] == "PLAN-FAILURE-1"
         )
         replacement_edges = state.list_edges("PLAN-FAILURE-2")
-        assert any(
-            edge["edge_type"] == "supersedes"
-            and edge["from_task_id"] == "T-FAILNODEA"
-            and edge["to_task_id"] == "T-REPLACEMENTA"
-            for edge in replacement_edges
-        )
+        assert not any(edge["edge_type"] == "supersedes" for edge in replacement_edges)
     finally:
         state.close()
 

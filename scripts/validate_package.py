@@ -23,6 +23,8 @@ IGNORED_DIRS = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    "audit_output",
+    "audit_tools",
     "build",
     "dist",
     ".venv",

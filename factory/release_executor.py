@@ -240,8 +240,8 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
             )
         return GitHubAdapter(owner, name, single_owner_mode=self.single_owner_mode)
 
-    @staticmethod
     def _default_assurance_runner(
+        self,
         workspace: Path,
         candidate_sha: str,
     ) -> Mapping[str, Mapping[str, Any]]:
@@ -281,6 +281,7 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 workspace,
                 candidate_sha,
                 python_executable=str(target_python),
+                temporary_root=self.config.state_dir / "tmp" / "quality-gates",
             )
         return results
 

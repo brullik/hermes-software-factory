@@ -8,7 +8,7 @@ from test_worker import make_config
 
 from factory.artifacts import ArtifactStore
 from factory.autonomy import TaskOutcome
-from factory.common import sha256_text
+from factory.common import sha256_text, stable_json
 from factory.path_governor import (
     PathArbiterSandbox,
     PathDecisionError,
@@ -16,6 +16,7 @@ from factory.path_governor import (
     ProgressVector,
     ResultLineageCycleError,
     ResultLineageIdentityError,
+    execution_slot_cost,
     failure_owner,
     stable_root_problem_signature,
 )
@@ -140,6 +141,237 @@ def _binding(
 
 def _progress(first: int, *, evidence_gap: int = 0) -> ProgressVector:
     return ProgressVector(first, 1, 1, 0, evidence_gap, 0, 0)
+
+
+def test_non_builder_repair_has_zero_execution_slot_cost() -> None:
+    for role, profile in (
+        ("solution-architect", "planning_readonly"),
+        ("replanner", "planning_readonly"),
+        ("path-arbiter", "planning_readonly"),
+        ("test-engineer", "test_workspace"),
+        ("security-reviewer", "reviewer_readonly"),
+        ("independent-reviewer", "reviewer_readonly"),
+    ):
+        assert execution_slot_cost(
+            {
+                "role": role,
+                "capability_profile": profile,
+                "stage_key": "repair",
+            }
+        ) == 0
+
+
+def test_architecture_correction_does_not_consume_execution_slot() -> None:
+    assert execution_slot_cost(
+        {
+            "role": "solution-architect",
+            "capability_profile": "planning_readonly",
+            "lifecycle_stage": "architecture-review",
+        }
+    ) == 0
+
+
+def test_builder_execution_reservation_is_idempotent(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    signature = "7" * 64
+    try:
+        with state._connection:
+            state._connection.execute(
+                "UPDATE tasks SET root_problem_signature=? WHERE task_id='T-ROOT0001'",
+                (signature,),
+            )
+            governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+            progress = governor.progress_vector("product-path-governor")
+            assert governor.reserve_task_execution_once(
+                task_id="T-ROOT0001",
+                root_problem_signature=signature,
+                progress=progress,
+            ) == "CONTINUE"
+            assert governor.reserve_task_execution_once(
+                task_id="T-ROOT0001",
+                root_problem_signature=signature,
+                progress=progress,
+            ) == "CONTINUE"
+        used = state._connection.execute(
+            "SELECT execution_attempts_used FROM problem_budgets"
+        ).fetchone()
+        assert used is not None and int(used[0]) == 1
+    finally:
+        state.close()
+
+
+def test_plan_compiler_and_failure_router_share_one_reservation(
+    tmp_path: Path,
+) -> None:
+    # Both production paths call reserve_task_execution_once; the EXECUTION
+    # membership is their shared durable idempotency coordinate.
+    test_builder_execution_reservation_is_idempotent(tmp_path)
+
+
+def test_bind_result_reads_back_exact_binding_id(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    try:
+        _accept_source(state, "T-ROOT0001", "attempt-exact-binding")
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        with state._connection:
+            node_id = governor.register_execution_membership("T-ROOT0001")
+            task = state.get_task("T-ROOT0001")
+            assert task is not None
+            historical_id = "RB-HISTORICAL00000001"
+            state._connection.execute(
+                """INSERT INTO result_bindings
+                   (binding_id,product_id,semantic_node_id,source_task_id,
+                    source_attempt_id,result_ref,result_digest,output_schema,
+                    contract_digest,policy_digest,candidate_digest,accepted_at,status)
+                   VALUES (?, ?, ?, 'T-ROOT0001', 'attempt-exact-binding',
+                           'evidence/historical.json', ?,
+                           'attempt-result.schema.json', ?, ?, NULL,
+                           '2026-08-10T00:00:00Z', 'SUPERSEDED')""",
+                (
+                    historical_id,
+                    str(task["product_id"]),
+                    node_id,
+                    "d" * 64,
+                    str(task["contract_digest"]),
+                    POLICY_DIGEST,
+                ),
+            )
+
+        binding = governor.bind_result(
+            task_id="T-ROOT0001",
+            source_task_id="T-ROOT0001",
+            source_attempt_id="attempt-exact-binding",
+            result_ref="evidence/exact.json",
+            result_digest="e" * 64,
+            output_schema="attempt-result.schema.json",
+        )
+        task = state.get_task("T-ROOT0001")
+        assert task is not None
+        expected_id = "RB-" + sha256_text(
+            stable_json(
+                [
+                    task["product_id"],
+                    task["semantic_node_id"],
+                    "e" * 64,
+                    task["contract_digest"],
+                ]
+            )
+        )[:20].upper()
+        assert binding.binding_id == expected_id
+        assert binding.binding_id != historical_id
+        assert governor.bind_result(
+            task_id="T-ROOT0001",
+            source_task_id="T-ROOT0001",
+            source_attempt_id="attempt-exact-binding",
+            result_ref="evidence/exact.json",
+            result_digest="e" * 64,
+            output_schema="attempt-result.schema.json",
+        ).binding_id == expected_id
+    finally:
+        state.close()
+
+
+def test_frozen_snapshot_reads_exact_superseded_binding(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    try:
+        _accept_source(state, "T-ROOT0001", "attempt-frozen-binding")
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        binding_id = _binding(
+            state,
+            "T-ROOT0001",
+            "attempt-frozen-binding",
+            result_digest="f" * 64,
+        )
+        task = state.get_task("T-ROOT0001")
+        assert task is not None
+        with state._connection:
+            snapshot_id = governor.create_candidate_snapshot(
+                product_id=str(task["product_id"]),
+                plan_id=str(task["plan_id"]),
+                repository_commit="a" * 40,
+                tree_digest="sha256:" + "b" * 64,
+                architecture_binding_id=binding_id,
+                result_binding_ids=(binding_id,),
+            )
+            assert governor.retire_active_binding_for_replacement(
+                product_id=str(task["product_id"]),
+                semantic_node_id=str(task["semantic_node_id"]),
+            ) == binding_id
+
+        snapshot = governor.candidate_snapshot(snapshot_id)
+        assert [item["binding_id"] for item in snapshot["result_bindings"]] == [
+            binding_id
+        ]
+        assert state._connection.execute(
+            "SELECT status FROM result_bindings WHERE binding_id=?",
+            (binding_id,),
+        ).fetchone()[0] == "SUPERSEDED"
+    finally:
+        state.close()
+
+
+def test_exactly_one_active_binding_per_semantic_node(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    try:
+        _accept_source(state, "T-ROOT0001", "attempt-binding-old")
+        governor = PathGovernor(state._connection, policy_digest=POLICY_DIGEST)
+        old_binding_id = _binding(
+            state,
+            "T-ROOT0001",
+            "attempt-binding-old",
+            result_digest="1" * 64,
+        )
+        source = state.get_task("T-ROOT0001")
+        assert source is not None
+        node_id = str(source["semantic_node_id"])
+
+        state._connection.commit()
+        state._connection.execute("BEGIN IMMEDIATE")
+        governor.retire_active_binding_for_replacement(
+            product_id=str(source["product_id"]),
+            semantic_node_id=node_id,
+        )
+        state._connection.rollback()
+        assert state._connection.execute(
+            "SELECT status FROM result_bindings WHERE binding_id=?",
+            (old_binding_id,),
+        ).fetchone()[0] == "ACTIVE"
+
+        with state._connection:
+            governor.retire_active_binding_for_replacement(
+                product_id=str(source["product_id"]),
+                semantic_node_id=node_id,
+            )
+            _clone_task(
+                state,
+                "T-ROOT0001",
+                "T-BINDING-REPLACEMENT",
+                supersedes_task_id="T-ROOT0001",
+            )
+        _accept_source(
+            state,
+            "T-BINDING-REPLACEMENT",
+            "attempt-binding-replacement",
+        )
+        replacement_id = _binding(
+            state,
+            "T-BINDING-REPLACEMENT",
+            "attempt-binding-replacement",
+            result_digest="2" * 64,
+        )
+
+        active = state._connection.execute(
+            """SELECT binding_id FROM result_bindings
+                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'""",
+            (source["product_id"], node_id),
+        ).fetchall()
+        assert [str(row["binding_id"]) for row in active] == [replacement_id]
+        assert state._connection.execute(
+            "SELECT status FROM result_bindings WHERE binding_id=?",
+            (old_binding_id,),
+        ).fetchone()[0] == "SUPERSEDED"
+    finally:
+        state.close()
 
 
 def test_LOOP_P0_001_ten_thousand_valid_legacy_nodes_materialize_direct_binding(

@@ -43,7 +43,10 @@ from .capabilities import CapabilityBroker
 from .common import new_id, redact_text, sha256_file, sha256_text, stable_json
 from .config import FactoryConfig, clean_canary_capability_context, load_config
 from .context_builder import ContextBuilder, ContextPackResult
+from .controller_envelope import bind_controller_envelope
+from .delivery_profile_obligations import delivery_profile_obligations
 from .path_governor import (
+    ActiveResultBindingConflictError,
     PathGovernor,
     ResultLineageCycleError,
     ResultLineageDepthExceededError,
@@ -89,7 +92,7 @@ from .repair_scope import (
     infer_unique_test_source_paths,
     path_is_covered,
 )
-from .replan_lineage import implementation_lineage
+from .replan_lineage import implementation_lineage, uncovered_mandatory_goal_ids
 from .repository import RepositoryBootstrapper, build_repository_bootstrapper
 from .state import StateStore, is_sqlite_busy
 from .workflow import WorkflowEngine
@@ -1446,6 +1449,83 @@ class AgentWorker:
         )
         return probe.status == "PASS"
 
+    def _bind_provider_output(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        spec: TaskExecutionSpec,
+        attempt: Attempt,
+        selection: ModelSelection,
+    ) -> dict[str, Any]:
+        """Attach immutable task/attempt truth before output validation."""
+
+        attempt_row = next(
+            (
+                row
+                for row in self.state.attempts_for_task(attempt.task_id)
+                if str(row.get("attempt_id") or "") == attempt.attempt_id
+            ),
+            None,
+        )
+        durable_task = self.state.get_task(attempt.task_id)
+        if attempt_row is None or durable_task is None:
+            raise RuntimeError("controller output envelope lacks durable task attempt")
+        schema = self.schemas.load_schema(spec.output_schema)
+        version_contract = schema.get("properties", {}).get("schema_version", {})
+        if not isinstance(version_contract, Mapping) or "const" not in version_contract:
+            raise RuntimeError("provider output schema lacks a fixed schema version")
+
+        task_contract = spec.task_contract
+        artifact_seed = stable_json(
+            [attempt.task_id, attempt.attempt_id, spec.output_schema, "controller-envelope-v1"]
+        )
+        fields: dict[str, Any] = {
+            "schema_version": version_contract["const"],
+            "artifact_id": f"artifact-{sha256_text(artifact_seed)[:20]}",
+            "created_at": str(attempt_row["created_at"]),
+            "producer": {
+                "role": spec.role,
+                "tier": attempt.tier.value,
+                "provider": (
+                    None if selection.provider == "controller" else selection.provider
+                ),
+                "model": None if selection.model == "deterministic" else selection.model,
+            },
+            "policy_digest": policy_digest(self.config),
+            "product_id": str(task_contract["product_id"]),
+            "task_id": str(task_contract["task_id"]),
+            "source_task_id": str(
+                task_contract.get("source_task_id") or task_contract["task_id"]
+            ),
+            "attempt_id": attempt.attempt_id,
+            "tier": attempt.tier.value,
+            "attempt_kind": attempt.attempt_kind,
+            "prompt_digest": attempt.prompt_digest,
+            "subject_sha": spec.subject_sha,
+            "subject_sha_before": spec.subject_sha,
+            "plan_id": str(task_contract.get("plan_id") or "") or None,
+            "plan_revision": int(task_contract.get("task_revision") or 1),
+            "parent_plan_id": (
+                str(task_contract.get("plan_id") or "") or None
+                if spec.role == "replanner"
+                else None
+            ),
+            "source_failure_id": (
+                str(task_contract.get("failure_id") or "") or None
+            ),
+            "trigger_failure_id": (
+                str(durable_task.get("failure_id") or "") or None
+            ),
+            "root_problem_signature": str(
+                durable_task.get("root_problem_signature") or ""
+            ),
+        }
+        return bind_controller_envelope(
+            payload,
+            schema=schema,
+            controller_fields=fields,
+        )
+
     def default_spec(self, task: Mapping[str, Any]) -> TaskExecutionSpec:
         task_id = str(task["task_id"])
         contract_ref = str(task.get("contract_ref") or "")
@@ -1624,6 +1704,37 @@ class AgentWorker:
             prompt_role,
         )
         evidence.extend(target_evidence)
+        obligation_roles = {
+            "solution-architect",
+            "task-specifier",
+            "replanner",
+            "independent-reviewer",
+            "security-reviewer",
+        }
+        obligation_set = None
+        if prompt_role in obligation_roles:
+            qualification = self.config.raw.get("qualification", {})
+            declared_faults = (
+                qualification.get("faults", [])
+                if isinstance(qualification, Mapping)
+                else []
+            )
+            obligation_set = delivery_profile_obligations(
+                str(product.get("delivery_profile") or "DEPLOYED_SERVICE"),
+                str(product.get("delivery_mode") or "new_repository"),
+                declared_faults if isinstance(declared_faults, list) else (),
+            )
+            obligation_payload = stable_json(obligation_set.as_dict())
+            evidence.append(
+                {
+                    "type": "controller-delivery-profile-obligations",
+                    "summary": "TRUSTED_CONTROLLER_EVIDENCE: " + obligation_payload,
+                    "artifact_ref": (
+                        "controller://delivery-profile-obligations/"
+                        + obligation_set.digest
+                    ),
+                }
+            )
         if prompt_role == "solution-architect":
             capacity_snapshot = _host_capacity_snapshot(self.config)
             capacity_payload = stable_json(capacity_snapshot)
@@ -1642,6 +1753,13 @@ class AgentWorker:
             )
         decisions = ["Use safe defaults for unspecified reversible product details."]
         decisions.extend(target_decisions)
+        if obligation_set is not None:
+            decisions.append(
+                "Treat every controller delivery-profile obligation as mandatory acceptance. "
+                f"Use exactly obligation_set_digest={obligation_set.digest} and IDs="
+                + ",".join(obligation_set.obligation_ids)
+                + "; do not omit, rename, or replace them with scenario-specific rules."
+            )
         if prompt_role == "builder":
             decisions.append(
                 "Controller-owned target quality gates are authoritative. Do not invent a "
@@ -3077,7 +3195,7 @@ class AgentWorker:
         product_id = str(task["product_id"])
         product = self.state.get_product(product_id)
         active_plan_id = str(product.get("active_plan_id") or "") if product else ""
-        source_failure_id = str(task.get("failure_id") or "")
+        source_failure_id = str(spec.task_contract.get("failure_id") or "")
         if not active_plan_id or not source_failure_id:
             return None
         active_plan = next(
@@ -3456,6 +3574,13 @@ class AgentWorker:
                     if isinstance(value, str) and value
                 ],
             )
+            active_goals = plan_summary.get("goals", [])
+            preserved_implementation_nodes = [
+                node
+                for node in implementation_nodes
+                if node["graph_status"] == "ACCEPTED"
+                and isinstance(node.get("accepted_result"), Mapping)
+            ]
             plan_summary.update(
                 {
                     "policy_digest": policy_digest(self.config),
@@ -3465,6 +3590,12 @@ class AgentWorker:
                         for node in implementation_nodes
                         if node["graph_status"] == "ACCEPTED"
                     ],
+                    "uncovered_mandatory_goal_ids": list(
+                        uncovered_mandatory_goal_ids(
+                            active_goals,
+                            preserved_implementation_nodes,
+                        )
+                    ),
                     "unresolved_failure_inventory": failure_inventory,
                     "hypothesis_inventory": _replanner_hypothesis_inventory(
                         self.state.list_hypotheses(str(task["product_id"])),
@@ -3711,6 +3842,8 @@ class AgentWorker:
     def _exception_reason_code(error: BaseException) -> str:
         if isinstance(error, PlanContractViolation):
             return error.reason_code
+        if isinstance(error, ActiveResultBindingConflictError):
+            return "active_result_binding_conflict"
         if isinstance(error, ResultLineageCycleError):
             return "controller_result_lineage_cycle"
         if isinstance(error, ResultLineageDepthExceededError):
@@ -4777,6 +4910,12 @@ class AgentWorker:
                 )
                 transport_diagnostic_ref = f"evidence/{diagnostic.name}"
                 raise TypeError("malformed_transport")
+            output = self._bind_provider_output(
+                output,
+                spec=spec,
+                attempt=attempt,
+                selection=selection,
+            )
             try:
                 self.schemas.validate(spec.output_schema, output)
             except (TypeError, ValueError) as error:
