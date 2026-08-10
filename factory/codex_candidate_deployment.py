@@ -89,6 +89,10 @@ _RESULT_FIELDS = {
     "redactions",
     "receipt_digest",
 }
+_LEGACY_RESULT_FIELDS = _RESULT_FIELDS - {
+    "failure_classification",
+    "failure_evidence_ref",
+}
 _CANDIDATE_TRUTH_FIELDS = {
     "product_status",
     "scenario_status",
@@ -538,7 +542,11 @@ class CandidateDeploymentBroker:
         if not path.exists():
             return None
         receipt = self._read_immutable_json(path, expected_uid=self.expected_source_uid)
-        if set(receipt) != _RESULT_FIELDS:
+        receipt_fields = set(receipt)
+        if (
+            receipt_fields != _RESULT_FIELDS
+            and receipt_fields != _LEGACY_RESULT_FIELDS
+        ):
             raise CandidateDeploymentError("deployment_result_fields_differ")
         unsigned = dict(receipt)
         digest = str(unsigned.pop("receipt_digest", ""))
@@ -546,6 +554,26 @@ class CandidateDeploymentBroker:
             raise CandidateDeploymentError("deployment_result_digest_differs")
         if receipt.get("request_digest") != request.digest():
             raise CandidateDeploymentError("deployment_replay_conflict")
+        if receipt_fields == _LEGACY_RESULT_FIELDS:
+            result = receipt.get("result")
+            if result not in {"PASS", "FAILED"}:
+                raise CandidateDeploymentError("deployment_result_fields_differ")
+            classification = (
+                "" if result == "PASS" else "sanitized_failure_evidence_unavailable"
+            )
+            upgraded = {
+                **unsigned,
+                "failure_classification": classification,
+                "failure_evidence_ref": (
+                    ""
+                    if not classification
+                    else self._failure_reference(request, classification)
+                ),
+            }
+            receipt = {
+                **upgraded,
+                "receipt_digest": sha256_text(stable_json(upgraded)),
+            }
         return receipt
 
     def _reserve(self, request: CandidateDeploymentRequest) -> None:
