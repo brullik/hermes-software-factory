@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -28,6 +30,19 @@ from factory.pre_q8_runtime import (
 )
 from scripts import pre_q8_runtime as runtime_control
 from scripts.functional_qualification import _write_identity_evidence
+
+
+def test_epoch_switch_module_imports_without_site_packages() -> None:
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", "import scripts.pre_q8_runtime"],
+        cwd=Path(__file__).parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _snapshot(

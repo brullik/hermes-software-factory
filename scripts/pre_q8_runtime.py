@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -14,25 +15,35 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-import yaml
-
-from factory.canary_faults import CanaryFaultContract
-from factory.common import sha256_file, sha256_text, stable_json
-from factory.config import ConfigError, load_config
-from factory.pre_q8_convergence import validate_run_id
-from factory.pre_q8_fixture import fixture_manifest
-from factory.pre_q8_runtime import (
-    PreQ8RuntimeError,
-    assessment_json,
-    classify_worker,
-    parse_systemctl_show,
-    progress_snapshot,
-)
-from factory.pre_q8_seal import systemd_bundle_digest
-
 
 class RuntimeControlError(RuntimeError):
     """Runtime inputs do not belong to the admitted qualification namespace."""
+
+
+def stable_json(value: Any) -> str:
+    """Encode guard results without importing the dependency-bearing factory package."""
+
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_config(path: Path) -> Any:
+    """Load full config lazily; epoch switching itself remains stdlib-only."""
+
+    from factory.config import load_config as factory_load_config
+
+    return factory_load_config(path)
 
 
 _EPOCH_SERVICE_PATTERNS = (
@@ -160,6 +171,11 @@ def build_identity(
     systemd_root: Path,
     capability_attestation: Path,
 ) -> dict[str, str]:
+    import yaml
+
+    from factory.pre_q8_fixture import fixture_manifest
+    from factory.pre_q8_seal import systemd_bundle_digest
+
     control = yaml.safe_load(control_path.read_text(encoding="utf-8"))
     base = yaml.safe_load(candidate_config.read_text(encoding="utf-8"))
     if not isinstance(control, Mapping) or not isinstance(base, Mapping):
@@ -198,10 +214,15 @@ def build_identity(
 
 
 def resolve_convergence_instance(instance: str) -> tuple[str, str, Path]:
+    from factory.pre_q8_convergence import PreQ8ConvergenceError, validate_run_id
+
     if instance.count("--") != 1:
         raise RuntimeControlError("convergence unit instance is invalid")
     run_id, scenario_id = instance.split("--", 1)
-    validate_run_id(run_id)
+    try:
+        validate_run_id(run_id)
+    except PreQ8ConvergenceError as error:
+        raise RuntimeControlError("convergence run id is invalid") from error
     if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", scenario_id) is None:
         raise RuntimeControlError("convergence scenario id is invalid")
     config = Path("/etc/hermes-factory/pre-q8-convergence") / run_id / f"{scenario_id}.yaml"
@@ -237,6 +258,8 @@ def config_identity(
     expected_scenario: str,
     allowed_root: Path,
 ) -> dict[str, str]:
+    from factory.canary_faults import CanaryFaultContract
+
     config = load_config(config_path)
     contract = CanaryFaultContract.from_config(config)
     database = config.database_path.resolve()
@@ -304,22 +327,33 @@ def worker_observation(
     intentional_restart_expected: bool,
     intentional_restart_receipt_verified: bool,
 ) -> dict[str, Any]:
-    progress = progress_snapshot(database)
-    unit_snapshot = parse_systemctl_show(_systemctl_show(unit))
-    frontier = [
-        status
-        for status, count in dict(progress["task_statuses"]).items()
-        if int(count) > 0
-    ]
-    assessment = classify_worker(
-        unit_snapshot,
-        restart_job_pending=_restart_pending(unit),
-        active_lease=int(progress["active_lease_count"]) > 0,
-        frontier_statuses=frontier,
-        no_progress_window_elapsed=no_progress_window_elapsed,
-        intentional_restart_expected=intentional_restart_expected,
-        intentional_restart_receipt_verified=intentional_restart_receipt_verified,
+    from factory.pre_q8_runtime import (
+        PreQ8RuntimeError,
+        assessment_json,
+        classify_worker,
+        parse_systemctl_show,
+        progress_snapshot,
     )
+
+    try:
+        progress = progress_snapshot(database)
+        unit_snapshot = parse_systemctl_show(_systemctl_show(unit))
+        frontier = [
+            status
+            for status, count in dict(progress["task_statuses"]).items()
+            if int(count) > 0
+        ]
+        assessment = classify_worker(
+            unit_snapshot,
+            restart_job_pending=_restart_pending(unit),
+            active_lease=int(progress["active_lease_count"]) > 0,
+            frontier_statuses=frontier,
+            no_progress_window_elapsed=no_progress_window_elapsed,
+            intentional_restart_expected=intentional_restart_expected,
+            intentional_restart_receipt_verified=intentional_restart_receipt_verified,
+        )
+    except PreQ8RuntimeError as error:
+        raise RuntimeControlError("PRE-Q8 worker state is invalid") from error
     return {
         "assessment": json.loads(assessment_json(assessment)),
         "unit": {
@@ -416,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         else:
             result = epoch_switch_guard()
-    except (ConfigError, OSError, PreQ8RuntimeError, RuntimeControlError, ValueError) as error:
+    except (OSError, RuntimeControlError, ValueError) as error:
         print(stable_json({"status": "FAIL", "error_type": type(error).__name__}), file=sys.stderr)
         return 1
     print(stable_json({"status": "PASS", **result}))
