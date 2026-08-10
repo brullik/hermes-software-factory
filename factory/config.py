@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -172,11 +173,29 @@ def clean_canary_capability_context(config: FactoryConfig) -> dict[str, str] | N
     ):
         return None
     scenario_id = str(qualification.get("scenario_id") or "")
+    namespace_keys = {
+        "qualification_plane",
+        "run_id",
+        "epoch_id",
+        "fixture_seed_digest",
+    }
+    namespace_present = namespace_keys <= set(qualification)
+    qualification_plane = str(qualification.get("qualification_plane") or "")
+    run_id = str(qualification.get("run_id") or "")
+    epoch_id = str(qualification.get("epoch_id") or "")
+    fixture_seed_digest = str(qualification.get("fixture_seed_digest") or "")
     faults = qualification.get("faults")
     if (
         not scenario_id
         or not isinstance(faults, list)
         or any(not isinstance(fault, str) or not fault for fault in faults)
+    ):
+        return None
+    if namespace_present and (
+        qualification_plane not in {"CONVERGENCE", "PRE_Q8", "Q8"}
+        or re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", run_id) is None
+        or re.fullmatch(r"RE-[A-F0-9]{24}", epoch_id) is None
+        or re.fullmatch(r"[a-f0-9]{64}", fixture_seed_digest) is None
     ):
         return None
     try:
@@ -208,11 +227,19 @@ def clean_canary_capability_context(config: FactoryConfig) -> dict[str, str] | N
         or target.get("host") != "clean-canary.invalid"
         or target.get("entrypoint") != "disabled"
         or backup.get("offsite_configured") is not False
+        or (
+            namespace_present
+            and (
+                state_root.name != scenario_id
+                or state_root.parent.name != run_id
+                or state_root.parent.parent.name != epoch_id
+            )
+        )
     ):
         return None
-    return {
+    context = {
         "adapter": "IsolatedCanaryReleaseExecutor",
-        "qualification_plane": "CLEAN_CANARY",
+        "fault_plane": "CLEAN_CANARY",
         "scenario_id": scenario_id,
         **digests,
         "isolated_state_root": str(state_root),
@@ -220,6 +247,16 @@ def clean_canary_capability_context(config: FactoryConfig) -> dict[str, str] | N
         "fault_receipt_root": str(resolved_receipts),
         "config_digest": sha256_text(stable_json(config.raw)),
     }
+    if namespace_present:
+        context.update(
+            {
+                "qualification_plane": qualification_plane,
+                "run_id": run_id,
+                "epoch_id": epoch_id,
+                "fixture_seed_digest": fixture_seed_digest,
+            }
+        )
+    return context
 
 
 def load_config(path: Path | None = None) -> FactoryConfig:
@@ -330,8 +367,21 @@ def validate_config(config: FactoryConfig) -> list[str]:
                 "isolated_target_root",
                 "existing_repository_url",
             }
-            expected_keys = canary_keys if plane == "CLEAN_CANARY" else q6_keys
-            if set(qualification) != expected_keys:
+            namespace_keys = {
+                "qualification_plane",
+                "run_id",
+                "epoch_id",
+                "fixture_seed_digest",
+            }
+            allowed_canary_keys = (canary_keys, canary_keys | namespace_keys)
+            expected_keys = q6_keys if plane != "CLEAN_CANARY" else None
+            if (
+                (expected_keys is not None and set(qualification) != expected_keys)
+                or (
+                    expected_keys is None
+                    and set(qualification) not in allowed_canary_keys
+                )
+            ):
                 errors.append("qualification isolation config is invalid")
             attestation_path = Path(
                 str(qualification.get("capability_attestation_path") or "")
@@ -395,6 +445,23 @@ def validate_config(config: FactoryConfig) -> list[str]:
                 existing_url = str(qualification.get("existing_repository_url") or "")
                 if existing_url and not existing_url.startswith("https://github.com/"):
                     errors.append("clean canary existing repository URL is invalid")
+                if namespace_keys <= set(qualification):
+                    qualification_plane = str(
+                        qualification.get("qualification_plane") or ""
+                    )
+                    run_id = str(qualification.get("run_id") or "")
+                    epoch_id = str(qualification.get("epoch_id") or "")
+                    fixture_digest = str(
+                        qualification.get("fixture_seed_digest") or ""
+                    )
+                    if qualification_plane not in {"CONVERGENCE", "PRE_Q8", "Q8"}:
+                        errors.append("clean canary qualification plane is invalid")
+                    if re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", run_id) is None:
+                        errors.append("clean canary run id is invalid")
+                    if re.fullmatch(r"RE-[A-F0-9]{24}", epoch_id) is None:
+                        errors.append("clean canary epoch id is invalid")
+                    if re.fullmatch(r"[a-f0-9]{64}", fixture_digest) is None:
+                        errors.append("clean canary fixture seed digest is invalid")
     return errors
 
 

@@ -20,9 +20,13 @@ from factory.canary_faults import (
 from factory.canary_qualification import CanaryObservationError, load_canary_catalog
 from factory.canary_release import IsolatedCanaryReleaseExecutor
 from factory.capabilities import CapabilityBroker
-from factory.common import sha256_text, stable_json
+from factory.common import stable_json
 from factory.config import ConfigError, FactoryConfig, load_config
 from factory.intake import IntakeRejected, IntakeService
+from factory.pre_q8_convergence import (
+    resource_idempotency_key,
+    resource_namespace,
+)
 from factory.repository import build_repository_bootstrapper
 from factory.state import StateStore, is_sqlite_busy
 from factory.worker import AgentWorker
@@ -91,25 +95,31 @@ def submit(config: FactoryConfig, contract: CanaryFaultContract) -> dict[str, An
             repository_name=(
                 None
                 if scenario.delivery_mode == "existing_repository"
-                else f"hermes-canary-{scenario.scenario_id}-{contract.candidate_digest[:8]}"
+                else resource_namespace(
+                    plane=contract.qualification_plane,
+                    run_id=contract.run_id,
+                    candidate_digest=contract.candidate_digest,
+                    scenario_id=scenario.scenario_id,
+                )
             ),
             repository_visibility="private",
             delivery_profile=scenario.delivery_profile,
             constraints={
                 "qualification_scenario_id": scenario.scenario_id,
                 "qualification_scenario_digest": scenario.scenario_digest,
+                "qualification_plane": contract.qualification_plane,
+                "qualification_run_id": contract.run_id,
+                "qualification_epoch_id": contract.epoch_id,
+                "fixture_seed_digest": contract.fixture_seed_digest,
                 "expected_events": list(scenario.events),
                 "declared_faults": list(scenario.injected_faults),
                 "production_target": "isolated_candidate",
             },
-            idempotency_key=sha256_text(
-                stable_json(
-                    [
-                        "clean-canary-v1",
-                        scenario.scenario_digest,
-                        contract.candidate_digest,
-                    ]
-                )
+            idempotency_key=resource_idempotency_key(
+                plane=contract.qualification_plane,
+                run_id=contract.run_id,
+                candidate_digest=contract.candidate_digest,
+                scenario_id=scenario.scenario_id,
             ),
         )
         if (

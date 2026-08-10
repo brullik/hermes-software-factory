@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.local/schemas/pre-q8-convergence-matrix.schema.json",
+  "title": "Hermes PRE-Q8 Convergence Matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "matrix_type",
+    "run_id",
+    "git_tree",
+    "release_tree_digest",
+    "toolchain_digest",
+    "scenario_count",
+    "pass_count",
+    "status",
+    "scenarios",
+    "matrix_digest",
+    "observed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "matrix_type": {"const": "PREQ8_CONVERGENCE_MATRIX"},
+    "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{7,63}$"},
+    "git_tree": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "release_tree_digest": {"$ref": "#/$defs/sha256"},
+    "toolchain_digest": {"$ref": "#/$defs/sha256"},
+    "scenario_count": {"const": 10},
+    "pass_count": {"type": "integer", "minimum": 0, "maximum": 10},
+    "status": {"enum": ["10/10 PASS", "SWEEP_FAILED"]},
+    "matrix_digest": {"$ref": "#/$defs/sha256"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "scenarios": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {"$ref": "#/$defs/result"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario_id",
+        "status",
+        "evidence_digest",
+        "config_digest",
+        "failure_class",
+        "support_bundle_ref"
+      ],
+      "properties": {
+        "scenario_id": {
+          "enum": [
+            "zero-dependency-cli",
+            "small-python-service",
+            "telegram-bot",
+            "existing-repository-repair",
+            "high-fan-in",
+            "external-blocker-resume",
+            "provider-timeout-restart",
+            "failed-product-test-one-repair",
+            "package-only",
+            "deploy-rollback"
+          ]
+        },
+        "status": {"enum": ["PASS", "FAIL"]},
+        "evidence_digest": {"$ref": "#/$defs/sha256"},
+        "config_digest": {"$ref": "#/$defs/sha256"},
+        "failure_class": {"type": ["string", "null"]},
+        "support_bundle_ref": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

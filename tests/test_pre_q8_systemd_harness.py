@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from scripts import pre_q8_runtime
+
+ROOT = Path(__file__).parents[1]
+
+
+class FakeSystemd:
+    def __init__(self, *, active: str = "", jobs: str = "") -> None:
+        self.active = active
+        self.jobs = jobs
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        normalized = tuple(command)
+        self.calls.append(normalized)
+        if normalized[:2] == ("systemctl", "list-units"):
+            return subprocess.CompletedProcess(command, 0, self.active, "")
+        if normalized[:2] == ("systemctl", "list-jobs"):
+            return subprocess.CompletedProcess(command, 0, self.jobs, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
+def test_epoch_switch_rejects_active_pre_q8_units() -> None:
+    stubborn_unit = (
+        "hermes-factory-pre-q8-convergence-worker@run-a--telegram-bot.service "
+        "loaded active running"
+    )
+    fake = FakeSystemd(active=stubborn_unit)
+    with pytest.raises(
+        pre_q8_runtime.RuntimeControlError,
+        match="units are still active",
+    ):
+        pre_q8_runtime.epoch_switch_guard(runner=fake.run)
+
+    stop = fake.calls[0]
+    for required_pattern in (
+        "hermes-factory-pre-q8@*.service",
+        "hermes-factory-pre-q8-controller@*.service",
+        "hermes-factory-pre-q8-worker@*.service",
+        "hermes-factory-pre-q8-convergence@*.service",
+        "hermes-factory-pre-q8-convergence-controller@*.service",
+        "hermes-factory-pre-q8-convergence-worker@*.service",
+        "hermes-factory-pre-q8-convergence-scenario@*.service",
+        "hermes-factory-pre-q8-official.service",
+        "hermes-factory-golden-*.service",
+    ):
+        assert required_pattern in stop
+
+
+def test_epoch_switch_rejects_pending_restart_jobs() -> None:
+    fake = FakeSystemd(
+        jobs="17 hermes-factory-pre-q8@telegram-bot.service restart running"
+    )
+    with pytest.raises(
+        pre_q8_runtime.RuntimeControlError,
+        match="restart jobs are still scheduled",
+    ):
+        pre_q8_runtime.epoch_switch_guard(runner=fake.run)
+
+
+def test_epoch_switch_accepts_drained_systemd() -> None:
+    fake = FakeSystemd()
+
+    result = pre_q8_runtime.epoch_switch_guard(runner=fake.run)
+
+    assert result["active_units"] == []
+    assert [call[1] for call in fake.calls] == ["stop", "list-units", "list-jobs"]
+
+
+def test_epoch_switch_recreates_pre_q8_mount_roots_after_archive() -> None:
+    bootstrap = (ROOT / "scripts" / "bootstrap" / "prepare-candidate-plane.sh").read_text(
+        encoding="utf-8"
+    )
+    archive = bootstrap.index('if [[ -d "${CONFIG_ROOT}/pre-q8-convergence" ]]')
+    recreate = bootstrap.index("# The old-epoch archive above moves these roots wholesale")
+    daemon_reload = bootstrap.index("systemctl daemon-reload")
+    recreated_block = bootstrap[recreate:daemon_reload]
+
+    assert archive < recreate < daemon_reload
+    assert '"${CONFIG_ROOT}/pre-q8"' in recreated_block
+    assert '"${CONFIG_ROOT}/pre-q8-convergence"' in recreated_block
+
+
+def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
+    for unit_name in (
+        "hermes-factory-pre-q8-convergence@.service",
+        "hermes-factory-pre-q8-convergence-scenario@.service",
+        "hermes-factory-pre-q8@.service",
+        "hermes-factory-pre-q8-official.service",
+    ):
+        unit = (ROOT / "config" / "systemd" / unit_name).read_text(
+            encoding="utf-8"
+        )
+        assert "SupplementaryGroups=hermesverifier hermesfunctional" in unit
+        assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID" in unit
+        assert "CAP_CHOWN" not in unit
+        assert "CAP_DAC_OVERRIDE" not in unit
+
+    aggregate = (
+        ROOT / "config" / "systemd" / "hermes-factory-pre-q8-convergence@.service"
+    ).read_text(encoding="utf-8")
+    assert "Wants=hermes-factory-github-broker.service" in aggregate
+    assert "Requires=hermes-factory-github-broker.service" not in aggregate
+
+    runner = (
+        ROOT / "scripts" / "qualification" / "run-pre-q8-convergence.sh"
+    ).read_text(encoding="utf-8")
+    assert "umask 0007" in runner
+    assert 'run_as_verifier /usr/bin/mkdir -p -- \\\n' in runner
+    assert "run_as_verifier /usr/bin/install" not in runner
+    assert "install -d -o hermesverifier" not in runner
+
+    for runner_name in (
+        "run-pre-q8-convergence-scenario.sh",
+        "run-pre-q8-scenario.sh",
+    ):
+        scenario_runner = (
+            ROOT / "scripts" / "qualification" / runner_name
+        ).read_text(encoding="utf-8")
+        assert "umask 0007" in scenario_runner
+        assert "run_as_verifier /usr/bin/mkdir -p --" in scenario_runner
+        assert "install -d -o hermesverifier" not in scenario_runner
+        assert (
+            "HERMES_GITHUB_BROKER_SOCKET="
+            "/run/hermes-factory-github-broker/broker.sock"
+        ) in scenario_runner
+
+    official = (
+        ROOT / "scripts" / "qualification" / "run-all-pre-q8.sh"
+    ).read_text(encoding="utf-8")
+    assert "umask 0007" in official
+    assert 'run_as_candidate /usr/bin/mkdir -p -- \\' in official
+    assert "install -d -o hermescandidate" not in official
+
+
+def test_pre_q8_runtime_units_share_sqlite_wal_with_verifier_group() -> None:
+    for unit_name in (
+        "hermes-factory-pre-q8-convergence-scenario@.service",
+        "hermes-factory-pre-q8-convergence-controller@.service",
+        "hermes-factory-pre-q8-convergence-worker@.service",
+        "hermes-factory-pre-q8@.service",
+        "hermes-factory-pre-q8-controller@.service",
+        "hermes-factory-pre-q8-worker@.service",
+    ):
+        unit = (ROOT / "config" / "systemd" / unit_name).read_text(
+            encoding="utf-8"
+        )
+        assert "UMask=0007" in unit
+
+    runners = {
+        "run-pre-q8-convergence-scenario.sh": (
+            '--config "${CONFIG}" prepare',
+            'run_as_candidate /usr/bin/chmod 0660 -- "${DATABASE}"',
+            ' --run-id "${RUN_ID}" fresh',
+        ),
+        "run-pre-q8-scenario.sh": (
+            '--config "${CANDIDATE_CONFIG}" prepare',
+            'run_as_candidate /usr/bin/chmod 0660 -- "${CANDIDATE_DATABASE}"',
+            "FAILURE_CLASS=CONTROLLER_UNIT_FAILED",
+        ),
+    }
+    for runner_name, ordered_markers in runners.items():
+        runner = (
+            ROOT / "scripts" / "qualification" / runner_name
+        ).read_text(encoding="utf-8")
+        offsets = [runner.index(marker) for marker in ordered_markers]
+        assert offsets == sorted(offsets)
+
+
+def test_bootstrap_extends_broker_only_for_convergence_workspace() -> None:
+    bootstrap = (
+        ROOT / "scripts" / "bootstrap" / "prepare-candidate-plane.sh"
+    ).read_text(encoding="utf-8")
+    broker_unit = (
+        ROOT / "config" / "systemd" / "hermes-factory-github-broker.service"
+    ).read_text(encoding="utf-8")
+    convergence_root = "/var/lib/hermes-factory-pre-q8-convergence"
+
+    assert convergence_root not in broker_unit
+    assert "hermes-factory-github-broker.service.d" in bootstrap
+    assert "50-pre-q8-convergence.conf" in bootstrap
+    assert bootstrap.count(convergence_root) >= 5
+    assert "printf '[Service]\\nExecStart=\\nExecStart=%s\\nReadWritePaths=\\n" in bootstrap
+    assert "systemctl daemon-reload" in bootstrap
+
+
+def test_completed_runtime_is_frozen_before_independent_observation() -> None:
+    for runner_name in (
+        "run-pre-q8-convergence-scenario.sh",
+        "run-pre-q8-scenario.sh",
+    ):
+        runner = (
+            ROOT / "scripts" / "qualification" / runner_name
+        ).read_text(encoding="utf-8")
+        assert "scripts.pre_q8_runtime completion-decision" in runner
+        assert "VERIFY_FAILED|WAITING_CAPABILITY|RUNNING" not in runner
+        freeze = runner.rfind("FAILURE_CLASS=RUNTIME_FREEZE_FAILED")
+        observe = runner.rfind("FAILURE_CLASS=OBSERVATION_VERIFICATION_FAILED")
+        assert 0 <= freeze < observe
+
+
+def test_admitted_seal_is_idempotent_and_published() -> None:
+    official = (
+        ROOT / "scripts" / "qualification" / "run-all-pre-q8.sh"
+    ).read_text(encoding="utf-8")
+    convergence = (
+        ROOT / "scripts" / "qualification" / "run-pre-q8-convergence.sh"
+    ).read_text(encoding="utf-8")
+    assert "install_admitted_seal()" in official
+    assert 'cmp -s -- "${source}" "${destination}"' in official
+    assert 'install_admitted_seal "${SEAL_INPUT}" "${SEAL}"' in official
+    assert "publish_admitted_seal()" in convergence
+    assert 'publish_admitted_seal "${SEAL}" "${ADMITTED_SEAL}"' in convergence
+
+
+def test_resume_uses_projected_fixture_credential() -> None:
+    unit = (
+        ROOT / "config" / "systemd" / "hermes-factory-pre-q8.service"
+    ).read_text(encoding="utf-8")
+    runner = (
+        ROOT / "scripts" / "qualification" / "run-all-pre-q8.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        "LoadCredential=github-token:"
+        "/etc/hermes-factory/candidate-credentials.d/github-token"
+    ) in unit
+    assert "InaccessiblePaths=" in unit
+    assert "/etc/hermes-factory/candidate-credentials.d" in unit
+    assert 'TOKEN_FILE="${CREDENTIALS_DIRECTORY}/github-token"' in runner

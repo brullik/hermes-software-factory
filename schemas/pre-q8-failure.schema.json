@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.local/schemas/pre-q8-failure.schema.json",
+  "title": "Hermes Official PRE-Q8 Failure Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_type",
+    "epoch_id",
+    "run_id",
+    "scenario_id",
+    "attempt",
+    "candidate_digest",
+    "failure_class",
+    "candidate_database_ref",
+    "config_digest",
+    "support_source_digests",
+    "evidence_digest",
+    "observed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "evidence_type": {"const": "OFFICIAL_PRE_Q8_FAILURE"},
+    "epoch_id": {"type": "string", "pattern": "^RE-[A-Z0-9]{24}$"},
+    "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{7,63}$"},
+    "scenario_id": {
+      "enum": [
+        "zero-dependency-cli",
+        "small-python-service",
+        "telegram-bot",
+        "existing-repository-repair",
+        "high-fan-in",
+        "external-blocker-resume",
+        "provider-timeout-restart",
+        "failed-product-test-one-repair",
+        "package-only",
+        "deploy-rollback"
+      ]
+    },
+    "attempt": {"const": 1},
+    "candidate_digest": {"$ref": "#/$defs/sha256"},
+    "failure_class": {"type": "string", "minLength": 1, "maxLength": 128},
+    "candidate_database_ref": {"type": "string", "minLength": 1},
+    "config_digest": {"$ref": "#/$defs/sha256"},
+    "evidence_digest": {"$ref": "#/$defs/sha256"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "support_source_digests": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[^/\\\\]{1,255}$"},
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

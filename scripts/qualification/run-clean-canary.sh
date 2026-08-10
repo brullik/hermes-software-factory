@@ -16,10 +16,13 @@ CANDIDATE_PYTHON=/opt/hermes-factory-candidate/venv/bin/python
 VERIFIER_PYTHON=/opt/hermes-factory-verifier/venv/bin/python
 CANDIDATE_CONFIG="/etc/hermes-factory/canaries/${SCENARIO_ID}.yaml"
 QUALIFICATION_CONFIG=/etc/hermes-factory/qualification-control.yaml
-CANARY_DATABASE="/var/lib/hermes-factory-canaries/${SCENARIO_ID}/controller.db"
 TIMEOUT_SECONDS="${CLEAN_CANARY_TIMEOUT_SECONDS:-172800}"
 CANARY_ID=""
 FAILURE_REASON=orchestrator_error
+FIXTURE_PROVISIONED=0
+FIXTURE_RECEIPT=""
+FIXTURE_ARCHIVE_RECEIPT=""
+GITHUB_OWNER=""
 
 if [[ ! -x "${CANDIDATE_PYTHON}" || ! -x "${VERIFIER_PYTHON}" ]]; then
   printf 'candidate or verifier runtime is unavailable\n' >&2
@@ -29,6 +32,16 @@ if [[ ! -f "${CANDIDATE_CONFIG}" ]]; then
   printf 'root-owned clean canary config is unavailable\n' >&2
   exit 66
 fi
+IDENTITY_JSON="$("${VERIFIER_PYTHON}" -m scripts.pre_q8_runtime config-identity \
+  --config "${CANDIDATE_CONFIG}" --expected-plane Q8 \
+  --expected-scenario "${SCENARIO_ID}" \
+  --allowed-root /var/lib/hermes-factory-canaries)"
+CANARY_DATABASE="$(printf '%s' "${IDENTITY_JSON}" | "${VERIFIER_PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["database_path"])')"
+EPOCH_ID="$(printf '%s' "${IDENTITY_JSON}" | "${VERIFIER_PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["epoch_id"])')"
+RUN_ID="$(printf '%s' "${IDENTITY_JSON}" | "${VERIFIER_PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["run_id"])')"
 if [[ ! "${TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || (( TIMEOUT_SECONDS < 900 )); then
   printf 'clean canary timeout is invalid\n' >&2
   exit 64
@@ -45,9 +58,36 @@ cleanup() {
       --config "${QUALIFICATION_CONFIG}" canary-fail \
       "${CANARY_ID}" "${FAILURE_REASON}" >/dev/null 2>&1 || true
   fi
+  if (( FIXTURE_PROVISIONED == 1 )); then
+    "${VERIFIER_PYTHON}" -m scripts.pre_q8_fixture \
+      --token-file /etc/hermes-factory/candidate-credentials.d/github-token \
+      --owner "${GITHUB_OWNER}" archive --receipt "${FIXTURE_RECEIPT}" \
+      --output "${FIXTURE_ARCHIVE_RECEIPT}" >/dev/null 2>&1 || exit_status=70
+  fi
   exit "${exit_status}"
 }
 trap cleanup EXIT
+
+if [[ "${SCENARIO_ID}" == existing-repository-repair ]]; then
+  RUN_ROOT="/var/lib/hermes-factory-canaries/${EPOCH_ID}/${RUN_ID}"
+  FIXTURE_RECEIPT="${RUN_ROOT}/fixture-provision.json"
+  FIXTURE_ARCHIVE_RECEIPT="${RUN_ROOT}/fixture-archive.json"
+  GITHUB_OWNER="$("${VERIFIER_PYTHON}" -c \
+    'import sys,yaml; print(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))["github"]["owner"])' \
+    "${CANDIDATE_CONFIG}")"
+  CANDIDATE_DIGEST="$("${VERIFIER_PYTHON}" -c \
+    'import sys,yaml; print(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))["qualification"]["candidate_digest"])' \
+    "${CANDIDATE_CONFIG}")"
+  install -d -o hermescandidate -g hermesfunctional -m 2770 "${RUN_ROOT}"
+  "${VERIFIER_PYTHON}" -m scripts.pre_q8_fixture \
+    --token-file /etc/hermes-factory/candidate-credentials.d/github-token \
+    --owner "${GITHUB_OWNER}" provision --plane q8 --run-id "${RUN_ID}" \
+    --candidate-digest "${CANDIDATE_DIGEST}" \
+    --receipt "${FIXTURE_RECEIPT}" >/dev/null
+  FIXTURE_PROVISIONED=1
+  chown root:hermesfunctional "${FIXTURE_RECEIPT}"
+  chmod 0640 "${FIXTURE_RECEIPT}"
+fi
 
 runuser -u hermescandidate -- \
   "${CANDIDATE_PYTHON}" -m scripts.canary_candidate \

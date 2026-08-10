@@ -1,0 +1,88 @@
+schema_version: "1.0"
+contract_id: "HERMES-PREQ8-10OF10-20260810"
+repository: "brullik/hermes-software-factory"
+audit_base:
+  main_commit: "8b717ad0204bd258fb1677f017123a8a971f57e2"
+  q6_5_confirmed_commit: "dad50e97bfc8056d86eaf15f52304c3cf9c01979"
+goal:
+  official_pre_q8: "10/10 PASS"
+  attempts_per_official_scenario: 1
+  golden_product_after_pre_q8: true
+non_negotiable_invariants:
+  - "No manual SQLite mutation"
+  - "No deletion/reset of official scenario state to retry the same Candidate"
+  - "No skip, xfail, downgrade, threshold reduction, or fabricated evidence"
+  - "Q6.5 remains exact 18/18 AVAILABLE"
+  - "Open owner actions remain zero"
+  - "Stable A state and credentials remain inaccessible to Candidate"
+  - "Official PRE-Q8 failure terminalizes the Candidate"
+  - "Convergence bytes exactly equal admitted official Candidate bytes"
+ordered_scenarios:
+  - zero-dependency-cli
+  - small-python-service
+  - telegram-bot
+  - existing-repository-repair
+  - high-fan-in
+  - external-blocker-resume
+  - provider-timeout-restart
+  - failed-product-test-one-repair
+  - package-only
+  - deploy-rollback
+required_static_properties:
+  unconditional_worker_idle_flag: false
+  durable_pre_q8_failure_model: true
+  same_candidate_timer_retry_after_failure: false
+  canonical_catalog_order: true
+  convergence_lane: true
+  convergence_seal: true
+  epoch_scoped_state_and_evidence: true
+  plane_and_run_scoped_external_resources: true
+  deterministic_observation_identity: true
+  q8_database_path_derived_from_config: true
+required_tests:
+  - active_worker_is_not_idle
+  - activating_worker_is_not_idle
+  - auto_restart_worker_is_not_idle
+  - failed_worker_is_typed_unit_failure
+  - stale_database_terminalizes_without_retry
+  - timer_second_tick_does_not_retry_terminal_candidate
+  - pre_q8_pass_and_failure_are_mutually_exclusive
+  - pre_q8_failure_transaction_is_idempotent
+  - convergence_runs_all_ten_after_individual_failures
+  - seal_rejects_any_identity_change
+  - epoch_switch_rejects_active_pre_q8_units
+  - convergence_pre_q8_q8_namespaces_do_not_collide
+  - observation_digest_is_repeatable
+  - q8_uses_config_database_path
+live_convergence:
+  fresh_state_per_scenario: true
+  all_ten_in_one_sweep: true
+  controller_incidents: 0
+  recovery_applications: 0
+  routine_owner_actions: 0
+  duplicate_side_effects: 0
+  unverified_side_effects: 0
+official_final:
+  q6_5_available_count: 18
+  open_owner_actions: 0
+  pre_q8_pass_count: 10
+  unique_scenario_count: 10
+  all_attempts_equal: 1
+  candidate_identity_matches_seal: true
+  accepted_epoch_status:
+    - GOLDEN_PRODUCT_PENDING
+    - READY_EVALUATION
+    - FUNCTIONALLY_READY
+    - Q7_STARTED
+required_evidence:
+  - before_vps_audit_archive
+  - static_audit_before_and_after
+  - migration_test_report
+  - full_unit_and_integration_test_report
+  - convergence_matrix
+  - convergence_seal
+  - final_git_tree_and_release_digest_proof
+  - q6_5_report_index
+  - official_pre_q8_evidence_index
+  - final_assert_report
+  - sanitized_failure_bundles_for_any_failed_convergence_sweep

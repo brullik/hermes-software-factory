@@ -9,8 +9,10 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 import sys
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,16 +20,27 @@ import yaml
 
 from factory.canary_faults import CanaryFaultContract
 from factory.canary_qualification import load_canary_catalog, observe_completion
-from factory.common import sha256_file, sha256_text, stable_json
+from factory.common import sha256_file, sha256_text, stable_json, utc_now
 from factory.config import load_config
 from factory.functional_readiness import (
     MANDATORY_Q6_5_OPERATIONS,
+    PRE_Q8_SCENARIOS,
     CapabilityHandshakeReport,
     CapabilityStatus,
     FunctionalQualificationGovernor,
     FunctionalReadinessError,
 )
 from factory.notifications import NotificationOutbox, NotificationRequest
+from factory.pre_q8_runtime import (
+    CrashReconciliationDecision,
+    crash_reconciliation_decision,
+)
+from factory.pre_q8_seal import (
+    PreQ8SealError,
+    load_and_verify_seal,
+    qualification_config_semantic_digest,
+)
+from factory.support_bundle import SupportBundleError, build_support_bundle
 
 
 class FunctionalControlError(RuntimeError):
@@ -239,6 +252,220 @@ def _notify(root: Path, *, kind: str, identity: str, text: str) -> None:
             text=text,
         )
     )
+
+
+def _write_identity_evidence(
+    root: Path, label: str, body: Mapping[str, Any]
+) -> tuple[Path, str, str]:
+    """Write a deterministic body with a non-identity observation envelope."""
+
+    normalized = {str(key): item for key, item in body.items()}
+    digest = sha256_text(stable_json(normalized))
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{label}-{digest}.json"
+    if path.exists():
+        if path.is_symlink():
+            raise FunctionalControlError("immutable PRE-Q8 evidence path is unsafe")
+        existing = _mapping(
+            json.loads(path.read_text(encoding="utf-8")), "PRE-Q8 evidence"
+        )
+        observed_at = str(existing.pop("observed_at", ""))
+        existing_digest = str(existing.pop("evidence_digest", ""))
+        if existing != normalized or existing_digest != digest or not observed_at:
+            raise FunctionalControlError("immutable PRE-Q8 evidence conflicts")
+        return path, digest, observed_at
+    observed_at = utc_now()
+    envelope = {**normalized, "evidence_digest": digest, "observed_at": observed_at}
+    encoded = json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o440)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return path, digest, observed_at
+
+
+def _pre_q8_index(path: Path) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise FunctionalControlError("root-owned PRE-Q8 index is unavailable")
+    value = _mapping(json.loads(path.read_text(encoding="utf-8")), "PRE-Q8 index")
+    index_digest = str(value.pop("index_digest", ""))
+    if index_digest != sha256_text(stable_json(value)):
+        raise FunctionalControlError("PRE-Q8 index digest differs")
+    scenarios = value.get("scenarios")
+    if not isinstance(scenarios, list):
+        raise FunctionalControlError("PRE-Q8 index scenarios are invalid")
+    ordered = tuple(
+        str(_mapping(item, "PRE-Q8 scenario entry").get("scenario_id", ""))
+        for item in scenarios
+    )
+    if ordered != PRE_Q8_SCENARIOS:
+        raise FunctionalControlError("PRE-Q8 index order differs from canonical order")
+    return {**value, "index_digest": index_digest}
+
+
+def _scenario_entry(index: Mapping[str, Any], scenario_id: str) -> dict[str, Any]:
+    scenarios = index.get("scenarios")
+    if not isinstance(scenarios, list):
+        raise FunctionalControlError("PRE-Q8 index scenarios are invalid")
+    matches = [
+        _mapping(item, "PRE-Q8 scenario entry")
+        for item in scenarios
+        if isinstance(item, Mapping) and str(item.get("scenario_id")) == scenario_id
+    ]
+    if len(matches) != 1:
+        raise FunctionalControlError("PRE-Q8 scenario index identity is ambiguous")
+    return matches[0]
+
+
+def admit_pre_q8(
+    config_path: Path,
+    *,
+    state_root: Path,
+    seal_path: Path,
+    index_path: Path,
+) -> dict[str, Any]:
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    index = _pre_q8_index(index_path)
+    required = {
+        "schema_version",
+        "qualification_plane",
+        "run_id",
+        "epoch_id",
+        "source_commit",
+        "candidate_digest",
+        "controller_release_digest",
+        "git_tree",
+        "release_tree_digest",
+        "requirements_lock_digest",
+        "toolchain_digest",
+        "systemd_bundle_digest",
+        "catalog_digest",
+        "base_config_digest",
+        "capability_attestation_digest",
+        "fixture_seed_digest",
+        "matrix_digest",
+        "scenarios",
+        "index_digest",
+    }
+    if set(index) != required or index.get("schema_version") != "2.0":
+        raise FunctionalControlError("PRE-Q8 admission index schema differs")
+    if (
+        index.get("qualification_plane") != "PRE_Q8"
+        or index.get("epoch_id") != epoch_id
+        or index.get("source_commit") != control["source_commit"]
+        or index.get("candidate_digest") != control["candidate_digest"]
+        or index.get("controller_release_digest")
+        != control["controller_release_digest"]
+        or index.get("toolchain_digest") != control["toolchain_manifest_digest"]
+        or index.get("release_tree_digest") != control["candidate_digest"]
+    ):
+        raise FunctionalControlError("PRE-Q8 admission index identity differs")
+    generated: dict[str, str] = {}
+    for scenario_id in PRE_Q8_SCENARIOS:
+        entry = _scenario_entry(index, scenario_id)
+        config = Path(str(entry.get("config_path", "")))
+        if not config.is_file() or config.is_symlink():
+            raise FunctionalControlError("PRE-Q8 generated config is unavailable")
+        payload = yaml.safe_load(config.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise FunctionalControlError("PRE-Q8 generated config is invalid")
+        qualification = payload.get("qualification")
+        if not isinstance(qualification, Mapping) or (
+            qualification.get("qualification_plane"),
+            qualification.get("run_id"),
+            qualification.get("epoch_id"),
+            qualification.get("scenario_id"),
+        ) != (
+            "PRE_Q8",
+            index["run_id"],
+            epoch_id,
+            scenario_id,
+        ):
+            raise FunctionalControlError("PRE-Q8 generated config namespace differs")
+        attestation_path = Path(str(qualification.get("capability_attestation_path") or ""))
+        if (
+            qualification.get("capability_attestation_digest")
+            != index["capability_attestation_digest"]
+            or not attestation_path.is_file()
+            or attestation_path.is_symlink()
+            or sha256_file(attestation_path) != index["capability_attestation_digest"]
+        ):
+            raise FunctionalControlError("PRE-Q8 capability attestation differs")
+        digest = sha256_text(stable_json(dict(payload)))
+        if digest != entry.get("config_digest"):
+            raise FunctionalControlError("PRE-Q8 generated config digest differs")
+        seal_digest = qualification_config_semantic_digest(payload)
+        if seal_digest != entry.get("seal_config_digest"):
+            raise FunctionalControlError("PRE-Q8 semantic config digest differs")
+        generated[scenario_id] = seal_digest
+    expected_identity = {
+        key: index[key]
+        for key in (
+            "git_tree",
+            "release_tree_digest",
+            "requirements_lock_digest",
+            "toolchain_digest",
+            "systemd_bundle_digest",
+            "catalog_digest",
+            "base_config_digest",
+            "capability_attestation_digest",
+            "fixture_seed_digest",
+            "matrix_digest",
+        )
+    }
+    try:
+        seal, seal_digest = load_and_verify_seal(
+            seal_path,
+            verifier_public_key=str(control["verifier_public_key"]),
+            trusted_public_key_digest=str(control["trusted_verifier_public_key_digest"]),
+            expected_identity=expected_identity,
+            expected_generated_config_digests=generated,
+        )
+    except PreQ8SealError as error:
+        raise FunctionalControlError("PRE-Q8 convergence seal rejected") from error
+    git_tree_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(control["candidate_repository_root"]),
+            "rev-parse",
+            "HEAD^{tree}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if (
+        seal.get("run_id") != index["run_id"]
+        or git_tree_result.returncode != 0
+        or git_tree_result.stdout.strip() != index["git_tree"]
+    ):
+        raise FunctionalControlError("PRE-Q8 convergence seal release differs")
+    governor = _governor(state_root / "functional.db")
+    try:
+        governor.admit_pre_q8(
+            epoch_id=epoch_id,
+            run_id=str(seal["run_id"]),
+            seal_digest=seal_digest,
+            git_tree=str(seal["git_tree"]),
+            release_tree_digest=str(seal["release_tree_digest"]),
+            candidate_digest=str(control["candidate_digest"]),
+        )
+        return {
+            "status": governor.epoch(epoch_id)["status"],
+            "epoch_id": epoch_id,
+            "run_id": seal["run_id"],
+            "seal_digest": seal_digest,
+        }
+    finally:
+        governor.connection.close()
 
 
 def _missing_report(config: Mapping[str, Any]) -> CapabilityHandshakeReport:
@@ -589,10 +816,25 @@ def status(config_path: Path, *, state_root: Path) -> dict[str, Any]:
             (epoch_id,),
         ).fetchall()
         pre_q8 = governor.connection.execute(
-            "SELECT scenario_id,status,evidence_digest FROM pre_q8_scenarios "
-            "WHERE epoch_id=? ORDER BY scenario_id",
+            "SELECT scenario_id,attempt,status,evidence_digest FROM pre_q8_scenarios "
+            "WHERE epoch_id=? ORDER BY rowid",
             (epoch_id,),
         ).fetchall()
+        failures = governor.connection.execute(
+            "SELECT scenario_id,attempt,failure_class,evidence_digest,support_bundle_digest "
+            "FROM pre_q8_failures WHERE epoch_id=? ORDER BY rowid",
+            (epoch_id,),
+        ).fetchall()
+        runs = governor.connection.execute(
+            "SELECT scenario_id,attempt,status,database_path,config_digest,product_id "
+            "FROM pre_q8_runs WHERE epoch_id=? ORDER BY rowid",
+            (epoch_id,),
+        ).fetchall()
+        admission = governor.connection.execute(
+            "SELECT run_id,seal_digest,git_tree,release_tree_digest "
+            "FROM pre_q8_admissions WHERE epoch_id=?",
+            (epoch_id,),
+        ).fetchone()
         return {
             "epoch": epoch,
             "capabilities": [
@@ -604,9 +846,372 @@ def status(config_path: Path, *, state_root: Path) -> dict[str, Any]:
                 for row in actions
             ],
             "pre_q8": [
-                {"scenario_id": row[0], "status": row[1], "evidence_digest": row[2]}
+                {
+                    "scenario_id": row[0],
+                    "attempt": row[1],
+                    "status": row[2],
+                    "evidence_digest": row[3],
+                }
                 for row in pre_q8
             ],
+            "pre_q8_failures": [
+                {
+                    "scenario_id": row[0],
+                    "attempt": row[1],
+                    "failure_class": row[2],
+                    "evidence_digest": row[3],
+                    "support_bundle_digest": row[4],
+                }
+                for row in failures
+            ],
+            "pre_q8_runs": [
+                {
+                    "scenario_id": row[0],
+                    "attempt": row[1],
+                    "status": row[2],
+                    "database_path": row[3],
+                    "config_digest": row[4],
+                    "product_id": row[5],
+                }
+                for row in runs
+            ],
+            "pre_q8_admission": (
+                {
+                    "run_id": admission[0],
+                    "seal_digest": admission[1],
+                    "git_tree": admission[2],
+                    "release_tree_digest": admission[3],
+                }
+                if admission is not None
+                else None
+            ),
+        }
+    finally:
+        governor.connection.close()
+
+
+def start_pre_q8(
+    config_path: Path,
+    *,
+    state_root: Path,
+    index_path: Path,
+    scenario_id: str,
+    candidate_config: Path,
+) -> dict[str, Any]:
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    index = _pre_q8_index(index_path)
+    entry = _scenario_entry(index, scenario_id)
+    if candidate_config != Path(str(entry.get("config_path", ""))):
+        raise FunctionalControlError("PRE-Q8 scenario config path differs from index")
+    scenario_config = load_config(candidate_config)
+    contract = CanaryFaultContract.from_config(scenario_config)
+    if (
+        contract.qualification_plane != "PRE_Q8"
+        or contract.epoch_id != epoch_id
+        or contract.run_id != index.get("run_id")
+        or contract.scenario_id != scenario_id
+    ):
+        raise FunctionalControlError("PRE-Q8 scenario namespace differs")
+    digest = sha256_text(stable_json(scenario_config.raw))
+    if digest != entry.get("config_digest"):
+        raise FunctionalControlError("PRE-Q8 scenario config digest differs")
+    database = str(scenario_config.database_path)
+    if database != str(entry.get("database_path", "")):
+        raise FunctionalControlError("PRE-Q8 scenario database differs from index")
+    governor = _governor(state_root / "functional.db")
+    try:
+        created = governor.start_pre_q8_scenario(
+            epoch_id=epoch_id,
+            scenario_id=scenario_id,
+            attempt=1,
+            database_path=database,
+            config_digest=digest,
+        )
+        current = governor.pre_q8_run(epoch_id=epoch_id, scenario_id=scenario_id)
+        if current is None:
+            raise FunctionalControlError("PRE-Q8 run disappeared after durable start")
+        return {
+            "status": "RUNNING" if created else str(current["status"]),
+            "epoch_id": epoch_id,
+            "scenario_id": scenario_id,
+            "attempt": 1,
+        }
+    finally:
+        governor.connection.close()
+
+
+def record_pre_q8_progress(
+    config_path: Path,
+    *,
+    state_root: Path,
+    scenario_id: str,
+    snapshot_path: Path,
+) -> dict[str, Any]:
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    if not snapshot_path.is_file() or snapshot_path.is_symlink():
+        raise FunctionalControlError("PRE-Q8 progress snapshot is unavailable")
+    value = _mapping(
+        json.loads(snapshot_path.read_text(encoding="utf-8")), "PRE-Q8 progress snapshot"
+    )
+    fingerprint = str(value.pop("progress_fingerprint", ""))
+    if fingerprint != sha256_text(stable_json(value)):
+        raise FunctionalControlError("PRE-Q8 progress fingerprint differs")
+    governor = _governor(state_root / "functional.db")
+    try:
+        changed = governor.record_pre_q8_progress(
+            epoch_id=epoch_id,
+            scenario_id=scenario_id,
+            attempt=1,
+            progress_fingerprint=fingerprint,
+            snapshot=value,
+        )
+        progress = governor.connection.execute(
+            "SELECT last_changed_at,checked_at FROM pre_q8_progress "
+            "WHERE epoch_id=? AND scenario_id=?",
+            (epoch_id, scenario_id),
+        ).fetchone()
+        if progress is None:
+            raise FunctionalControlError("PRE-Q8 progress state disappeared")
+        last_changed = datetime.fromisoformat(str(progress[0]))
+        checked = datetime.fromisoformat(str(progress[1]))
+        if last_changed.tzinfo is None or checked.tzinfo is None:
+            raise FunctionalControlError("PRE-Q8 progress time is not UTC")
+        seconds_without_progress = max(
+            0, int((checked.astimezone(UTC) - last_changed.astimezone(UTC)).total_seconds())
+        )
+        return {
+            "status": "CHANGED" if changed else "UNCHANGED",
+            "epoch_id": epoch_id,
+            "scenario_id": scenario_id,
+            "progress_fingerprint": fingerprint,
+            "seconds_without_progress": seconds_without_progress,
+        }
+    finally:
+        governor.connection.close()
+
+
+def record_pre_q8_failure(
+    config_path: Path,
+    *,
+    state_root: Path,
+    scenario_id: str,
+    failure_class: str,
+    candidate_config: Path,
+    support_sources: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    """Create immutable evidence/bundle, then commit one terminal DB transaction."""
+
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    scenario_config = load_config(candidate_config)
+    contract = CanaryFaultContract.from_config(scenario_config)
+    if (
+        contract.scenario_id != scenario_id
+        or contract.qualification_plane != "PRE_Q8"
+        or contract.epoch_id != epoch_id
+    ):
+        raise FunctionalControlError("PRE-Q8 failure scenario config identity differs")
+    governor = _governor(state_root / "functional.db")
+    try:
+        admission = governor.connection.execute(
+            "SELECT run_id FROM pre_q8_admissions WHERE epoch_id=?", (epoch_id,)
+        ).fetchone()
+        run_id = str(admission[0]) if admission is not None else contract.run_id
+        if admission is not None and run_id != contract.run_id:
+            raise FunctionalControlError("PRE-Q8 failure admission run differs")
+        source_digests: dict[str, str] = {}
+        for source in support_sources:
+            if not source.is_file() or source.is_symlink():
+                raise FunctionalControlError("PRE-Q8 failure support source is unsafe")
+            if source.name in source_digests:
+                raise FunctionalControlError("PRE-Q8 support source name is duplicated")
+            source_digests[source.name] = sha256_file(source)
+        body = {
+            "schema_version": "1.0",
+            "evidence_type": "OFFICIAL_PRE_Q8_FAILURE",
+            "epoch_id": epoch_id,
+            "run_id": run_id,
+            "scenario_id": scenario_id,
+            "attempt": 1,
+            "candidate_digest": str(control["candidate_digest"]),
+            "failure_class": failure_class,
+            "candidate_database_ref": str(scenario_config.database_path),
+            "config_digest": sha256_text(stable_json(scenario_config.raw)),
+            "support_source_digests": source_digests,
+        }
+        evidence_root = state_root / "pre-q8-evidence" / epoch_id / run_id / scenario_id
+        evidence_path, evidence_digest, observed_at = _write_identity_evidence(
+            evidence_root, "failure", body
+        )
+        bundle, bundle_digest = build_support_bundle(
+            incident_id=f"preq8-{epoch_id}-{scenario_id}-attempt1",
+            source_files=(evidence_path, *support_sources),
+            allowed_roots=(
+                state_root,
+                Path("/var/lib/hermes-factory-pre-q8"),
+                Path("/var/log/hermes-factory-pre-q8"),
+            ),
+            output_root=state_root / "support-bundles",
+            metadata={
+                "status": "QUALIFICATION_FAILED",
+                "epoch_id": epoch_id,
+                "run_id": run_id,
+                "scenario_id": scenario_id,
+                "attempt": 1,
+                "failure_class": failure_class,
+            },
+            created_at=observed_at,
+        )
+        created = governor.record_pre_q8_failure(
+            epoch_id=epoch_id,
+            scenario_id=scenario_id,
+            attempt=1,
+            failure_class=failure_class,
+            failure_digest=evidence_digest,
+            evidence_ref=f"artifact://qualification/pre-q8/{epoch_id}/{run_id}/{scenario_id}/{evidence_digest}",
+            evidence_digest=evidence_digest,
+            candidate_database_ref=str(scenario_config.database_path),
+            config_digest=str(body["config_digest"]),
+            support_bundle_ref=str(bundle),
+            support_bundle_digest=bundle_digest,
+        )
+        _notify(
+            state_root,
+            kind="PRE_Q8_FAILED",
+            identity=f"{epoch_id}:{scenario_id}:{evidence_digest}",
+            text=(
+                f"Hermes official PRE-Q8 terminalized Candidate at {scenario_id}; "
+                "a sanitized support bundle is available."
+            ),
+        )
+        return {
+            "status": "QUALIFICATION_FAILED",
+            "created": created,
+            "epoch_id": epoch_id,
+            "scenario_id": scenario_id,
+            "attempt": 1,
+            "failure_class": failure_class,
+            "evidence_digest": evidence_digest,
+            "support_bundle": str(bundle),
+            "support_bundle_digest": bundle_digest,
+        }
+    finally:
+        governor.connection.close()
+
+
+def reconcile_pre_q8(
+    config_path: Path,
+    *,
+    state_root: Path,
+    scenario_id: str,
+    candidate_config: Path,
+    support_sources: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    """Reconcile a crash without ever executing an official scenario twice."""
+
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    scenario_config = load_config(candidate_config)
+    contract = CanaryFaultContract.from_config(scenario_config)
+    if (
+        contract.scenario_id != scenario_id
+        or contract.qualification_plane != "PRE_Q8"
+        or contract.epoch_id != epoch_id
+    ):
+        raise FunctionalControlError("PRE-Q8 reconciliation config identity differs")
+    governor = _governor(state_root / "functional.db")
+    try:
+        failure = governor.connection.execute(
+            "SELECT failure_class,evidence_digest FROM pre_q8_failures "
+            "WHERE epoch_id=? AND scenario_id=?",
+            (epoch_id, scenario_id),
+        ).fetchone()
+        if failure is not None:
+            return {
+                "status": "FAIL",
+                "scenario_id": scenario_id,
+                "failure_class": failure[0],
+                "evidence_digest": failure[1],
+            }
+        passed = governor.connection.execute(
+            "SELECT evidence_digest FROM pre_q8_scenarios "
+            "WHERE epoch_id=? AND scenario_id=?",
+            (epoch_id, scenario_id),
+        ).fetchone()
+        if passed is not None:
+            return {
+                "status": "PASS",
+                "scenario_id": scenario_id,
+                "evidence_digest": passed[0],
+            }
+        run = governor.pre_q8_run(epoch_id=epoch_id, scenario_id=scenario_id)
+    finally:
+        governor.connection.close()
+    database_exists = scenario_config.database_path.exists()
+    decision = crash_reconciliation_decision(
+        durable_run_status=str(run["status"]) if run is not None else None,
+        database_exists=database_exists,
+        product_completed=False,
+    )
+    if decision == CrashReconciliationDecision.MISSING:
+        return {"status": "MISSING", "scenario_id": scenario_id}
+    if decision == CrashReconciliationDecision.STALE_DATABASE:
+        return record_pre_q8_failure(
+            config_path,
+            state_root=state_root,
+            scenario_id=scenario_id,
+            failure_class="STALE_DATABASE",
+            candidate_config=candidate_config,
+            support_sources=support_sources,
+        )
+    if scenario_config.database_path.is_file() and not scenario_config.database_path.is_symlink():
+        connection = sqlite3.connect(
+            f"file:{scenario_config.database_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            products = connection.execute(
+                "SELECT product_id,status FROM products ORDER BY created_at"
+            ).fetchall()
+        finally:
+            connection.close()
+        if len(products) == 1 and str(products[0][1]) == "COMPLETED":
+            decision = crash_reconciliation_decision(
+                durable_run_status="RUNNING",
+                database_exists=True,
+                product_completed=True,
+            )
+        if decision == CrashReconciliationDecision.OBSERVE_COMPLETED:
+            return record_pre_q8(
+                config_path,
+                state_root=state_root,
+                scenario_id=scenario_id,
+                product_id=str(products[0][0]),
+                candidate_config=candidate_config,
+            )
+    return record_pre_q8_failure(
+        config_path,
+        state_root=state_root,
+        scenario_id=scenario_id,
+        failure_class="INTERRUPTED_OFFICIAL_RUN",
+        candidate_config=candidate_config,
+        support_sources=support_sources,
+    )
+
+
+def finalize_pre_q8(config_path: Path, *, state_root: Path) -> dict[str, Any]:
+    control = _load_config(config_path)
+    epoch_id = _release_epoch(control)
+    governor = _governor(state_root / "functional.db")
+    try:
+        changed = governor.finalize_pre_q8(epoch_id)
+        return {
+            "status": governor.epoch(epoch_id)["status"],
+            "epoch_id": epoch_id,
+            "changed": changed,
         }
     finally:
         governor.connection.close()
@@ -624,7 +1229,11 @@ def record_pre_q8(
     epoch_id = _release_epoch(control)
     scenario_config = load_config(candidate_config)
     contract = CanaryFaultContract.from_config(scenario_config)
-    if contract.scenario_id != scenario_id:
+    if (
+        contract.scenario_id != scenario_id
+        or contract.epoch_id != epoch_id
+        or contract.qualification_plane != "PRE_Q8"
+    ):
         raise FunctionalControlError("PRE-Q8 scenario config identity differs")
     catalog = load_canary_catalog(Path(str(control["canary_catalog_path"])))
     scenario = catalog.get(scenario_id)
@@ -632,12 +1241,17 @@ def record_pre_q8(
         raise FunctionalControlError("PRE-Q8 scenario is outside catalog")
     observation = observe_completion(
         scenario_config.database_path,
-        state_root / "pre-q8-evidence" / scenario_id,
+        state_root
+        / "pre-q8-evidence"
+        / epoch_id
+        / contract.run_id
+        / scenario_id,
         product_id=product_id,
         expected_controller_release_digest=str(control["controller_release_digest"]),
         scenario=scenario,
         fault_receipt_root=contract.receipt_root,
         expected_candidate_digest=str(control["candidate_digest"]),
+        fault_contract=contract,
     )
     if any(
         (
@@ -802,13 +1416,36 @@ def _parser() -> argparse.ArgumentParser:
             "/etc/hermes-factory/candidate-credentials.d/candidate-telegram-token"
         ),
     )
+    parser.add_argument(
+        "--pre-q8-index",
+        type=Path,
+        default=Path("/etc/hermes-factory/pre-q8/index.json"),
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("reconcile")
     commands.add_parser("status")
-    pre_q8 = commands.add_parser("pre-q8-pass")
-    pre_q8.add_argument("scenario_id")
-    pre_q8.add_argument("product_id")
-    pre_q8.add_argument("candidate_config", type=Path)
+    admission = commands.add_parser("pre-q8-admit")
+    admission.add_argument("seal_path", type=Path)
+    start = commands.add_parser("pre-q8-start")
+    start.add_argument("scenario_id")
+    start.add_argument("candidate_config", type=Path)
+    progress = commands.add_parser("pre-q8-progress")
+    progress.add_argument("scenario_id")
+    progress.add_argument("snapshot_path", type=Path)
+    pre_q8_pass = commands.add_parser("pre-q8-pass")
+    pre_q8_pass.add_argument("scenario_id")
+    pre_q8_pass.add_argument("product_id")
+    pre_q8_pass.add_argument("candidate_config", type=Path)
+    failure = commands.add_parser("pre-q8-fail")
+    failure.add_argument("scenario_id")
+    failure.add_argument("failure_class")
+    failure.add_argument("candidate_config", type=Path)
+    failure.add_argument("--support-source", action="append", type=Path, default=[])
+    crash = commands.add_parser("pre-q8-reconcile")
+    crash.add_argument("scenario_id")
+    crash.add_argument("candidate_config", type=Path)
+    crash.add_argument("--support-source", action="append", type=Path, default=[])
+    commands.add_parser("pre-q8-finalize")
     golden = commands.add_parser("golden-complete")
     golden.add_argument("evidence_path", type=Path)
     checks = commands.add_parser("factory-checks")
@@ -832,6 +1469,28 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "status":
             result = status(args.config, state_root=args.state_root)
+        elif args.command == "pre-q8-admit":
+            result = admit_pre_q8(
+                args.config,
+                state_root=args.state_root,
+                seal_path=args.seal_path,
+                index_path=args.pre_q8_index,
+            )
+        elif args.command == "pre-q8-start":
+            result = start_pre_q8(
+                args.config,
+                state_root=args.state_root,
+                index_path=args.pre_q8_index,
+                scenario_id=args.scenario_id,
+                candidate_config=args.candidate_config,
+            )
+        elif args.command == "pre-q8-progress":
+            result = record_pre_q8_progress(
+                args.config,
+                state_root=args.state_root,
+                scenario_id=args.scenario_id,
+                snapshot_path=args.snapshot_path,
+            )
         elif args.command == "pre-q8-pass":
             result = record_pre_q8(
                 args.config,
@@ -840,6 +1499,25 @@ def main(argv: list[str] | None = None) -> int:
                 product_id=args.product_id,
                 candidate_config=args.candidate_config,
             )
+        elif args.command == "pre-q8-fail":
+            result = record_pre_q8_failure(
+                args.config,
+                state_root=args.state_root,
+                scenario_id=args.scenario_id,
+                failure_class=args.failure_class,
+                candidate_config=args.candidate_config,
+                support_sources=tuple(args.support_source),
+            )
+        elif args.command == "pre-q8-reconcile":
+            result = reconcile_pre_q8(
+                args.config,
+                state_root=args.state_root,
+                scenario_id=args.scenario_id,
+                candidate_config=args.candidate_config,
+                support_sources=tuple(args.support_source),
+            )
+        elif args.command == "pre-q8-finalize":
+            result = finalize_pre_q8(args.config, state_root=args.state_root)
         elif args.command == "golden-complete":
             result = record_golden(
                 args.config,
@@ -863,6 +1541,8 @@ def main(argv: list[str] | None = None) -> int:
         sqlite3.Error,
         FunctionalReadinessError,
         FunctionalControlError,
+        PreQ8SealError,
+        SupportBundleError,
     ) as error:
         print(stable_json({"status": "FAIL", "error_type": type(error).__name__}), file=sys.stderr)
         return 1

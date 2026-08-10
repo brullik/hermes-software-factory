@@ -1443,7 +1443,7 @@ def test_clean_canary_catalog_is_exact_and_fresh_state_is_observed(tmp_path: Pat
         prove_fresh_state(database, tmp_path / "second-evidence")
 
 
-def test_completed_canary_observation_derives_zero_intervention_counts(
+def test_observation_digest_is_repeatable(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "canary.db"
@@ -1490,6 +1490,15 @@ def test_completed_canary_observation_derives_zero_intervention_counts(
     assert observation.recovery_applications == 0
     assert observation.routine_owner_actions == 0
     assert observation.duplicate_side_effects == 0
+    repeated = observe_completion(
+        database,
+        tmp_path / "evidence",
+        product_id="product-clean",
+        expected_controller_release_digest=controller_digest,
+    )
+    assert repeated.observation_digest == observation.observation_digest
+    assert repeated.evidence_ref == observation.evidence_ref
+    assert repeated.report_path == observation.report_path
 
 
 def test_qualification_control_initializes_one_idempotent_epoch(tmp_path: Path) -> None:
@@ -1975,6 +1984,10 @@ def test_candidate_bootstrap_closes_dependency_and_namespace_failures() -> None:
         'chown root:"${VERIFIER_USER}" '
         '"${CONFIG_ROOT}/qualification-control.yaml"' not in bootstrap
     )
+    assert '"${FUNCTIONAL_STATE}/functional.db" "${FUNCTIONAL_GROUP}"' in bootstrap
+    assert 'nofollow = getattr(os, "O_NOFOLLOW", None)' in bootstrap
+    assert "flags | os.O_CREAT | os.O_EXCL, 0o660" in bootstrap
+    assert "os.fchmod(descriptor, 0o660)" in bootstrap
     assert 'venv_ready_marker="${venv_root}/.hermes-bootstrap-complete"' in bootstrap
     assert 'rm -rf -- "${venv_root}"' in bootstrap
     assert "Refusing to rebuild the active incomplete environment" in bootstrap

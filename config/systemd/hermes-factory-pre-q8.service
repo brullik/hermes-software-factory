@@ -5,6 +5,7 @@ Requires=hermes-factory-github-broker.service
 
 [Service]
 Type=oneshot
+LoadCredential=github-token:/etc/hermes-factory/candidate-credentials.d/github-token
 User=root
 Group=root
 WorkingDirectory=/opt/hermes-factory-verifier/current

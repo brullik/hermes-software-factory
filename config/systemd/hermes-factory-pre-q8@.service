@@ -7,6 +7,8 @@ Requires=hermes-factory-github-broker.service
 Type=oneshot
 User=root
 Group=root
+SupplementaryGroups=hermesverifier hermesfunctional
+UMask=0007
 WorkingDirectory=/opt/hermes-factory-verifier/current
 Environment=PRE_Q8_TIMEOUT_SECONDS=172800
 ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-pre-q8-scenario.sh %i

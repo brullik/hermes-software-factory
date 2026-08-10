@@ -1,0 +1,27 @@
+[Unit]
+Description=Hermes PRE-Q8 convergence scenario (%i)
+After=network-online.target hermes-factory-github-broker.service
+Requires=hermes-factory-github-broker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+SupplementaryGroups=hermesverifier hermesfunctional
+UMask=0007
+WorkingDirectory=/opt/hermes-factory-verifier/current
+Environment=PRE_Q8_CONVERGENCE_TIMEOUT_SECONDS=172800
+Environment=PRE_Q8_CONVERGENCE_NO_PROGRESS_SECONDS=1800
+ExecStart=/opt/hermes-factory-verifier/current/scripts/qualification/run-pre-q8-convergence-scenario.sh %i
+TimeoutStartSec=48h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes-factory-pre-q8-convergence /var/log/hermes-factory-pre-q8-convergence /var/lib/hermes-factory-candidate /run/systemd
+ReadOnlyPaths=/etc/hermes-factory/pre-q8-convergence /opt/hermes-factory-candidate /opt/hermes-factory-verifier
+InaccessiblePaths=/var/lib/hermes-factory /var/lib/hermes-factory-pre-q8 /etc/hermes-factory/credentials.d /etc/hermes-factory/candidate-credentials.d
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+RestrictSUIDSGID=true
+LockPersonality=true
