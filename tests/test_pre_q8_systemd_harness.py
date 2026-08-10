@@ -91,3 +91,13 @@ def test_epoch_switch_recreates_pre_q8_mount_roots_after_archive() -> None:
     assert archive < recreate < daemon_reload
     assert '"${CONFIG_ROOT}/pre-q8"' in recreated_block
     assert '"${CONFIG_ROOT}/pre-q8-convergence"' in recreated_block
+
+
+def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
+    unit = (
+        ROOT / "config" / "systemd" / "hermes-factory-pre-q8-convergence@.service"
+    ).read_text(encoding="utf-8")
+
+    assert "SupplementaryGroups=hermesverifier hermesfunctional" in unit
+    assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID" in unit
+    assert "CAP_DAC_OVERRIDE" not in unit
