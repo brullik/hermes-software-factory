@@ -3210,6 +3210,52 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(state.get_product(product_id)["status"], "STAGING_DEPLOYED")
             state.close()
 
+    def test_release_proposal_cannot_preempt_adapter_owned_candidate_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+            config = make_config(root, registry_path)
+            state = StateStore(config.database_path, max_active_workers=config.max_active_workers)
+            artifacts = ArtifactStore(config)
+            product_id, _ = staging_release_task(config, state, artifacts)
+            # A model can only see the workspace content digest before the
+            # adapter publishes a Git candidate.  It must not be required to
+            # invent the future 40-character commit SHA.
+            proposed = release_operation(
+                config,
+                product_id,
+                candidate_sha="a" * 64,
+                image_digest="sha256:" + "b" * 64,
+            )
+            authoritative = release_operation(
+                config,
+                product_id,
+                candidate_sha="c" * 40,
+                image_digest="sha256:" + "d" * 64,
+            )
+            executor = RecordingReleaseExecutor(authoritative)
+            worker = AgentWorker(
+                config,
+                state,
+                runner=FakeRunner(json.dumps(proposed)),
+                release_executor=executor,
+                health_probe=lambda _: True,
+                repository_root=ROOT,
+            )
+
+            result = worker.run_once()
+
+            assert result is not None
+            self.assertEqual(result.status, "completed", result.reason_code)
+            self.assertEqual(len(executor.calls), 1)
+            persisted = json.loads(
+                next(config.evidence_dir.glob("release-operation-result-*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(persisted["candidate_sha"], "c" * 40)
+            state.close()
+
     def test_release_scope_is_checked_before_adapter_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -5191,6 +5237,16 @@ class WorkerTests(unittest.TestCase):
             ignored.parent.mkdir()
             ignored.write_text("generated\n", encoding="utf-8")
             self.assertEqual(_workspace_snapshot(repository), baseline)
+
+            generated_build = repository / "build" / "lib" / "source.py"
+            generated_build.parent.mkdir(parents=True)
+            generated_build.write_text("generated = True\n", encoding="utf-8")
+            self.assertEqual(_workspace_snapshot(repository), baseline)
+            subprocess.run(
+                ["git", "-C", str(repository), "add", "build/lib/source.py"],
+                check=True,
+            )
+            self.assertIn("build/lib/source.py", _workspace_snapshot(repository))
 
             source.write_text("value = 2\n", encoding="utf-8")
             changed = _workspace_snapshot(repository)

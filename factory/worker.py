@@ -72,6 +72,7 @@ from .release import (
     ReleasePolicyError,
     canonical_release_operation,
     release_predecessor_evidence,
+    release_proposal_validation_view,
     validate_release_operation,
 )
 from .release_executor import (
@@ -1091,6 +1092,21 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
     if repository_marker.exists():
         resolved_root = root.resolve()
         try:
+            tracked = subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={resolved_root}",
+                    "-C",
+                    str(resolved_root),
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                ],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
             listed = subprocess.run(
                 [
                     "git",
@@ -1110,10 +1126,13 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError("workspace inventory command failed") from error
-        if listed.returncode != 0:
+        if tracked.returncode != 0 or listed.returncode != 0:
             raise RuntimeError("workspace inventory command failed")
         snapshot: dict[str, str] = {}
         try:
+            tracked_paths = {
+                os.fsdecode(value) for value in tracked.stdout.split(b"\0") if value
+            }
             relative_paths = sorted(
                 {os.fsdecode(value) for value in listed.stdout.split(b"\0") if value}
             )
@@ -1131,6 +1150,15 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
                 raise RuntimeError("workspace inventory contains an unsafe path")
             path = root / relative_path
             normalized = relative_path.as_posix()
+            # Build backends may materialize disposable, untracked outputs
+            # while proving the requested command.  They are neither product
+            # source nor release candidates.  Tracked files at these paths are
+            # still inventoried and scope-checked exactly.
+            if relative not in tracked_paths and (
+                relative_path.parts[0] in {"build", "dist"}
+                or any(part.endswith(".egg-info") for part in relative_path.parts)
+            ):
+                continue
             if path.is_symlink():
                 snapshot[normalized] = f"SYMLINK:{path.resolve()}"
             elif path.is_file():
@@ -4917,7 +4945,12 @@ class AgentWorker:
                 selection=selection,
             )
             try:
-                self.schemas.validate(spec.output_schema, output)
+                validation_output = (
+                    release_proposal_validation_view(output)
+                    if spec.role == "release-operator"
+                    else output
+                )
+                self.schemas.validate(spec.output_schema, validation_output)
             except (TypeError, ValueError) as error:
                 parser_diagnostic = safe_exception_diagnostic(error)
                 safe_message = str(parser_diagnostic["safe_message"])

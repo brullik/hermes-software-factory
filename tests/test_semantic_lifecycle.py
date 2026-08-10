@@ -16,6 +16,7 @@ from factory.artifacts import ArtifactStore
 from factory.autonomy import TaskOutcome
 from factory.capabilities import CapabilityBroker, CapabilityCheck
 from factory.common import sha256_text, stable_json
+from factory.failure_router import FailureRouter
 from factory.intake import IntakeRejected, IntakeService
 from factory.pipeline import PipelineCoordinator, PlanCompilationInvariantError
 from factory.plan_compiler import CompileContext, PlanCompiler
@@ -35,6 +36,7 @@ from factory.recovery import (
 )
 from factory.replan_lineage import implementation_lineage
 from factory.state import StateStore
+from factory.transition_kernel import TransitionKernel
 from scripts.verify_version_consistency import (
     VersionConsistencyError,
     verify_version_consistency,
@@ -46,6 +48,67 @@ def configured(tmp_path: Path):
         tmp_path,
         selected_registry(tmp_path / "registry.yaml", selected="gpt-5.6-luna"),
     )
+
+
+def test_preplan_path_arbiter_uses_exact_architecture_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = configured(tmp_path)
+    state = StateStore(config.database_path)
+    product_id = "product-preplan-path-arbiter"
+    state.create_product_v2(
+        product_id=product_id,
+        owner_id="owner",
+        source="test",
+        goal_text="Recover a pre-plan architecture decision",
+        delivery_mode="new_repository",
+        repository_url=None,
+        repository_name="preplan-path-arbiter",
+        repository_visibility="private",
+        root_goal_ref=f"evidence/intake-{product_id}.json",
+        constraints_ref=None,
+        owner_defaults_ref=None,
+        idempotency_key=sha256_text(f"intake:{product_id}"),
+        rate_limit=None,
+    )
+    with state._lock, state._connection:
+        TransitionKernel(state._connection).apply_product(
+            product_id=product_id,
+            target="RISK_CLASSIFIED",
+            event="CONTRACT_AND_RISK_PROVEN",
+            evidence={
+                "product_contract": "internal://product-contract",
+                "risk_assessment": "internal://risk-assessment",
+            },
+        )
+    state.add_task(
+        task_id="T-PREPLAN-PATH-ARBITER",
+        product_id=product_id,
+        title="Arbitrate the pre-plan architecture failure",
+        role="path-arbiter",
+        output_schema="path-decision-proposal.schema.json",
+        contract_ref="evidence/task-T-PREPLAN-PATH-ARBITER.json",
+        stage_key="path-arbiter",
+        graph_status="ACCEPTED",
+    )
+    monkeypatch.setattr(
+        FailureRouter,
+        "prepare_replanner_after_arbiter",
+        lambda _router, _task, _output: {"task_id": "T-PREPLAN-REPLANNER"},
+    )
+    task = state.get_task("T-PREPLAN-PATH-ARBITER")
+    assert task is not None
+
+    prepared = PipelineCoordinator(config, state).prepare_after(
+        task,
+        {"status": "proposed"},
+        tmp_path / "path-arbiter-output.json",
+    )
+
+    assert prepared.product_status == "ARCHITECTED"
+    assert prepared.successors == ({"task_id": "T-PREPLAN-REPLANNER"},)
+    state.close()
 
 
 def issue_test_recovery_certificate(
@@ -888,6 +951,16 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
         stage_key="solution-architect",
         graph_status="ACCEPTED",
     )
+    with state._lock, state._connection:
+        state._connection.execute(
+            """UPDATE tasks SET status='DONE', result_ref=?, result_digest=?
+                 WHERE task_id=?""",
+            (
+                "internal://accepted-architecture-package",
+                sha256_text("accepted-architecture-package"),
+                architecture_source_id,
+            ),
+        )
     creator_id = "T-LINEAGE-SPECIFIER"
     state.add_task(
         task_id=creator_id,
@@ -1064,7 +1137,8 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
         implementation_contracts["core-journey"]["supersedes_task_id"]
         == first_implementation["task_id"]
     )
-    assert architecture_contract["supersedes_task_id"] == first_architecture["task_id"]
+    assert architecture_contract["supersedes_task_id"] is None
+    assert architecture_contract["dependencies"] == [architecture_source_id]
 
     state.ingest_plan(
         runtime_plan,
@@ -1086,9 +1160,15 @@ def test_replan_pipeline_carries_accepted_parent_results_into_new_revision(
     )
     assert reused["core-journey"]["graph_status"] == "ACCEPTED"
     assert reused["core-journey"]["result_ref"] == first_implementation["result_ref"]
-    assert reused["runtime-extension"]["graph_status"] != "BLOCKED_DEPENDENCY"
-    assert second_architecture["graph_status"] == "ACCEPTED"
-    assert second_architecture["result_ref"] == first_architecture["result_ref"]
+    assert second_architecture["task_id"] in json.loads(
+        str(reused["runtime-extension"]["dependencies_json"])
+    )
+    assert reused["runtime-extension"]["graph_status"] in {
+        "BLOCKED_DEPENDENCY",
+        "BLOCKED_CAPABILITY",
+    }
+    assert second_architecture["graph_status"] in {"READY", "BLOCKED_CAPABILITY"}
+    assert second_architecture["result_ref"] is None
     lineage = {
         str(node.proposal_node["node_key"]): node
         for node in implementation_lineage(

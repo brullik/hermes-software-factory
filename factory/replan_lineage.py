@@ -277,17 +277,20 @@ def architecture_source_task_id(
     }
     candidates: list[dict[str, Any]] = []
     for row in state.list_tasks(product_id):
+        role = str(row.get("role") or "").replace("_", "-")
+        belongs_to_architecture_lineage = (
+            str(row.get("plan_id") or "") in lineage_plan_ids
+            or role == "solution-architect"
+        )
         if (
-            str(row.get("plan_id") or "") not in lineage_plan_ids
+            not belongs_to_architecture_lineage
             or str(row.get("graph_status") or "") != "ACCEPTED"
             or not str(row.get("result_ref") or "")
             or not str(row.get("result_digest") or "")
         ):
             continue
         produced = _string_list(row.get("produces_evidence_types_json"))
-        if "architecture_package" in produced or str(row.get("role") or "") == (
-            "solution-architect"
-        ):
+        if "architecture_package" in produced or role == "solution-architect":
             candidates.append(row)
     if not candidates:
         return None

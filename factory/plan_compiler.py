@@ -740,15 +740,17 @@ class PlanCompiler:
 
         for key, proposal_node in zip(raw_keys, slices, strict=True):
             implementation = implementation_by_key[key]
+            # Every implementation contract in a revised plan is gated by the
+            # fresh independent architecture review.  Depending on an accepted
+            # inherited implementation node alone is insufficient: that node
+            # was reviewed under the parent plan, not this revision.
+            edge(architecture_review, implementation)
             dependencies = [
                 implementation_by_key[_node_key(str(value))]
                 for value in proposal_node.get("depends_on", [])
             ]
-            if dependencies:
-                for dependency in dependencies:
-                    edge(dependency, implementation)
-            else:
-                edge(architecture_review, implementation)
+            for dependency in dependencies:
+                edge(dependency, implementation)
             edge(implementation, candidate_snapshot, "evidence_from")
         edge(architecture_review, candidate_snapshot, "evidence_from")
         edge(candidate_snapshot, test)

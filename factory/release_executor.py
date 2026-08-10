@@ -399,6 +399,11 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
         return path
 
     def _candidate_paths(self, workspace: Path) -> list[str]:
+        tracked_result = self._command(
+            ["git", "ls-files", "--cached", "-z"],
+            workspace,
+        )
+        tracked_paths = {raw for raw in tracked_result.stdout.split("\0") if raw}
         result = self._command(
             ["git", "ls-files", "--modified", "--deleted", "--others", "--exclude-standard", "-z"],
             workspace,
@@ -414,6 +419,11 @@ class ConfiguredReleaseExecutor(ReleaseExecutor):
                 or "__pycache__" in path.parts
                 or path.suffix in {".pyc", ".pyo"}
                 or raw == ".lease.json"
+            ):
+                continue
+            if raw not in tracked_paths and (
+                root in {"build", "dist"}
+                or any(part.endswith(".egg-info") for part in path.parts)
             ):
                 continue
             if (

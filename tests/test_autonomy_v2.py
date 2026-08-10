@@ -1884,7 +1884,6 @@ def test_cross_role_supersession_is_rejected_before_insert(tmp_path: Path) -> No
     [
         ("mandatory_gate_failed", "target-dependency-audit", "security-review"),
         ("model_requested_repair", "SECURITY-CONTAINER-SCAN-NOT-RUN", "security-review"),
-        ("model_requested_repair", "ARCH-ROLLBACK-ATOMICITY-001", "architecture-review"),
     ],
 )
 def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
@@ -2101,6 +2100,65 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
             "remaining_execution_slots": 2 - expected_execution_used,
             "status": "ACTIVE",
         }
+    finally:
+        state.close()
+
+
+def test_architecture_review_failure_routes_directly_to_semantic_correction(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="model_requested_repair",
+    )
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "independent-reviewer",
+                "output_schema": "review-result.schema.json",
+                "capability_profile": "reviewer_readonly",
+                "required_capabilities": list(CAPABILITY_PROFILES["reviewer_readonly"]),
+                "allowed_paths": ["artifacts/**"],
+                "quality_gates": [],
+                "lifecycle_stage": "architecture-review",
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                   SET role='independent-reviewer',
+                       output_schema='review-result.schema.json',
+                       stage_key='architecture-review',
+                       lifecycle_stage='architecture-review',
+                       capability_profile='reviewer_readonly',
+                       required_capabilities_json=?
+                   WHERE task_id='T-FAILNODEA'""",
+                (stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),),
+            )
+
+        correction_id = FailureRouter(config, state, artifacts).route(failure_id)
+        correction = state.get_task(correction_id)
+        assert correction is not None
+        assert correction["role"] == "solution_architect"
+        assert correction["output_schema"] == "architecture-package.schema.json"
+        assert correction["capability_profile"] == "planning_readonly"
+        assert correction["supersedes_task_id"] is None
+        assert state.get_task("T-FAILNODEA")["graph_status"] == "BLOCKED_DEPENDENCY"
+        assert not any(
+            task["role"] == "path-arbiter"
+            for task in state.list_tasks("product-autonomy")
+        )
+        assert state._connection.execute(
+            "SELECT COALESCE(SUM(execution_attempts_used), 0) FROM problem_budgets"
+        ).fetchone()[0] == 0
     finally:
         state.close()
 

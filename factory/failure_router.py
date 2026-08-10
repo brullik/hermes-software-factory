@@ -1390,24 +1390,46 @@ class FailureRouter:
                     WHERE product_id=? AND root_problem_signature=?""",
                 (failed["product_id"], root_problem_signature),
             ).fetchone()
-            bounded_reviewer_gate_repair = (
+            architecture_review_failure = bool(
                 needs_replan
                 and str(failed.get("capability_profile") or "") == "reviewer_readonly"
                 and str(failure.get("failure_class") or "") in {"semantic", "policy"}
-                and budget_row is not None
-                and int(budget_row["arbiter_calls_used"] or 0) >= 1
-                and int(budget_row["execution_attempts_used"] or 0) < 2
-                and str(budget_row["status"] or "") == "ACTIVE"
-            )
-            bounded_architecture_review_repair = bool(
-                bounded_reviewer_gate_repair
                 and str(failed.get("role") or "") == "independent-reviewer"
                 and str(failed.get("lifecycle_stage") or failed.get("stage_key") or "")
                 == "architecture-review"
             )
+            semantic_budget = (
+                int(hypothesis["semantic_budget"] or 3)
+                if hypothesis is not None
+                else 3
+            )
+            # Architecture findings are corrected at their semantic source.
+            # This read-only Solution Architect loop is bounded by the
+            # hypothesis budget and must run before any Path Arbiter/Replanner
+            # path can reserve repository execution slots.
+            bounded_architecture_review_repair = bool(
+                architecture_review_failure and attempts_used < semantic_budget
+            )
+            bounded_reviewer_gate_repair = bool(
+                bounded_architecture_review_repair
+                or (
+                    needs_replan
+                    and not architecture_review_failure
+                    and str(failed.get("capability_profile") or "")
+                    == "reviewer_readonly"
+                    and str(failure.get("failure_class") or "")
+                    in {"semantic", "policy"}
+                    and budget_row is not None
+                    and int(budget_row["arbiter_calls_used"] or 0) >= 1
+                    and int(budget_row["execution_attempts_used"] or 0) < 2
+                    and str(budget_row["status"] or "") == "ACTIVE"
+                )
+            )
             actual_builder_repair = bool(
-                bounded_reviewer_gate_repair
-                and not bounded_architecture_review_repair
+                (
+                    bounded_reviewer_gate_repair
+                    and not bounded_architecture_review_repair
+                )
                 or (
                     not needs_replan
                     and str(failed.get("role") or "").replace("_", "-") == "builder"

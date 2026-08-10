@@ -46,10 +46,14 @@ def is_manifest_file(path: Path) -> bool:
 
 def main() -> int:
     files = sorted(
-        path for path in ROOT.rglob("*")
-        if path.is_file()
-        and path != OUTPUT
-        and is_manifest_file(path)
+        (
+            path
+            for path in ROOT.rglob("*")
+            if path.is_file()
+            and path != OUTPUT
+            and is_manifest_file(path)
+        ),
+        key=lambda path: path.relative_to(ROOT).as_posix(),
     )
     lines = [f"{sha256(path)}  {path.relative_to(ROOT).as_posix()}" for path in files]
     OUTPUT.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")

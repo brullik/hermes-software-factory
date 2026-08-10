@@ -221,6 +221,9 @@ def test_staging_publishes_controller_owned_candidate_and_excludes_runtime_artif
         runner = AllowlistedRunner()
         executor = make_executor(config, github, runner)
         source = workspace(root)
+        generated_build = source / "build" / "lib" / "product.py"
+        generated_build.parent.mkdir(parents=True)
+        generated_build.write_text("generated = True\n", encoding="utf-8")
 
         result = executor.execute(
             stage="staging",
@@ -243,6 +246,7 @@ def test_staging_publishes_controller_owned_candidate_and_excludes_runtime_artif
         assert not (staged / "artifacts").exists()
         assert not (staged / ".git").exists()
         assert run_git(source, "ls-tree", "-r", "--name-only", "HEAD").find("artifacts/") == -1
+        assert run_git(source, "ls-tree", "-r", "--name-only", "HEAD").find("build/") == -1
         assert any(name == "create" for name, _ in github.calls)
         assert any(call[0] == "git" and "push" in call for call in runner.calls)
         record = json.loads(

@@ -22,7 +22,6 @@ from .registry import SchemaRegistry
 from .repair_brief import normalized_repair_findings, repair_requirements
 from .repair_scope import derive_scope_required_paths
 from .replan_lineage import (
-    accepted_stage_task_id,
     architecture_source_task_id,
     implementation_lineage,
     uncovered_mandatory_goal_ids,
@@ -1130,25 +1129,20 @@ class PipelineCoordinator:
                     for node in accepted_implementation
                 }
             )
-            accepted_architecture_review = accepted_stage_task_id(
+            # An independent review is an observation of architecture, not the
+            # architecture package itself.  Every revised plan therefore gets
+            # a fresh review causally dependent on the newest accepted package;
+            # it never reuses/supersedes a reviewer task from the parent plan.
+            architecture_source = architecture_source_task_id(
                 self.state,
                 product_id,
                 parent_plan_id,
-                "architecture-review",
             )
-            if accepted_architecture_review is not None:
-                accepted_nodes["lifecycle:architecture-review"] = accepted_architecture_review
-            else:
-                architecture_source = architecture_source_task_id(
-                    self.state,
-                    product_id,
-                    parent_plan_id,
+            if architecture_source is None:
+                raise PlanContractViolation(
+                    "replan has no accepted architecture_package producer",
+                    reason_code="missing_declared_predecessor",
                 )
-                if architecture_source is None:
-                    raise PlanContractViolation(
-                        "replan has no accepted architecture_package producer",
-                        reason_code="missing_declared_predecessor",
-                    )
         compiler = PlanCompiler(policy_digest=policy_digest(self.config))
         root_problem_signature = str(task.get("root_problem_signature") or "")
         execution_budget = (
@@ -1265,7 +1259,16 @@ class PipelineCoordinator:
                 self.state,
                 self.artifacts,
             ).prepare_replanner_after_arbiter(task, output)
-            return PreparedPipelineOutcome("IMPLEMENTING", (successor,))
+            product = self.state.get_product(product_id) or {}
+            current_status = str(product.get("status") or "")
+            # A pre-plan architecture failure can invoke the arbiter while the
+            # product is still RISK_CLASSIFIED.  Advance only to the exact
+            # architecture coordinate; the Replanner's compiled plan performs
+            # the separate ARCHITECTED -> IMPLEMENTING transition.
+            return PreparedPipelineOutcome(
+                "ARCHITECTED" if current_status == "RISK_CLASSIFIED" else None,
+                (successor,),
+            )
         if role == "product-director":
             self._write_risk_assessment(product_id, output, f"evidence/{output_path.name}")
             successor = self.prepare_task(product_id, "product-analyst", dependencies=(task_id,))

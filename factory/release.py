@@ -106,6 +106,36 @@ _SHA = re.compile(r"^[a-f0-9]{40}$")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 
 
+def release_proposal_validation_view(
+    proposed: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a schema-checkable view without trusting adapter-owned facts.
+
+    The provider is asked for release intent, but it cannot know the Git commit,
+    immutable image digest, merge result, deployment state, or rollback result
+    before the side-effect adapter runs.  Those coordinates are replaced only
+    in this transient validation view.  The original proposal is still passed
+    to the adapter, and the adapter's authoritative result is validated against
+    the complete release schema and lifecycle policy afterwards.
+    """
+
+    validation_view = dict(proposed)
+    validation_view.update(
+        {
+            "candidate_sha": "0" * 40,
+            "merge": {"performed": False, "merge_sha": None},
+            "release": {
+                "version": "controller-adapter-pending",
+                "image_digest": "sha256:" + "0" * 64,
+            },
+            "staging": "not_started",
+            "production": "not_started",
+            "rollback": "not_tested",
+        }
+    )
+    return validation_view
+
+
 def validate_release_operation(
     result: Mapping[str, Any],
     *,
