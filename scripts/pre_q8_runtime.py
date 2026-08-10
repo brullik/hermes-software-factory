@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -28,7 +29,6 @@ from factory.pre_q8_runtime import (
     progress_snapshot,
 )
 from factory.pre_q8_seal import systemd_bundle_digest
-from factory.release_qualification import release_epoch_id
 
 
 class RuntimeControlError(RuntimeError):
@@ -122,6 +122,36 @@ def epoch_switch_guard(
     return {"stopped_patterns": list(_EPOCH_SERVICE_PATTERNS), "active_units": []}
 
 
+def release_epoch_from_governor(
+    governor_database: Path, *, source_commit: str, candidate_digest: str
+) -> str:
+    """Read the one real release epoch from the checkpointed governor DB."""
+
+    if (
+        not governor_database.is_absolute()
+        or not governor_database.is_file()
+        or governor_database.is_symlink()
+    ):
+        raise RuntimeControlError("Candidate release governor database is unavailable")
+    connection = sqlite3.connect(
+        f"file:{governor_database.resolve().as_posix()}?mode=ro&immutable=1",
+        uri=True,
+        timeout=20,
+    )
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        rows = connection.execute(
+            "SELECT epoch_id FROM controller_release_epochs "
+            "WHERE source_commit=? AND candidate_digest=?",
+            (source_commit, candidate_digest),
+        ).fetchall()
+    finally:
+        connection.close()
+    if len(rows) != 1 or re.fullmatch(r"RE-[A-F0-9]{24}", str(rows[0][0])) is None:
+        raise RuntimeControlError("exact Candidate release epoch is unavailable")
+    return str(rows[0][0])
+
+
 def build_identity(
     *,
     control_path: Path,
@@ -158,13 +188,10 @@ def build_identity(
         "capability_attestation_digest": sha256_file(capability_attestation),
         "fixture_seed_digest": str(fixture_manifest()["fixture_seed_digest"]),
     }
-    values["epoch_id"] = release_epoch_id(
+    values["epoch_id"] = release_epoch_from_governor(
+        Path(str(control["governor_database"])),
         source_commit=values["source_commit"],
-        controller_release_digest=values["controller_release_digest"],
         candidate_digest=values["candidate_digest"],
-        policy_digest=values["policy_digest"],
-        toolchain_manifest_digest=values["toolchain_digest"],
-        stable_release_digest=values["stable_release_digest"],
     )
     values["identity_digest"] = sha256_text(stable_json(values))
     return values

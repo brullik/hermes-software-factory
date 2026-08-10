@@ -116,6 +116,7 @@ FIXTURE_URL="$(printf '%s' "${FIXTURE_JSON}" | "${PYTHON}" -c \
   --git-tree "${GIT_TREE}" --requirements-lock-digest "${REQUIREMENTS_DIGEST}" \
   --systemd-bundle-digest "${SYSTEMD_DIGEST}" \
   --qualification-plane CONVERGENCE --run-id "${RUN_ID}" \
+  --epoch-id "${EPOCH_ID}" \
   --fixture-seed-digest "${FIXTURE_DIGEST}" \
   --matrix-digest "${MATRIX_PENDING_DIGEST}" \
   --capability-attestation-path "${ATTESTATION_PATH}" \

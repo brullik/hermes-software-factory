@@ -15,11 +15,8 @@ import yaml
 from factory.canary_qualification import load_canary_catalog
 from factory.common import sha256_text, stable_json
 from factory.config import FactoryConfig, validate_config
+from factory.functional_readiness import PRE_Q8_SCENARIOS as CANONICAL_CANARY_SCENARIOS
 from factory.pre_q8_seal import qualification_config_semantic_digest
-from factory.release_qualification import (
-    CANONICAL_CANARY_SCENARIOS,
-    release_epoch_id,
-)
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
@@ -53,6 +50,7 @@ def build_configs(
     systemd_bundle_digest: str,
     qualification_plane: str,
     run_id: str,
+    epoch_id: str,
     fixture_seed_digest: str,
     matrix_digest: str,
     capability_attestation_path: Path,
@@ -84,6 +82,7 @@ def build_configs(
         or _SHA40.fullmatch(git_tree) is None
         or qualification_plane not in _PLANES
         or _RUN_ID.fullmatch(run_id) is None
+        or re.fullmatch(r"RE-[A-F0-9]{24}", epoch_id) is None
     ):
         raise ValueError("clean canary release namespace is invalid")
     if not all(
@@ -99,14 +98,6 @@ def build_configs(
         raise ValueError("clean canary paths must be absolute")
     if first_port < 1024 or first_port + len(catalog) - 1 > 65535:
         raise ValueError("clean canary port range is invalid")
-    epoch_id = release_epoch_id(
-        source_commit=source_commit,
-        controller_release_digest=controller_release_digest,
-        candidate_digest=candidate_digest,
-        policy_digest=policy_digest,
-        toolchain_manifest_digest=toolchain_digest,
-        stable_release_digest=stable_release_digest,
-    )
     base_config_digest = sha256_text(stable_json(base))
     catalog_digest = sha256_text(
         stable_json(
@@ -269,6 +260,7 @@ def main() -> int:
     parser.add_argument("--systemd-bundle-digest", required=True)
     parser.add_argument("--qualification-plane", choices=sorted(_PLANES), required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--epoch-id", required=True)
     parser.add_argument("--fixture-seed-digest", required=True)
     parser.add_argument("--matrix-digest", required=True)
     parser.add_argument("--capability-attestation-path", type=Path, required=True)
@@ -296,6 +288,7 @@ def main() -> int:
         systemd_bundle_digest=args.systemd_bundle_digest,
         qualification_plane=args.qualification_plane,
         run_id=args.run_id,
+        epoch_id=args.epoch_id,
         fixture_seed_digest=args.fixture_seed_digest,
         matrix_digest=args.matrix_digest,
         capability_attestation_path=args.capability_attestation_path,

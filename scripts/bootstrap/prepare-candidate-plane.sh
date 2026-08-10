@@ -635,6 +635,8 @@ FIXTURE_SEED_DIGEST="$("${VERIFIER_ROOT}/venv/bin/python" -c \
 Q8_MATRIX_DIGEST="$("${VERIFIER_ROOT}/venv/bin/python" -c \
   'from factory.common import sha256_text; print(sha256_text("not-applicable:q8"))')"
 Q8_RUN_ID="q8-${SOURCE_COMMIT:0:12}"
+Q8_EPOCH_ID="RE-${SOURCE_COMMIT:0:24}"
+Q8_EPOCH_ID="${Q8_EPOCH_ID^^}"
 if [[ -z "${CANARY_EXISTING_REPOSITORY_URL}" ]]; then
   Q8_GITHUB_OWNER="$("${VERIFIER_ROOT}/venv/bin/python" -c \
     'import sys,yaml; print(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))["github"]["owner"])' \
@@ -783,6 +785,7 @@ CANARY_ATTESTATION_DIGEST="$(sha256sum "${CANARY_ATTESTATION}" | awk '{print $1}
   --systemd-bundle-digest "${SYSTEMD_BUNDLE_DIGEST}" \
   --qualification-plane Q8 \
   --run-id "${Q8_RUN_ID}" \
+  --epoch-id "${Q8_EPOCH_ID}" \
   --fixture-seed-digest "${FIXTURE_SEED_DIGEST}" \
   --matrix-digest "${Q8_MATRIX_DIGEST}" \
   --capability-attestation-path "${CANARY_ATTESTATION}" \

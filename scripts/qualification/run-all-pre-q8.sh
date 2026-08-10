@@ -116,7 +116,8 @@ if [[ -n "${1:-}" ]]; then
     --policy-digest "${POLICY_DIGEST}" --toolchain-digest "${TOOLCHAIN_DIGEST}" \
     --git-tree "${GIT_TREE}" --requirements-lock-digest "${REQUIREMENTS_DIGEST}" \
     --systemd-bundle-digest "${SYSTEMD_DIGEST}" --qualification-plane PRE_Q8 \
-    --run-id "${RUN_ID}" --fixture-seed-digest "${FIXTURE_DIGEST}" \
+    --run-id "${RUN_ID}" --epoch-id "${EPOCH_ID}" \
+    --fixture-seed-digest "${FIXTURE_DIGEST}" \
     --matrix-digest "${MATRIX_DIGEST}" \
     --capability-attestation-path "${ATTESTATION_PATH}" \
     --capability-attestation-digest "${ATTESTATION_DIGEST}" \

@@ -204,6 +204,33 @@ def test_q8_uses_config_database_path(
         )
 
 
+def test_release_epoch_is_read_from_exact_governor_identity(tmp_path: Path) -> None:
+    database = (tmp_path / "qualification.db").resolve()
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE controller_release_epochs("
+        "epoch_id TEXT,source_commit TEXT,candidate_digest TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO controller_release_epochs VALUES (?,?,?)",
+        ("RE-" + "A" * 24, "1" * 40, "2" * 64),
+    )
+    connection.commit()
+    connection.close()
+
+    assert runtime_control.release_epoch_from_governor(
+        database,
+        source_commit="1" * 40,
+        candidate_digest="2" * 64,
+    ) == "RE-" + "A" * 24
+    with pytest.raises(runtime_control.RuntimeControlError):
+        runtime_control.release_epoch_from_governor(
+            database,
+            source_commit="3" * 40,
+            candidate_digest="2" * 64,
+        )
+
+
 def test_timer_second_tick_does_not_retry_terminal_candidate() -> None:
     first_tick_after_failure = official_timer_decision("QUALIFICATION_FAILED")
     second_tick_after_failure = official_timer_decision("QUALIFICATION_FAILED")

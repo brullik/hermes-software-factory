@@ -23,7 +23,6 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .common import sha256_text, stable_json, utc_now
-from .release_qualification import CANONICAL_CANARY_SCENARIOS
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SHA40 = re.compile(r"^[a-f0-9]{40}$")
@@ -65,7 +64,18 @@ MANDATORY_Q6_5_OPERATIONS: Final[tuple[str, ...]] = (
 )
 
 
-PRE_Q8_SCENARIOS: Final[tuple[str, ...]] = CANONICAL_CANARY_SCENARIOS
+PRE_Q8_SCENARIOS: Final[tuple[str, ...]] = (
+    "zero-dependency-cli",
+    "small-python-service",
+    "telegram-bot",
+    "existing-repository-repair",
+    "high-fan-in",
+    "external-blocker-resume",
+    "provider-timeout-restart",
+    "failed-product-test-one-repair",
+    "package-only",
+    "deploy-rollback",
+)
 
 
 @dataclass(frozen=True)
