@@ -569,6 +569,11 @@ if (( ALLOW_EPOCH_SWITCH == 1 )); then
   ln -sfn "${CANDIDATE_RELEASE}" "${CANDIDATE_ROOT}/current"
 fi
 
+# The old-epoch archive above moves these roots wholesale. Recreate the
+# mount-namespace anchors before systemd can start any new PRE-Q8 unit.
+install -d -o root -g "${FUNCTIONAL_GROUP}" -m 0750 \
+  "${CONFIG_ROOT}/pre-q8" "${CONFIG_ROOT}/pre-q8-convergence"
+
 HERMES_WHEEL_DIR="$(mktemp -d)"
 trap 'rm -rf "${HERMES_WHEEL_DIR}"' EXIT
 "${CANDIDATE_ROOT}/venv/bin/python" -m pip download \

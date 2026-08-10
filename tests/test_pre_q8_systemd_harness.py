@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from scripts import pre_q8_runtime
+
+ROOT = Path(__file__).parents[1]
 
 
 class FakeSystemd:
@@ -74,3 +77,17 @@ def test_epoch_switch_accepts_drained_systemd() -> None:
 
     assert result["active_units"] == []
     assert [call[1] for call in fake.calls] == ["stop", "list-units", "list-jobs"]
+
+
+def test_epoch_switch_recreates_pre_q8_mount_roots_after_archive() -> None:
+    bootstrap = (ROOT / "scripts" / "bootstrap" / "prepare-candidate-plane.sh").read_text(
+        encoding="utf-8"
+    )
+    archive = bootstrap.index('if [[ -d "${CONFIG_ROOT}/pre-q8-convergence" ]]')
+    recreate = bootstrap.index("# The old-epoch archive above moves these roots wholesale")
+    daemon_reload = bootstrap.index("systemctl daemon-reload")
+    recreated_block = bootstrap[recreate:daemon_reload]
+
+    assert archive < recreate < daemon_reload
+    assert '"${CONFIG_ROOT}/pre-q8"' in recreated_block
+    assert '"${CONFIG_ROOT}/pre-q8-convergence"' in recreated_block
