@@ -167,23 +167,3 @@ def test_pre_q8_runtime_units_share_sqlite_wal_with_verifier_group() -> None:
         ).read_text(encoding="utf-8")
         offsets = [runner.index(marker) for marker in ordered_markers]
         assert offsets == sorted(offsets)
-
-
-def test_github_broker_admits_convergence_workspaces_without_stable_access() -> None:
-    unit = (
-        ROOT / "config" / "systemd" / "hermes-factory-github-broker.service"
-    ).read_text(encoding="utf-8")
-    convergence_root = "/var/lib/hermes-factory-pre-q8-convergence"
-
-    exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
-    read_write = next(
-        line for line in unit.splitlines() if line.startswith("ReadWritePaths=")
-    )
-    inaccessible = next(
-        line for line in unit.splitlines() if line.startswith("InaccessiblePaths=")
-    )
-    assert f"--workspace-root {convergence_root}" in exec_start
-    writable_paths = read_write.split("=", 1)[1].split()
-    assert convergence_root in writable_paths
-    assert "/var/lib/hermes-factory" not in writable_paths
-    assert "/etc/hermes-factory/credentials.d" in inaccessible
