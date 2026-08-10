@@ -108,6 +108,12 @@ def test_convergence_orchestrator_has_only_required_dac_groups() -> None:
         assert "CAP_CHOWN" not in unit
         assert "CAP_DAC_OVERRIDE" not in unit
 
+    aggregate = (
+        ROOT / "config" / "systemd" / "hermes-factory-pre-q8-convergence@.service"
+    ).read_text(encoding="utf-8")
+    assert "Wants=hermes-factory-github-broker.service" in aggregate
+    assert "Requires=hermes-factory-github-broker.service" not in aggregate
+
     runner = (
         ROOT / "scripts" / "qualification" / "run-pre-q8-convergence.sh"
     ).read_text(encoding="utf-8")

@@ -114,7 +114,7 @@ def _build_schema_registry(root: Path) -> Path:
         ],
     }
     manifest["manifest_digest"] = sha256_text(stable_json(manifest))
-    manifest_path = destination / "pre-q8-schema-registry.json"
+    manifest_path = root / f"{registry_digest}.manifest.json"
     _write_immutable(
         manifest_path,
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

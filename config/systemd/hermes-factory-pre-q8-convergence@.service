@@ -1,7 +1,7 @@
 [Unit]
 Description=Hermes all-ten PRE-Q8 convergence sweep (%i)
 After=network-online.target hermes-factory-github-broker.service
-Requires=hermes-factory-github-broker.service
+Wants=hermes-factory-github-broker.service
 
 [Service]
 Type=oneshot

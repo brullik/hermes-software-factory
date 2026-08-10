@@ -355,9 +355,15 @@ def test_generated_convergence_and_official_configs_have_same_semantics(
 
     assert task_schema["properties"]["lifecycle_stage"]["enum"] == list(STAGES)
     registry_manifest = json.loads(
-        (schema_root / "pre-q8-schema-registry.json").read_text(encoding="utf-8")
+        (schema_root.parent / f"{schema_root.name}.manifest.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert registry_manifest["registry_digest"] == schema_root.name
+    assert all(
+        "$schema" in json.loads(path.read_text(encoding="utf-8"))
+        for path in schema_root.glob("*.json")
+    )
 
 
 def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:
