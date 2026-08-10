@@ -167,3 +167,20 @@ def test_pre_q8_runtime_units_share_sqlite_wal_with_verifier_group() -> None:
         ).read_text(encoding="utf-8")
         offsets = [runner.index(marker) for marker in ordered_markers]
         assert offsets == sorted(offsets)
+
+
+def test_bootstrap_extends_broker_only_for_convergence_workspace() -> None:
+    bootstrap = (
+        ROOT / "scripts" / "bootstrap" / "prepare-candidate-plane.sh"
+    ).read_text(encoding="utf-8")
+    broker_unit = (
+        ROOT / "config" / "systemd" / "hermes-factory-github-broker.service"
+    ).read_text(encoding="utf-8")
+    convergence_root = "/var/lib/hermes-factory-pre-q8-convergence"
+
+    assert convergence_root not in broker_unit
+    assert "hermes-factory-github-broker.service.d" in bootstrap
+    assert "50-pre-q8-convergence.conf" in bootstrap
+    assert bootstrap.count(convergence_root) >= 5
+    assert "printf '[Service]\\nExecStart=\\nExecStart=%s\\nReadWritePaths=\\n" in bootstrap
+    assert "systemctl daemon-reload" in bootstrap

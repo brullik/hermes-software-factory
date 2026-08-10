@@ -884,6 +884,38 @@ for unit in \
     install -o root -g root -m 0644 "${unit_source}" "${unit_destination}"
   fi
 done
+
+# Keep the general Candidate broker unit unchanged while admitting the separate,
+# non-official convergence state root through a deterministic systemd drop-in.
+BROKER_UNIT_SOURCE="${CANDIDATE_RELEASE}/config/systemd/hermes-factory-github-broker.service"
+BROKER_DROPIN_ROOT=/etc/systemd/system/hermes-factory-github-broker.service.d
+BROKER_DROPIN_TMP="$(mktemp)"
+BROKER_EXEC_START="$(sed -n 's/^ExecStart=//p' "${BROKER_UNIT_SOURCE}")"
+BROKER_READ_WRITE="$(sed -n 's/^ReadWritePaths=//p' "${BROKER_UNIT_SOURCE}")"
+if [[ -z "${BROKER_EXEC_START}" || "${BROKER_EXEC_START}" == *$'\n'* \
+  || -z "${BROKER_READ_WRITE}" || "${BROKER_READ_WRITE}" == *$'\n'* \
+  || "${BROKER_EXEC_START}" != *"--workspace-root /var/lib/hermes-factory-functional"* \
+  || "${BROKER_READ_WRITE}" != *"/run/hermes-factory-github-broker"* ]]; then
+  printf 'Candidate GitHub broker unit cannot be safely extended for convergence\n' >&2
+  rm -f "${BROKER_DROPIN_TMP}"
+  exit 65
+fi
+BROKER_EXEC_START="$(printf '%s' "${BROKER_EXEC_START}" | sed \
+  's#--workspace-root /var/lib/hermes-factory-functional#--workspace-root /var/lib/hermes-factory-pre-q8-convergence --workspace-root /var/lib/hermes-factory-functional#')"
+BROKER_READ_WRITE="$(printf '%s' "${BROKER_READ_WRITE}" | sed \
+  's#/run/hermes-factory-github-broker#/var/lib/hermes-factory-pre-q8-convergence /run/hermes-factory-github-broker#')"
+if [[ "${BROKER_EXEC_START}" != *"--workspace-root /var/lib/hermes-factory-pre-q8-convergence"* \
+  || "${BROKER_READ_WRITE}" != *"/var/lib/hermes-factory-pre-q8-convergence"* ]]; then
+  printf 'Candidate GitHub broker convergence boundary was not rendered\n' >&2
+  rm -f "${BROKER_DROPIN_TMP}"
+  exit 65
+fi
+printf '[Service]\nExecStart=\nExecStart=%s\nReadWritePaths=\nReadWritePaths=%s\n' \
+  "${BROKER_EXEC_START}" "${BROKER_READ_WRITE}" >"${BROKER_DROPIN_TMP}"
+install -d -o root -g root -m 0755 "${BROKER_DROPIN_ROOT}"
+install -o root -g root -m 0644 "${BROKER_DROPIN_TMP}" \
+  "${BROKER_DROPIN_ROOT}/50-pre-q8-convergence.conf"
+rm -f "${BROKER_DROPIN_TMP}"
 systemctl daemon-reload
 stop_functional_candidate_services
 for reset_unit in \
