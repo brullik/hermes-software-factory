@@ -895,6 +895,14 @@ def _ledger_fixture(
         repository_owner="brullik",
         repository_name=name,
         repository_id=42,
+        repository_node_id="R_fixture",
+        expected_head_sha="a" * 40,
+        expected_default_branch="main",
+        identity_proof_mode=(
+            "FIXTURE_RECEIPT_ID_AND_HEAD_V1"
+            if product_id is None
+            else "LIVE_REPOSITORY_ID_AND_HEAD_V1"
+        ),
         expected_description=(
             f"Hermes product {product_id}"
             if product_id is not None
@@ -910,10 +918,13 @@ def _ledger_fixture(
     )
     live = {
         "id": 42,
+        "node_id": "R_fixture",
         "name": name,
         "private": True,
         "fork": False,
         "owner": {"login": "brullik"},
+        "default_branch": "main",
+        "_hermes_head_sha": "a" * 40,
         "description": entry["expected_description"],
     }
     return ledger, entry, live
@@ -1078,8 +1089,8 @@ def test_seal_rejects_cleanup_failed_entry(tmp_path: Path) -> None:
         finalize_repository_cleanup(ledger)
 
 
-def test_historical_inventory_contains_exact_39_names() -> None:
-    assert HISTORICAL_REPOSITORY_COUNT == 39
+def test_historical_inventory_contains_exact_40_names() -> None:
+    assert HISTORICAL_REPOSITORY_COUNT == 40
 
 
 def test_cli_raw_text_exact_output_contract() -> None:
