@@ -2253,6 +2253,85 @@ def test_architecture_review_failure_routes_directly_to_semantic_correction(
         state.close()
 
 
+def test_preplan_architecture_failure_routes_to_bounded_semantic_correction(
+    tmp_path: Path,
+) -> None:
+    config, state, artifacts, failure_id, _ = failed_two_node_graph(
+        tmp_path,
+        reason_code="needs_replan",
+    )
+    try:
+        failed = state.get_task("T-FAILNODEA")
+        assert failed is not None
+        contract_path = config.evidence_dir / Path(str(failed["contract_ref"])).name
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "role": "solution-architect",
+                "output_schema": "architecture-package.schema.json",
+                "capability_profile": "planning_readonly",
+                "required_capabilities": list(CAPABILITY_PROFILES["planning_readonly"]),
+                "allowed_paths": ["artifacts/**"],
+                "quality_gates": [],
+            }
+        )
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with state._lock, state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                   SET role='solution-architect',
+                       output_schema='architecture-package.schema.json',
+                       stage_key='solution-architect',
+                       lifecycle_stage=NULL,
+                       capability_profile='planning_readonly',
+                       required_capabilities_json=?
+                   WHERE task_id='T-FAILNODEA'""",
+                (stable_json(list(CAPABILITY_PROFILES["planning_readonly"])),),
+            )
+
+        correction_id = FailureRouter(config, state, artifacts).route(failure_id)
+
+        correction = state.get_task(correction_id)
+        assert correction is not None, correction_id
+        assert correction["role"] == "solution-architect"
+        assert correction["output_schema"] == "architecture-package.schema.json"
+        assert correction["stage_key"] == "repair"
+        assert correction["capability_profile"] == "planning_readonly"
+        assert correction["supersedes_task_id"] is None
+        assert json.loads(str(correction["produces_evidence_types_json"])) == [
+            "architecture_package"
+        ]
+        assert not any(
+            task["role"] == "path-arbiter" for task in state.list_tasks("product-autonomy")
+        )
+        repair_contract = json.loads(
+            (
+                config.evidence_dir / Path(str(correction["contract_ref"])).name
+            ).read_text(encoding="utf-8")
+        )
+        assert repair_contract["acceptance"][0]["criterion_id"] == (
+            "AC-PREPLAN-ARCHITECTURE-REPAIR"
+        )
+        assert repair_contract["acceptance"][1]["criterion_id"] == (
+            "AC-PREPLAN-ARCHITECTURE-PREDECESSOR"
+        )
+        assert tuple(
+            state._connection.execute(
+                "SELECT COALESCE(SUM(arbiter_calls_used),0),"
+                "COALESCE(SUM(execution_attempts_used),0) FROM problem_budgets"
+            ).fetchone()
+        ) == (0, 0)
+        decision = state._connection.execute(
+            "SELECT action,status FROM path_decisions"
+        ).fetchone()
+        assert decision is not None and tuple(decision) == ("REPAIR_NODE_VERSION", "APPLIED")
+    finally:
+        state.close()
+
+
 def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
     tmp_path: Path,
 ) -> None:

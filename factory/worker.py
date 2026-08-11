@@ -1714,6 +1714,8 @@ class AgentWorker:
         )
         evidence.extend(target_evidence)
         obligation_roles = {
+            "product-director",
+            "product-analyst",
             "solution-architect",
             "task-specifier",
             "replanner",
@@ -1744,6 +1746,8 @@ class AgentWorker:
                 }
             )
             if prompt_role in {
+                "product-director",
+                "product-analyst",
                 "solution-architect",
                 "builder",
                 "independent-reviewer",
@@ -1796,6 +1800,15 @@ class AgentWorker:
                 + "; do not omit, rename, or replace them with scenario-specific rules."
             )
         if architecture_baseline is not None:
+            if prompt_role in {"product-director", "product-analyst"}:
+                decisions.append(
+                    "The controller profile_protocol_blueprint is binding while drafting "
+                    "the Product Contract and Requirements Package. Do not introduce an "
+                    "alternative command or input interface. Every requirement, journey, "
+                    "and acceptance criterion must remain compatible with its exact "
+                    "command_shape, raw_text_protocol, exact_positional_count, "
+                    "deterministic_options, stdout/stderr, and exit-code facts."
+                )
             decisions.append(
                 "The controller architecture baseline is authoritative and immutable. "
                 "Use its exact interpreter argv, setuptools.build_meta with "

@@ -513,6 +513,65 @@ def test_same_obligations_enter_independent_review() -> None:
             state.close()
 
 
+def test_product_contract_roles_receive_binding_profile_protocol() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-terra"),
+        )
+        state = StateStore(config.database_path)
+        artifacts = ArtifactStore(config)
+        product_id = "P-BINDING-PROFILE-PROTOCOL"
+        state.create_product_v2(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            goal_text="Build a deterministic zero-dependency CLI",
+            delivery_mode="new_repository",
+            repository_url=None,
+            repository_name="binding-profile-protocol",
+            repository_visibility="private",
+            root_goal_ref=f"evidence/intake-{product_id}.json",
+            constraints_ref=None,
+            owner_defaults_ref=None,
+            idempotency_key=sha256_text(f"intake:{product_id}"),
+            rate_limit=None,
+            delivery_profile="CLI_PACKAGE",
+        )
+        pipeline = PipelineCoordinator(config, state, artifacts)
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner("{}"),
+            repository_root=ROOT,
+        )
+        try:
+            for role in ("product-director", "product-analyst"):
+                task_path = pipeline.create_task(product_id, role)
+                task_id = str(json.loads(task_path.read_text(encoding="utf-8"))["task_id"])
+                task = state.get_task(task_id)
+                assert task is not None
+                spec = worker.default_spec(task)
+                baseline = next(
+                    item
+                    for item in spec.evidence
+                    if item["type"] == "controller-architecture-baseline"
+                )
+                payload = json.loads(
+                    baseline["summary"].removeprefix("TRUSTED_CONTROLLER_EVIDENCE: ")
+                )
+                protocol = payload["profile_protocol_blueprint"]
+                assert protocol["command_shape"] == ["deterministic-cli", "run", "TEXT"]
+                assert protocol["exact_positional_count"] == 1
+                assert any(
+                    "Do not introduce an alternative command or input interface" in decision
+                    for decision in spec.decisions
+                )
+        finally:
+            state.close()
+
+
 def test_external_planning_roles_and_builder_get_binding_python_contract() -> None:
     product = {"repository_url": "https://github.com/example/service"}
     for role in ("solution-architect", "task-specifier", "replanner", "builder"):

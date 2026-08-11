@@ -885,6 +885,32 @@ class FailureRouter:
         ]
 
     @staticmethod
+    def _preplan_architecture_repair_acceptance(
+        failed_gate_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        gates = ", ".join(failed_gate_ids) or "the failed architecture contract"
+        return [
+            {
+                "criterion_id": "AC-PREPLAN-ARCHITECTURE-REPAIR",
+                "verification": (
+                    "The replacement architecture_package resolves the exact "
+                    f"required fixes for {gates} while preserving every "
+                    "controller-owned architecture baseline fact."
+                ),
+                "mandatory": True,
+            },
+            {
+                "criterion_id": "AC-PREPLAN-ARCHITECTURE-PREDECESSOR",
+                "verification": (
+                    "The replacement is fresh accepted architecture_package evidence "
+                    "that can be bound as the declared predecessor of deterministic "
+                    "plan compilation."
+                ),
+                "mandatory": True,
+            },
+        ]
+
+    @staticmethod
     def _product_replan_acceptance() -> list[dict[str, Any]]:
         """Evaluate a product replan as a bounded planning handoff."""
 
@@ -1799,6 +1825,28 @@ class FailureRouter:
                 if hypothesis is not None
                 else 3
             )
+            preplan_architecture_failure = bool(
+                architecture_context is None
+                and str(failed.get("role") or "").replace("_", "-")
+                == "solution-architect"
+                and str(failed.get("output_schema") or "")
+                == "architecture-package.schema.json"
+                and str(failed.get("capability_profile") or "") == "planning_readonly"
+                and str(failure.get("failure_class") or "") in {"semantic", "policy"}
+            )
+            if preplan_architecture_failure and attempts_used >= semantic_budget:
+                if hypothesis_id is not None:
+                    self.state._connection.execute(
+                        """UPDATE hypotheses SET status='EXHAUSTED', closed_at=?
+                             WHERE hypothesis_id=? AND status='ACTIVE'""",
+                        (failure["last_seen_at"], hypothesis_id),
+                    )
+                return self._quarantine_failure(
+                    failure=failure,
+                    failed=failed,
+                    reason_code="architecture_correction_budget_exhausted",
+                    evidence_ref=str(failure["evidence_ref"]),
+                )
             # Architecture findings are corrected at their semantic source.
             # This read-only Solution Architect loop is bounded by the
             # hypothesis budget and must run before any Path Arbiter/Replanner
@@ -1808,8 +1856,15 @@ class FailureRouter:
                 and architecture_context is not None
                 and architecture_context.semantic_attempts_used < semantic_budget
             )
-            bounded_reviewer_gate_repair = bool(
+            bounded_preplan_architecture_repair = bool(
+                preplan_architecture_failure and attempts_used < semantic_budget
+            )
+            bounded_architecture_repair = bool(
                 bounded_architecture_review_repair
+                or bounded_preplan_architecture_repair
+            )
+            bounded_reviewer_gate_repair = bool(
+                bounded_architecture_repair
                 or (
                     needs_replan
                     and not architecture_review_failure
@@ -1822,7 +1877,7 @@ class FailureRouter:
                 )
             )
             actual_builder_repair = bool(
-                (bounded_reviewer_gate_repair and not bounded_architecture_review_repair)
+                (bounded_reviewer_gate_repair and not bounded_architecture_repair)
                 or (
                     not needs_replan
                     and str(failed.get("role") or "").replace("_", "-") == "builder"
@@ -1856,22 +1911,33 @@ class FailureRouter:
                     failure=failure,
                     root_problem_signature=root_problem_signature,
                     action=path_action,
-                )
+            )
             if bounded_reviewer_gate_repair:
-                role = "solution-architect" if bounded_architecture_review_repair else "builder"
+                role = "solution-architect" if bounded_architecture_repair else "builder"
                 output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS[role]
                 capability_profile = (
                     "planning_readonly"
-                    if bounded_architecture_review_repair
+                    if bounded_architecture_repair
                     else "builder_workspace"
                 )
                 suffix = "repair"
                 objective = (
-                    "Use the bounded architecture-correction hypothesis to replace the rejected "
-                    "architecture_package. Resolve every exact architecture-review finding "
-                    "from the controller repair brief, remain read-only, preserve the root "
-                    "problem signature and require fresh independent reviewer acceptance."
-                    if bounded_architecture_review_repair
+                    (
+                        "Use the bounded architecture-correction hypothesis to replace the "
+                        "rejected architecture_package. Resolve every exact "
+                        "architecture-review finding from the controller repair brief, remain "
+                        "read-only, preserve the root problem signature and require fresh "
+                        "independent reviewer acceptance."
+                        if bounded_architecture_review_repair
+                        else (
+                            "Replace the rejected pre-plan architecture_package at its semantic "
+                            "source. Re-evaluate the reported contradiction against the binding "
+                            "controller profile protocol, preserve every controller-owned "
+                            "baseline fact, remain read-only, and produce fresh architecture "
+                            "evidence for deterministic plan compilation."
+                        )
+                    )
+                    if bounded_architecture_repair
                     else (
                         "Use the remaining bounded execution slot to repair the exact "
                         "repository-level cause of the reviewer mandatory-gate failure. "
@@ -1988,7 +2054,7 @@ class FailureRouter:
             if bounded_reviewer_gate_repair:
                 allowed_paths = (
                     ["artifacts/**"]
-                    if bounded_architecture_review_repair
+                    if bounded_architecture_repair
                     else self._reviewer_gate_repair_paths(self._failure_gate_ids(failure))
                 )
             elif role in {"replanner", "path-arbiter"}:
@@ -2005,6 +2071,10 @@ class FailureRouter:
                 contract_acceptance = (
                     self._architecture_review_repair_acceptance(self._failure_gate_ids(failure))
                     if bounded_architecture_review_repair
+                    else self._preplan_architecture_repair_acceptance(
+                        self._failure_gate_ids(failure)
+                    )
+                    if bounded_preplan_architecture_repair
                     else self._reviewer_gate_repair_acceptance(self._failure_gate_ids(failure))
                 )
             else:
@@ -2072,7 +2142,7 @@ class FailureRouter:
                     and output_schema == str(failed.get("output_schema") or "")
                 ),
                 produces_evidence_types=(
-                    ["architecture_package"] if bounded_architecture_review_repair else None
+                    ["architecture_package"] if bounded_architecture_repair else None
                 ),
             )
             repair_ref: str | None = None
