@@ -882,16 +882,10 @@ class PathGovernor:
         prior_binding = ResultBinding.from_row(prior_binding_row)
         if (
             str(prior_source.get("product_id") or "") != product_id
-            or str(prior_source.get("plan_id") or "") != plan_id
             or str(prior_source.get("role") or "").replace("_", "-") != "solution-architect"
             or str(prior_source.get("status") or "") != "DONE"
             or str(prior_source.get("graph_status") or "") != "ACCEPTED"
             or str(prior_source.get("output_schema") or "") != "architecture-package.schema.json"
-            or "architecture_package"
-            not in {
-                str(value)
-                for value in _json_array(prior_source.get("produces_evidence_types_json"))
-            }
             or int(prior_source.get("task_revision") or 0) >= int(task.get("task_revision") or 0)
             or prior_binding.semantic_node_id != str(prior_source.get("semantic_node_id") or "")
             or prior_binding.contract_digest != str(prior_source.get("contract_digest") or "")

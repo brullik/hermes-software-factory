@@ -300,6 +300,39 @@ def test_architecture_correction_does_not_require_same_semantic_node(tmp_path: P
         state.close()
 
 
+def test_architecture_correction_accepts_graph_bound_legacy_prior_plan(tmp_path: Path) -> None:
+    state, governor, prior_binding = _architecture_graph(tmp_path)
+    try:
+        correction_plan = str(state.get_task("T-ARCH-CORR")["plan_id"])
+        legacy_plan = "PLAN-LEGACY-ARCHITECTURE"
+        with state._connection:
+            state._connection.execute(
+                """INSERT INTO plans
+                   (plan_id, product_id, revision, status, plan_artifact_ref,
+                    plan_digest, goals_json, completion_criteria_json,
+                    created_by_task_id, created_at, activated_at, completed_at)
+                   VALUES (?, 'product-path-governor', 999, 'SUPERSEDED', ?, ?,
+                           '[]', '[]', 'T-ROOT0001',
+                           '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z',
+                           '2026-08-11T00:01:00Z')""",
+                (
+                    legacy_plan,
+                    f"internal://plan/{legacy_plan}",
+                    sha256_text(legacy_plan),
+                ),
+            )
+            state._connection.execute(
+                """UPDATE tasks SET plan_id=?, produces_evidence_types_json='[]'
+                     WHERE task_id='T-ARCH-PRIOR'""",
+                (legacy_plan,),
+            )
+        assert state.get_task("T-ARCH-PRIOR")["plan_id"] != correction_plan
+        proof = governor._reviewed_architecture_source_for_correction("T-ARCH-CORR")
+        assert proof is not None and proof.prior_binding_id == prior_binding
+    finally:
+        state.close()
+
+
 def test_architecture_correction_retires_exact_prior_binding(tmp_path: Path) -> None:
     state, governor, prior = _architecture_graph(tmp_path)
     try:
