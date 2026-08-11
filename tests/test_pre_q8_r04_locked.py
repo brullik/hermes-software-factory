@@ -329,6 +329,14 @@ def test_architecture_correction_accepts_graph_bound_legacy_prior_plan(tmp_path:
         assert state.get_task("T-ARCH-PRIOR")["plan_id"] != correction_plan
         proof = governor._reviewed_architecture_source_for_correction("T-ARCH-CORR")
         assert proof is not None and proof.prior_binding_id == prior_binding
+        _accept_correction(state)
+        edge = state._connection.execute(
+            """SELECT from_task_id FROM task_edges
+                 WHERE plan_id=? AND to_task_id='T-ARCH-REVIEW'
+                   AND edge_type='evidence_from' AND required=1""",
+            (correction_plan,),
+        ).fetchone()
+        assert edge is not None and edge[0] == "T-ARCH-CORR"
     finally:
         state.close()
 

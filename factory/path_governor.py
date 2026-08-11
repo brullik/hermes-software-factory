@@ -984,8 +984,8 @@ class PathGovernor:
         old_source_id = str(retired["source_task_id"])
         prior = self.connection.execute(
             """SELECT result_binding_id,status,graph_status FROM tasks
-                 WHERE task_id=? AND product_id=? AND plan_id=?""",
-            (old_source_id, str(task_row["product_id"]), str(task_row["plan_id"])),
+                 WHERE task_id=? AND product_id=?""",
+            (old_source_id, str(task_row["product_id"])),
         ).fetchone()
         if (
             prior is None
