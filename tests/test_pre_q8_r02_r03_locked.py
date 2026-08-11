@@ -964,14 +964,22 @@ def test_architecture_correction_repair_stays_in_same_hypothesis(
         assert next_correction is not None and reviewer is not None
         assert next_correction["role"] == "solution_architect"
         assert next_correction["hypothesis_id"] == first["hypothesis_id"]
-        assert next_id in json.loads(reviewer["dependencies_json"])
+        assert json.loads(reviewer["dependencies_json"]) == [next_id]
         assert state.get_task(correction_id)["graph_status"] == "FAILED_SEMANTIC"
-        edge = state._connection.execute(
-            """SELECT 1 FROM task_edges WHERE from_task_id=? AND to_task_id=?
-                 AND edge_type='revalidates' AND required=1""",
-            (next_id, graph["reviewer_id"]),
-        ).fetchone()
-        assert edge is not None
+        edges = state._connection.execute(
+            """SELECT from_task_id,required FROM task_edges WHERE to_task_id=?
+                 AND edge_type='revalidates' ORDER BY from_task_id""",
+            (graph["reviewer_id"],),
+        ).fetchall()
+        assert {str(row[0]): int(row[1]) for row in edges} == {
+            correction_id: 0,
+            next_id: 1,
+        }
+        graph["correction_id"] = next_id
+        _commit_architecture_correction(graph)
+        reviewer = state.get_task(str(graph["reviewer_id"]))
+        assert reviewer is not None
+        assert (reviewer["status"], reviewer["graph_status"]) == ("PENDING", "READY")
     finally:
         state.close()
 

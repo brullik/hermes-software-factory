@@ -2224,14 +2224,52 @@ class FailureRouter:
                     dependencies = json.loads(str(reviewer_task.get("dependencies_json") or "[]"))
                     if not isinstance(dependencies, list):
                         raise TypeError("architecture reviewer dependencies are invalid")
+                    prior_revalidation_task_ids = [
+                        str(row[0])
+                        for row in self.state._connection.execute(
+                            """SELECT DISTINCT edge.from_task_id
+                                 FROM task_edges AS edge
+                                 JOIN tasks AS upstream
+                                   ON upstream.task_id=edge.from_task_id
+                                WHERE edge.plan_id=? AND edge.to_task_id=?
+                                  AND edge.edge_type!='evidence_from'
+                                  AND edge.required=1 AND edge.from_task_id!=?
+                                  AND REPLACE(upstream.role,'_','-')='solution-architect'
+                                  AND upstream.stage_key='repair'
+                                ORDER BY edge.from_task_id""",
+                            (
+                                str(contract["plan_id"]),
+                                str(reviewer_task["task_id"]),
+                                str(contract["task_id"]),
+                            ),
+                        ).fetchall()
+                    ]
+                    prior_revalidation_ids = set(prior_revalidation_task_ids)
                     dependencies = list(
                         dict.fromkeys(
                             [
-                                *[str(value) for value in dependencies],
+                                *[
+                                    str(value)
+                                    for value in dependencies
+                                    if str(value) not in prior_revalidation_ids
+                                ],
                                 str(contract["task_id"]),
                             ]
                         )
                     )
+                    if prior_revalidation_task_ids:
+                        placeholders = ",".join("?" for _ in prior_revalidation_task_ids)
+                        self.state._connection.execute(
+                            f"""UPDATE task_edges SET required=0
+                                  WHERE plan_id=? AND to_task_id=?
+                                    AND edge_type!='evidence_from' AND required=1
+                                    AND from_task_id IN ({placeholders})""",
+                            (
+                                str(contract["plan_id"]),
+                                str(reviewer_task["task_id"]),
+                                *prior_revalidation_task_ids,
+                            ),
+                        )
                     self.state._connection.execute(
                         """UPDATE tasks
                               SET status='PENDING', graph_status='BLOCKED_DEPENDENCY',
@@ -2274,6 +2312,7 @@ class FailureRouter:
                         {
                             "architecture_repair_task_id": str(contract["task_id"]),
                             "fresh_reviewer_acceptance_required": True,
+                            "superseded_revalidation_task_ids": prior_revalidation_task_ids,
                         },
                     )
             with self.state._lock, self.state._connection:
