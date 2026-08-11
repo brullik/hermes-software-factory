@@ -976,6 +976,73 @@ def test_architecture_correction_repair_stays_in_same_hypothesis(
         state.close()
 
 
+def test_reviewer_routes_second_architecture_correction_above_reviewed_revision(
+    tmp_path: Path,
+) -> None:
+    graph = _architecture_graph(tmp_path)
+    state: StateStore = graph["state"]
+    try:
+        _commit_architecture_correction(graph)
+        reviewer_id = str(graph["reviewer_id"])
+        reviewer = state.get_task(reviewer_id)
+        assert reviewer is not None
+        with state._connection:
+            state._connection.execute(
+                """UPDATE tasks
+                      SET status='PENDING', graph_status='READY', blocked_reason=NULL,
+                          blocked_ref=NULL
+                    WHERE task_id=?""",
+                (reviewer_id,),
+            )
+        claimed = state.claim_task(worker_id="architecture-reviewer-worker")
+        assert claimed is not None and claimed["task_id"] == reviewer_id
+        attempt_id = "attempt-second-architecture-review"
+        state.record_attempt(
+            attempt_id=attempt_id,
+            task_id=reviewer_id,
+            tier="terra",
+            attempt_kind="initial",
+            prompt_digest=sha256_text("prompt:second-architecture-review"),
+            status="started",
+            semantic_counted=True,
+        )
+        failure = FailureData(
+            failure_class="semantic",
+            reason_code="model_requested_repair",
+            safe_message="The reviewed replacement architecture needs one exact correction.",
+            evidence_ref="internal://second-architecture-review",
+            expected={"architecture_review": "accepted"},
+            actual={"required_fixes": ["Correct the remaining architecture finding."]},
+            failed_gate_ids=("architecture-review",),
+        )
+        committed = state.commit_task_outcome(
+            TaskOutcome(
+                task_id=reviewer_id,
+                worker_id="architecture-reviewer-worker",
+                lease_token=str(claimed["lease_token"]),
+                expected_task_revision=int(claimed["task_revision"]),
+                idempotency_key=sha256_text("outcome:second-architecture-review"),
+                result_ref="internal://second-architecture-review",
+                result_digest=sha256_text("second-architecture-review"),
+                status="FAILED_SEMANTIC",
+                attempt_id=attempt_id,
+                attempt_status="repair_required",
+                failure=failure,
+            )
+        )
+        assert committed.failure_id is not None
+        next_id = graph["router"].route(committed.failure_id)
+        next_correction = state.get_task(next_id)
+        first_correction = state.get_task(str(graph["correction_id"]))
+        assert next_correction is not None and first_correction is not None
+        assert int(next_correction["task_revision"]) == int(
+            first_correction["task_revision"]
+        ) + 1
+        assert next_correction["role"] == "solution_architect"
+    finally:
+        state.close()
+
+
 def test_architecture_correction_transport_retry_costs_zero_semantic_attempts(
     tmp_path: Path,
 ) -> None:

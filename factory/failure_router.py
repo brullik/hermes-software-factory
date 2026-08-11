@@ -195,6 +195,35 @@ class FailureRouter:
             semantic_attempts_used=semantic_attempts,
         )
 
+    def _architecture_correction_revision(
+        self,
+        failed: Mapping[str, Any],
+        context: ArchitectureCorrectionContext,
+    ) -> int:
+        """Allocate a revision newer than the exact architecture under review."""
+
+        rows = self.state._connection.execute(
+            """SELECT source.task_revision
+                 FROM task_edges AS edge
+                 JOIN tasks AS source ON source.task_id=edge.from_task_id
+                WHERE edge.to_task_id=?
+                  AND edge.edge_type='evidence_from' AND edge.required=1
+                  AND source.product_id=?
+                  AND replace(source.role, '_', '-')='solution-architect'
+                ORDER BY edge.created_at DESC, source.task_id""",
+            (
+                context.reviewer_task_id,
+                str(failed.get("product_id") or ""),
+            ),
+        ).fetchall()
+        reviewed_revisions = [int(row["task_revision"] or 0) for row in rows]
+        return max(
+            [
+                int(failed.get("task_revision") or 1) + 1,
+                *(revision + 1 for revision in reviewed_revisions),
+            ]
+        )
+
     def _causal_scope_evidence(
         self,
         failure: dict[str, Any],
@@ -2008,7 +2037,15 @@ class FailureRouter:
                 capability_profile=capability_profile,
                 objective=objective,
                 allowed_paths=allowed_paths,
-                task_revision=int(failed.get("task_revision") or 1) + 1,
+                task_revision=(
+                    self._architecture_correction_revision(
+                        failed,
+                        architecture_context,
+                    )
+                    if bounded_architecture_review_repair
+                    and architecture_context is not None
+                    else int(failed.get("task_revision") or 1) + 1
+                ),
                 node_suffix=suffix,
                 acceptance=contract_acceptance,
                 required_capabilities=(
