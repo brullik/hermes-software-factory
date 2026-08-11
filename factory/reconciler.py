@@ -1196,6 +1196,20 @@ class PipelineReconciler:
             )
         return self.failure_router.route(failure_id)
 
+    def _has_terminal_controller_incident(self, product_id: str) -> bool:
+        """Return whether a primary controller incident already ended the product."""
+
+        row = self.state._connection.execute(
+            """SELECT product.status
+                 FROM controller_incidents AS incident
+                 JOIN products AS product ON product.product_id=incident.product_id
+                WHERE incident.product_id=? AND incident.status='OPEN'
+                  AND product.status IN ('CANCELLED','COMPLETED','FAILED_SAFE')
+                ORDER BY incident.created_at DESC LIMIT 1""",
+            (product_id,),
+        ).fetchone()
+        return row is not None
+
     def _materialize_candidate_snapshot(self, product_id: str) -> bool:
         """Complete a ready controller-only fan-in task without an agent call."""
 
@@ -1419,6 +1433,12 @@ class PipelineReconciler:
             )
             if completion.completed:
                 return "completed"
+            refreshed = self.state.get_product(product_id)
+            if (
+                refreshed is not None
+                and str(refreshed.get("status") or "") in _TERMINAL_PRODUCTS
+            ) or self._has_terminal_controller_incident(product_id):
+                return "incident"
             routed_task_id = self._route_liveness_violation(
                 product,
                 plans,

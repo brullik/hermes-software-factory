@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brullik.github.io/hermes-software-factory/schemas/architecture-baseline.schema.json",
+  "title": "Controller Architecture Baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "product_id",
+    "interpreter",
+    "requirements_lock_sha256",
+    "distributions",
+    "commands",
+    "pyproject",
+    "license",
+    "readme_checklist",
+    "profile_protocol_blueprint",
+    "fault_lifecycle_blueprint",
+    "obligation_set_digest",
+    "toolchain_manifest_digest",
+    "baseline_digest"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "artifact_id": {"type": "string", "pattern": "^architecture-baseline-[a-f0-9]{24}$"},
+    "product_id": {"type": "string", "minLength": 1},
+    "interpreter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "version", "binary_sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "binary_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "requirements_lock_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "distributions": {"type": "array", "minItems": 5, "items": {"type": "object"}},
+    "commands": {"type": "object"},
+    "pyproject": {"type": "object"},
+    "license": {"type": "object"},
+    "readme_checklist": {"type": "array", "items": {"type": "string"}},
+    "profile_protocol_blueprint": {"type": "object"},
+    "fault_lifecycle_blueprint": {"type": "object"},
+    "obligation_set_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "toolchain_manifest_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "baseline_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

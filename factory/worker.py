@@ -28,6 +28,10 @@ from scripts.prompt_compiler import (
     redact_secret_candidates,
 )
 
+from .architecture_baseline import (
+    ArchitectureBaselineToolchainMismatch,
+    build_architecture_baseline,
+)
 from .artifacts import ArtifactConflictError, ArtifactStore, artifact_metadata
 from .attempts import Attempt, AttemptManager, IdenticalAttemptError
 from .autonomy import (
@@ -62,7 +66,12 @@ from .policy import policy_digest
 from .prompting import PromptCompiler
 from .proof_obligations import SideEffectProtocol
 from .providers import ExternalBlocker, ModelSelection, ProviderRegistry
-from .quality import QualityGateEngine, QualityGateRun, UnknownQualityGatesError
+from .quality import (
+    ControllerContainerScanHelperInvalid,
+    QualityGateEngine,
+    QualityGateRun,
+    UnknownQualityGatesError,
+)
 from .recovery_directive import build_scope_recovery_directive
 from .registry import SchemaRegistry
 from .release import (
@@ -1088,6 +1097,16 @@ def _incident_recovery_has_bounded_handoff(
 
 
 def _workspace_snapshot(root: Path) -> dict[str, str]:
+    def disposable(relative_path: Path) -> bool:
+        return bool(
+            any(part == "__pycache__" for part in relative_path.parts)
+            or relative_path.suffix in {".pyc", ".pyo"}
+            or relative_path.parts
+            and relative_path.parts[0]
+            in {".pytest_cache", ".ruff_cache", "build", "dist"}
+            or any(part.endswith(".egg-info") for part in relative_path.parts)
+        )
+
     repository_marker = root / ".git"
     if repository_marker.exists():
         resolved_root = root.resolve()
@@ -1155,8 +1174,7 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
             # source nor release candidates.  Tracked files at these paths are
             # still inventoried and scope-checked exactly.
             if relative not in tracked_paths and (
-                relative_path.parts[0] in {"build", "dist"}
-                or any(part.endswith(".egg-info") for part in relative_path.parts)
+                disposable(relative_path)
             ):
                 continue
             if path.is_symlink():
@@ -1175,6 +1193,8 @@ def _workspace_snapshot(root: Path) -> dict[str, str]:
             continue
         relative = path.relative_to(root).as_posix()
         if ".git" in Path(relative).parts:
+            continue
+        if disposable(Path(relative)):
             continue
         if path.is_symlink():
             fallback_snapshot[relative] = f"SYMLINK:{path.resolve()}"
@@ -1736,10 +1756,12 @@ class AgentWorker:
             "solution-architect",
             "task-specifier",
             "replanner",
+            "builder",
             "independent-reviewer",
             "security-reviewer",
         }
         obligation_set = None
+        architecture_baseline = None
         if prompt_role in obligation_roles:
             qualification = self.config.raw.get("qualification", {})
             declared_faults = (
@@ -1763,6 +1785,38 @@ class AgentWorker:
                     ),
                 }
             )
+            if prompt_role in {
+                "solution-architect",
+                "builder",
+                "independent-reviewer",
+            }:
+                architecture_baseline = build_architecture_baseline(
+                    self.config,
+                    product,
+                    contract,
+                    obligation_set,
+                )
+                baseline_artifact = architecture_baseline.as_artifact(
+                    str(task["product_id"])
+                )
+                baseline_path = self.artifacts.write(
+                    "architecture-baseline.schema.json",
+                    baseline_artifact,
+                    filename=(
+                        "architecture-baseline-"
+                        f"{architecture_baseline.baseline_digest[:24]}.json"
+                    ),
+                )
+                evidence.append(
+                    {
+                        "type": "controller-architecture-baseline",
+                        "summary": (
+                            "TRUSTED_CONTROLLER_EVIDENCE: "
+                            + stable_json(architecture_baseline.as_dict())
+                        ),
+                        "artifact_ref": f"evidence/{baseline_path.name}",
+                    }
+                )
         if prompt_role == "solution-architect":
             capacity_snapshot = _host_capacity_snapshot(self.config)
             capacity_payload = stable_json(capacity_snapshot)
@@ -1788,6 +1842,22 @@ class AgentWorker:
                 + ",".join(obligation_set.obligation_ids)
                 + "; do not omit, rename, or replace them with scenario-specific rules."
             )
+        if architecture_baseline is not None:
+            decisions.append(
+                "The controller architecture baseline is authoritative and immutable. "
+                "Use its exact interpreter argv, setuptools.build_meta with "
+                "setuptools==83.0.0, empty default dependencies, private qualification "
+                "license, README checklist, profile protocol, fault lifecycle and Ed25519 "
+                "release contract. Do not select Hatchling, OpenPGP, an unbounded "
+                "setuptools requirement, another interpreter, or another license."
+            )
+            if prompt_role == "independent-reviewer":
+                decisions.append(
+                    "Treat controller-owned package, toolchain, signing and license choices "
+                    "as satisfied by the verified architecture baseline. Review product "
+                    "semantics and reject only drift from those exact baseline facts; do not "
+                    "ask the model to reselect them."
+                )
         if prompt_role == "builder":
             decisions.append(
                 "Controller-owned target quality gates are authoritative. Do not invent a "
@@ -3868,6 +3938,10 @@ class AgentWorker:
 
     @staticmethod
     def _exception_reason_code(error: BaseException) -> str:
+        if isinstance(error, ArchitectureBaselineToolchainMismatch):
+            return "architecture_baseline_toolchain_mismatch"
+        if isinstance(error, ControllerContainerScanHelperInvalid):
+            return "controller_container_scan_helper_invalid"
         if isinstance(error, PlanContractViolation):
             return error.reason_code
         if isinstance(error, ActiveResultBindingConflictError):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +17,10 @@ from .failure_catalog import FailureAction, failure_disposition
 from .path_governor import (
     PathGovernor,
     execution_slot_cost,
+    semantic_node_id,
     stable_root_problem_signature,
     supersession_is_compatible,
+    task_contract_digest,
 )
 from .plan_semantics import PlanContractViolation
 from .policy import policy_digest
@@ -60,6 +64,14 @@ class ContractIntegrityError(RuntimeError):
     """The exact immutable task contract is absent, invalid, or mismatched."""
 
 
+@dataclass(frozen=True)
+class ArchitectureCorrectionContext:
+    reviewer_task_id: str
+    hypothesis_id: str | None
+    semantic_attempts_used: int
+    semantic_budget: int = 3
+
+
 class FailureRouter:
     def __init__(
         self,
@@ -71,6 +83,130 @@ class FailureRouter:
         self.state = state
         self.artifacts = artifacts or ArtifactStore(config)
         self.schemas = SchemaRegistry(config, self.artifacts)
+
+    def _architecture_correction_context(
+        self,
+        failed: Mapping[str, Any],
+        failure: Mapping[str, Any],
+    ) -> ArchitectureCorrectionContext | None:
+        """Resolve one bounded architecture-review correction hypothesis."""
+
+        product_id = str(failed.get("product_id") or "")
+        normalized_role = str(failed.get("role") or "").replace("_", "-")
+        stage = str(failed.get("lifecycle_stage") or failed.get("stage_key") or "")
+        reviewer: dict[str, Any] | None = None
+        hypothesis_id = str(failed.get("hypothesis_id") or "") or None
+        if normalized_role == "independent-reviewer" and stage == "architecture-review":
+            if str(failure.get("failure_class") or "") not in {"semantic", "policy"}:
+                return None
+            reviewer = dict(failed)
+            if hypothesis_id is None:
+                sources = self.state._connection.execute(
+                    """SELECT source.hypothesis_id
+                         FROM task_edges AS edge
+                         JOIN tasks AS source ON source.task_id=edge.from_task_id
+                        WHERE edge.plan_id=? AND edge.to_task_id=?
+                          AND edge.edge_type='evidence_from' AND edge.required=1
+                          AND replace(source.role, '_', '-')='solution-architect'
+                          AND source.stage_key='repair'
+                        ORDER BY edge.created_at DESC, source.task_id""",
+                    (
+                        str(failed.get("plan_id") or ""),
+                        str(failed.get("task_id") or ""),
+                    ),
+                ).fetchall()
+                inherited = {
+                    str(row[0]) for row in sources if str(row[0] or "")
+                }
+                if len(inherited) > 1:
+                    raise ContractIntegrityError(
+                        "architecture reviewer has ambiguous correction hypotheses"
+                    )
+                hypothesis_id = next(iter(inherited), None)
+        elif normalized_role == "solution-architect" and str(
+            failed.get("stage_key") or ""
+        ) == "repair":
+            if (
+                str(failed.get("capability_profile") or "") != "planning_readonly"
+                or str(failed.get("output_schema") or "")
+                != "architecture-package.schema.json"
+                or str(failure.get("reason_code") or "")
+                not in {
+                    "model_requested_repair",
+                    "schema_validation",
+                    "malformed_transport",
+                }
+            ):
+                return None
+            current = dict(failed)
+            visited: set[str] = set()
+            for _depth in range(12):
+                parent_id = str(current.get("parent_task_id") or "")
+                if not parent_id or parent_id in visited:
+                    break
+                visited.add(parent_id)
+                parent_row = self.state._connection.execute(
+                    "SELECT * FROM tasks WHERE task_id=? AND product_id=?",
+                    (parent_id, product_id),
+                ).fetchone()
+                if parent_row is None:
+                    break
+                parent = dict(parent_row)
+                parent_role = str(parent.get("role") or "").replace("_", "-")
+                parent_stage = str(
+                    parent.get("lifecycle_stage")
+                    or parent.get("stage_key")
+                    or ""
+                )
+                if (
+                    parent_role == "independent-reviewer"
+                    and parent_stage == "architecture-review"
+                ):
+                    reviewer = parent
+                    hypothesis_id = (
+                        hypothesis_id
+                        or str(parent.get("hypothesis_id") or "")
+                        or None
+                    )
+                    break
+                if parent_role != "solution-architect" or str(
+                    parent.get("stage_key") or ""
+                ) != "repair":
+                    break
+                current = parent
+        else:
+            return None
+        if reviewer is None:
+            return None
+
+        semantic_attempts = 0
+        if hypothesis_id:
+            rows = self.state._connection.execute(
+                """SELECT task.task_id, task.graph_status,
+                          GROUP_CONCAT(failure.reason_code) AS reasons
+                     FROM tasks AS task
+                     LEFT JOIN failures AS failure
+                       ON failure.task_id=task.task_id
+                    WHERE task.product_id=? AND task.hypothesis_id=?
+                      AND replace(task.role, '_', '-')='solution-architect'
+                      AND task.stage_key='repair'
+                    GROUP BY task.task_id, task.graph_status""",
+                (product_id, hypothesis_id),
+            ).fetchall()
+            for row in rows:
+                graph_status = str(row["graph_status"] or "")
+                reasons = {
+                    value for value in str(row["reasons"] or "").split(",") if value
+                }
+                if graph_status in {"ACCEPTED", "SUPERSEDED"} or (
+                    "model_requested_repair" in reasons
+                ):
+                    semantic_attempts += 1
+        return ArchitectureCorrectionContext(
+            reviewer_task_id=str(reviewer["task_id"]),
+            hypothesis_id=hypothesis_id,
+            semantic_attempts_used=semantic_attempts,
+        )
 
     def _causal_scope_evidence(
         self,
@@ -149,6 +285,7 @@ class FailureRouter:
                     "reason_code": item.get("reason_code"),
                     "semantic_node_key": (
                         source_task.get("semantic_node_key")
+                        or source_task.get("plan_node_id")
                         or source_task.get("semantic_node_id")
                     ),
                     "lifecycle_stage": source_task.get("lifecycle_stage"),
@@ -248,6 +385,7 @@ class FailureRouter:
                 "reason_code": chosen.get("reason_code"),
                 "semantic_node_key": (
                     source_task.get("semantic_node_key")
+                    or source_task.get("plan_node_id")
                     or source_task.get("semantic_node_id")
                 ),
                 "lifecycle_stage": source_task.get("lifecycle_stage"),
@@ -750,6 +888,21 @@ class FailureRouter:
             if role in {"replanner", "path-arbiter"}
             else None
         )
+        same_role_repair = bool(
+            node_suffix == "repair"
+            and str(failed.get("role") or "").replace("_", "-")
+            == role.replace("_", "-")
+        )
+        source_contract = self._contract(failed) if same_role_repair else None
+        if source_contract is not None:
+            semantic_node_key = str(
+                source_contract.get("semantic_node_key")
+                or source_contract.get("plan_node_id")
+                or source_contract.get("stage_key")
+                or failed.get("semantic_node_key")
+                or failed.get("semantic_node_id")
+                or failed["task_id"]
+            )
         contract = {
             "schema_version": "2.0",
             "artifact_id": f"task-contract-{task_id}",
@@ -808,12 +961,34 @@ class FailureRouter:
             "critical_path_rank": 0,
             "quality_gates": list(quality_gates or []),
         }
+        if source_contract is not None:
+            for field in ("lifecycle_stage", "review_kind", "evidence_profile"):
+                if field in source_contract:
+                    contract[field] = source_contract[field]
+            for field in (
+                "consumes_evidence_types",
+                "produces_evidence_types",
+                "completion_obligation_ids",
+                "goal_ids",
+            ):
+                contract[field] = list(source_contract.get(field, []))
+            contract["production_side_effects"] = bool(
+                source_contract.get("production_side_effects", False)
+            )
         if supersede_failed:
             for field in ("lifecycle_stage", "review_kind", "evidence_profile"):
                 value = failed.get(field)
                 if value is not None and (field == "review_kind" or str(value)):
                     contract[field] = value
-            if not supersession_is_compatible(failed, contract):
+            compatibility_source = dict(failed)
+            if source_contract is not None and not compatibility_source.get(
+                "semantic_node_key"
+            ):
+                # Pre-projection tasks may carry only their derived node ID in
+                # the durable row.  Their immutable contract still owns the
+                # semantic key, so compare against that exact source fact.
+                compatibility_source["semantic_node_key"] = semantic_node_key
+            if not supersession_is_compatible(compatibility_source, contract):
                 raise PlanContractViolation(
                     "cross-role supersession is incompatible with the source task contract",
                     reason_code="cross_role_supersession_invalid",
@@ -827,6 +1002,121 @@ class FailureRouter:
             filename=f"task-{task_id}.json",
         )
         return contract, path
+
+    def _persist_routed_task_contract(
+        self,
+        task_id: str,
+        contract: Mapping[str, Any],
+        durable_role: str,
+    ) -> dict[str, Any]:
+        """Atomically project one immutable routed contract into its task row."""
+
+        canonical_role = str(contract.get("role") or "")
+        normalized_contract_role = canonical_role.replace("_", "-")
+        normalized_durable_role = durable_role.replace("_", "-")
+        if normalized_contract_role != normalized_durable_role or (
+            durable_role != canonical_role
+            and not (
+                canonical_role == "solution-architect"
+                and durable_role == "solution_architect"
+            )
+        ):
+            raise ContractIntegrityError("routed durable role conflicts with contract")
+        digest = task_contract_digest(contract)
+        node_id = semantic_node_id(contract, digest)
+        projection: dict[str, Any] = {
+            "lifecycle_stage": contract.get("lifecycle_stage"),
+            "review_kind": contract.get("review_kind"),
+            "evidence_profile": contract.get("evidence_profile"),
+            "consumes_evidence_types_json": stable_json(
+                list(contract.get("consumes_evidence_types", []))
+            ),
+            "produces_evidence_types_json": stable_json(
+                list(contract.get("produces_evidence_types", []))
+            ),
+            "completion_obligation_ids_json": stable_json(
+                list(contract.get("completion_obligation_ids", []))
+            ),
+            "goal_ids_json": stable_json(list(contract.get("goal_ids", []))),
+            "semantic_node_key": contract.get("semantic_node_key"),
+            "production_side_effects": int(
+                bool(contract.get("production_side_effects", False))
+            ),
+            "contract_digest": digest,
+            "semantic_node_id": node_id,
+        }
+        with self.state._lock, self.state._connection:
+            row = self.state._connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise ContractIntegrityError("routed task is missing before projection")
+            current = dict(row)
+            if (
+                str(current.get("product_id") or "")
+                != str(contract.get("product_id") or "")
+                or str(current.get("role") or "") != durable_role
+                or str(current.get("output_schema") or "")
+                != str(contract.get("output_schema") or "")
+                or str(current.get("contract_ref") or "")
+                != f"evidence/task-{task_id}.json"
+            ):
+                raise ContractIntegrityError(
+                    "routed task identity conflicts before contract projection"
+                )
+            persisted_digest = str(current.get("contract_digest") or "")
+            persisted_node = str(current.get("semantic_node_id") or "")
+            if bool(persisted_digest) != bool(persisted_node):
+                raise ContractIntegrityError(
+                    "routed task has a partial semantic projection"
+                )
+            if persisted_digest:
+                if persisted_digest != digest or persisted_node != node_id:
+                    raise ContractIntegrityError(
+                        "routed task semantic projection conflicts"
+                    )
+                for field, expected in projection.items():
+                    actual = current.get(field)
+                    if actual != expected:
+                        raise ContractIntegrityError(
+                            f"routed task projection conflicts for {field}"
+                        )
+                return current
+            self.state._connection.execute(
+                """UPDATE tasks
+                      SET lifecycle_stage=?, review_kind=?, evidence_profile=?,
+                          consumes_evidence_types_json=?,
+                          produces_evidence_types_json=?,
+                          completion_obligation_ids_json=?, goal_ids_json=?,
+                          semantic_node_key=?, production_side_effects=?,
+                          contract_digest=?, semantic_node_id=?, updated_at=updated_at
+                    WHERE task_id=?""",
+                (
+                    projection["lifecycle_stage"],
+                    projection["review_kind"],
+                    projection["evidence_profile"],
+                    projection["consumes_evidence_types_json"],
+                    projection["produces_evidence_types_json"],
+                    projection["completion_obligation_ids_json"],
+                    projection["goal_ids_json"],
+                    projection["semantic_node_key"],
+                    projection["production_side_effects"],
+                    digest,
+                    node_id,
+                    task_id,
+                ),
+            )
+            persisted = self.state._connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if persisted is None:
+                raise ContractIntegrityError("routed task disappeared after projection")
+            result = dict(persisted)
+            if any(result.get(field) != expected for field, expected in projection.items()):
+                raise ContractIntegrityError(
+                    "routed task exact contract projection did not persist"
+                )
+            return result
 
     def prepare_replanner_after_arbiter(
         self,
@@ -1309,12 +1599,24 @@ class FailureRouter:
             hypothesis = None
             hypothesis_id: str | None = None
             attempts_used = 0
+            architecture_context = self._architecture_correction_context(
+                failed,
+                failure,
+            )
             diagnosis_reassessment = str(failed.get("stage_key") or "") == "diagnosis-reassessment"
             same_role_problem_count = self._same_role_problem_count(
                 dict(failure),
                 dict(failed),
             )
-            inherited_hypothesis_id = str(failed.get("hypothesis_id") or "")
+            inherited_hypothesis_id = str(
+                (
+                    architecture_context.hypothesis_id
+                    if architecture_context is not None
+                    else None
+                )
+                or failed.get("hypothesis_id")
+                or ""
+            )
             if inherited_hypothesis_id:
                 hypothesis = self.state._connection.execute(
                     """SELECT * FROM hypotheses
@@ -1358,6 +1660,28 @@ class FailureRouter:
             else:
                 hypothesis_id = str(hypothesis["hypothesis_id"])
                 attempts_used = int(hypothesis["attempts_used"] or 0)
+            failed["hypothesis_id"] = hypothesis_id
+            architecture_context = self._architecture_correction_context(
+                failed,
+                failure,
+            )
+            if (
+                architecture_context is not None
+                and architecture_context.semantic_attempts_used
+                >= architecture_context.semantic_budget
+            ):
+                if hypothesis_id is not None:
+                    self.state._connection.execute(
+                        """UPDATE hypotheses SET status='EXHAUSTED', closed_at=?
+                             WHERE hypothesis_id=? AND status='ACTIVE'""",
+                        (failure["last_seen_at"], hypothesis_id),
+                    )
+                return self._quarantine_failure(
+                    failure=failure,
+                    failed=failed,
+                    reason_code="architecture_correction_budget_exhausted",
+                    evidence_ref=str(failure["evidence_ref"]),
+                )
             reassessment_threshold = 3
             repeated_problem_requires_reassessment = (
                 same_role_problem_count >= reassessment_threshold
@@ -1390,16 +1714,11 @@ class FailureRouter:
                     WHERE product_id=? AND root_problem_signature=?""",
                 (failed["product_id"], root_problem_signature),
             ).fetchone()
-            architecture_review_failure = bool(
-                needs_replan
-                and str(failed.get("capability_profile") or "") == "reviewer_readonly"
-                and str(failure.get("failure_class") or "") in {"semantic", "policy"}
-                and str(failed.get("role") or "") == "independent-reviewer"
-                and str(failed.get("lifecycle_stage") or failed.get("stage_key") or "")
-                == "architecture-review"
-            )
+            architecture_review_failure = architecture_context is not None
             semantic_budget = (
-                int(hypothesis["semantic_budget"] or 3)
+                architecture_context.semantic_budget
+                if architecture_context is not None
+                else int(hypothesis["semantic_budget"] or 3)
                 if hypothesis is not None
                 else 3
             )
@@ -1408,7 +1727,9 @@ class FailureRouter:
             # hypothesis budget and must run before any Path Arbiter/Replanner
             # path can reserve repository execution slots.
             bounded_architecture_review_repair = bool(
-                architecture_review_failure and attempts_used < semantic_budget
+                architecture_review_failure
+                and architecture_context is not None
+                and architecture_context.semantic_attempts_used < semantic_budget
             )
             bounded_reviewer_gate_repair = bool(
                 bounded_architecture_review_repair
@@ -1791,9 +2112,11 @@ class FailureRouter:
                 required_capabilities=[str(value) for value in contract["required_capabilities"]],
                 graph_status="READY",
             )
-            new_routed_task = self.state.get_task(str(contract["task_id"]))
-            if new_routed_task is None:
-                raise RuntimeError("routed task disappeared before budget reservation")
+            new_routed_task = self._persist_routed_task_contract(
+                str(contract["task_id"]),
+                contract,
+                durable_role,
+            )
             if execution_slot_cost(new_routed_task) == 1:
                 governor = PathGovernor(
                     self.state._connection,
@@ -1833,8 +2156,16 @@ class FailureRouter:
                     )
             if bounded_architecture_review_repair:
                 with self.state._lock, self.state._connection:
+                    assert architecture_context is not None
+                    reviewer_task = self.state.get_task(
+                        architecture_context.reviewer_task_id
+                    )
+                    if reviewer_task is None:
+                        raise ContractIntegrityError(
+                            "architecture correction reviewer disappeared"
+                        )
                     dependencies = json.loads(
-                        str(failed.get("dependencies_json") or "[]")
+                        str(reviewer_task.get("dependencies_json") or "[]")
                     )
                     if not isinstance(dependencies, list):
                         raise TypeError("architecture reviewer dependencies are invalid")
@@ -1849,7 +2180,7 @@ class FailureRouter:
                     self.state._connection.execute(
                         """UPDATE tasks
                               SET status='PENDING', graph_status='BLOCKED_DEPENDENCY',
-                                  dependencies_json=?, failure_id=NULL, hypothesis_id=NULL,
+                                  dependencies_json=?, failure_id=?, hypothesis_id=?,
                                   result_ref=NULL, result_digest=NULL,
                                   result_binding_id=NULL, lease_owner=NULL,
                                   lease_until=NULL, heartbeat_at=NULL, lease_token=NULL,
@@ -1862,18 +2193,11 @@ class FailureRouter:
                               AND graph_status NOT IN ('ACCEPTED','CANCELLED')""",
                         (
                             stable_json(dependencies),
+                            str(failure["failure_id"]),
+                            hypothesis_id,
                             str(failure["last_seen_at"]),
-                            str(failed["task_id"]),
-                            str(failed["product_id"]),
-                        ),
-                    )
-                    self.state._connection.execute(
-                        """UPDATE tasks SET produces_evidence_types_json=?
-                            WHERE task_id=? AND product_id=?""",
-                        (
-                            stable_json(["architecture_package"]),
-                            str(contract["task_id"]),
-                            str(failed["product_id"]),
+                            str(reviewer_task["task_id"]),
+                            str(reviewer_task["product_id"]),
                         ),
                     )
                     self.state._connection.execute(
@@ -1884,13 +2208,13 @@ class FailureRouter:
                         (
                             str(contract["plan_id"]),
                             str(contract["task_id"]),
-                            str(failed["task_id"]),
+                            str(reviewer_task["task_id"]),
                             str(failure["last_seen_at"]),
                         ),
                     )
                     self.state._record_event(
                         str(failed["product_id"]),
-                        str(failed["task_id"]),
+                        str(reviewer_task["task_id"]),
                         "architecture_reviewer_revalidation_blocked",
                         {
                             "architecture_repair_task_id": str(contract["task_id"]),
@@ -1902,7 +2226,16 @@ class FailureRouter:
                     "UPDATE failures SET status='ROUTED' WHERE failure_id=?",
                     (failure_id,),
                 )
-                if hypothesis_id is not None:
+                if hypothesis_id is not None and architecture_context is not None:
+                    self.state._connection.execute(
+                        """UPDATE hypotheses SET attempts_used=?
+                           WHERE hypothesis_id=?""",
+                        (
+                            architecture_context.semantic_attempts_used,
+                            hypothesis_id,
+                        ),
+                    )
+                elif hypothesis_id is not None:
                     self.state._connection.execute(
                         """UPDATE hypotheses SET attempts_used=attempts_used+1
                            WHERE hypothesis_id=?""",

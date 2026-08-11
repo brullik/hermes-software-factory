@@ -2129,10 +2129,18 @@ class AutonomyStore:
                 if outcome.accepted_result_ref is not None:
                     if outcome.attempt_id is None:
                         raise ValueError("accepted result requires a source attempt")
-                    accepted_binding = PathGovernor(
+                    governor = PathGovernor(
                         self.connection,
                         policy_digest=str(outcome.accepted_policy_digest),
-                    ).bind_result(
+                    )
+                    retired_architecture_binding = (
+                        governor.retire_reviewed_architecture_binding_for_correction(
+                            outcome.task_id
+                        )
+                    )
+                    if retired_architecture_binding is not None:
+                        inject("after_architecture_binding_retirement")
+                    accepted_binding = governor.bind_result(
                         task_id=outcome.task_id,
                         source_task_id=outcome.task_id,
                         source_attempt_id=outcome.attempt_id,
@@ -2142,6 +2150,11 @@ class AutonomyStore:
                         candidate_digest=outcome.candidate_digest,
                         accepted_at=now,
                     )
+                    if retired_architecture_binding is not None:
+                        governor.advance_reviewed_architecture_evidence_for_correction(
+                            outcome.task_id,
+                            retired_architecture_binding,
+                        )
                     result_binding_id = accepted_binding.binding_id
                 inject("after_result_binding_write")
                 failure_id: str | None = None
@@ -2290,7 +2303,16 @@ class AutonomyStore:
                 inject("after_successor_write")
                 if outcome.status in TERMINAL_SUCCESS and failure_id is None:
                     prior_failure_id = str(task["failure_id"] or "")
-                    if prior_failure_id:
+                    architecture_correction = bool(
+                        str(task["role"] or "").replace("_", "-")
+                        == "solution-architect"
+                        and str(task["stage_key"] or "") == "repair"
+                        and str(task["capability_profile"] or "")
+                        == "planning_readonly"
+                        and str(task["output_schema"] or "")
+                        == "architecture-package.schema.json"
+                    )
+                    if prior_failure_id and not architecture_correction:
                         self._resolve_failure_chain(
                             self.connection,
                             prior_failure_id,

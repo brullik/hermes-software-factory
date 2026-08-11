@@ -13,6 +13,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .common import sha256_text, stable_json, utc_now
@@ -354,7 +355,19 @@ def supersession_is_compatible(
 ) -> bool:
     """Return whether two tasks describe one exact replaceable contract identity."""
 
-    return _identity(source) == _identity(replacement)
+    source_identity = _identity(source)
+    replacement_identity = _identity(replacement)
+    if source_identity[:-1] != replacement_identity[:-1]:
+        return False
+    source_key = str(source.get("semantic_node_key") or "")
+    replacement_key = str(replacement.get("semantic_node_key") or "")
+    if source_key and replacement_key:
+        return source_key == replacement_key
+    source_node = str(source.get("semantic_node_id") or "")
+    replacement_node = str(replacement.get("semantic_node_id") or "")
+    if source_node and replacement_node:
+        return source_node == replacement_node
+    return source_identity[-1] == replacement_identity[-1]
 
 
 def execution_slot_cost(task: Mapping[str, Any]) -> int:
@@ -709,6 +722,292 @@ class PathGovernor:
                 "active result binding changed during replacement"
             )
         return binding_id
+
+    def retire_reviewed_architecture_binding_for_correction(
+        self,
+        task_id: str,
+    ) -> str | None:
+        """Retire one reviewed architecture binding for its exact correction.
+
+        The caller must own the surrounding ``BEGIN IMMEDIATE`` transaction.
+        A correction is allowed to replace an accepted architecture result only
+        through the reviewer that consumed the old result and requested the new
+        one.  Historical bindings and frozen snapshot items are never changed.
+        """
+
+        task_row = self.connection.execute(
+            "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if task_row is None:
+            raise KeyError(task_id)
+        task = dict(task_row)
+        role = str(task.get("role") or "").replace("_", "-")
+        if role != "solution-architect" or str(task.get("stage_key") or "") != "repair":
+            return None
+        if (
+            str(task.get("capability_profile") or "") != "planning_readonly"
+            or str(task.get("output_schema") or "")
+            != "architecture-package.schema.json"
+            or "architecture_package"
+            not in {
+                str(value)
+                for value in _json_array(task.get("produces_evidence_types_json"))
+            }
+        ):
+            raise ResultLineageIdentityError(
+                f"architecture correction contract is not eligible for {task_id}"
+            )
+
+        contract_ref = str(task.get("contract_ref") or "")
+        if contract_ref != f"evidence/task-{task_id}.json":
+            raise ResultLineageIdentityError(
+                f"architecture correction contract reference is not exact for {task_id}"
+            )
+        database_row = self.connection.execute("PRAGMA database_list").fetchone()
+        database_path = Path(str(database_row[2] or "")) if database_row else Path()
+        evidence_root = database_path.parent / "evidence"
+        unresolved = evidence_root / Path(contract_ref).name
+        try:
+            contract_path = unresolved.resolve(strict=True)
+            resolved_evidence_root = evidence_root.resolve(strict=True)
+        except OSError as error:
+            raise ResultLineageIdentityError(
+                f"architecture correction contract is missing for {task_id}"
+            ) from error
+        if (
+            contract_path.parent != resolved_evidence_root
+            or unresolved.is_symlink()
+            or not contract_path.is_file()
+        ):
+            raise ResultLineageIdentityError(
+                f"architecture correction contract path is invalid for {task_id}"
+            )
+        try:
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ResultLineageIdentityError(
+                f"architecture correction contract is unreadable for {task_id}"
+            ) from error
+        if not isinstance(contract, dict):
+            raise ResultLineageIdentityError(
+                f"architecture correction contract is not an object for {task_id}"
+            )
+        contract_digest = task_contract_digest(contract)
+        correction_node_id = semantic_node_id(contract, contract_digest)
+        if (
+            str(contract.get("task_id") or "") != task_id
+            or str(contract.get("product_id") or "")
+            != str(task.get("product_id") or "")
+            or str(contract.get("role") or "").replace("_", "-")
+            != "solution-architect"
+            or str(contract.get("lifecycle_stage") or "")
+            != "architecture-review"
+            or str(contract.get("capability_profile") or "") != "planning_readonly"
+            or str(contract.get("output_schema") or "")
+            != "architecture-package.schema.json"
+            or "architecture_package"
+            not in {
+                str(value) for value in contract.get("produces_evidence_types", [])
+            }
+            or str(task.get("contract_digest") or "") != contract_digest
+            or str(task.get("semantic_node_id") or "") != correction_node_id
+        ):
+            raise ResultLineageIdentityError(
+                f"architecture correction immutable identity conflicts for {task_id}"
+            )
+
+        plan_id = str(task.get("plan_id") or "")
+        product_id = str(task.get("product_id") or "")
+        reviewer_edges = self.connection.execute(
+            """SELECT edge.to_task_id, reviewer.*
+                 FROM task_edges AS edge
+                 JOIN tasks AS reviewer ON reviewer.task_id=edge.to_task_id
+                WHERE edge.plan_id=? AND edge.from_task_id=?
+                  AND edge.edge_type='revalidates' AND edge.required=1
+                ORDER BY edge.to_task_id""",
+            (plan_id, task_id),
+        ).fetchall()
+        if len(reviewer_edges) != 1:
+            raise ResultLineageIdentityError(
+                f"architecture correction requires one reviewer edge for {task_id}"
+            )
+        reviewer = dict(reviewer_edges[0])
+        reviewer_id = str(reviewer["to_task_id"])
+        try:
+            reviewer_dependencies = _json_array(reviewer.get("dependencies_json"))
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ResultLineageIdentityError(
+                f"architecture reviewer dependencies are invalid for {task_id}"
+            ) from error
+        if (
+            str(reviewer.get("product_id") or "") != product_id
+            or str(reviewer.get("plan_id") or "") != plan_id
+            or str(reviewer.get("role") or "").replace("_", "-")
+            != "independent-reviewer"
+            or str(reviewer.get("lifecycle_stage") or "")
+            != "architecture-review"
+            or reviewer_dependencies.count(task_id) != 1
+        ):
+            raise ResultLineageIdentityError(
+                f"architecture reviewer lineage conflicts for {task_id}"
+            )
+        prior_edges = self.connection.execute(
+            """SELECT edge.from_task_id, source.*
+                 FROM task_edges AS edge
+                 JOIN tasks AS source ON source.task_id=edge.from_task_id
+                WHERE edge.plan_id=? AND edge.to_task_id=?
+                  AND edge.edge_type='evidence_from' AND edge.required=1
+                ORDER BY edge.from_task_id""",
+            (plan_id, reviewer_id),
+        ).fetchall()
+        if len(prior_edges) != 1:
+            raise ResultLineageIdentityError(
+                f"architecture reviewer requires one prior evidence edge for {task_id}"
+            )
+        prior = dict(prior_edges[0])
+        prior_task_id = str(prior["from_task_id"])
+
+        active_rows = self.connection.execute(
+            """SELECT * FROM result_bindings
+                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'
+                 ORDER BY binding_id""",
+            (product_id, correction_node_id),
+        ).fetchall()
+        if len(active_rows) > 1:
+            raise ActiveResultBindingConflictError(
+                "multiple active architecture bindings exist for one semantic node"
+            )
+        if not active_rows:
+            return None
+        active = ResultBinding.from_row(active_rows[0])
+        if active.source_task_id == task_id:
+            if (
+                active.contract_digest != contract_digest
+                or active.output_schema != str(task.get("output_schema") or "")
+            ):
+                raise ResultLineageIdentityError(
+                    f"architecture correction replay conflicts for {task_id}"
+                )
+            return None
+        if (
+            active.source_task_id != prior_task_id
+            or str(prior.get("status") or "") != "DONE"
+            or str(prior.get("graph_status") or "") != "ACCEPTED"
+            or str(prior.get("semantic_node_id") or "") != correction_node_id
+            or str(prior.get("contract_digest") or "") != contract_digest
+            or str(prior.get("output_schema") or "")
+            != str(task.get("output_schema") or "")
+            or int(prior.get("task_revision") or 0)
+            >= int(task.get("task_revision") or 0)
+            or str(prior.get("result_binding_id") or "") != active.binding_id
+            or active.contract_digest != contract_digest
+            or active.output_schema != str(task.get("output_schema") or "")
+        ):
+            raise ResultLineageIdentityError(
+                f"prior reviewed architecture binding conflicts for {task_id}"
+            )
+        updated = self.connection.execute(
+            """UPDATE result_bindings SET status='SUPERSEDED'
+                 WHERE binding_id=? AND product_id=? AND semantic_node_id=?
+                   AND source_task_id=? AND status='ACTIVE'""",
+            (
+                active.binding_id,
+                product_id,
+                correction_node_id,
+                prior_task_id,
+            ),
+        ).rowcount
+        if updated != 1:
+            raise ActiveResultBindingConflictError(
+                "reviewed architecture binding changed during correction"
+            )
+        remaining = self.connection.execute(
+            """SELECT COUNT(*) FROM result_bindings
+                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'""",
+            (product_id, correction_node_id),
+        ).fetchone()
+        if remaining is None or int(remaining[0]) != 0:
+            raise ActiveResultBindingConflictError(
+                "reviewed architecture binding retirement is not exclusive"
+            )
+        return active.binding_id
+
+    def advance_reviewed_architecture_evidence_for_correction(
+        self,
+        task_id: str,
+        retired_binding_id: str,
+    ) -> None:
+        """Point the same reviewer at the newly accepted architecture source."""
+
+        task_row = self.connection.execute(
+            "SELECT product_id,plan_id FROM tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        retired = self.connection.execute(
+            """SELECT product_id,source_task_id,status FROM result_bindings
+                 WHERE binding_id=?""",
+            (retired_binding_id,),
+        ).fetchone()
+        if (
+            task_row is None
+            or retired is None
+            or str(retired["product_id"]) != str(task_row["product_id"])
+            or str(retired["status"]) != "SUPERSEDED"
+        ):
+            raise ResultLineageIdentityError(
+                f"retired architecture evidence conflicts for {task_id}"
+            )
+        active = self.connection.execute(
+            """SELECT source_task_id FROM result_bindings
+                 WHERE product_id=? AND status='ACTIVE'
+                   AND semantic_node_id=(
+                       SELECT semantic_node_id FROM tasks WHERE task_id=?
+                   )
+                 ORDER BY binding_id""",
+            (str(task_row["product_id"]), task_id),
+        ).fetchall()
+        if len(active) != 1 or str(active[0]["source_task_id"]) != task_id:
+            raise ResultLineageIdentityError(
+                f"new architecture binding is not exact for {task_id}"
+            )
+        reviewer_rows = self.connection.execute(
+            """SELECT to_task_id FROM task_edges
+                 WHERE plan_id=? AND from_task_id=?
+                   AND edge_type='revalidates' AND required=1
+                 ORDER BY to_task_id""",
+            (str(task_row["plan_id"]), task_id),
+        ).fetchall()
+        if len(reviewer_rows) != 1:
+            raise ResultLineageIdentityError(
+                f"architecture correction reviewer changed for {task_id}"
+            )
+        reviewer_id = str(reviewer_rows[0]["to_task_id"])
+        old_source_id = str(retired["source_task_id"])
+        updated = self.connection.execute(
+            """UPDATE task_edges SET from_task_id=?, created_at=?
+                 WHERE plan_id=? AND from_task_id=? AND to_task_id=?
+                   AND edge_type='evidence_from' AND required=1""",
+            (
+                task_id,
+                utc_now(),
+                str(task_row["plan_id"]),
+                old_source_id,
+                reviewer_id,
+            ),
+        ).rowcount
+        if updated != 1:
+            raise ResultLineageIdentityError(
+                f"architecture reviewer evidence edge changed for {task_id}"
+            )
+        current = self.connection.execute(
+            """SELECT COUNT(*) FROM task_edges
+                 WHERE plan_id=? AND from_task_id=? AND to_task_id=?
+                   AND edge_type='evidence_from' AND required=1""",
+            (str(task_row["plan_id"]), task_id, reviewer_id),
+        ).fetchone()
+        if current is None or int(current[0]) != 1:
+            raise ResultLineageIdentityError(
+                f"architecture reviewer evidence did not advance for {task_id}"
+            )
 
     def register_execution_membership(self, task_id: str) -> str:
         task_row = self.connection.execute(
@@ -1387,7 +1686,9 @@ class PathGovernor:
         ).fetchone()
         if row is None:
             raise RuntimeError("problem budget was not persisted")
-        if str(row["status"]) != "ACTIVE" or int(row["execution_attempts_used"]) + count > 2:
+        if str(row["status"]) != "ACTIVE" or 2 < int(
+            row["execution_attempts_used"]
+        ) + count:
             self.connection.execute(
                 """UPDATE problem_budgets SET status='EXHAUSTED', updated_at=?
                     WHERE product_id=? AND root_problem_signature=?""",

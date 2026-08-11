@@ -30,6 +30,10 @@ class UnknownQualityGatesError(ValueError):
         super().__init__(f"Unknown quality gates: {', '.join(self.gate_ids)}")
 
 
+class ControllerContainerScanHelperInvalid(RuntimeError):
+    """The immutable controller-owned image verifier is missing or tampered."""
+
+
 class QualityGateEngine:
     """Run only controller-selected catalog entries; model text cannot alter the catalog."""
 
@@ -88,6 +92,12 @@ class QualityGateEngine:
             evidence_path = self.artifacts.write("gate-evidence.schema.json", evidence, filename=filename)
             evidence_paths.append(evidence_path)
             status = str(evidence["status"])
+            if "controller_container_scan_helper_invalid" in str(
+                evidence.get("summary") or ""
+            ):
+                raise ControllerContainerScanHelperInvalid(
+                    "controller_container_scan_helper_invalid"
+                )
             results.append(
                 {
                     "gate_id": gate_id,

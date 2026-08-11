@@ -11,11 +11,13 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,11 @@ _TARGET_LICENSE_ADAPTER = "target_license_check"
 _TARGET_LICENSE_COMMAND = "controller:target-license-check"
 _TARGET_CONTAINER_IMAGE_ADAPTER = "target_container_image_scan"
 _TARGET_CONTAINER_IMAGE_COMMAND = "controller:target-container-image-scan"
+_CONTROLLER_IMAGE_SECURITY_VERIFIER_SHA256 = (
+    "247cc0b6f8f55e081c2188ec1f5f50a45cf358923c02117a8a15a6d3e9760f8f"
+)
+_OS_KILL_PROCESS_GROUP = os.__dict__.get("killpg")
+_SIGKILL = signal.__dict__.get("SIGKILL", signal.SIGTERM)
 _TARGET_SECRET_PATTERN = re.compile(
     rb"(?:ghp_|github_pat_|(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|"
     rb"BEGIN\s+(?:(?:RSA|EC|OPENSSH)\s+)?PRIVATE\s+KEY)"
@@ -81,6 +88,165 @@ def digest_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class _BoundedProcessResult:
+    returncode: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+    process_tree: tuple[dict[str, Any], ...]
+    dump_requested: bool
+
+
+def _signal_process_group(process_id: int, selected_signal: int) -> None:
+    if not callable(_OS_KILL_PROCESS_GROUP):
+        raise OSError("process-group signalling is unavailable")
+    _OS_KILL_PROCESS_GROUP(process_id, selected_signal)
+
+
+def _bounded_process_tree(root_pid: int, *, limit: int = 128) -> tuple[dict[str, Any], ...]:
+    """Capture a bounded Linux process tree without invoking another shell."""
+
+    records: dict[int, tuple[int, str]] = {}
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in sorted(proc.iterdir(), key=lambda path: path.name):
+            if not entry.name.isdigit() or len(records) >= 4096:
+                continue
+            try:
+                status = (entry / "status").read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            fields = {
+                key: value.strip()
+                for raw in status.splitlines()
+                if ":" in raw
+                for key, value in [raw.split(":", 1)]
+            }
+            try:
+                records[int(entry.name)] = (
+                    int(fields.get("PPid", "0")),
+                    fields.get("Name", "unknown")[:80],
+                )
+            except ValueError:
+                continue
+    selected: set[int] = {root_pid}
+    changed = True
+    while changed and len(selected) < limit:
+        changed = False
+        for pid, (parent, _name) in records.items():
+            if parent in selected and pid not in selected:
+                selected.add(pid)
+                changed = True
+                if len(selected) >= limit:
+                    break
+    return tuple(
+        {
+            "pid": pid,
+            "ppid": records.get(pid, (0, "unknown"))[0],
+            "name": records.get(pid, (0, "unknown"))[1],
+        }
+        for pid in sorted(selected)[:limit]
+    )
+
+
+def _run_bounded_python_gate(
+    argv: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout: int,
+) -> _BoundedProcessResult:
+    """Run a Python gate in its own process group and kill the full group."""
+
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **kwargs,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return _BoundedProcessResult(
+            process.returncode,
+            stdout,
+            stderr,
+            False,
+            (),
+            False,
+        )
+    except subprocess.TimeoutExpired:
+        process_tree = _bounded_process_tree(process.pid)
+        dump_requested = False
+        try:
+            if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+                dump_requested = True
+            elif os.name != "nt":
+                _signal_process_group(process.pid, signal.SIGABRT)
+                dump_requested = True
+            process.wait(timeout=1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if process.poll() is None:
+            try:
+                if os.name == "nt":
+                    process.terminate()
+                else:
+                    _signal_process_group(process.pid, signal.SIGTERM)
+                process.wait(timeout=3)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if process.poll() is None:
+            try:
+                if os.name == "nt":
+                    process.kill()
+                else:
+                    _signal_process_group(process.pid, _SIGKILL)
+            except OSError:
+                pass
+        stdout, stderr = process.communicate()
+        return _BoundedProcessResult(
+            None,
+            stdout,
+            stderr,
+            True,
+            process_tree,
+            dump_requested,
+        )
+
+
+def _gate_workspace_fingerprint(root: Path) -> str:
+    records: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if _disposable_workspace_path(relative) or ".git" in relative.parts:
+            continue
+        if path.is_symlink():
+            records.append((relative.as_posix(), f"SYMLINK:{path.resolve()}"))
+        elif path.is_file():
+            records.append((relative.as_posix(), digest_file(path)))
+    return digest_text(json.dumps(records, separators=(",", ":")))
+
+
+def _disposable_workspace_path(relative: Path) -> bool:
+    return bool(
+        any(part == "__pycache__" for part in relative.parts)
+        or relative.suffix in {".pyc", ".pyo"}
+        or relative.parts
+        and relative.parts[0] in {".pytest_cache", ".ruff_cache", "build", "dist"}
+        or any(part.endswith(".egg-info") for part in relative.parts)
+    )
 
 
 def _runtime_python_sources(cwd: Path) -> list[Path]:
@@ -946,14 +1112,6 @@ def _container_image_scan(
     exit_code: int | None = None
     output = "target container image scan failed closed"
     try:
-        verifier = root / "scripts" / "image_security_verify.py"
-        if verifier.is_symlink():
-            raise RuntimeError("image security verifier must not be a symbolic link")
-        verifier = verifier.resolve(strict=True)
-        verifier.relative_to(root)
-        if not verifier.is_file():
-            raise RuntimeError("image security verifier is not a regular file")
-
         require_root_owned = bool(gate.get("require_root_owned", False))
         scanner, _ = _trusted_gate_file(
             Path(str(gate.get("scanner_path", ""))),
@@ -975,6 +1133,7 @@ def _container_image_scan(
             dir=temporary_root,
         ) as directory:
             temporary = Path(directory)
+            verifier = _controller_image_security_verifier(temporary)
             environment = os.environ.copy()
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["PYTHONPYCACHEPREFIX"] = str(temporary / "pycache")
@@ -1145,6 +1304,59 @@ def _container_image_scan(
     )
 
 
+def _controller_image_security_verifier(temporary_root: Path) -> Path:
+    """Materialize the digest-pinned controller verifier outside the product."""
+
+    root = temporary_root.resolve(strict=True)
+    source = Path(__file__).resolve().with_name(
+        "controller_image_security_verify.py"
+    )
+    try:
+        packaged_scripts = Path(__file__).resolve().parent
+        resolved_source = source.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(
+            "controller_container_scan_helper_invalid: packaged helper is missing"
+        ) from error
+    if (
+        source.is_symlink()
+        or resolved_source.parent != packaged_scripts
+        or not resolved_source.is_file()
+        or digest_file(resolved_source)
+        != _CONTROLLER_IMAGE_SECURITY_VERIFIER_SHA256
+    ):
+        raise RuntimeError(
+            "controller_container_scan_helper_invalid: packaged helper digest mismatch"
+        )
+    destination = root / (
+        "image-security-verify-"
+        f"{_CONTROLLER_IMAGE_SECURITY_VERIFIER_SHA256[:16]}.py"
+    )
+    if destination.exists() or destination.is_symlink():
+        if (
+            destination.is_symlink()
+            or not destination.is_file()
+            or digest_file(destination)
+            != _CONTROLLER_IMAGE_SECURITY_VERIFIER_SHA256
+        ):
+            raise RuntimeError(
+                "controller_container_scan_helper_invalid: temporary helper conflicts"
+            )
+        return destination
+    try:
+        destination.write_bytes(resolved_source.read_bytes())
+        destination.chmod(0o500)
+    except OSError as error:
+        raise RuntimeError(
+            "controller_container_scan_helper_invalid: helper copy failed"
+        ) from error
+    if digest_file(destination) != _CONTROLLER_IMAGE_SECURITY_VERIFIER_SHA256:
+        raise RuntimeError(
+            "controller_container_scan_helper_invalid: copied helper digest mismatch"
+        )
+    return destination
+
+
 def run_gate(
     gate: dict[str, Any],
     cwd: Path,
@@ -1208,6 +1420,9 @@ def run_gate(
         exit_code = None
         status = "ERROR"
     else:
+        completed: _BoundedProcessResult | subprocess.CompletedProcess[str] | None = (
+            None
+        )
         try:
             argv = shlex.split(command)
             if python_executable and argv and argv[0].lower() in {"python", "python3", "python.exe"}:
@@ -1217,25 +1432,89 @@ def run_gate(
                 dir=controller_temp_root,
             ) as pycache_directory:
                 gate_environment = os.environ.copy()
-                gate_environment["PYTHONPYCACHEPREFIX"] = pycache_directory
+                gate_environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+                gate_environment["PYTHONNOUSERSITE"] = "1"
+                gate_environment["PYTHONHASHSEED"] = "0"
                 gate_environment["PYTHONDONTWRITEBYTECODE"] = "1"
-                completed = subprocess.run(
-                    argv,
-                    cwd=cwd,
-                    env=gate_environment,
-                    text=True,
-                    capture_output=True,
-                    timeout=int(gate.get("timeout_seconds", 600)),
-                    check=False,
+                gate_environment["PYTHONPYCACHEPREFIX"] = pycache_directory
+                gate_environment["PYTHONFAULTHANDLER"] = "1"
+                timeout = int(gate.get("timeout_seconds", 600))
+                python_gate = bool(
+                    argv
+                    and (
+                        Path(argv[0]).name.casefold()
+                        in {"python", "python3", "python.exe"}
+                        or python_executable is not None
+                        and Path(argv[0]).resolve()
+                        == Path(python_executable).resolve()
+                    )
                 )
-            output = (completed.stdout + "\n" + completed.stderr).strip()
-            exit_code = completed.returncode
+                if python_gate:
+                    before_fingerprint = _gate_workspace_fingerprint(cwd)
+                    bounded = _run_bounded_python_gate(
+                        argv,
+                        cwd=cwd,
+                        environment=gate_environment,
+                        timeout=timeout,
+                    )
+                    retry_count = 0
+                    if bounded.timed_out:
+                        after_fingerprint = _gate_workspace_fingerprint(cwd)
+                        if after_fingerprint == before_fingerprint:
+                            retry_count = 1
+                            bounded = _run_bounded_python_gate(
+                                argv,
+                                cwd=cwd,
+                                environment=gate_environment,
+                                timeout=timeout,
+                            )
+                    if bounded.timed_out:
+                        diagnostic = json.dumps(
+                            {
+                                "reason_code": "python_gate_timeout",
+                                "subject_sha": subject_sha,
+                                "infrastructure_retries": retry_count,
+                                "process_tree": list(bounded.process_tree),
+                                "faulthandler_dump_requested": bounded.dump_requested,
+                                "product_execution_slot_cost": 0,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        output = (
+                            diagnostic
+                            + "\n"
+                            + bounded.stdout
+                            + "\n"
+                            + bounded.stderr
+                        ).strip()
+                        exit_code = None
+                        status = "ERROR"
+                        completed = None
+                    else:
+                        output = (bounded.stdout + "\n" + bounded.stderr).strip()
+                        exit_code = bounded.returncode
+                        completed = bounded
+                else:
+                    regular = subprocess.run(
+                        argv,
+                        cwd=cwd,
+                        env=gate_environment,
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout,
+                        check=False,
+                    )
+                    output = (regular.stdout + "\n" + regular.stderr).strip()
+                    exit_code = regular.returncode
+                    completed = regular
             success_exit_codes = gate.get("success_exit_codes", [0])
             if not isinstance(success_exit_codes, list) or not all(
                 isinstance(item, int) for item in success_exit_codes
             ):
                 raise TypeError("success_exit_codes must be a list of integers")
-            status = "PASS" if completed.returncode in success_exit_codes else "FAIL"
+            if completed is not None:
+                status = "PASS" if exit_code in success_exit_codes else "FAIL"
         except subprocess.TimeoutExpired as error:
             output = f"gate timed out after {gate.get('timeout_seconds', 600)} seconds: {error}"
             exit_code = None

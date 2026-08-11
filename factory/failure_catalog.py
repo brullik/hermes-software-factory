@@ -84,6 +84,13 @@ def _entries(
 # behavior and reopen the failure mode found by the audit.
 FAILURE_CATALOG: Final[dict[str, FailureDisposition]] = {
     **_entries(
+        FailureDomain.CONTROLLER,
+        FailureAction.CONTROLLER_QUARANTINE,
+        "controller_container_scan_helper_invalid",
+        "architecture_baseline_toolchain_mismatch",
+        "architecture_correction_budget_exhausted",
+    ),
+    **_entries(
         FailureDomain.TRANSIENT_PROVIDER,
         FailureAction.RETRY_TRANSIENT,
         "provider_unavailable",

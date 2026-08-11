@@ -17,7 +17,7 @@ from test_worker import make_config, selected_registry
 from factory.artifacts import ArtifactStore
 from factory.config import FactoryConfig
 from factory.quality import QualityGateEngine, UnknownQualityGatesError
-from scripts.quality_gate import _git_changed_paths, run_gate
+from scripts.quality_gate import _BoundedProcessResult, _git_changed_paths, run_gate
 
 
 def _single_python_gate_engine(
@@ -72,11 +72,11 @@ def test_python_gates_use_candidate_interpreter(tmp_path: Path) -> None:
     def record(
         argv: list[str],
         **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> _BoundedProcessResult:
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, stdout="pass", stderr="")
+        return _BoundedProcessResult(0, "pass", "", False, (), False)
 
-    with patch("scripts.quality_gate.subprocess.run", side_effect=record):
+    with patch("scripts.quality_gate._run_bounded_python_gate", side_effect=record):
         result = engine.run(
             cwd=workspace,
             subject_sha="1" * 64,
@@ -133,15 +133,18 @@ def test_controller_helper_is_outside_workspace_diff(tmp_path: Path) -> None:
     def record_helper(
         argv: list[str],
         **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        environment = kwargs.get("env")
+    ) -> _BoundedProcessResult:
+        environment = kwargs.get("environment")
         assert isinstance(environment, dict)
         helper = Path(str(environment["PYTHONPYCACHEPREFIX"])) / "controller-helper.py"
         helper.write_text("controller owned\n", encoding="utf-8")
         observed_helper.append(helper)
-        return subprocess.CompletedProcess(argv, 0, stdout="pass", stderr="")
+        return _BoundedProcessResult(0, "pass", "", False, (), False)
 
-    with patch("scripts.quality_gate.subprocess.run", side_effect=record_helper):
+    with patch(
+        "scripts.quality_gate._run_bounded_python_gate",
+        side_effect=record_helper,
+    ):
         result = engine.run(
             cwd=workspace,
             subject_sha="2" * 64,
