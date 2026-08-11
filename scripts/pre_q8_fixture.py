@@ -153,9 +153,7 @@ def _verify_repository(
     manifest = fixture_manifest()
     files = fixture_files()
     repository = client.request("GET", f"/repos/{owner}/{repository_name}")
-    branch = client.request(
-        "GET", f"/repos/{owner}/{repository_name}/git/ref/heads/main"
-    )
+    branch = client.request("GET", f"/repos/{owner}/{repository_name}/git/ref/heads/main")
     commit = client.request(
         "GET", f"/repos/{owner}/{repository_name}/git/commits/{expected_commit}"
     )
@@ -191,8 +189,7 @@ def _verify_repository(
         or repository.get("default_branch") != "main"
         or branch.get("object", {}).get("sha") != expected_commit
         or commit.get("sha") != expected_commit
-        or commit.get("message")
-        != f"Hermes fixture {manifest['fixture_seed_digest']}"
+        or commit.get("message") != f"Hermes fixture {manifest['fixture_seed_digest']}"
         or observed_tree != expected_tree
         or (expected_id is not None and repository.get("id") != expected_id)
     ):
@@ -220,9 +217,7 @@ def provision(
     login = str(user.get("login") or "")
     endpoint = "/user/repos" if login.casefold() == owner.casefold() else f"/orgs/{owner}/repos"
     if receipt_path.exists():
-        receipt = _read_receipt(
-            receipt_path, "PREQ8_EXISTING_REPOSITORY_FIXTURE"
-        )
+        receipt = _read_receipt(receipt_path, "PREQ8_EXISTING_REPOSITORY_FIXTURE")
         if (
             receipt.get("fixture_seed_digest") != manifest["fixture_seed_digest"]
             or receipt.get("repository_name") != repository_name
@@ -305,9 +300,9 @@ def provision(
             f"/repos/{owner}/{repository_name}/contents/.hermes-bootstrap",
             {
                 "message": f"Hermes fixture bootstrap {manifest['fixture_seed_digest']}",
-                "content": b64encode(
-                    f"{manifest['fixture_seed_digest']}\n".encode("ascii")
-                ).decode("ascii"),
+                "content": b64encode(f"{manifest['fixture_seed_digest']}\n".encode("ascii")).decode(
+                    "ascii"
+                ),
                 "branch": "main",
                 "committer": {
                     "name": "Hermes Qualification",
@@ -334,12 +329,8 @@ def provision(
             f"/repos/{owner}/{repository_name}/git/blobs",
             {"content": b64encode(content).decode("ascii"), "encoding": "base64"},
         )
-        blobs.append(
-            {"path": relative, "mode": "100644", "type": "blob", "sha": str(blob["sha"])}
-        )
-    tree = client.request(
-        "POST", f"/repos/{owner}/{repository_name}/git/trees", {"tree": blobs}
-    )
+        blobs.append({"path": relative, "mode": "100644", "type": "blob", "sha": str(blob["sha"])})
+    tree = client.request("POST", f"/repos/{owner}/{repository_name}/git/trees", {"tree": blobs})
     commit = client.request(
         "POST",
         f"/repos/{owner}/{repository_name}/git/commits",
@@ -364,9 +355,7 @@ def provision(
         branch_update_path,
         {"sha": commit["sha"], "force": True},
     )
-    client.request(
-        "PATCH", f"/repos/{owner}/{repository_name}", {"default_branch": "main"}
-    )
+    client.request("PATCH", f"/repos/{owner}/{repository_name}", {"default_branch": "main"})
     verified = _verify_repository(
         client=client,
         owner=owner,
@@ -392,50 +381,37 @@ def provision(
     return _write_receipt(receipt_path, body)
 
 
-def archive(
-    *, client: GitHubClient, owner: str, receipt_path: Path, output: Path
-) -> dict[str, Any]:
-    receipt = _read_receipt(
-        receipt_path, "PREQ8_EXISTING_REPOSITORY_FIXTURE"
-    )
+def delete(*, client: GitHubClient, owner: str, receipt_path: Path, output: Path) -> dict[str, Any]:
+    receipt = _read_receipt(receipt_path, "PREQ8_EXISTING_REPOSITORY_FIXTURE")
     name = str(receipt.get("repository_name") or "")
     body = {
         "schema_version": "1.0",
-        "receipt_type": "PREQ8_EXISTING_REPOSITORY_FIXTURE_ARCHIVE",
+        "receipt_type": "PREQ8_EXISTING_REPOSITORY_FIXTURE_DELETE",
         "provision_receipt_digest": receipt["receipt_digest"],
         "repository_name": name,
         "repository_id": receipt["repository_id"],
-        "archived": True,
+        "action": "delete",
+        "verified_get_status": 404,
     }
     if output.exists():
-        existing = _read_receipt(
-            output, "PREQ8_EXISTING_REPOSITORY_FIXTURE_ARCHIVE"
-        )
-        if {
-            key: existing[key]
-            for key in body
-        } != body:
+        existing = _read_receipt(output, "PREQ8_EXISTING_REPOSITORY_FIXTURE_DELETE")
+        if {key: existing[key] for key in body} != body:
             raise FixtureControlError("fixture archive receipt conflicts")
+        if _optional_request(client, "GET", f"/repos/{owner}/{name}") is not None:
+            raise FixtureControlError("fixture repository still exists after DELETE")
+        return existing
+    repository = _optional_request(client, "GET", f"/repos/{owner}/{name}")
+    if repository is not None:
         _verify_repository(
             client=client,
             owner=owner,
             repository_name=name,
             expected_commit=str(receipt["seed_commit"]),
             expected_id=receipt["repository_id"],
-            archived=True,
         )
-        return existing
-    repository = client.request("GET", f"/repos/{owner}/{name}")
-    if repository.get("archived") is not True:
-        client.request("PATCH", f"/repos/{owner}/{name}", {"archived": True})
-    _verify_repository(
-        client=client,
-        owner=owner,
-        repository_name=name,
-        expected_commit=str(receipt["seed_commit"]),
-        expected_id=receipt["repository_id"],
-        archived=True,
-    )
+        client.request("DELETE", f"/repos/{owner}/{name}")
+    if _optional_request(client, "GET", f"/repos/{owner}/{name}") is not None:
+        raise FixtureControlError("fixture repository still exists after DELETE")
     return _write_receipt(output, body)
 
 
@@ -449,7 +425,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--run-id", required=True)
     create.add_argument("--candidate-digest", required=True)
     create.add_argument("--receipt", type=Path, required=True)
-    retire = commands.add_parser("archive")
+    retire = commands.add_parser("delete")
     retire.add_argument("--receipt", type=Path, required=True)
     retire.add_argument("--output", type=Path, required=True)
     return parser
@@ -469,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
                 receipt_path=args.receipt,
             )
         else:
-            result = archive(
+            result = delete(
                 client=client,
                 owner=args.owner,
                 receipt_path=args.receipt,

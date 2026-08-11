@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run one isolated clean-canary product through the normal Candidate B runtime."""
 
+# Every created qualification repository is ledgered here for terminal DELETE.
+
 from __future__ import annotations
 
 import argparse
@@ -20,13 +22,14 @@ from factory.canary_faults import (
 from factory.canary_qualification import CanaryObservationError, load_canary_catalog
 from factory.canary_release import IsolatedCanaryReleaseExecutor
 from factory.capabilities import CapabilityBroker
-from factory.common import stable_json
+from factory.common import sha256_text, stable_json
 from factory.config import ConfigError, FactoryConfig, load_config
 from factory.intake import IntakeRejected, IntakeService
 from factory.pre_q8_convergence import (
     resource_idempotency_key,
     resource_namespace,
 )
+from factory.qualification_repository_gc import record_provisioned_repository
 from factory.repository import build_repository_bootstrapper
 from factory.state import StateStore, is_sqlite_busy
 from factory.worker import AgentWorker
@@ -79,11 +82,19 @@ def submit(config: FactoryConfig, contract: CanaryFaultContract) -> dict[str, An
         max_active_products=config.max_active_products,
     )
     try:
-        existing_url = str(
-            config.raw["qualification"].get("existing_repository_url") or ""
-        )
+        existing_url = str(config.raw["qualification"].get("existing_repository_url") or "")
         if scenario.delivery_mode == "existing_repository" and not existing_url:
             raise CanaryCandidateError("existing-repository canary URL is not configured")
+        repository_name = (
+            None
+            if scenario.delivery_mode == "existing_repository"
+            else resource_namespace(
+                plane=contract.qualification_plane,
+                run_id=contract.run_id,
+                candidate_digest=contract.candidate_digest,
+                scenario_id=scenario.scenario_id,
+            )
+        )
         result = IntakeService(config, state, ArtifactStore(config)).submit(
             source="cli",
             owner_id="independent-clean-canary",
@@ -92,16 +103,7 @@ def submit(config: FactoryConfig, contract: CanaryFaultContract) -> dict[str, An
             repository_url=(
                 existing_url if scenario.delivery_mode == "existing_repository" else None
             ),
-            repository_name=(
-                None
-                if scenario.delivery_mode == "existing_repository"
-                else resource_namespace(
-                    plane=contract.qualification_plane,
-                    run_id=contract.run_id,
-                    candidate_digest=contract.candidate_digest,
-                    scenario_id=scenario.scenario_id,
-                )
-            ),
+            repository_name=(repository_name),
             repository_visibility="private",
             delivery_profile=scenario.delivery_profile,
             constraints={
@@ -122,15 +124,42 @@ def submit(config: FactoryConfig, contract: CanaryFaultContract) -> dict[str, An
                 scenario_id=scenario.scenario_id,
             ),
         )
-        if (
-            "KNOWN_PRODUCT_DEFECT" in contract.faults
-            and not CanaryFaultJournal(contract).consumed("KNOWN_PRODUCT_DEFECT")
+        if "KNOWN_PRODUCT_DEFECT" in contract.faults and not CanaryFaultJournal(contract).consumed(
+            "KNOWN_PRODUCT_DEFECT"
         ):
             CanaryFaultJournal(contract).consume(
                 "KNOWN_PRODUCT_DEFECT",
                 point="existing_repository_fixture",
                 product_id=result.product_id,
                 observed={"repository_url": existing_url},
+            )
+        if repository_name is not None:
+            owner = str(config.raw.get("github", {}).get("owner") or "")
+            provision_identity = {
+                "qualification_plane": contract.qualification_plane,
+                "epoch_id": contract.epoch_id,
+                "run_id": contract.run_id,
+                "scenario_id": scenario.scenario_id,
+                "candidate_digest": contract.candidate_digest,
+                "product_id": result.product_id,
+                "repository_owner": owner,
+                "repository_name": repository_name,
+                "description": f"Hermes product {result.product_id}",
+            }
+            record_provisioned_repository(
+                contract.receipt_root.parent.parent / "repository-ledger.json",
+                qualification_plane=contract.qualification_plane,
+                epoch_id=contract.epoch_id,
+                run_id=contract.run_id,
+                scenario_id=scenario.scenario_id,
+                candidate_digest=contract.candidate_digest,
+                product_id=result.product_id,
+                repository_owner=owner,
+                repository_name=repository_name,
+                repository_id=None,
+                expected_description=f"Hermes product {result.product_id}",
+                provision_receipt_digest=sha256_text(stable_json(provision_identity)),
+                database_path=str(config.database_path),
             )
         return {
             "scenario_id": scenario.scenario_id,
@@ -152,10 +181,7 @@ def status(config: FactoryConfig, contract: CanaryFaultContract) -> dict[str, An
         if len(products) > 1:
             raise CanaryCandidateError("clean canary database contains multiple products")
         product = products[0] if products else None
-        faults = {
-            fault: CanaryFaultJournal(contract).consumed(fault)
-            for fault in contract.faults
-        }
+        faults = {fault: CanaryFaultJournal(contract).consumed(fault) for fault in contract.faults}
         return {
             "scenario_id": contract.scenario_id,
             "product_id": str(product["product_id"]) if product else None,

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Terminal repository cleanup is exact DELETE with verified zero residue.
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -28,7 +29,8 @@ MATRIX=""
 SEAL=""
 ADMITTED_SEAL=/var/lib/hermes-factory-convergence/admitted/seal.json
 FIXTURE_RECEIPT=""
-FIXTURE_ARCHIVE_RECEIPT=""
+REPOSITORY_LEDGER=""
+REPOSITORY_CLEANUP_SUMMARY=""
 TOKEN_FILE=/etc/hermes-factory/candidate-credentials.d/github-token
 KEY_FILE=/var/lib/hermes-factory-verifier/verifier-ed25519.key
 FIXTURE_PROVISIONED=0
@@ -69,21 +71,18 @@ publish_admitted_seal() {
   sync -f "$(dirname -- "${destination}")"
 }
 
-cleanup_fixture() {
+cleanup_repositories() {
   exit_status=$?
   trap - EXIT
-  if (( FIXTURE_PROVISIONED == 1 )); then
-    "${PYTHON}" -m scripts.pre_q8_fixture --token-file "${TOKEN_FILE}" \
-      --owner "${GITHUB_OWNER}" archive --receipt "${FIXTURE_RECEIPT}" \
-      --output "${FIXTURE_ARCHIVE_RECEIPT}" >/dev/null || exit_status=70
-    if [[ -f "${FIXTURE_ARCHIVE_RECEIPT}" ]]; then
-      chown root:hermesfunctional "${FIXTURE_ARCHIVE_RECEIPT}"
-      chmod 0640 "${FIXTURE_ARCHIVE_RECEIPT}"
-    fi
+  if [[ -n "${REPOSITORY_LEDGER}" && -f "${REPOSITORY_LEDGER}" ]]; then
+    "${PYTHON}" -m scripts.pre_q8_repository_gc cleanup \
+      --ledger "${REPOSITORY_LEDGER}" --token-file "${TOKEN_FILE}" \
+      --output "${REPOSITORY_CLEANUP_SUMMARY}" --run-inactive \
+      >/dev/null || exit_status=70
   fi
   exit "${exit_status}"
 }
-trap cleanup_fixture EXIT
+trap cleanup_repositories EXIT
 
 IDENTITY_JSON="$("${PYTHON}" -m scripts.pre_q8_runtime build-identity \
   --control "${CONTROL}" --candidate-config "${BASE_CONFIG}" \
@@ -111,7 +110,8 @@ DATABASE="${STATE_ROOT}/convergence.db"
 MATRIX="${STATE_ROOT}/matrix.json"
 SEAL="${STATE_ROOT}/seal.json"
 FIXTURE_RECEIPT="${STATE_ROOT}/fixture-provision.json"
-FIXTURE_ARCHIVE_RECEIPT="${STATE_ROOT}/fixture-archive.json"
+REPOSITORY_LEDGER="${STATE_ROOT}/repository-ledger.json"
+REPOSITORY_CLEANUP_SUMMARY="${STATE_ROOT}/repository-cleanup-summary.json"
 MATRIX_PENDING_DIGEST="$(RUN_ID="${RUN_ID}" "${PYTHON}" -c \
   'from factory.common import sha256_text; import os; print(sha256_text("matrix-pending:"+os.environ["RUN_ID"]))')"
 GITHUB_OWNER="$("${PYTHON}" -c \
@@ -133,6 +133,10 @@ FIXTURE_JSON="$("${PYTHON}" -m scripts.pre_q8_fixture \
 FIXTURE_PROVISIONED=1
 chown root:hermesfunctional "${FIXTURE_RECEIPT}"
 chmod 0640 "${FIXTURE_RECEIPT}"
+"${PYTHON}" -m scripts.pre_q8_repository_gc record-fixture \
+  --ledger "${REPOSITORY_LEDGER}" --receipt "${FIXTURE_RECEIPT}" \
+  --epoch-id "${EPOCH_ID}" --owner "${GITHUB_OWNER}" \
+  --database-path "${DATABASE}" >/dev/null
 FIXTURE_URL="$(printf '%s' "${FIXTURE_JSON}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["repository_url"])')"
 
@@ -182,6 +186,9 @@ for scenario_id in "${SCENARIOS[@]}"; do
   fi
   run_as_verifier "${PYTHON}" -m scripts.pre_q8_convergence --database "${DATABASE}" \
     --run-id "${RUN_ID}" record "${result_path}" >/dev/null
+  "${PYTHON}" -m scripts.pre_q8_repository_gc freeze-scenario \
+    --ledger "${REPOSITORY_LEDGER}" --scenario-id "${scenario_id}" \
+    --evidence-root "${STATE_ROOT}/evidence/${scenario_id}" >/dev/null
 done
 
 MATRIX_JSON="$(run_as_verifier "${PYTHON}" -m scripts.pre_q8_convergence \
@@ -189,12 +196,18 @@ MATRIX_JSON="$(run_as_verifier "${PYTHON}" -m scripts.pre_q8_convergence \
 RUN_STATUS="$(printf '%s' "${MATRIX_JSON}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["status"])')"
 
-"${PYTHON}" -m scripts.pre_q8_fixture --token-file "${TOKEN_FILE}" \
-  --owner "${GITHUB_OWNER}" archive --receipt "${FIXTURE_RECEIPT}" \
-  --output "${FIXTURE_ARCHIVE_RECEIPT}" >/dev/null
+GC_JSON="$("${PYTHON}" -m scripts.pre_q8_repository_gc cleanup \
+  --ledger "${REPOSITORY_LEDGER}" --token-file "${TOKEN_FILE}" \
+  --output "${REPOSITORY_CLEANUP_SUMMARY}" --run-inactive)"
 FIXTURE_PROVISIONED=0
-chown root:hermesfunctional "${FIXTURE_ARCHIVE_RECEIPT}"
-chmod 0640 "${FIXTURE_ARCHIVE_RECEIPT}"
+repository_residue="$(printf '%s' "${GC_JSON}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["repository_residue_count"])')"
+cleanup_failed="$(printf '%s' "${GC_JSON}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["cleanup_failed_count"])')"
+if [[ "${repository_residue}" != 0 || "${cleanup_failed}" != 0 ]]; then
+  printf 'PRE-Q8 convergence repository residue is nonzero\n' >&2
+  exit 70
+fi
 
 if [[ "${RUN_STATUS}" != CONVERGENCE_10_OF_10 ]]; then
   printf 'PRE-Q8 convergence sweep failed; matrix retained at %s\n' "${MATRIX}" >&2

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Terminal Q8 repository cleanup is exact DELETE, never archive.
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -21,7 +22,8 @@ CANARY_ID=""
 FAILURE_REASON=orchestrator_error
 FIXTURE_PROVISIONED=0
 FIXTURE_RECEIPT=""
-FIXTURE_ARCHIVE_RECEIPT=""
+REPOSITORY_LEDGER=""
+REPOSITORY_CLEANUP_SUMMARY=""
 GITHUB_OWNER=""
 
 if [[ ! -x "${CANDIDATE_PYTHON}" || ! -x "${VERIFIER_PYTHON}" ]]; then
@@ -42,6 +44,9 @@ EPOCH_ID="$(printf '%s' "${IDENTITY_JSON}" | "${VERIFIER_PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["epoch_id"])')"
 RUN_ID="$(printf '%s' "${IDENTITY_JSON}" | "${VERIFIER_PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["run_id"])')"
+RUN_ROOT="/var/lib/hermes-factory-canaries/${EPOCH_ID}/${RUN_ID}"
+REPOSITORY_LEDGER="${RUN_ROOT}/repository-ledger.json"
+REPOSITORY_CLEANUP_SUMMARY="${RUN_ROOT}/repository-cleanup-${SCENARIO_ID}.json"
 if [[ ! "${TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || (( TIMEOUT_SECONDS < 900 )); then
   printf 'clean canary timeout is invalid\n' >&2
   exit 64
@@ -58,20 +63,23 @@ cleanup() {
       --config "${QUALIFICATION_CONFIG}" canary-fail \
       "${CANARY_ID}" "${FAILURE_REASON}" >/dev/null 2>&1 || true
   fi
-  if (( FIXTURE_PROVISIONED == 1 )); then
-    "${VERIFIER_PYTHON}" -m scripts.pre_q8_fixture \
+  if [[ -f "${REPOSITORY_LEDGER}" ]]; then
+    "${VERIFIER_PYTHON}" -m scripts.pre_q8_repository_gc freeze-scenario \
+      --ledger "${REPOSITORY_LEDGER}" --scenario-id "${SCENARIO_ID}" \
+      --evidence-root "${RUN_ROOT}/${SCENARIO_ID}/evidence" \
+      >/dev/null 2>&1 || exit_status=70
+    "${VERIFIER_PYTHON}" -m scripts.pre_q8_repository_gc cleanup \
+      --ledger "${REPOSITORY_LEDGER}" \
       --token-file /etc/hermes-factory/candidate-credentials.d/github-token \
-      --owner "${GITHUB_OWNER}" archive --receipt "${FIXTURE_RECEIPT}" \
-      --output "${FIXTURE_ARCHIVE_RECEIPT}" >/dev/null 2>&1 || exit_status=70
+      --output "${REPOSITORY_CLEANUP_SUMMARY}" --run-inactive \
+      >/dev/null 2>&1 || exit_status=70
   fi
   exit "${exit_status}"
 }
 trap cleanup EXIT
 
 if [[ "${SCENARIO_ID}" == existing-repository-repair ]]; then
-  RUN_ROOT="/var/lib/hermes-factory-canaries/${EPOCH_ID}/${RUN_ID}"
   FIXTURE_RECEIPT="${RUN_ROOT}/fixture-provision.json"
-  FIXTURE_ARCHIVE_RECEIPT="${RUN_ROOT}/fixture-archive.json"
   GITHUB_OWNER="$("${VERIFIER_PYTHON}" -c \
     'import sys,yaml; print(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))["github"]["owner"])' \
     "${CANDIDATE_CONFIG}")"
@@ -87,6 +95,10 @@ if [[ "${SCENARIO_ID}" == existing-repository-repair ]]; then
   FIXTURE_PROVISIONED=1
   chown root:hermesfunctional "${FIXTURE_RECEIPT}"
   chmod 0640 "${FIXTURE_RECEIPT}"
+  "${VERIFIER_PYTHON}" -m scripts.pre_q8_repository_gc record-fixture \
+    --ledger "${REPOSITORY_LEDGER}" --receipt "${FIXTURE_RECEIPT}" \
+    --epoch-id "${EPOCH_ID}" --owner "${GITHUB_OWNER}" \
+    --database-path "${CANARY_DATABASE}" >/dev/null
 fi
 
 runuser -u hermescandidate -- \

@@ -49,6 +49,28 @@ for scenario_id in "${SCENARIOS[@]}"; do
   systemctl start --wait "hermes-factory-clean-canary@${scenario_id}.service"
 done
 
+FIRST_CONFIG="$("${VERIFIER_PYTHON}" -c \
+  'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["scenarios"][0]["config_path"])' \
+  "${INDEX}")"
+readarray -t Q8_IDENTITY < <("${VERIFIER_PYTHON}" -c \
+  'import sys,yaml; v=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); q=v["qualification"]; print(q["epoch_id"]); print(q["run_id"])' \
+  "${FIRST_CONFIG}")
+EPOCH_ID="${Q8_IDENTITY[0]}"
+RUN_ID="${Q8_IDENTITY[1]}"
+RUN_ROOT="/var/lib/hermes-factory-canaries/${EPOCH_ID}/${RUN_ID}"
+GC_JSON="$("${VERIFIER_PYTHON}" -m scripts.pre_q8_repository_gc cleanup \
+  --ledger "${RUN_ROOT}/repository-ledger.json" \
+  --token-file /etc/hermes-factory/candidate-credentials.d/github-token \
+  --output "${RUN_ROOT}/repository-cleanup-summary.json" --run-inactive)"
+repository_residue="$(printf '%s' "${GC_JSON}" | "${VERIFIER_PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["repository_residue_count"])')"
+cleanup_failed="$(printf '%s' "${GC_JSON}" | "${VERIFIER_PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["cleanup_failed_count"])')"
+if [[ "${repository_residue}" != 0 || "${cleanup_failed}" != 0 ]]; then
+  printf 'Q8 repository residue is nonzero\n' >&2
+  exit 70
+fi
+
 FINAL_STATUS="$(runuser -u hermesverifier -- \
   "${VERIFIER_PYTHON}" -m scripts.qualification_control \
   --config "${QUALIFICATION_CONFIG}" status | \

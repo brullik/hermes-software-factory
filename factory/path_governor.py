@@ -134,6 +134,18 @@ class LegacyResultSource:
 
 
 @dataclass(frozen=True)
+class ReviewedArchitectureReplacement:
+    """Exact graph proof for replacing one reviewed architecture result."""
+
+    correction_task_id: str
+    reviewer_task_id: str
+    prior_source_task_id: str
+    prior_binding_id: str
+    product_id: str
+    plan_id: str
+
+
+@dataclass(frozen=True)
 class ResultBinding:
     binding_id: str
     product_id: str
@@ -163,9 +175,7 @@ class ResultBinding:
             contract_digest=str(row["contract_digest"]),
             policy_digest=str(row["policy_digest"]),
             candidate_digest=(
-                str(row["candidate_digest"])
-                if row["candidate_digest"] is not None
-                else None
+                str(row["candidate_digest"]) if row["candidate_digest"] is not None else None
             ),
             accepted_at=str(row["accepted_at"]),
             status=str(row["status"]),
@@ -185,12 +195,8 @@ class ProgressVector:
     def as_dict(self) -> dict[str, int]:
         return {
             "unmet_mandatory_obligations": self.unmet_mandatory_obligations,
-            "unresolved_root_problem_signatures": (
-                self.unresolved_root_problem_signatures
-            ),
-            "unaccepted_changed_semantic_nodes": (
-                self.unaccepted_changed_semantic_nodes
-            ),
+            "unresolved_root_problem_signatures": (self.unresolved_root_problem_signatures),
+            "unaccepted_changed_semantic_nodes": (self.unaccepted_changed_semantic_nodes),
             "open_controller_incidents": self.open_controller_incidents,
             "missing_candidate_evidence": self.missing_candidate_evidence,
             "lineage_indirection_depth": self.lineage_indirection_depth,
@@ -221,9 +227,7 @@ class ProgressVector:
 def root_cause_key(values: Mapping[str, Any]) -> str:
     """Hash semantic coordinates while excluding volatile attempt prose/ids."""
 
-    failed_gate_ids = sorted(
-        {str(value) for value in values.get("failed_gate_ids", ())}
-    )
+    failed_gate_ids = sorted({str(value) for value in values.get("failed_gate_ids", ())})
     owner = str(values.get("problem_owner") or "") or failure_owner(
         failure_class=str(values.get("failure_class") or ""),
         reason_code=str(values.get("reason_code") or ""),
@@ -245,9 +249,7 @@ def root_cause_key(values: Mapping[str, Any]) -> str:
         "semantic_node_key": semantic_node_key,
         "lifecycle_stage": str(values.get("lifecycle_stage") or ""),
         "failed_gate_ids": failed_gate_ids,
-        "required_paths": sorted(
-            {str(value) for value in values.get("required_paths", ())}
-        ),
+        "required_paths": sorted({str(value) for value in values.get("required_paths", ())}),
     }
     return sha256_text(stable_json(coordinates))
 
@@ -315,9 +317,7 @@ def semantic_node_id(task: Mapping[str, Any], contract_digest: str) -> str:
         or task.get("stage_key")
         or task.get("task_id")
     )
-    digest = sha256_text(
-        stable_json([str(task.get("product_id") or ""), key, contract_digest])
-    )
+    digest = sha256_text(stable_json([str(task.get("product_id") or ""), key, contract_digest]))
     return f"SN-{digest[:20].upper()}"
 
 
@@ -343,9 +343,7 @@ def _identity(task: Mapping[str, Any]) -> tuple[str, ...]:
             "evidence_profile",
         )
     )
-    semantic_identity = str(
-        task.get("semantic_node_key") or task.get("semantic_node_id") or ""
-    )
+    semantic_identity = str(task.get("semantic_node_key") or task.get("semantic_node_id") or "")
     return (*fixed, semantic_identity)
 
 
@@ -403,9 +401,7 @@ class PathGovernor:
         if row is None:
             return None
         binding = ResultBinding.from_row(row)
-        task = self.connection.execute(
-            "SELECT * FROM tasks WHERE task_id=?", (task_id,)
-        ).fetchone()
+        task = self.connection.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         if task is None:
             raise KeyError(task_id)
         expected_contract = str(task["contract_digest"] or task_contract_digest(task))
@@ -431,8 +427,7 @@ class PathGovernor:
         requested_mapping = dict(requested)
         if (
             str(requested_mapping.get("status") or "") != "DONE"
-            or str(requested_mapping.get("graph_status") or "")
-            not in _TERMINAL_ACCEPTED
+            or str(requested_mapping.get("graph_status") or "") not in _TERMINAL_ACCEPTED
         ):
             raise ResultLineageIdentityError(f"accepted task is missing for {task_id}")
 
@@ -495,9 +490,7 @@ class PathGovernor:
                 else None
             )
             if predecessor_row is None:
-                raise ResultLineageIdentityError(
-                    f"accepted task result is missing for {task_id}"
-                )
+                raise ResultLineageIdentityError(f"accepted task result is missing for {task_id}")
             predecessor = dict(predecessor_row)
             if (
                 str(current.get("graph_status") or "") != "ACCEPTED"
@@ -505,8 +498,7 @@ class PathGovernor:
                 or str(predecessor.get("status") or "") != "DONE"
                 or not supersession_is_compatible(predecessor, current)
                 or not str(current.get("result_ref") or "")
-                or str(current.get("result_ref") or "")
-                != str(predecessor.get("result_ref") or "")
+                or str(current.get("result_ref") or "") != str(predecessor.get("result_ref") or "")
                 or not str(current.get("result_digest") or "")
                 or str(current.get("result_digest") or "")
                 != str(predecessor.get("result_digest") or "")
@@ -557,9 +549,7 @@ class PathGovernor:
             or str(source.get("graph_status") or "") not in _TERMINAL_ACCEPTED
             or output_schema != str(task.get("output_schema") or "")
         ):
-            raise ResultLineageIdentityError(
-                f"accepted result provenance conflicts for {task_id}"
-            )
+            raise ResultLineageIdentityError(f"accepted result provenance conflicts for {task_id}")
         attempt = self.connection.execute(
             """SELECT attempt_id FROM attempts
                  WHERE attempt_id=? AND task_id=?
@@ -567,9 +557,7 @@ class PathGovernor:
             (source_attempt_id, source_task_id),
         ).fetchone()
         if attempt is None:
-            raise ResultLineageIdentityError(
-                f"accepted source attempt is missing for {task_id}"
-            )
+            raise ResultLineageIdentityError(f"accepted source attempt is missing for {task_id}")
 
         contract = str(task.get("contract_digest") or task_contract_digest(task))
         node_id = str(task.get("semantic_node_id") or semantic_node_id(task, contract))
@@ -598,9 +586,7 @@ class PathGovernor:
                 now,
             ),
         )
-        binding_seed = stable_json(
-            [str(task["product_id"]), node_id, result_digest, contract]
-        )
+        binding_seed = stable_json([str(task["product_id"]), node_id, result_digest, contract])
         binding_id = f"RB-{sha256_text(binding_seed)[:20].upper()}"
         self.connection.execute(
             """INSERT OR IGNORE INTO result_bindings
@@ -667,9 +653,7 @@ class PathGovernor:
             (str(task["product_id"]), node_id, binding_id),
         ).fetchall()
         if competing:
-            raise ActiveResultBindingConflictError(
-                f"active result binding conflicts for {task_id}"
-            )
+            raise ActiveResultBindingConflictError(f"active result binding conflicts for {task_id}")
         self.connection.execute(
             """UPDATE tasks
                   SET semantic_node_id=?, contract_digest=?, result_binding_id=?,
@@ -723,17 +707,10 @@ class PathGovernor:
             )
         return binding_id
 
-    def retire_reviewed_architecture_binding_for_correction(
-        self,
-        task_id: str,
-    ) -> str | None:
-        """Retire one reviewed architecture binding for its exact correction.
-
-        The caller must own the surrounding ``BEGIN IMMEDIATE`` transaction.
-        A correction is allowed to replace an accepted architecture result only
-        through the reviewer that consumed the old result and requested the new
-        one.  Historical bindings and frozen snapshot items are never changed.
-        """
+    def _reviewed_architecture_source_for_correction(
+        self, task_id: str
+    ) -> ReviewedArchitectureReplacement | None:
+        """Prove the exact correction/reviewer/prior graph without mutating it."""
 
         task_row = self.connection.execute(
             "SELECT * FROM tasks WHERE task_id=?", (task_id,)
@@ -746,13 +723,9 @@ class PathGovernor:
             return None
         if (
             str(task.get("capability_profile") or "") != "planning_readonly"
-            or str(task.get("output_schema") or "")
-            != "architecture-package.schema.json"
+            or str(task.get("output_schema") or "") != "architecture-package.schema.json"
             or "architecture_package"
-            not in {
-                str(value)
-                for value in _json_array(task.get("produces_evidence_types_json"))
-            }
+            not in {str(value) for value in _json_array(task.get("produces_evidence_types_json"))}
         ):
             raise ResultLineageIdentityError(
                 f"architecture correction contract is not eligible for {task_id}"
@@ -796,19 +769,12 @@ class PathGovernor:
         correction_node_id = semantic_node_id(contract, contract_digest)
         if (
             str(contract.get("task_id") or "") != task_id
-            or str(contract.get("product_id") or "")
-            != str(task.get("product_id") or "")
-            or str(contract.get("role") or "").replace("_", "-")
-            != "solution-architect"
-            or str(contract.get("lifecycle_stage") or "")
-            != "architecture-review"
+            or str(contract.get("product_id") or "") != str(task.get("product_id") or "")
+            or str(contract.get("role") or "").replace("_", "-") != "solution-architect"
             or str(contract.get("capability_profile") or "") != "planning_readonly"
-            or str(contract.get("output_schema") or "")
-            != "architecture-package.schema.json"
+            or str(contract.get("output_schema") or "") != "architecture-package.schema.json"
             or "architecture_package"
-            not in {
-                str(value) for value in contract.get("produces_evidence_types", [])
-            }
+            not in {str(value) for value in contract.get("produces_evidence_types", [])}
             or str(task.get("contract_digest") or "") != contract_digest
             or str(task.get("semantic_node_id") or "") != correction_node_id
         ):
@@ -818,6 +784,17 @@ class PathGovernor:
 
         plan_id = str(task.get("plan_id") or "")
         product_id = str(task.get("product_id") or "")
+        active_plan = self.connection.execute(
+            "SELECT active_plan_id FROM products WHERE product_id=?", (product_id,)
+        ).fetchone()
+        if (
+            not plan_id
+            or active_plan is None
+            or str(active_plan["active_plan_id"] or "") != plan_id
+        ):
+            raise ResultLineageIdentityError(
+                f"architecture correction plan is not active for {task_id}"
+            )
         reviewer_edges = self.connection.execute(
             """SELECT edge.to_task_id, reviewer.*
                  FROM task_edges AS edge
@@ -842,10 +819,8 @@ class PathGovernor:
         if (
             str(reviewer.get("product_id") or "") != product_id
             or str(reviewer.get("plan_id") or "") != plan_id
-            or str(reviewer.get("role") or "").replace("_", "-")
-            != "independent-reviewer"
-            or str(reviewer.get("lifecycle_stage") or "")
-            != "architecture-review"
+            or str(reviewer.get("role") or "").replace("_", "-") != "independent-reviewer"
+            or str(reviewer.get("lifecycle_stage") or "") != "architecture-review"
             or reviewer_dependencies.count(task_id) != 1
         ):
             raise ResultLineageIdentityError(
@@ -864,57 +839,93 @@ class PathGovernor:
             raise ResultLineageIdentityError(
                 f"architecture reviewer requires one prior evidence edge for {task_id}"
             )
-        prior = dict(prior_edges[0])
-        prior_task_id = str(prior["from_task_id"])
+        prior_source = dict(prior_edges[0])
+        prior_task_id = str(prior_source["from_task_id"])
 
-        active_rows = self.connection.execute(
-            """SELECT * FROM result_bindings
-                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'
-                 ORDER BY binding_id""",
-            (product_id, correction_node_id),
-        ).fetchall()
-        if len(active_rows) > 1:
-            raise ActiveResultBindingConflictError(
-                "multiple active architecture bindings exist for one semantic node"
-            )
-        if not active_rows:
-            return None
-        active = ResultBinding.from_row(active_rows[0])
-        if active.source_task_id == task_id:
+        # A persisted replay can already have advanced the exact evidence edge.
+        # The outer outcome idempotency check normally returns before this path,
+        # but this guard keeps direct controller calls deterministic as well.
+        if prior_task_id == task_id:
+            replay_binding_id = str(task.get("result_binding_id") or "")
+            replay = self.connection.execute(
+                """SELECT * FROM result_bindings
+                     WHERE binding_id=? AND product_id=? AND source_task_id=?
+                       AND status='ACTIVE'""",
+                (replay_binding_id, product_id, task_id),
+            ).fetchone()
+            if replay is None:
+                raise ResultLineageIdentityError(
+                    f"architecture correction replay conflicts for {task_id}"
+                )
+            exact_replay = ResultBinding.from_row(replay)
             if (
-                active.contract_digest != contract_digest
-                or active.output_schema != str(task.get("output_schema") or "")
+                exact_replay.semantic_node_id != correction_node_id
+                or exact_replay.contract_digest != contract_digest
+                or exact_replay.output_schema != str(task.get("output_schema") or "")
             ):
                 raise ResultLineageIdentityError(
                     f"architecture correction replay conflicts for {task_id}"
                 )
             return None
+
+        prior_binding_id = str(prior_source.get("result_binding_id") or "")
+        prior_binding_row = self.connection.execute(
+            """SELECT * FROM result_bindings
+                 WHERE binding_id=? AND product_id=? AND source_task_id=?
+                   AND status='ACTIVE'""",
+            (prior_binding_id, product_id, prior_task_id),
+        ).fetchone()
+        if prior_binding_row is None:
+            raise ResultLineageIdentityError(
+                f"prior reviewed architecture binding conflicts for {task_id}"
+            )
+        prior_binding = ResultBinding.from_row(prior_binding_row)
         if (
-            active.source_task_id != prior_task_id
-            or str(prior.get("status") or "") != "DONE"
-            or str(prior.get("graph_status") or "") != "ACCEPTED"
-            or str(prior.get("semantic_node_id") or "") != correction_node_id
-            or str(prior.get("contract_digest") or "") != contract_digest
-            or str(prior.get("output_schema") or "")
-            != str(task.get("output_schema") or "")
-            or int(prior.get("task_revision") or 0)
-            >= int(task.get("task_revision") or 0)
-            or str(prior.get("result_binding_id") or "") != active.binding_id
-            or active.contract_digest != contract_digest
-            or active.output_schema != str(task.get("output_schema") or "")
+            str(prior_source.get("product_id") or "") != product_id
+            or str(prior_source.get("plan_id") or "") != plan_id
+            or str(prior_source.get("role") or "").replace("_", "-") != "solution-architect"
+            or str(prior_source.get("status") or "") != "DONE"
+            or str(prior_source.get("graph_status") or "") != "ACCEPTED"
+            or str(prior_source.get("output_schema") or "") != "architecture-package.schema.json"
+            or "architecture_package"
+            not in {
+                str(value)
+                for value in _json_array(prior_source.get("produces_evidence_types_json"))
+            }
+            or int(prior_source.get("task_revision") or 0) >= int(task.get("task_revision") or 0)
+            or prior_binding.semantic_node_id != str(prior_source.get("semantic_node_id") or "")
+            or prior_binding.contract_digest != str(prior_source.get("contract_digest") or "")
+            or prior_binding.output_schema != str(prior_source.get("output_schema") or "")
         ):
             raise ResultLineageIdentityError(
                 f"prior reviewed architecture binding conflicts for {task_id}"
             )
+        return ReviewedArchitectureReplacement(
+            correction_task_id=task_id,
+            reviewer_task_id=reviewer_id,
+            prior_source_task_id=prior_task_id,
+            prior_binding_id=prior_binding.binding_id,
+            product_id=product_id,
+            plan_id=plan_id,
+        )
+
+    def retire_reviewed_architecture_binding_for_correction(
+        self,
+        task_id: str,
+    ) -> str | None:
+        """Retire the graph-proven prior binding inside the caller's transaction."""
+
+        replacement = self._reviewed_architecture_source_for_correction(task_id)
+        if replacement is None:
+            return None
         updated = self.connection.execute(
             """UPDATE result_bindings SET status='SUPERSEDED'
-                 WHERE binding_id=? AND product_id=? AND semantic_node_id=?
-                   AND source_task_id=? AND status='ACTIVE'""",
+                 WHERE binding_id=? AND product_id=? AND source_task_id=?
+                   AND status='ACTIVE'""",
             (
-                active.binding_id,
-                product_id,
-                correction_node_id,
-                prior_task_id,
+                replacement.prior_binding_id,
+                replacement.product_id,
+                replacement.prior_source_task_id,
             ),
         ).rowcount
         if updated != 1:
@@ -922,15 +933,14 @@ class PathGovernor:
                 "reviewed architecture binding changed during correction"
             )
         remaining = self.connection.execute(
-            """SELECT COUNT(*) FROM result_bindings
-                 WHERE product_id=? AND semantic_node_id=? AND status='ACTIVE'""",
-            (product_id, correction_node_id),
+            "SELECT status FROM result_bindings WHERE binding_id=?",
+            (replacement.prior_binding_id,),
         ).fetchone()
-        if remaining is None or int(remaining[0]) != 0:
+        if remaining is None or str(remaining["status"]) != "SUPERSEDED":
             raise ActiveResultBindingConflictError(
                 "reviewed architecture binding retirement is not exclusive"
             )
-        return active.binding_id
+        return replacement.prior_binding_id
 
     def advance_reviewed_architecture_evidence_for_correction(
         self,
@@ -940,7 +950,9 @@ class PathGovernor:
         """Point the same reviewer at the newly accepted architecture source."""
 
         task_row = self.connection.execute(
-            "SELECT product_id,plan_id FROM tasks WHERE task_id=?", (task_id,)
+            """SELECT product_id,plan_id,result_binding_id
+                 FROM tasks WHERE task_id=?""",
+            (task_id,),
         ).fetchone()
         retired = self.connection.execute(
             """SELECT product_id,source_task_id,status FROM result_bindings
@@ -958,17 +970,11 @@ class PathGovernor:
             )
         active = self.connection.execute(
             """SELECT source_task_id FROM result_bindings
-                 WHERE product_id=? AND status='ACTIVE'
-                   AND semantic_node_id=(
-                       SELECT semantic_node_id FROM tasks WHERE task_id=?
-                   )
-                 ORDER BY binding_id""",
-            (str(task_row["product_id"]), task_id),
-        ).fetchall()
-        if len(active) != 1 or str(active[0]["source_task_id"]) != task_id:
-            raise ResultLineageIdentityError(
-                f"new architecture binding is not exact for {task_id}"
-            )
+                 WHERE binding_id=? AND product_id=? AND status='ACTIVE'""",
+            (str(task_row["result_binding_id"] or ""), str(task_row["product_id"])),
+        ).fetchone()
+        if active is None or str(active["source_task_id"]) != task_id:
+            raise ResultLineageIdentityError(f"new architecture binding is not exact for {task_id}")
         reviewer_rows = self.connection.execute(
             """SELECT to_task_id FROM task_edges
                  WHERE plan_id=? AND from_task_id=?
@@ -982,6 +988,18 @@ class PathGovernor:
             )
         reviewer_id = str(reviewer_rows[0]["to_task_id"])
         old_source_id = str(retired["source_task_id"])
+        prior = self.connection.execute(
+            """SELECT result_binding_id,status,graph_status FROM tasks
+                 WHERE task_id=? AND product_id=? AND plan_id=?""",
+            (old_source_id, str(task_row["product_id"]), str(task_row["plan_id"])),
+        ).fetchone()
+        if (
+            prior is None
+            or str(prior["result_binding_id"] or "") != retired_binding_id
+            or str(prior["status"] or "") != "DONE"
+            or str(prior["graph_status"] or "") != "ACCEPTED"
+        ):
+            raise ResultLineageIdentityError(f"retired architecture source conflicts for {task_id}")
         updated = self.connection.execute(
             """UPDATE task_edges SET from_task_id=?, created_at=?
                  WHERE plan_id=? AND from_task_id=? AND to_task_id=?
@@ -999,12 +1017,13 @@ class PathGovernor:
                 f"architecture reviewer evidence edge changed for {task_id}"
             )
         current = self.connection.execute(
-            """SELECT COUNT(*) FROM task_edges
-                 WHERE plan_id=? AND from_task_id=? AND to_task_id=?
-                   AND edge_type='evidence_from' AND required=1""",
-            (str(task_row["plan_id"]), task_id, reviewer_id),
-        ).fetchone()
-        if current is None or int(current[0]) != 1:
+            """SELECT from_task_id FROM task_edges
+                 WHERE plan_id=? AND to_task_id=?
+                   AND edge_type='evidence_from' AND required=1
+                 ORDER BY from_task_id""",
+            (str(task_row["plan_id"]), reviewer_id),
+        ).fetchall()
+        if len(current) != 1 or str(current[0]["from_task_id"]) != task_id:
             raise ResultLineageIdentityError(
                 f"architecture reviewer evidence did not advance for {task_id}"
             )
@@ -1056,9 +1075,8 @@ class PathGovernor:
             if not base_key.endswith(scope_suffix):
                 task["semantic_node_key"] = f"{base_key}{scope_suffix}"
                 identity_rescoped = True
-        elif (
-            str(task.get("lifecycle_stage") or "") in _CANDIDATE_CONSUMER_STAGES
-            and str(task.get("candidate_snapshot_id") or "")
+        elif str(task.get("lifecycle_stage") or "") in _CANDIDATE_CONSUMER_STAGES and str(
+            task.get("candidate_snapshot_id") or ""
         ):
             snapshot_id = str(task["candidate_snapshot_id"])
             snapshot = self.connection.execute(
@@ -1398,9 +1416,7 @@ class PathGovernor:
             )
         )
         if expected_digest != str(snapshot["snapshot_digest"]):
-            raise ResultLineageIdentityError(
-                "frozen candidate snapshot digest conflicts"
-            )
+            raise ResultLineageIdentityError("frozen candidate snapshot digest conflicts")
         payload = dict(snapshot)
         payload["result_bindings"] = [
             {
@@ -1460,11 +1476,11 @@ class PathGovernor:
         column, maximum = columns[action_kind]
         used = int(row[column])
         previous_raw = json.loads(str(row["last_progress_vector_json"] or "{}"))
-        previous = ProgressVector(
-            *[int(previous_raw.get(key, 0)) for key in progress.as_dict()]
-        )
+        previous = ProgressVector(*[int(previous_raw.get(key, 0)) for key in progress.as_dict()])
         fresh_evidence = bool(evidence_digest and evidence_digest != row["last_evidence_digest"])
-        if used >= maximum or (used > 0 and not progress.strictly_improves(previous) and not fresh_evidence):
+        if used >= maximum or (
+            used > 0 and not progress.strictly_improves(previous) and not fresh_evidence
+        ):
             self.connection.execute(
                 """UPDATE problem_budgets SET status='EXHAUSTED', updated_at=?
                     WHERE product_id=? AND root_problem_signature=?""",
@@ -1686,9 +1702,7 @@ class PathGovernor:
         ).fetchone()
         if row is None:
             raise RuntimeError("problem budget was not persisted")
-        if str(row["status"]) != "ACTIVE" or 2 < int(
-            row["execution_attempts_used"]
-        ) + count:
+        if str(row["status"]) != "ACTIVE" or 2 < int(row["execution_attempts_used"]) + count:
             self.connection.execute(
                 """UPDATE problem_budgets SET status='EXHAUSTED', updated_at=?
                     WHERE product_id=? AND root_problem_signature=?""",
@@ -1771,10 +1785,7 @@ class PathGovernor:
             ).fetchone()
             if budget is None:
                 raise RuntimeError("problem budget was not persisted")
-            if (
-                str(budget["status"]) != "ACTIVE"
-                or int(budget["execution_attempts_used"]) >= 2
-            ):
+            if str(budget["status"]) != "ACTIVE" or int(budget["execution_attempts_used"]) >= 2:
                 self.connection.execute(
                     """UPDATE problem_budgets SET status='EXHAUSTED', updated_at=?
                         WHERE product_id=? AND root_problem_signature=?""",
@@ -1865,9 +1876,7 @@ class PathGovernor:
                     or membership_node_id != str(row["task_node_id"] or "")
                     or not row["plan_status"]
                 ):
-                    raise PathDecisionError(
-                        "unused execution reservation identity is ambiguous"
-                    )
+                    raise PathDecisionError("unused execution reservation identity is ambiguous")
                 seen_tasks.add(task_id)
                 if (
                     str(row["plan_status"]) != "SUPERSEDED"
@@ -1878,9 +1887,7 @@ class PathGovernor:
                     or int(row["attempt_count"] or 0) != 0
                 ):
                     continue
-                reclaimable.append(
-                    (membership_plan_id, membership_node_id, task_id)
-                )
+                reclaimable.append((membership_plan_id, membership_node_id, task_id))
             if not reclaimable:
                 self.connection.execute(f"RELEASE {savepoint}")
                 return 0
@@ -1897,9 +1904,7 @@ class PathGovernor:
                 or str(budget["status"]) != "ACTIVE"
                 or int(budget["execution_attempts_used"]) < count
             ):
-                raise PathDecisionError(
-                    "unused execution reservation accounting is inconsistent"
-                )
+                raise PathDecisionError("unused execution reservation accounting is inconsistent")
             for plan_id, node_id, task_id in reclaimable:
                 updated = self.connection.execute(
                     """UPDATE plan_memberships
@@ -1910,9 +1915,7 @@ class PathGovernor:
                     (plan_id, node_id, task_id),
                 ).rowcount
                 if updated != 1:
-                    raise PathDecisionError(
-                        "unused execution reservation changed during reclaim"
-                    )
+                    raise PathDecisionError("unused execution reservation changed during reclaim")
             updated_budget = self.connection.execute(
                 """UPDATE problem_budgets
                       SET execution_attempts_used=execution_attempts_used-?,
@@ -1957,9 +1960,7 @@ class PathGovernor:
             raise ValueError("Path Governor decision history bound is too small")
         if not _SHA256.fullmatch(path_snapshot_digest):
             raise ValueError("path snapshot digest must be a lowercase SHA-256")
-        if root_problem_signature is not None and not _SHA256.fullmatch(
-            root_problem_signature
-        ):
+        if root_problem_signature is not None and not _SHA256.fullmatch(root_problem_signature):
             raise ValueError("root problem signature must be a lowercase SHA-256")
         if status not in {"PROPOSED", "APPLYING", "APPLIED", "REJECTED", "FAILED_SAFE"}:
             raise ValueError("Path Governor decision status is invalid")
@@ -1967,9 +1968,11 @@ class PathGovernor:
             FailureAction(action)
         except ValueError as error:
             raise ValueError("Path Governor action is outside the closed catalog") from error
-        if status == "APPLIED" and not expected_progress_after.strictly_improves(
-            progress_before
-        ) and evidence_digest is None:
+        if (
+            status == "APPLIED"
+            and not expected_progress_after.strictly_improves(progress_before)
+            and evidence_digest is None
+        ):
             raise PathDecisionError(
                 "applied decision must strictly improve progress or add fresh evidence"
             )

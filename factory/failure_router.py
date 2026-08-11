@@ -51,12 +51,13 @@ _CONTROLLER_PREFIXES = (
     "artifact_",
     "repair_requeue_",
 )
-_CONTROL_GATE_IDS = {
+_PROBLEM_SIGNATURE_CONTINUATIONS = {
+    "malformed_transport",
+    "schema_validation",
     "model_requested_repair",
     "needs_replan",
     "plan_contract_violation",
     "repeated_hypothesis",
-    "liveness_invariant_violation",
 }
 
 
@@ -115,21 +116,19 @@ class FailureRouter:
                         str(failed.get("task_id") or ""),
                     ),
                 ).fetchall()
-                inherited = {
-                    str(row[0]) for row in sources if str(row[0] or "")
-                }
+                inherited = {str(row[0]) for row in sources if str(row[0] or "")}
                 if len(inherited) > 1:
                     raise ContractIntegrityError(
                         "architecture reviewer has ambiguous correction hypotheses"
                     )
                 hypothesis_id = next(iter(inherited), None)
-        elif normalized_role == "solution-architect" and str(
-            failed.get("stage_key") or ""
-        ) == "repair":
+        elif (
+            normalized_role == "solution-architect"
+            and str(failed.get("stage_key") or "") == "repair"
+        ):
             if (
                 str(failed.get("capability_profile") or "") != "planning_readonly"
-                or str(failed.get("output_schema") or "")
-                != "architecture-package.schema.json"
+                or str(failed.get("output_schema") or "") != "architecture-package.schema.json"
                 or str(failure.get("reason_code") or "")
                 not in {
                     "model_requested_repair",
@@ -153,25 +152,15 @@ class FailureRouter:
                     break
                 parent = dict(parent_row)
                 parent_role = str(parent.get("role") or "").replace("_", "-")
-                parent_stage = str(
-                    parent.get("lifecycle_stage")
-                    or parent.get("stage_key")
-                    or ""
-                )
-                if (
-                    parent_role == "independent-reviewer"
-                    and parent_stage == "architecture-review"
-                ):
+                parent_stage = str(parent.get("lifecycle_stage") or parent.get("stage_key") or "")
+                if parent_role == "independent-reviewer" and parent_stage == "architecture-review":
                     reviewer = parent
-                    hypothesis_id = (
-                        hypothesis_id
-                        or str(parent.get("hypothesis_id") or "")
-                        or None
-                    )
+                    hypothesis_id = hypothesis_id or str(parent.get("hypothesis_id") or "") or None
                     break
-                if parent_role != "solution-architect" or str(
-                    parent.get("stage_key") or ""
-                ) != "repair":
+                if (
+                    parent_role != "solution-architect"
+                    or str(parent.get("stage_key") or "") != "repair"
+                ):
                     break
                 current = parent
         else:
@@ -195,9 +184,7 @@ class FailureRouter:
             ).fetchall()
             for row in rows:
                 graph_status = str(row["graph_status"] or "")
-                reasons = {
-                    value for value in str(row["reasons"] or "").split(",") if value
-                }
+                reasons = {value for value in str(row["reasons"] or "").split(",") if value}
                 if graph_status in {"ACCEPTED", "SUPERSEDED"} or (
                     "model_requested_repair" in reasons
                 ):
@@ -237,8 +224,7 @@ class FailureRouter:
                 actual = {}
             if isinstance(actual, dict):
                 reassessment_required = (
-                    reassessment_required
-                    or actual.get("scope_reassessment_required") is True
+                    reassessment_required or actual.get("scope_reassessment_required") is True
                 )
                 required_paths.extend(derive_scope_required_paths(actual))
             current_id = str(current.get("parent_failure_id") or "")
@@ -314,6 +300,146 @@ class FailureRouter:
             failure_id = str(item.get("parent_failure_id") or "")
         return count
 
+    def _current_failure_problem_signature(
+        self,
+        failure: Mapping[str, Any],
+        failed: Mapping[str, Any],
+        *,
+        scope_reassessment_required: bool = False,
+        required_scope_paths: tuple[str, ...] = (),
+    ) -> str:
+        """Return the signature owned by the current failure coordinates."""
+
+        product_id = str(failed.get("product_id") or "")
+        if scope_reassessment_required:
+            failures = {
+                str(item["failure_id"]): item for item in self.state.list_failures(product_id)
+            }
+            directive = build_scope_recovery_directive(
+                self.config,
+                self.state,
+                list(failures.values()),
+                product_id=product_id,
+                source_failure_id=str(failure.get("failure_id") or ""),
+            )
+            return str(directive["root_problem_signature"])
+
+        persisted = str(failure.get("root_cause_key") or "")
+        if re.fullmatch(r"[a-f0-9]{64}", persisted) and not required_scope_paths:
+            return persisted
+        try:
+            gate_values = json.loads(str(failure.get("failed_gate_ids_json") or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            gate_values = []
+        failed_gate_ids = (
+            [str(value) for value in gate_values] if isinstance(gate_values, list) else []
+        )
+        return stable_root_problem_signature(
+            {
+                "product_id": product_id,
+                "failure_class": failure.get("failure_class"),
+                "reason_code": failure.get("reason_code"),
+                "semantic_node_key": (
+                    failed.get("semantic_node_key")
+                    or failed.get("plan_node_id")
+                    or failed.get("semantic_node_id")
+                ),
+                "lifecycle_stage": (failed.get("lifecycle_stage") or failed.get("stage_key")),
+                "failed_gate_ids": failed_gate_ids,
+                "required_paths": required_scope_paths,
+                "controller_invariant_id": failure.get("controller_invariant_id"),
+            }
+        )
+
+    def _may_inherit_problem_signature(
+        self,
+        failure: Mapping[str, Any],
+        failed: Mapping[str, Any],
+        *,
+        inherited_signature: str,
+        required_scope_paths: tuple[str, ...] = (),
+    ) -> bool:
+        """Allow inheritance only for an exact causal continuation."""
+
+        if (
+            str(failure.get("reason_code") or "") not in _PROBLEM_SIGNATURE_CONTINUATIONS
+            or re.fullmatch(r"[a-f0-9]{64}", inherited_signature) is None
+        ):
+            return False
+        parent_failure_id = str(failure.get("parent_failure_id") or "")
+        if not parent_failure_id:
+            return False
+        parent_failure_row = self.state._connection.execute(
+            "SELECT * FROM failures WHERE failure_id=? AND product_id=?",
+            (parent_failure_id, str(failed.get("product_id") or "")),
+        ).fetchone()
+        if parent_failure_row is None:
+            return False
+        parent_failure = dict(parent_failure_row)
+        parent_task = self.state.get_task(str(parent_failure.get("task_id") or ""))
+        if parent_task is None:
+            return False
+
+        current_hypothesis = str(failed.get("hypothesis_id") or "")
+        parent_hypothesis = str(parent_task.get("hypothesis_id") or "")
+        if not current_hypothesis or current_hypothesis != parent_hypothesis:
+            return False
+
+        parent_task_id = str(parent_task.get("task_id") or "")
+        current_task_id = str(failed.get("task_id") or "")
+        same_semantic_chain = current_task_id == parent_task_id
+        cursor = dict(failed)
+        visited: set[str] = set()
+        for _depth in range(24):
+            cursor_id = str(cursor.get("task_id") or "")
+            if not cursor_id or cursor_id in visited:
+                break
+            visited.add(cursor_id)
+            if cursor_id == parent_task_id:
+                same_semantic_chain = True
+                break
+            next_id = str(cursor.get("source_task_id") or cursor.get("parent_task_id") or "")
+            if not next_id:
+                break
+            next_row = self.state.get_task(next_id)
+            if next_row is None:
+                break
+            cursor = dict(next_row)
+        if not same_semantic_chain:
+            current_semantic = str(
+                failed.get("semantic_node_key") or failed.get("semantic_node_id") or ""
+            )
+            parent_semantic = str(
+                parent_task.get("semantic_node_key") or parent_task.get("semantic_node_id") or ""
+            )
+            same_semantic_chain = bool(current_semantic and current_semantic == parent_semantic)
+        if not same_semantic_chain:
+            return False
+
+        current_lifecycle = str(failed.get("lifecycle_stage") or failed.get("stage_key") or "")
+        parent_lifecycle = str(
+            parent_task.get("lifecycle_stage") or parent_task.get("stage_key") or ""
+        )
+        if current_lifecycle != parent_lifecycle:
+            return False
+
+        def gates(item: Mapping[str, Any]) -> tuple[str, ...]:
+            try:
+                values = json.loads(str(item.get("failed_gate_ids_json") or "[]"))
+            except (TypeError, json.JSONDecodeError):
+                return ()
+            if not isinstance(values, list):
+                return ()
+            return tuple(sorted({str(value) for value in values if str(value)}))
+
+        if gates(failure) != gates(parent_failure):
+            return False
+        _parent_reassessment, parent_paths = self._causal_scope_evidence(
+            parent_failure,
+            product_id=str(failed.get("product_id") or ""),
+        )
+        return tuple(sorted(set(required_scope_paths))) == tuple(sorted(set(parent_paths)))
+
     def _stable_causal_problem_signature(
         self,
         failure: dict[str, Any],
@@ -324,75 +450,29 @@ class FailureRouter:
     ) -> str:
         """Resolve one structural coordinate across task and wording changes."""
 
-        product_id = str(failed["product_id"])
         inherited_signature = str(failed.get("root_problem_signature") or "")
-        if re.fullmatch(r"[a-f0-9]{64}", inherited_signature):
-            return inherited_signature
-        failures = {
-            str(item["failure_id"]): item
-            for item in self.state.list_failures(product_id)
-        }
-        if scope_reassessment_required:
-            directive = build_scope_recovery_directive(
-                self.config,
-                self.state,
-                list(failures.values()),
-                product_id=product_id,
-                source_failure_id=str(failure["failure_id"]),
-            )
-            return str(directive["root_problem_signature"])
-
-        chosen = failure
-        current = failure
-        seen: set[str] = set()
-        while current and str(current.get("failure_id") or "") not in seen:
-            current_id = str(current.get("failure_id") or "")
-            seen.add(current_id)
-            try:
-                gate_ids = {
-                    str(value)
-                    for value in json.loads(
-                        str(current.get("failed_gate_ids_json") or "[]")
-                    )
-                }
-            except (TypeError, json.JSONDecodeError):
-                gate_ids = set()
-            if gate_ids - _CONTROL_GATE_IDS:
-                chosen = current
-                break
-            parent_id = str(current.get("parent_failure_id") or "")
-            parent = failures.get(parent_id)
-            if parent is None:
-                chosen = current
-                break
-            chosen = parent
-            current = parent
-
-        try:
-            chosen_gates = [
-                str(value)
-                for value in json.loads(
-                    str(chosen.get("failed_gate_ids_json") or "[]")
-                )
-            ]
-        except (TypeError, json.JSONDecodeError):
-            chosen_gates = []
-        source_task = self.state.get_task(str(chosen.get("task_id") or "")) or failed
-        return stable_root_problem_signature(
-            {
-                "product_id": product_id,
-                "failure_class": chosen.get("failure_class"),
-                "reason_code": chosen.get("reason_code"),
-                "semantic_node_key": (
-                    source_task.get("semantic_node_key")
-                    or source_task.get("plan_node_id")
-                    or source_task.get("semantic_node_id")
-                ),
-                "lifecycle_stage": source_task.get("lifecycle_stage"),
-                "failed_gate_ids": chosen_gates,
-                "required_paths": required_scope_paths,
-            }
+        current_signature = self._current_failure_problem_signature(
+            failure,
+            failed,
+            scope_reassessment_required=scope_reassessment_required,
+            required_scope_paths=required_scope_paths,
         )
+        if self._may_inherit_problem_signature(
+            failure,
+            failed,
+            inherited_signature=inherited_signature,
+            required_scope_paths=required_scope_paths,
+        ):
+            return inherited_signature
+        # Rows created before failure.root_cause_key existed cannot prove a new
+        # coordinate. Preserve their already-budgeted signature; every current
+        # runtime failure is persisted with a valid root_cause_key by autonomy.
+        if (
+            re.fullmatch(r"[a-f0-9]{64}", str(failure.get("root_cause_key") or "")) is None
+            and re.fullmatch(r"[a-f0-9]{64}", inherited_signature) is not None
+        ):
+            return inherited_signature
+        return current_signature
 
     def _consume_path_budget(
         self,
@@ -555,9 +635,10 @@ class FailureRouter:
         product_id = str(failed["product_id"])
         task_id = str(failed["task_id"])
         now = str(failure.get("last_seen_at") or failure.get("first_seen_at") or "")
-        incident_id = "incident-" + sha256_text(
-            stable_json([product_id, task_id, reason_code, evidence_ref])
-        )[:20]
+        incident_id = (
+            "incident-"
+            + sha256_text(stable_json([product_id, task_id, reason_code, evidence_ref]))[:20]
+        )
         disposition = failure_disposition(reason_code)
         with self.state._lock, self.state._connection:
             self.state._connection.execute(
@@ -604,8 +685,7 @@ class FailureRouter:
                 },
             )
         epoch_id = str(
-            (self.state.get_product(product_id) or {}).get("controller_release_epoch_id")
-            or ""
+            (self.state.get_product(product_id) or {}).get("controller_release_epoch_id") or ""
         )
         if epoch_id:
             from .release_qualification import (
@@ -614,9 +694,7 @@ class FailureRouter:
             )
 
             try:
-                ReleaseQualificationGovernor(
-                    self.state._connection
-                ).record_controller_defect(
+                ReleaseQualificationGovernor(self.state._connection).record_controller_defect(
                     epoch_id=epoch_id,
                     reason_code=reason_code,
                     evidence_ref=evidence_ref,
@@ -650,11 +728,9 @@ class FailureRouter:
             raise ContractIntegrityError("task contract is unreadable") from error
         if not isinstance(payload, dict):
             raise ContractIntegrityError("task contract is not an object")
-        if (
-            str(payload.get("task_id") or "") != task_id
-            or str(payload.get("product_id") or "")
-            != str(task.get("product_id") or "")
-        ):
+        if str(payload.get("task_id") or "") != task_id or str(
+            payload.get("product_id") or ""
+        ) != str(task.get("product_id") or ""):
             raise ContractIntegrityError("task contract identity mismatch")
         allowed_paths = payload.get("allowed_paths")
         if not isinstance(allowed_paths, list) or any(
@@ -890,8 +966,7 @@ class FailureRouter:
         )
         same_role_repair = bool(
             node_suffix == "repair"
-            and str(failed.get("role") or "").replace("_", "-")
-            == role.replace("_", "-")
+            and str(failed.get("role") or "").replace("_", "-") == role.replace("_", "-")
         )
         source_contract = self._contract(failed) if same_role_repair else None
         if source_contract is not None:
@@ -919,9 +994,7 @@ class FailureRouter:
             "active_context_ref": contract_ref,
             "failure_id": str(failure["failure_id"]),
             "hypothesis_id": hypothesis_id,
-            "supersedes_task_id": (
-                str(failed["task_id"]) if supersede_failed else None
-            ),
+            "supersedes_task_id": (str(failed["task_id"]) if supersede_failed else None),
             "title": (
                 "Replan affected product graph"
                 if role == "replanner"
@@ -981,9 +1054,7 @@ class FailureRouter:
                 if value is not None and (field == "review_kind" or str(value)):
                     contract[field] = value
             compatibility_source = dict(failed)
-            if source_contract is not None and not compatibility_source.get(
-                "semantic_node_key"
-            ):
+            if source_contract is not None and not compatibility_source.get("semantic_node_key"):
                 # Pre-projection tasks may carry only their derived node ID in
                 # the durable row.  Their immutable contract still owns the
                 # semantic key, so compare against that exact source fact.
@@ -1017,8 +1088,7 @@ class FailureRouter:
         if normalized_contract_role != normalized_durable_role or (
             durable_role != canonical_role
             and not (
-                canonical_role == "solution-architect"
-                and durable_role == "solution_architect"
+                canonical_role == "solution-architect" and durable_role == "solution_architect"
             )
         ):
             raise ContractIntegrityError("routed durable role conflicts with contract")
@@ -1039,9 +1109,7 @@ class FailureRouter:
             ),
             "goal_ids_json": stable_json(list(contract.get("goal_ids", []))),
             "semantic_node_key": contract.get("semantic_node_key"),
-            "production_side_effects": int(
-                bool(contract.get("production_side_effects", False))
-            ),
+            "production_side_effects": int(bool(contract.get("production_side_effects", False))),
             "contract_digest": digest,
             "semantic_node_id": node_id,
         }
@@ -1053,13 +1121,11 @@ class FailureRouter:
                 raise ContractIntegrityError("routed task is missing before projection")
             current = dict(row)
             if (
-                str(current.get("product_id") or "")
-                != str(contract.get("product_id") or "")
+                str(current.get("product_id") or "") != str(contract.get("product_id") or "")
                 or str(current.get("role") or "") != durable_role
                 or str(current.get("output_schema") or "")
                 != str(contract.get("output_schema") or "")
-                or str(current.get("contract_ref") or "")
-                != f"evidence/task-{task_id}.json"
+                or str(current.get("contract_ref") or "") != f"evidence/task-{task_id}.json"
             ):
                 raise ContractIntegrityError(
                     "routed task identity conflicts before contract projection"
@@ -1067,14 +1133,10 @@ class FailureRouter:
             persisted_digest = str(current.get("contract_digest") or "")
             persisted_node = str(current.get("semantic_node_id") or "")
             if bool(persisted_digest) != bool(persisted_node):
-                raise ContractIntegrityError(
-                    "routed task has a partial semantic projection"
-                )
+                raise ContractIntegrityError("routed task has a partial semantic projection")
             if persisted_digest:
                 if persisted_digest != digest or persisted_node != node_id:
-                    raise ContractIntegrityError(
-                        "routed task semantic projection conflicts"
-                    )
+                    raise ContractIntegrityError("routed task semantic projection conflicts")
                 for field, expected in projection.items():
                     actual = current.get(field)
                     if actual != expected:
@@ -1127,15 +1189,13 @@ class FailureRouter:
 
         if (
             str(task.get("role") or "") != "path-arbiter"
-            or str(task.get("output_schema") or "")
-            != "path-decision-proposal.schema.json"
+            or str(task.get("output_schema") or "") != "path-decision-proposal.schema.json"
         ):
             raise ValueError("path arbitration source task is invalid")
         root_problem_signature = str(task.get("root_problem_signature") or "")
         if (
             str(proposal.get("status") or "") != "proposed"
-            or str(proposal.get("root_problem_signature") or "")
-            != root_problem_signature
+            or str(proposal.get("root_problem_signature") or "") != root_problem_signature
             or str(proposal.get("recommended_action") or "")
             != FailureAction.RECOMPILE_AFFECTED_SUBGRAPH.value
         ):
@@ -1165,15 +1225,13 @@ class FailureRouter:
                 "and include every controller-derived safe root-cause path."
             )
             if required_scope_paths:
-                objective += " Required safe repository paths: " + ", ".join(
-                    required_scope_paths
-                ) + "."
+                objective += (
+                    " Required safe repository paths: " + ", ".join(required_scope_paths) + "."
+                )
         contract, path = self._write_contract(
             failed=task,
             failure=failure,
-            hypothesis_id=(
-                str(task["hypothesis_id"]) if task.get("hypothesis_id") else None
-            ),
+            hypothesis_id=(str(task["hypothesis_id"]) if task.get("hypothesis_id") else None),
             role="replanner",
             output_schema="plan-proposal-v1.schema.json",
             capability_profile="planning_readonly",
@@ -1210,9 +1268,7 @@ class FailureRouter:
             "idempotency_key": str(contract["idempotency_key"]),
             "supersedes_task_id": contract.get("supersedes_task_id"),
             "root_problem_signature": root_problem_signature,
-            "required_capabilities": list(
-                CAPABILITY_PROFILES["planning_readonly"]
-            ),
+            "required_capabilities": list(CAPABILITY_PROFILES["planning_readonly"]),
             "graph_status": "DRAFT",
             "mandatory": True,
         }
@@ -1364,9 +1420,7 @@ class FailureRouter:
             task_revision=int(routed.get("task_revision") or 1) + 1,
             node_suffix="active-plan-reanchor",
             required_capabilities=(
-                sorted(CAPABILITY_PROFILES[capability_profile])
-                if role != "replanner"
-                else None
+                sorted(CAPABILITY_PROFILES[capability_profile]) if role != "replanner" else None
             ),
             quality_gates=(self._quality_gates(original) if role != "replanner" else None),
             supersede_failed=False,
@@ -1504,9 +1558,7 @@ class FailureRouter:
                         product_id=str(failed["product_id"]),
                         target="BLOCKED_OWNER",
                         event="EXTERNAL_BLOCK",
-                        evidence={
-                            "owner_action_contract": str(failure["evidence_ref"])
-                        },
+                        evidence={"owner_action_contract": str(failure["evidence_ref"])},
                     )
                 return ""
             if disposition.action is FailureAction.ROLLBACK:
@@ -1609,11 +1661,7 @@ class FailureRouter:
                 dict(failed),
             )
             inherited_hypothesis_id = str(
-                (
-                    architecture_context.hypothesis_id
-                    if architecture_context is not None
-                    else None
-                )
+                (architecture_context.hypothesis_id if architecture_context is not None else None)
                 or failed.get("hypothesis_id")
                 or ""
             )
@@ -1736,10 +1784,8 @@ class FailureRouter:
                 or (
                     needs_replan
                     and not architecture_review_failure
-                    and str(failed.get("capability_profile") or "")
-                    == "reviewer_readonly"
-                    and str(failure.get("failure_class") or "")
-                    in {"semantic", "policy"}
+                    and str(failed.get("capability_profile") or "") == "reviewer_readonly"
+                    and str(failure.get("failure_class") or "") in {"semantic", "policy"}
                     and budget_row is not None
                     and int(budget_row["arbiter_calls_used"] or 0) >= 1
                     and int(budget_row["execution_attempts_used"] or 0) < 2
@@ -1747,15 +1793,11 @@ class FailureRouter:
                 )
             )
             actual_builder_repair = bool(
-                (
-                    bounded_reviewer_gate_repair
-                    and not bounded_architecture_review_repair
-                )
+                (bounded_reviewer_gate_repair and not bounded_architecture_review_repair)
                 or (
                     not needs_replan
                     and str(failed.get("role") or "").replace("_", "-") == "builder"
-                    and str(failed.get("capability_profile") or "")
-                    == "builder_workspace"
+                    and str(failed.get("capability_profile") or "") == "builder_workspace"
                 )
             )
             if needs_replan and not bounded_reviewer_gate_repair:
@@ -1763,14 +1805,17 @@ class FailureRouter:
             else:
                 path_action = FailureAction.REPAIR_NODE_VERSION.value
             if needs_replan and not bounded_reviewer_gate_repair:
-                if self._consume_path_budget(
-                    failed=failed,
-                    failure=failure,
-                    root_problem_signature=root_problem_signature,
-                    action_kind="arbiter",
-                    action=path_action,
-                    reserve_execution=False,
-                ) != "CONTINUE":
+                if (
+                    self._consume_path_budget(
+                        failed=failed,
+                        failure=failure,
+                        root_problem_signature=root_problem_signature,
+                        action_kind="arbiter",
+                        action=path_action,
+                        reserve_execution=False,
+                    )
+                    != "CONTINUE"
+                ):
                     return self._terminate_path_governor_budget(
                         failed=failed,
                         failure=failure,
@@ -1784,11 +1829,7 @@ class FailureRouter:
                     action=path_action,
                 )
             if bounded_reviewer_gate_repair:
-                role = (
-                    "solution-architect"
-                    if bounded_architecture_review_repair
-                    else "builder"
-                )
+                role = "solution-architect" if bounded_architecture_review_repair else "builder"
                 output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS[role]
                 capability_profile = (
                     "planning_readonly"
@@ -1817,10 +1858,7 @@ class FailureRouter:
                         "incorrectly inherited a failed Builder write scope. Return "
                         "one bounded replan_delta using the typed replan scope policy."
                     )
-                elif (
-                    attempts_used >= 3
-                    or repeated_problem_requires_reassessment
-                ):
+                elif attempts_used >= 3 or repeated_problem_requires_reassessment:
                     assert hypothesis_id is not None
                     self.state._connection.execute(
                         """UPDATE hypotheses SET status='EXHAUSTED', closed_at=?
@@ -1922,16 +1960,13 @@ class FailureRouter:
                 allowed_paths = (
                     ["artifacts/**"]
                     if bounded_architecture_review_repair
-                    else self._reviewer_gate_repair_paths(
-                        self._failure_gate_ids(failure)
-                    )
+                    else self._reviewer_gate_repair_paths(self._failure_gate_ids(failure))
                 )
             elif role in {"replanner", "path-arbiter"}:
                 allowed_paths = ["artifacts/**"]
             else:
                 allowed_paths = [
-                    str(value)
-                    for value in original.get("allowed_paths", ["artifacts/**"])
+                    str(value) for value in original.get("allowed_paths", ["artifacts/**"])
                 ]
             if role == "path-arbiter":
                 contract_acceptance = self._path_arbiter_acceptance()
@@ -1939,13 +1974,9 @@ class FailureRouter:
                 contract_acceptance = self._product_replan_acceptance()
             elif bounded_reviewer_gate_repair:
                 contract_acceptance = (
-                    self._architecture_review_repair_acceptance(
-                        self._failure_gate_ids(failure)
-                    )
+                    self._architecture_review_repair_acceptance(self._failure_gate_ids(failure))
                     if bounded_architecture_review_repair
-                    else self._reviewer_gate_repair_acceptance(
-                        self._failure_gate_ids(failure)
-                    )
+                    else self._reviewer_gate_repair_acceptance(self._failure_gate_ids(failure))
                 )
             else:
                 contract_acceptance = None
@@ -1957,9 +1988,7 @@ class FailureRouter:
                     for gate_id in self._failure_gate_ids(failure)
                 ):
                     repair_quality_gates = list(
-                        dict.fromkeys(
-                            [*repair_quality_gates, "target-container-image-scan"]
-                        )
+                        dict.fromkeys([*repair_quality_gates, "target-container-image-scan"])
                     )
                 if reason == "mandatory_gate_failed":
                     repair_quality_gates = list(
@@ -1983,14 +2012,13 @@ class FailureRouter:
                 node_suffix=suffix,
                 acceptance=contract_acceptance,
                 required_capabilities=(
-                    sorted(CAPABILITY_PROFILES[capability_profile])
-                    if suffix == "repair"
-                    else None
+                    sorted(CAPABILITY_PROFILES[capability_profile]) if suffix == "repair" else None
                 ),
                 quality_gates=repair_quality_gates,
                 model_floor=(
                     "sol"
-                    if needs_replan and not bounded_reviewer_gate_repair
+                    if needs_replan
+                    and not bounded_reviewer_gate_repair
                     or suffix == "scope-contract-correction"
                     else "terra"
                 ),
@@ -2007,9 +2035,7 @@ class FailureRouter:
                     and output_schema == str(failed.get("output_schema") or "")
                 ),
                 produces_evidence_types=(
-                    ["architecture_package"]
-                    if bounded_architecture_review_repair
-                    else None
+                    ["architecture_package"] if bounded_architecture_review_repair else None
                 ),
             )
             repair_ref: str | None = None
@@ -2072,9 +2098,7 @@ class FailureRouter:
             # solution-architect prompt role, while preventing the legacy v1
             # solution-architect -> task-specifier pipeline from recompiling an
             # already-active v2 plan.  The immutable contract remains canonical.
-            durable_role = (
-                "solution_architect" if bounded_architecture_review_repair else role
-            )
+            durable_role = "solution_architect" if bounded_architecture_review_repair else role
             self.state.add_task(
                 task_id=str(contract["task_id"]),
                 product_id=str(failed["product_id"]),
@@ -2157,16 +2181,10 @@ class FailureRouter:
             if bounded_architecture_review_repair:
                 with self.state._lock, self.state._connection:
                     assert architecture_context is not None
-                    reviewer_task = self.state.get_task(
-                        architecture_context.reviewer_task_id
-                    )
+                    reviewer_task = self.state.get_task(architecture_context.reviewer_task_id)
                     if reviewer_task is None:
-                        raise ContractIntegrityError(
-                            "architecture correction reviewer disappeared"
-                        )
-                    dependencies = json.loads(
-                        str(reviewer_task.get("dependencies_json") or "[]")
-                    )
+                        raise ContractIntegrityError("architecture correction reviewer disappeared")
+                    dependencies = json.loads(str(reviewer_task.get("dependencies_json") or "[]"))
                     if not isinstance(dependencies, list):
                         raise TypeError("architecture reviewer dependencies are invalid")
                     dependencies = list(

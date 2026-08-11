@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Terminal repository cleanup is exact DELETE before official finalize.
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -20,7 +21,8 @@ if [[ -n "${CREDENTIALS_DIRECTORY:-}" ]]; then
 fi
 FIXTURE_PROVISIONED=0
 FIXTURE_RECEIPT=""
-FIXTURE_ARCHIVE_RECEIPT=""
+REPOSITORY_LEDGER=""
+REPOSITORY_CLEANUP_SUMMARY=""
 GITHUB_OWNER=""
 OFFICIAL_INVOCATION=0
 
@@ -72,17 +74,14 @@ install_admitted_seal() {
   sync -f "$(dirname -- "${destination}")"
 }
 
-cleanup_fixture() {
+cleanup_repositories() {
   exit_status=$?
   trap - EXIT
-  if (( FIXTURE_PROVISIONED == 1 )); then
-    "${PYTHON}" -m scripts.pre_q8_fixture --token-file "${TOKEN_FILE}" \
-      --owner "${GITHUB_OWNER}" archive --receipt "${FIXTURE_RECEIPT}" \
-      --output "${FIXTURE_ARCHIVE_RECEIPT}" >/dev/null || exit_status=70
-    if [[ -f "${FIXTURE_ARCHIVE_RECEIPT}" ]]; then
-      chown root:hermesfunctional "${FIXTURE_ARCHIVE_RECEIPT}"
-      chmod 0640 "${FIXTURE_ARCHIVE_RECEIPT}"
-    fi
+  if [[ -n "${REPOSITORY_LEDGER}" && -f "${REPOSITORY_LEDGER}" ]]; then
+    "${PYTHON}" -m scripts.pre_q8_repository_gc cleanup \
+      --ledger "${REPOSITORY_LEDGER}" --token-file "${TOKEN_FILE}" \
+      --output "${REPOSITORY_CLEANUP_SUMMARY}" --run-inactive \
+      >/dev/null || exit_status=70
   fi
   if (( OFFICIAL_INVOCATION == 1 )); then
     systemctl start hermes-factory-functional-qualification.timer \
@@ -90,7 +89,7 @@ cleanup_fixture() {
   fi
   exit "${exit_status}"
 }
-trap cleanup_fixture EXIT
+trap cleanup_repositories EXIT
 
 if [[ -n "${1:-}" ]]; then
   if [[ ! -f "${SEAL_INPUT}" || -L "${SEAL_INPUT}" ]]; then
@@ -130,7 +129,8 @@ if [[ -n "${1:-}" ]]; then
     "${BASE_CONFIG}")"
   RUN_ROOT="/var/lib/hermes-factory-pre-q8/${EPOCH_ID}/${RUN_ID}"
   FIXTURE_RECEIPT="${RUN_ROOT}/fixture-provision.json"
-  FIXTURE_ARCHIVE_RECEIPT="${RUN_ROOT}/fixture-archive.json"
+  REPOSITORY_LEDGER="${RUN_ROOT}/repository-ledger.json"
+  REPOSITORY_CLEANUP_SUMMARY="${RUN_ROOT}/repository-cleanup-summary.json"
   (
     umask 0007
     run_as_candidate /usr/bin/mkdir -p -- \
@@ -143,6 +143,9 @@ if [[ -n "${1:-}" ]]; then
   FIXTURE_PROVISIONED=1
   chown root:hermesfunctional "${FIXTURE_RECEIPT}"
   chmod 0640 "${FIXTURE_RECEIPT}"
+  "${PYTHON}" -m scripts.pre_q8_repository_gc record-fixture \
+    --ledger "${REPOSITORY_LEDGER}" --receipt "${FIXTURE_RECEIPT}" \
+    --epoch-id "${EPOCH_ID}" --owner "${GITHUB_OWNER}" >/dev/null
   FIXTURE_URL="$(printf '%s' "${FIXTURE_JSON}" | "${PYTHON}" -c \
     'import json,sys; print(json.load(sys.stdin)["repository_url"])')"
   "${PYTHON}" "${CANDIDATE_ROOT}/scripts/bootstrap/build-canary-configs.py" \
@@ -186,8 +189,9 @@ if (( FIXTURE_PROVISIONED == 0 )); then
     'import sys,yaml; print(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))["github"]["owner"])' \
     "${BASE_CONFIG}")"
   FIXTURE_RECEIPT="/var/lib/hermes-factory-pre-q8/${EPOCH_ID}/${RUN_ID}/fixture-provision.json"
-  FIXTURE_ARCHIVE_RECEIPT="/var/lib/hermes-factory-pre-q8/${EPOCH_ID}/${RUN_ID}/fixture-archive.json"
-  [[ -f "${FIXTURE_RECEIPT}" && ! -f "${FIXTURE_ARCHIVE_RECEIPT}" ]] \
+  REPOSITORY_LEDGER="/var/lib/hermes-factory-pre-q8/${EPOCH_ID}/${RUN_ID}/repository-ledger.json"
+  REPOSITORY_CLEANUP_SUMMARY="/var/lib/hermes-factory-pre-q8/${EPOCH_ID}/${RUN_ID}/repository-cleanup-summary.json"
+  [[ -f "${FIXTURE_RECEIPT}" && -f "${REPOSITORY_LEDGER}" ]] \
     && FIXTURE_PROVISIONED=1
 fi
 
@@ -220,7 +224,14 @@ if [[ "${INDEX_ORDER}" != "$(printf '%s\n' "${SCENARIOS[@]}")" ]]; then
 fi
 
 for scenario_id in "${SCENARIOS[@]}"; do
-  if ! systemctl start --wait "hermes-factory-pre-q8@${scenario_id}.service"; then
+  scenario_failed=0
+  systemctl start --wait "hermes-factory-pre-q8@${scenario_id}.service" \
+    || scenario_failed=1
+  "${PYTHON}" -m scripts.pre_q8_repository_gc freeze-scenario \
+    --ledger "${REPOSITORY_LEDGER}" --scenario-id "${scenario_id}" \
+    --evidence-root "/var/lib/hermes-factory-pre-q8/${EPOCH_ID}/${RUN_ID}/${scenario_id}/evidence" \
+    >/dev/null
+  if (( scenario_failed == 1 )); then
     STATUS_JSON="$(run_as_verifier "${PYTHON}" -m scripts.functional_qualification status)"
     EPOCH_STATUS="$(printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c \
       'import json,sys; print(json.load(sys.stdin)["epoch"]["status"])')"
@@ -232,6 +243,19 @@ for scenario_id in "${SCENARIOS[@]}"; do
     exit 1
   fi
 done
+
+GC_JSON="$("${PYTHON}" -m scripts.pre_q8_repository_gc cleanup \
+  --ledger "${REPOSITORY_LEDGER}" --token-file "${TOKEN_FILE}" \
+  --output "${REPOSITORY_CLEANUP_SUMMARY}" --run-inactive)"
+FIXTURE_PROVISIONED=0
+repository_residue="$(printf '%s' "${GC_JSON}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["repository_residue_count"])')"
+cleanup_failed="$(printf '%s' "${GC_JSON}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["cleanup_failed_count"])')"
+if [[ "${repository_residue}" != 0 || "${cleanup_failed}" != 0 ]]; then
+  printf 'Official PRE-Q8 repository residue is nonzero\n' >&2
+  exit 70
+fi
 
 run_as_verifier "${PYTHON}" -m scripts.functional_qualification pre-q8-finalize >/dev/null
 SOURCE_COMMIT="$("${PYTHON}" -c \

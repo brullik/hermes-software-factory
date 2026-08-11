@@ -442,13 +442,16 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
             policy_digest=policy_digest(config),
         )
         with state._connection:
-            assert governor.consume_budget(
-                product_id="product-autonomy",
-                root_problem_signature=signature,
-                action_kind="arbiter",
-                progress=governor.progress_vector("product-autonomy"),
-                evidence_digest="1" * 64,
-            ) == "CONTINUE"
+            assert (
+                governor.consume_budget(
+                    product_id="product-autonomy",
+                    root_problem_signature=signature,
+                    action_kind="arbiter",
+                    progress=governor.progress_vector("product-autonomy"),
+                    evidence_digest="1" * 64,
+                )
+                == "CONTINUE"
+            )
 
         product = state.get_product("product-autonomy")
         assert product is not None
@@ -473,10 +476,9 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
             created_by_task_id="T-PATH-ARBITER",
         )
         assert len(task_ids) == 2
-        assert {
-            str(state.get_task(task_id)["root_problem_signature"])
-            for task_id in task_ids
-        } == {signature}
+        assert {str(state.get_task(task_id)["root_problem_signature"]) for task_id in task_ids} == {
+            signature
+        }
         budget = state._connection.execute(
             """SELECT arbiter_calls_used, execution_attempts_used, status
                  FROM problem_budgets
@@ -531,11 +533,14 @@ def test_plan_delta_inherits_signature_and_reserves_two_execution_slots(
             ("product-autonomy", signature),
         ).fetchone()
         assert tuple(budget) == (1, 2, "ACTIVE")
-        assert state._connection.execute(
-            """SELECT membership_state FROM plan_memberships
+        assert (
+            state._connection.execute(
+                """SELECT membership_state FROM plan_memberships
                  WHERE plan_id='PLAN-PATH-BUDGET-1'
                    AND execution_task_id='T-PATH-EXEC-B'"""
-        ).fetchone()[0] == "EXECUTION"
+            ).fetchone()[0]
+            == "EXECUTION"
+        )
     finally:
         state.close()
 
@@ -561,13 +566,16 @@ def test_replan_reclaims_unused_superseded_implementation_reservation(
             policy_digest=policy_digest(config),
         )
         with state._connection:
-            assert governor.consume_budget(
-                product_id="product-autonomy",
-                root_problem_signature=signature,
-                action_kind="arbiter",
-                progress=governor.progress_vector("product-autonomy"),
-                evidence_digest="8" * 64,
-            ) == "CONTINUE"
+            assert (
+                governor.consume_budget(
+                    product_id="product-autonomy",
+                    root_problem_signature=signature,
+                    action_kind="arbiter",
+                    progress=governor.progress_vector("product-autonomy"),
+                    evidence_digest="8" * 64,
+                )
+                == "CONTINUE"
+            )
 
         first_plan = executable_plan(
             config,
@@ -577,9 +585,7 @@ def test_replan_reclaims_unused_superseded_implementation_reservation(
             node_specs=[("A", "T-UNUSED-IMPLEMENTATION-1", "accept-a")],
             edges=[],
         )
-        first_plan["nodes"][0]["task_contract"]["lifecycle_stage"] = (
-            "implementation-slice"
-        )
+        first_plan["nodes"][0]["task_contract"]["lifecycle_stage"] = "implementation-slice"
         persist_and_ingest_plan(
             config,
             state,
@@ -597,9 +603,7 @@ def test_replan_reclaims_unused_superseded_implementation_reservation(
             node_specs=[("B", "T-REPLACEMENT-IMPLEMENTATION-2", "accept-b")],
             edges=[],
         )
-        replacement["nodes"][0]["task_contract"]["lifecycle_stage"] = (
-            "implementation-slice"
-        )
+        replacement["nodes"][0]["task_contract"]["lifecycle_stage"] = "implementation-slice"
         assert persist_and_ingest_plan(
             config,
             state,
@@ -617,9 +621,7 @@ def test_replan_reclaims_unused_superseded_implementation_reservation(
             node_specs=[("C", "T-REPLACEMENT-IMPLEMENTATION-3", "accept-c")],
             edges=[],
         )
-        final_replacement["nodes"][0]["task_contract"]["lifecycle_stage"] = (
-            "implementation-slice"
-        )
+        final_replacement["nodes"][0]["task_contract"]["lifecycle_stage"] = "implementation-slice"
         assert persist_and_ingest_plan(
             config,
             state,
@@ -634,31 +636,46 @@ def test_replan_reclaims_unused_superseded_implementation_reservation(
             ("product-autonomy", signature),
         ).fetchone()
         assert tuple(budget) == (1, 1, "ACTIVE")
-        assert state._connection.execute(
-            """SELECT membership_state FROM plan_memberships
+        assert (
+            state._connection.execute(
+                """SELECT membership_state FROM plan_memberships
                  WHERE plan_id='PLAN-UNUSED-RESERVATION-1'
                    AND execution_task_id='T-UNUSED-IMPLEMENTATION-1'"""
-        ).fetchone()[0] == "RECLAIMED_UNUSED"
-        assert state._connection.execute(
-            """SELECT membership_state FROM plan_memberships
+            ).fetchone()[0]
+            == "RECLAIMED_UNUSED"
+        )
+        assert (
+            state._connection.execute(
+                """SELECT membership_state FROM plan_memberships
                  WHERE plan_id='PLAN-UNUSED-RESERVATION-2'
                    AND execution_task_id='T-REPLACEMENT-IMPLEMENTATION-2'"""
-        ).fetchone()[0] == "RECLAIMED_UNUSED"
-        assert state._connection.execute(
-            """SELECT membership_state FROM plan_memberships
+            ).fetchone()[0]
+            == "RECLAIMED_UNUSED"
+        )
+        assert (
+            state._connection.execute(
+                """SELECT membership_state FROM plan_memberships
                  WHERE plan_id='PLAN-UNUSED-RESERVATION-3'
                    AND execution_task_id='T-REPLACEMENT-IMPLEMENTATION-3'"""
-        ).fetchone()[0] == "EXECUTION"
+            ).fetchone()[0]
+            == "EXECUTION"
+        )
         with state._connection:
-            assert governor.reclaim_unused_execution_reservations(
-                product_id="product-autonomy",
-                root_problem_signature=signature,
-            ) == 0
-        assert state._connection.execute(
-            """SELECT execution_attempts_used FROM problem_budgets
+            assert (
+                governor.reclaim_unused_execution_reservations(
+                    product_id="product-autonomy",
+                    root_problem_signature=signature,
+                )
+                == 0
+            )
+        assert (
+            state._connection.execute(
+                """SELECT execution_attempts_used FROM problem_budgets
                 WHERE product_id=? AND root_problem_signature=?""",
-            ("product-autonomy", signature),
-        ).fetchone()[0] == 1
+                ("product-autonomy", signature),
+            ).fetchone()[0]
+            == 1
+        )
     finally:
         state.close()
 
@@ -749,10 +766,13 @@ def test_plan_delta_retires_previous_active_binding(tmp_path: Path) -> None:
             created_by_task_id="T-BINDING-ROOT",
         )
 
-        assert state._connection.execute(
-            "SELECT status FROM result_bindings WHERE binding_id=?",
-            (old_binding_id,),
-        ).fetchone()[0] == "SUPERSEDED"
+        assert (
+            state._connection.execute(
+                "SELECT status FROM result_bindings WHERE binding_id=?",
+                (old_binding_id,),
+            ).fetchone()[0]
+            == "SUPERSEDED"
+        )
         assert state._connection.execute(
             """SELECT binding_id,membership_state FROM plan_memberships
                  WHERE plan_id='PLAN-BINDING-1' AND semantic_node_id=?""",
@@ -770,39 +790,64 @@ def test_plan_delta_retires_previous_active_binding(tmp_path: Path) -> None:
 def test_external_target_scope_and_recovery_slot_compile_guards() -> None:
     def implementation(key: str, scope: list[str]) -> dict[str, Any]:
         return {
-            "node_key": key, "stage_kind": "implementation_slice",
-            "title": f"Implement {key}", "objective": "Produce fresh target-tests evidence.",
-            "scope": scope, "depends_on": [], "goal_ids": ["service"],
+            "node_key": key,
+            "stage_kind": "implementation_slice",
+            "title": f"Implement {key}",
+            "objective": "Produce fresh target-tests evidence.",
+            "scope": scope,
+            "depends_on": [],
+            "goal_ids": ["service"],
             "acceptance_intents": ["target-tests passes with fresh evidence."],
         }
 
     proposal = {
-        "schema_version": "1.0", "proposal_kind": "initial",
-        "product_id": "P-EXTERNAL-PYTHON", "parent_plan_id": None,
-        "source_failure_id": None, "created_at": "2026-08-09T00:00:00Z",
+        "schema_version": "1.0",
+        "proposal_kind": "initial",
+        "product_id": "P-EXTERNAL-PYTHON",
+        "parent_plan_id": None,
+        "source_failure_id": None,
+        "created_at": "2026-08-09T00:00:00Z",
         "goals": [{"goal_id": "service", "mandatory": True}],
         "nodes": [implementation("go-service", ["cmd/**", "internal/**"])],
     }
     context = CompileContext(
-        product_id="P-EXTERNAL-PYTHON", revision=1, parent_plan_id=None,
-        source_failure_id=None, created_by_task_id="T-SPECIFIER",
-        root_task_id="T-SPECIFIER", root_context_ref="evidence/intake.json",
-        external_repository=True, proposal_artifact_ref="evidence/proposal.json",
+        product_id="P-EXTERNAL-PYTHON",
+        revision=1,
+        parent_plan_id=None,
+        source_failure_id=None,
+        created_by_task_id="T-SPECIFIER",
+        root_task_id="T-SPECIFIER",
+        root_context_ref="evidence/intake.json",
+        external_repository=True,
+        proposal_artifact_ref="evidence/proposal.json",
     )
     plan = PlanCompiler(policy_digest="a" * 64).compile(proposal, context)
-    contract = next(node["task_contract"] for node in plan["nodes"]
-                    if node["task_contract"]["lifecycle_stage"] == "implementation-slice")
+    contract = next(
+        node["task_contract"]
+        for node in plan["nodes"]
+        if node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+    )
     assert {"cmd/**", "internal/**", "src/**", "tests/**"}.issubset(contract["allowed_paths"])
-    assert contract["quality_gates"] == ["target-environment", "target-tests",
-                                         "target-compile", "target-lint", "target-secret-scan"]
-    assert {"toolchain.python", "toolchain.scanners", "toolchain.container_builder",
-            "toolchain.make"}.issubset(contract["required_capabilities"])
+    assert contract["quality_gates"] == [
+        "target-environment",
+        "target-tests",
+        "target-compile",
+        "target-lint",
+        "target-secret-scan",
+    ]
+    assert {
+        "toolchain.python",
+        "toolchain.scanners",
+        "toolchain.container_builder",
+        "toolchain.make",
+    }.issubset(contract["required_capabilities"])
 
     proposal.update(
-        proposal_kind="replan_delta", product_id="P-BUDGETED-REPLAN",
-        parent_plan_id="PLAN-1", source_failure_id="failure-1",
-        nodes=[implementation(f"repair-{index}", [f"src/repair_{index}.py"])
-               for index in range(4)],
+        proposal_kind="replan_delta",
+        product_id="P-BUDGETED-REPLAN",
+        parent_plan_id="PLAN-1",
+        source_failure_id="failure-1",
+        nodes=[implementation(f"repair-{index}", [f"src/repair_{index}.py"]) for index in range(4)],
     )
     with pytest.raises(
         PlanContractViolation,
@@ -811,9 +856,13 @@ def test_external_target_scope_and_recovery_slot_compile_guards() -> None:
         PlanCompiler(policy_digest="b" * 64).compile(
             proposal,
             CompileContext(
-                product_id="P-BUDGETED-REPLAN", revision=2, parent_plan_id="PLAN-1",
-                source_failure_id="failure-1", created_by_task_id="T-REPLANNER",
-                root_task_id="T-ROOT", root_context_ref="evidence/intake.json",
+                product_id="P-BUDGETED-REPLAN",
+                revision=2,
+                parent_plan_id="PLAN-1",
+                source_failure_id="failure-1",
+                created_by_task_id="T-REPLANNER",
+                root_task_id="T-ROOT",
+                root_context_ref="evidence/intake.json",
                 external_repository=True,
                 proposal_artifact_ref="evidence/replan.json",
                 remaining_recovery_execution_slots=2,
@@ -960,13 +1009,16 @@ def test_replanner_can_use_two_post_arbiter_builder_execution_slots(
             policy_digest=policy_digest(config),
         )
         with state._connection:
-            assert governor.consume_budget(
-                product_id="product-autonomy",
-                root_problem_signature=signature,
-                action_kind="arbiter",
-                progress=governor.progress_vector("product-autonomy"),
-                evidence_digest="6" * 64,
-            ) == "CONTINUE"
+            assert (
+                governor.consume_budget(
+                    product_id="product-autonomy",
+                    root_problem_signature=signature,
+                    action_kind="arbiter",
+                    progress=governor.progress_vector("product-autonomy"),
+                    evidence_digest="6" * 64,
+                )
+                == "CONTINUE"
+            )
 
         budget = path_governor_execution_budget(
             state._connection,
@@ -1015,23 +1067,27 @@ def test_replanner_can_use_two_post_arbiter_builder_execution_slots(
             root_context_ref="evidence/intake.json",
             external_repository=True,
             proposal_artifact_ref="evidence/replan.json",
-            remaining_recovery_execution_slots=int(
-                budget["remaining_execution_slots"]
-            ),
+            remaining_recovery_execution_slots=int(budget["remaining_execution_slots"]),
         )
         compiler = PlanCompiler(policy_digest="b" * 64)
         compiled = compiler.compile(proposal, context)
-        assert sum(
-            node["task_contract"]["lifecycle_stage"] == "implementation-slice"
-            for node in compiled["nodes"]
-        ) == 2
+        assert (
+            sum(
+                node["task_contract"]["lifecycle_stage"] == "implementation-slice"
+                for node in compiled["nodes"]
+            )
+            == 2
+        )
         with state._connection:
-            assert governor.reserve_execution_slots(
-                product_id="product-autonomy",
-                root_problem_signature=signature,
-                count=2,
-                progress=governor.progress_vector("product-autonomy"),
-            ) == "CONTINUE"
+            assert (
+                governor.reserve_execution_slots(
+                    product_id="product-autonomy",
+                    root_problem_signature=signature,
+                    count=2,
+                    progress=governor.progress_vector("product-autonomy"),
+                )
+                == "CONTINUE"
+            )
         assert path_governor_execution_budget(
             state._connection,
             product_id="product-autonomy",
@@ -1109,14 +1165,14 @@ def test_accepted_pipeline_successor_does_not_inherit_resolved_problem_signature
             created_by_task_id="T-NORMAL-PLAN-CREATOR",
         )
         assert len(task_ids) == 4
-        assert {
-            state.get_task(task_id)["root_problem_signature"]
-            for task_id in task_ids
-        } == {None}
-        assert state._connection.execute(
-            "SELECT COUNT(*) FROM problem_budgets WHERE product_id=?",
-            ("product-autonomy",),
-        ).fetchone()[0] == 0
+        assert {state.get_task(task_id)["root_problem_signature"] for task_id in task_ids} == {None}
+        assert (
+            state._connection.execute(
+                "SELECT COUNT(*) FROM problem_budgets WHERE product_id=?",
+                ("product-autonomy",),
+            ).fetchone()[0]
+            == 0
+        )
     finally:
         state.close()
 
@@ -1517,22 +1573,32 @@ def transitive_repair_graph(tmp_path: Path, *, reviewer: bool = False):
         assert source is not None
         contract_path = config.evidence_dir / Path(str(source["contract_ref"])).name
         write_test_repair_contract(
-            artifacts, json.loads(contract_path.read_text(encoding="utf-8")),
-            task_id=task_id, source_task_id=source_id,
-            plan_node_id=f"A:{task_id}", failure_id=failure_id,
+            artifacts,
+            json.loads(contract_path.read_text(encoding="utf-8")),
+            task_id=task_id,
+            source_task_id=source_id,
+            plan_node_id=f"A:{task_id}",
+            failure_id=failure_id,
         )
         state.add_task(
-            task_id=task_id, product_id="product-autonomy",
-            title=f"Repair {source_id}", role="builder",
-            output_schema="attempt-result.schema.json", stage_key="repair",
-            contract_ref=f"evidence/task-{task_id}.json", priority=200,
-            graph_status=graph_status, parent_task_id=source_id,
+            task_id=task_id,
+            product_id="product-autonomy",
+            title=f"Repair {source_id}",
+            role="builder",
+            output_schema="attempt-result.schema.json",
+            stage_key="repair",
+            contract_ref=f"evidence/task-{task_id}.json",
+            priority=200,
+            graph_status=graph_status,
+            parent_task_id=source_id,
             root_task_id=str(source["root_task_id"]),
-            source_task_id=source_id, plan_id=str(source["plan_id"]),
+            source_task_id=source_id,
+            plan_id=str(source["plan_id"]),
             plan_node_id=f"A:{task_id}",
             root_context_ref=str(source["root_context_ref"]),
             active_context_ref=f"evidence/task-{task_id}.json",
-            failure_id=failure_id, capability_profile="builder_workspace",
+            failure_id=failure_id,
+            capability_profile="builder_workspace",
             hypothesis_id=str(source["hypothesis_id"] or "") or None,
             supersedes_task_id=source_id,
         )
@@ -1543,7 +1609,9 @@ def transitive_repair_graph(tmp_path: Path, *, reviewer: bool = False):
 
 
 @pytest.mark.parametrize("reviewer", [False, True])
-def test_accepted_repair_closes_transitive_chain_without_spending_budget(tmp_path: Path, reviewer: bool) -> None:
+def test_accepted_repair_closes_transitive_chain_without_spending_budget(
+    tmp_path: Path, reviewer: bool
+) -> None:
     _, state, _ = transitive_repair_graph(tmp_path, reviewer=reviewer)
     try:
         budget_sql = "SELECT semantic_budget,attempts_used FROM hypotheses ORDER BY hypothesis_id"
@@ -1552,9 +1620,11 @@ def test_accepted_repair_closes_transitive_chain_without_spending_budget(tmp_pat
         assert claimed is not None and claimed["task_id"] == "T-SECOND-REPAIR"
         state.commit_task_outcome(
             TaskOutcome(
-                task_id="T-SECOND-REPAIR", worker_id="transitive-repair-worker",
+                task_id="T-SECOND-REPAIR",
+                worker_id="transitive-repair-worker",
                 lease_token=str(claimed["lease_token"]),
-                expected_plan_revision=1, status="ACCEPTED",
+                expected_plan_revision=1,
+                status="ACCEPTED",
                 idempotency_key=sha256_text(f"transitive-repair:{reviewer}"),
                 result_ref="internal://transitive-repair",
                 result_digest=sha256_text("transitive-repair"),
@@ -1574,15 +1644,19 @@ def test_accepted_repair_closes_transitive_chain_without_spending_budget(tmp_pat
     ("boundary", "message"),
     [("cycle", "cycle"), ("plan", "plan boundary"), ("product", "product boundary")],
 )
-def test_transitive_repair_chain_boundary_failure_is_atomic(tmp_path: Path, boundary: str, message: str) -> None:
+def test_transitive_repair_chain_boundary_failure_is_atomic(
+    tmp_path: Path, boundary: str, message: str
+) -> None:
     _, state, root_id = transitive_repair_graph(tmp_path)
     try:
         target = "T-SECOND-REPAIR" if boundary == "cycle" else root_id
         if boundary == "product":
             create_v2_product(state, product_id="foreign-product")
             state.add_task(
-                task_id="T-FOREIGN", product_id="foreign-product",
-                title="Foreign task", graph_status="FAILED_SEMANTIC"
+                task_id="T-FOREIGN",
+                product_id="foreign-product",
+                title="Foreign task",
+                graph_status="FAILED_SEMANTIC",
             )
             target = "T-FOREIGN"
         with state._lock, state._connection:
@@ -1595,10 +1669,14 @@ def test_transitive_repair_chain_boundary_failure_is_atomic(tmp_path: Path, boun
         with pytest.raises(ValueError, match=message):
             state.commit_task_outcome(
                 TaskOutcome(
-                    task_id="T-SECOND-REPAIR", worker_id="boundary-worker",
-                    lease_token=str(claimed["lease_token"]), expected_plan_revision=1,
-                    idempotency_key=sha256_text(f"boundary:{boundary}"), status="ACCEPTED",
-                    result_ref="internal://boundary", result_digest=sha256_text("boundary")
+                    task_id="T-SECOND-REPAIR",
+                    worker_id="boundary-worker",
+                    lease_token=str(claimed["lease_token"]),
+                    expected_plan_revision=1,
+                    idempotency_key=sha256_text(f"boundary:{boundary}"),
+                    status="ACCEPTED",
+                    result_ref="internal://boundary",
+                    result_digest=sha256_text("boundary"),
                 )
             )
         assert state.get_task("T-SECOND-REPAIR")["graph_status"] == "CLAIMED"
@@ -1846,9 +1924,7 @@ def test_cross_role_supersession_is_rejected_before_insert(tmp_path: Path) -> No
             for item in state.list_failures("product-autonomy")
             if item["failure_id"] == failure_id
         )
-        tasks_before = tuple(
-            task["task_id"] for task in state.list_tasks("product-autonomy")
-        )
+        tasks_before = tuple(task["task_id"] for task in state.list_tasks("product-autonomy"))
         artifacts_before = tuple(sorted(config.evidence_dir.glob("task-T-*.json")))
 
         with pytest.raises(PlanContractViolation) as captured:
@@ -1856,9 +1932,7 @@ def test_cross_role_supersession_is_rejected_before_insert(tmp_path: Path) -> No
                 failed=source,
                 failure=failure,
                 hypothesis_id=(
-                    str(source["hypothesis_id"])
-                    if source.get("hypothesis_id")
-                    else None
+                    str(source["hypothesis_id"]) if source.get("hypothesis_id") else None
                 ),
                 role="path-arbiter",
                 output_schema="path-decision-proposal.schema.json",
@@ -1871,9 +1945,9 @@ def test_cross_role_supersession_is_rejected_before_insert(tmp_path: Path) -> No
             )
 
         assert captured.value.reason_code == "cross_role_supersession_invalid"
-        assert tuple(
-            task["task_id"] for task in state.list_tasks("product-autonomy")
-        ) == tasks_before
+        assert (
+            tuple(task["task_id"] for task in state.list_tasks("product-autonomy")) == tasks_before
+        )
         assert tuple(sorted(config.evidence_dir.glob("task-T-*.json"))) == artifacts_before
     finally:
         state.close()
@@ -1903,7 +1977,9 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         architecture = review_stage == "architecture-review"
         reviewer_role = "independent-reviewer" if architecture else "security-reviewer"
-        reviewer_schema = "review-result.schema.json" if architecture else "security-review-result.schema.json"
+        reviewer_schema = (
+            "review-result.schema.json" if architecture else "security-review-result.schema.json"
+        )
         contract.update(
             {
                 "role": reviewer_role,
@@ -1926,8 +2002,13 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                        capability_profile='reviewer_readonly',
                        required_capabilities_json=?
                    WHERE task_id='T-FAILNODEA'""",
-                (reviewer_role, reviewer_schema, review_stage, review_stage,
-                 stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"]))),
+                (
+                    reviewer_role,
+                    reviewer_schema,
+                    review_stage,
+                    review_stage,
+                    stable_json(list(CAPABILITY_PROFILES["reviewer_readonly"])),
+                ),
             )
 
         router = FailureRouter(config, state, artifacts)
@@ -2041,7 +2122,9 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
                 encoding="utf-8"
             )
         )
-        expected_paths = ["artifacts/**"] if architecture else ["pyproject.toml", "src/**", "tests/**"]
+        expected_paths = (
+            ["artifacts/**"] if architecture else ["pyproject.toml", "src/**", "tests/**"]
+        )
         if "dependency" in failed_gate_id:
             expected_paths.insert(1, "requirements*.txt")
         if "CONTAINER" in failed_gate_id:
@@ -2066,12 +2149,17 @@ def test_reviewer_gate_failure_after_arbiter_uses_remaining_builder_slot(
             "AC-ARCHITECTURE-REPAIR" if architecture else "AC-REVIEWER-GATE-ROOT-CAUSE"
         )
         if architecture:
-            brief = json.loads((config.evidence_dir / Path(str(repair["repair_context_ref"])).name).read_text())
+            brief = json.loads(
+                (config.evidence_dir / Path(str(repair["repair_context_ref"])).name).read_text()
+            )
             assert repair_contract["role"] == "solution-architect"
             assert repair_contract["supersedes_task_id"] is None
             assert repair_contract["produces_evidence_types"] == ["architecture_package"]
             assert brief["failed_gate_ids"] == [failed_gate_id]
-            assert brief["required_fixes"][0] == "Produce fresh subject-bound evidence for the reviewer."
+            assert (
+                brief["required_fixes"][0]
+                == "Produce fresh subject-bound evidence for the reviewer."
+            )
             assert state.get_task("T-FAILNODEA")["graph_status"] == "BLOCKED_DEPENDENCY"
             assert state.get_task("T-FAILNODEB")["graph_status"] == "BLOCKED_DEPENDENCY"
             edge = state._connection.execute(
@@ -2153,12 +2241,14 @@ def test_architecture_review_failure_routes_directly_to_semantic_correction(
         assert correction["supersedes_task_id"] is None
         assert state.get_task("T-FAILNODEA")["graph_status"] == "BLOCKED_DEPENDENCY"
         assert not any(
-            task["role"] == "path-arbiter"
-            for task in state.list_tasks("product-autonomy")
+            task["role"] == "path-arbiter" for task in state.list_tasks("product-autonomy")
         )
-        assert state._connection.execute(
-            "SELECT COALESCE(SUM(execution_attempts_used), 0) FROM problem_budgets"
-        ).fetchone()[0] == 0
+        assert (
+            state._connection.execute(
+                "SELECT COALESCE(SUM(execution_attempts_used), 0) FROM problem_budgets"
+            ).fetchone()[0]
+            == 0
+        )
     finally:
         state.close()
 
@@ -2236,11 +2326,7 @@ def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
                     sha256_text(failure_id),
                     safe_message,
                     stable_json(
-                        {
-                            "required_fixes": [
-                                "Build and scan the immutable candidate image."
-                            ]
-                        }
+                        {"required_fixes": ["Build and scan the immutable candidate image."]}
                     ),
                     stable_json(["SECURITY-CONTAINER-SCAN-NOT-RUN"]),
                     first_failure_id,
@@ -2328,12 +2414,15 @@ def test_reviewer_builder_route_recovery_preserves_finding_and_budget(
             correction_evidence_digest="d" * 64,
         )
         assert replay["application_status"] == "REPLAYED"
-        assert state._connection.execute(
-            """SELECT COUNT(*) FROM tasks
+        assert (
+            state._connection.execute(
+                """SELECT COUNT(*) FROM tasks
                 WHERE product_id='product-autonomy' AND failure_id=?
                   AND role='builder' AND stage_key='repair'""",
-            (failure_id,),
-        ).fetchone()[0] == 1
+                (failure_id,),
+            ).fetchone()[0]
+            == 1
+        )
     finally:
         state.close()
 
@@ -2430,10 +2519,13 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
         assert recovered["graph_status"] == "READY"
         assert recovered["failure_id"] == parent_failure_id
         assert recovered["repair_context_ref"] is None
-        assert state._connection.execute(
-            "SELECT status FROM failures WHERE failure_id=?",
-            (failure_id,),
-        ).fetchone()[0] == "RESOLVED"
+        assert (
+            state._connection.execute(
+                "SELECT status FROM failures WHERE failure_id=?",
+                (failure_id,),
+            ).fetchone()[0]
+            == "RESOLVED"
+        )
         budget = state._connection.execute(
             """SELECT deterministic_actions_used,arbiter_calls_used,
                       execution_attempts_used,status
@@ -2452,12 +2544,8 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
         assert replay["application_status"] == "REPLAYED"
         assert replay["recovery_task_id"] == task_id
 
-        recovered_contract_path = (
-            config.evidence_dir / Path(str(recovered["contract_ref"])).name
-        )
-        invalid_contract = json.loads(
-            recovered_contract_path.read_text(encoding="utf-8")
-        )
+        recovered_contract_path = config.evidence_dir / Path(str(recovered["contract_ref"])).name
+        invalid_contract = json.loads(recovered_contract_path.read_text(encoding="utf-8"))
         invalid_contract_ref = "evidence/task-T-FAILNODEA-invalid-builder-schema.json"
         invalid_contract.update(
             {
@@ -2490,10 +2578,7 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
                     task_id,
                     parent_failure_id,
                     sha256_text(schema_failure_id),
-                    (
-                        "C:/runtime/schemas/"
-                        "implementation-result.schema.json"
-                    ),
+                    ("C:/runtime/schemas/implementation-result.schema.json"),
                     "f" * 64,
                     stable_json(
                         {
@@ -2540,15 +2625,12 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
         assert schema_recovered["failure_id"] == parent_failure_id
         assert schema_recovered["output_schema"] == "attempt-result.schema.json"
         corrected_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(schema_recovered["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(schema_recovered["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert corrected_contract["output_schema"] == "attempt-result.schema.json"
-        assert schema_recovered["contract_digest"] == task_contract_digest(
-            corrected_contract
-        )
+        assert schema_recovered["contract_digest"] == task_contract_digest(corrected_contract)
         assert tuple(
             state._connection.execute(
                 """SELECT deterministic_actions_used,arbiter_calls_used,
@@ -2679,7 +2761,7 @@ def test_opaque_subject_reference_recovery_resumes_same_builder_without_budget_r
 def test_path_governor_live_router_enforces_one_arbiter_two_executions(
     tmp_path: Path,
 ) -> None:
-    """Production routing cannot reset a structural budget with fresh task IDs."""
+    """A fresh mandatory gate receives an independent structural budget."""
 
     config, state, artifacts, failure_id, _ = failed_two_node_graph(
         tmp_path,
@@ -2773,31 +2855,33 @@ def test_path_governor_live_router_enforces_one_arbiter_two_executions(
         )
         assert committed.failure_id is not None
         tasks_before = len(state.list_tasks("product-autonomy"))
-        terminal_task_id = router.route(committed.failure_id)
-        assert terminal_task_id == "T-PATH-LIVE-A"
-        assert len(state.list_tasks("product-autonomy")) == tasks_before
+        next_repair_id = router.route(committed.failure_id)
+        next_repair = state.get_task(next_repair_id)
+        assert next_repair is not None
+        assert next_repair_id != "T-PATH-LIVE-A"
+        assert next_repair["role"] == "builder"
+        assert next_repair["root_problem_signature"] != signature
+        assert len(state.list_tasks("product-autonomy")) == tasks_before + 1
 
         product = state.get_product("product-autonomy")
         assert product is not None
-        assert product["status"] == "FAILED_SAFE"
-        assert product["terminal_reason"] == "path_governor_problem_budget_exhausted"
-        budget = state._connection.execute(
+        assert product["status"] == "IMPLEMENTING"
+        prior_budget = state._connection.execute(
             """SELECT arbiter_calls_used, execution_attempts_used, status
                  FROM problem_budgets
                 WHERE product_id=? AND root_problem_signature=?""",
             ("product-autonomy", signature),
         ).fetchone()
-        assert budget is not None
-        assert tuple(budget) == (1, 2, "EXHAUSTED")
-        decisions = state._connection.execute(
-            """SELECT action, status FROM path_decisions
-                WHERE product_id=? AND root_problem_signature=?
-                ORDER BY created_at, decision_id""",
-            ("product-autonomy", signature),
-        ).fetchall()
-        decision_pairs = [tuple(row) for row in decisions]
-        assert decision_pairs.count(("RECOMPILE_AFFECTED_SUBGRAPH", "APPLIED")) == 1
-        assert decision_pairs.count(("REPAIR_NODE_VERSION", "FAILED_SAFE")) == 1
+        assert prior_budget is not None
+        assert tuple(prior_budget) == (1, 2, "ACTIVE")
+        next_budget = state._connection.execute(
+            """SELECT arbiter_calls_used, execution_attempts_used, status
+                 FROM problem_budgets
+                WHERE product_id=? AND root_problem_signature=?""",
+            ("product-autonomy", next_repair["root_problem_signature"]),
+        ).fetchone()
+        assert next_budget is not None
+        assert tuple(next_budget) == (0, 1, "ACTIVE")
     finally:
         state.close()
 
@@ -2829,9 +2913,7 @@ def test_path_arbiter_worker_runs_readonly_and_creates_one_replanner(
                     "recommended_action": "RECOMPILE_AFFECTED_SUBGRAPH",
                     "affected_semantic_node_keys": ["a"],
                     "evidence_refs": ["internal://failure/evidence"],
-                    "expected_progress_delta": {
-                        "unresolved_root_problem_signatures": -1
-                    },
+                    "expected_progress_delta": {"unresolved_root_problem_signatures": -1},
                     "summary": "Create one bounded semantic delta with fresh evidence.",
                 }
             )
@@ -2861,9 +2943,7 @@ def test_path_arbiter_worker_runs_readonly_and_creates_one_replanner(
         assert replanners[0]["parent_task_id"] == arbiter_id
         assert replanners[0]["root_problem_signature"] == signature
         context = json.loads(
-            (config.evidence_dir / f"context-{arbiter_id}.json").read_text(
-                encoding="utf-8"
-            )
+            (config.evidence_dir / f"context-{arbiter_id}.json").read_text(encoding="utf-8")
         )
         snapshot = context["plan_summary"]["path_snapshot"]
         assert snapshot["root_problem_signature"] == signature
@@ -2936,9 +3016,7 @@ def test_scope_insufficient_builder_failure_routes_directly_to_replanner(
             )
 
         arbiter_id = FailureRouter(config, state, artifacts).route(failure_id)
-        routed_id = accept_path_arbiter_and_prepare_replanner(
-            config, state, artifacts, arbiter_id
-        )
+        routed_id = accept_path_arbiter_and_prepare_replanner(config, state, artifacts, arbiter_id)
 
         routed = state.get_task(routed_id)
         assert routed is not None
@@ -3048,9 +3126,9 @@ def test_exact_safe_scope_expansion_compiles_without_provider_call(
         replanner = state.get_task(replanner_id)
         assert replanner is not None
         contract = json.loads(
-            (
-                config.evidence_dir / Path(str(replanner["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(replanner["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert contract["allowed_paths"] == ["artifacts/**"]
 
@@ -3077,14 +3155,12 @@ def test_exact_safe_scope_expansion_compiles_without_provider_call(
             and task["lifecycle_stage"] == "implementation-slice"
         )
         compiled_contract = json.loads(
-            (
-                config.evidence_dir / Path(str(implementation["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(implementation["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert "scripts/image_security_verify.py" in compiled_contract["allowed_paths"]
-        result_artifact = json.loads(
-            Path(str(result.artifact_ref)).read_text(encoding="utf-8")
-        )
+        result_artifact = json.loads(Path(str(result.artifact_ref)).read_text(encoding="utf-8"))
         assert result_artifact["producer"]["provider"] == "controller"
         assert (
             result_artifact["commands"][0]["command_id"]
@@ -3142,9 +3218,7 @@ def test_scope_recovery_signature_is_stable_across_reason_transitions(
                 "reason_code": reason_code,
                 "safe_message": f"different wording {index}",
                 "failed_gate_ids_json": stable_json(
-                    ["target-tests"]
-                    if reason_code == "mandatory_gate_failed"
-                    else [reason_code]
+                    ["target-tests"] if reason_code == "mandatory_gate_failed" else [reason_code]
                 ),
                 "actual_json": "{}",
             }
@@ -3158,9 +3232,7 @@ def test_scope_recovery_signature_is_stable_across_reason_transitions(
             )
             signatures.add(str(directive["root_problem_signature"]))
             assert directive["root_failure_id"] == root_failure_id
-            assert directive["required_scope_paths"] == [
-                "scripts/image_security_verify.py"
-            ]
+            assert directive["required_scope_paths"] == ["scripts/image_security_verify.py"]
             assert directive["failed_mandatory_gate_ids"] == [
                 "target-tests",
                 "target-lint",
@@ -3197,9 +3269,7 @@ def test_recovery_directive_targets_latest_builder_not_historical_root_role(
                         {
                             "scope_reassessment_required": True,
                             "blocked_allowed_paths": ["src/a/**", "tests/**"],
-                            "scope_required_paths": [
-                                "scripts/image_security_verify.py"
-                            ],
+                            "scope_required_paths": ["scripts/image_security_verify.py"],
                         }
                     ),
                     root_failure_id,
@@ -3237,9 +3307,7 @@ def test_recovery_directive_targets_latest_builder_not_historical_root_role(
         )
 
         assert directive["affected_semantic_node_keys"] == ["a"]
-        assert directive["required_scope_paths"] == [
-            "scripts/image_security_verify.py"
-        ]
+        assert directive["required_scope_paths"] == ["scripts/image_security_verify.py"]
     finally:
         state.close()
 
@@ -3302,9 +3370,7 @@ def test_plan_contract_descendant_promotes_causal_required_scope_path(
             )
 
         arbiter_id = FailureRouter(config, state, artifacts).route(child_failure_id)
-        routed_id = accept_path_arbiter_and_prepare_replanner(
-            config, state, artifacts, arbiter_id
-        )
+        routed_id = accept_path_arbiter_and_prepare_replanner(config, state, artifacts, arbiter_id)
 
         routed = state.get_task(routed_id)
         assert routed is not None
@@ -3536,9 +3602,7 @@ def test_accepted_builder_repair_requires_fresh_readonly_reviewer_acceptance(
                 "role": "security-reviewer",
                 "output_schema": "security-review-result.schema.json",
                 "capability_profile": "reviewer_readonly",
-                "required_capabilities": list(
-                    CAPABILITY_PROFILES["reviewer_readonly"]
-                ),
+                "required_capabilities": list(CAPABILITY_PROFILES["reviewer_readonly"]),
                 "lifecycle_stage": "security-review",
                 "quality_gates": ["target-tests", "target-lint"],
             }
@@ -3953,10 +4017,9 @@ def test_reviewer_revalidation_lineage_recovery_repairs_existing_shadow_state(
             "READY",
         )
         corrected_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(corrected_repair["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(corrected_repair["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert "target-container-image-scan" in corrected_contract["quality_gates"]
         assert "container/**" in corrected_contract["allowed_paths"]
@@ -3968,10 +4031,9 @@ def test_reviewer_revalidation_lineage_recovery_repairs_existing_shadow_state(
             "BLOCKED_DEPENDENCY",
         )
         reviewer_contract = json.loads(
-            (
-                config.evidence_dir
-                / Path(str(reviewer["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(reviewer["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert "target-container-image-scan" in reviewer_contract["quality_gates"]
         assert "toolchain.container_builder" in reviewer_contract["required_capabilities"]
@@ -4178,9 +4240,9 @@ def test_missing_security_container_gate_recovery_reuses_verified_builder(
             "READY",
         )
         recovered_contract = json.loads(
-            (
-                config.evidence_dir / Path(str(recovered["contract_ref"])).name
-            ).read_text(encoding="utf-8")
+            (config.evidence_dir / Path(str(recovered["contract_ref"])).name).read_text(
+                encoding="utf-8"
+            )
         )
         assert "target-container-image-scan" in recovered_contract["quality_gates"]
         assert tuple(
@@ -4594,11 +4656,14 @@ def test_AUT_P0_006_missing_plan_output_schema_quarantines_controller_defect(
         assert product is not None
         assert product["status"] == "FAILED_SAFE"
         assert product["terminal_reason"] == "controller_exception_file_not_found_error"
-        assert state._connection.execute(
-            """SELECT COUNT(*) FROM controller_incidents
+        assert (
+            state._connection.execute(
+                """SELECT COUNT(*) FROM controller_incidents
                  WHERE product_id=? AND status='OPEN'""",
-            ("product-autonomy",),
-        ).fetchone()[0] >= 1
+                ("product-autonomy",),
+            ).fetchone()[0]
+            >= 1
+        )
     finally:
         state.close()
 
@@ -4723,9 +4788,7 @@ def test_replanner_uses_planning_acceptance_not_failed_security_acceptance(
             )
 
         arbiter_id = FailureRouter(config, state, artifacts).route(failure_id)
-        routed_id = accept_path_arbiter_and_prepare_replanner(
-            config, state, artifacts, arbiter_id
-        )
+        routed_id = accept_path_arbiter_and_prepare_replanner(config, state, artifacts, arbiter_id)
 
         routed = state.get_task(routed_id)
         assert routed is not None
@@ -4910,13 +4973,9 @@ def test_AUT_P0_011_needs_replan_activates_real_plan_revision(
         result = PipelineReconciler(config, state, artifacts).reconcile_once()
         assert result.replanned == 1
         arbiter = next(
-            task
-            for task in state.list_tasks("product-autonomy")
-            if task["role"] == "path-arbiter"
+            task for task in state.list_tasks("product-autonomy") if task["role"] == "path-arbiter"
         )
-        accept_path_arbiter_and_prepare_replanner(
-            config, state, artifacts, str(arbiter["task_id"])
-        )
+        accept_path_arbiter_and_prepare_replanner(config, state, artifacts, str(arbiter["task_id"]))
         replanner = next(
             task for task in state.list_tasks("product-autonomy") if task["role"] == "replanner"
         )
@@ -5022,9 +5081,7 @@ def test_AUT_P0_012_hypothesis_budget_exhaustion_changes_hypothesis(
         hypotheses = state.list_hypotheses("product-autonomy")
         exhausted = next(item for item in hypotheses if item["hypothesis_id"] == old_hypothesis_id)
         replacement = next(
-            item
-            for item in hypotheses
-            if item["parent_hypothesis_id"] == old_hypothesis_id
+            item for item in hypotheses if item["parent_hypothesis_id"] == old_hypothesis_id
         )
         assert exhausted["status"] == "EXHAUSTED"
         assert replacement["status"] == "RESOLVED"
@@ -5089,15 +5146,20 @@ def test_diagnosis_reassessment_uses_one_arbiter_then_fails_safe(
         )
         assert committed.failure_id is not None
         tasks_before = len(state.list_tasks("product-autonomy"))
-        assert router.route(committed.failure_id) == diagnosis_task_id
-        assert len(state.list_tasks("product-autonomy")) == tasks_before
-        assert state.get_product("product-autonomy")["status"] == "FAILED_SAFE"
-        exhausted = next(
+        reassessment_id = router.route(committed.failure_id)
+        reassessment = state.get_task(reassessment_id)
+        assert reassessment is not None
+        assert reassessment_id != diagnosis_task_id
+        assert reassessment["role"] == "path-arbiter"
+        assert reassessment["root_problem_signature"] != diagnosis["root_problem_signature"]
+        assert len(state.list_tasks("product-autonomy")) == tasks_before + 1
+        assert state.get_product("product-autonomy")["status"] == "IMPLEMENTING"
+        diagnosis_hypothesis = next(
             item
             for item in state.list_hypotheses("product-autonomy")
             if item["hypothesis_id"] == diagnosis_hypothesis_id
         )
-        assert exhausted["status"] == "EXHAUSTED"
+        assert diagnosis_hypothesis["status"] == "ACTIVE"
     finally:
         state.close()
 
@@ -5569,11 +5631,7 @@ def test_CAP_P0_007_expired_grant_blocks_claim_until_replaced(
                 provider="fake-controller",
                 scope={"repository": "brullik/durable-task-service"},
                 status="AVAILABLE",
-                expires_at=(
-                    "2000-01-01T00:00:00Z"
-                    if capability == expired_capability
-                    else None
-                ),
+                expires_at=("2000-01-01T00:00:00Z" if capability == expired_capability else None),
             )
         persist_and_ingest_plan(
             config,
@@ -7160,8 +7218,7 @@ def test_legacy_replanner_scope_contract_is_quarantined_without_correction_task(
         # Reproduce the exact pre-fix production contract.
         legacy_contract["allowed_paths"] = ["src/**", "tests/**"]
         legacy_contract_path.write_text(
-            json.dumps(legacy_contract, ensure_ascii=False, indent=2, sort_keys=True)
-            + "\n",
+            json.dumps(legacy_contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 

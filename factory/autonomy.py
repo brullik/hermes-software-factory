@@ -208,11 +208,7 @@ def path_governor_execution_budget(
     ).fetchone()
     used = int(row[1]) if row is not None else 0
     status = str(row[2]) if row is not None else "ACTIVE"
-    raw_remaining = (
-        max(0, PATH_GOVERNOR_EXECUTION_SLOT_LIMIT - used)
-        if status == "ACTIVE"
-        else 0
-    )
+    raw_remaining = max(0, PATH_GOVERNOR_EXECUTION_SLOT_LIMIT - used) if status == "ACTIVE" else 0
     # Reviewer and architecture corrections have their own finite semantic
     # budgets and cannot reserve repository execution capacity.
     reviewer_reservation = 0
@@ -225,10 +221,9 @@ def path_governor_execution_budget(
         "status": status,
     }
 
+
 ALL_CAPABILITIES = frozenset(
-    capability
-    for capabilities in CAPABILITY_PROFILES.values()
-    for capability in capabilities
+    capability for capabilities in CAPABILITY_PROFILES.values() for capability in capabilities
 ) | frozenset(
     {
         "toolchain.python",
@@ -298,9 +293,7 @@ def canonical_plan_identity_catalog() -> str:
         (
             f"{role}: output_schema={output_schema}; "
             f"capability_profile={profile}; "
-            "required_capabilities=["
-            + ", ".join(CAPABILITY_PROFILES[profile])
-            + "]"
+            "required_capabilities=[" + ", ".join(CAPABILITY_PROFILES[profile]) + "]"
         )
         for role, output_schema, profile in identities
     )
@@ -350,10 +343,7 @@ def minimum_capability_profile(
         from .lifecycle import STAGES
 
         lifecycle_definition = STAGES.get(normalized_stage)
-        if (
-            lifecycle_definition is not None
-            and lifecycle_definition.role == "release-operator"
-        ):
+        if lifecycle_definition is not None and lifecycle_definition.role == "release-operator":
             return lifecycle_definition.capability_profile
         if normalized_stage in {"release-production", "production"}:
             return "release_production"
@@ -412,27 +402,22 @@ def validate_task_capability_contract(
     )
     if capability_profile != minimum:
         raise ValueError(
-            f"{coordinate}.capability_profile cannot downgrade controller "
-            f"minimum {minimum}"
+            f"{coordinate}.capability_profile cannot downgrade controller minimum {minimum}"
         )
     declared = {str(value) for value in required_capabilities}
     unknown = declared - ALL_CAPABILITIES
     if unknown:
         raise ValueError(
-            f"{coordinate}.required_capabilities contains unknown capability: "
-            f"{min(unknown)}"
+            f"{coordinate}.required_capabilities contains unknown capability: {min(unknown)}"
         )
     canonical = set(CAPABILITY_PROFILES[capability_profile])
     omitted = sorted(canonical - declared)
     if omitted:
         raise ValueError(
-            f"{coordinate}.required_capabilities omits canonical capability: "
-            f"{omitted[0]}"
+            f"{coordinate}.required_capabilities omits canonical capability: {omitted[0]}"
         )
     non_toolchain_expansion = sorted(
-        capability
-        for capability in declared - canonical
-        if not capability.startswith("toolchain.")
+        capability for capability in declared - canonical if not capability.startswith("toolchain.")
     )
     if non_toolchain_expansion:
         raise ValueError(
@@ -543,9 +528,7 @@ class TaskOutcome:
         )
         if any(value is not None for value in accepted_values):
             if self.status not in TERMINAL_SUCCESS or not all(accepted_values):
-                raise ValueError(
-                    "accepted result provenance is complete only for terminal success"
-                )
+                raise ValueError("accepted result provenance is complete only for terminal success")
             if not re.fullmatch(r"[a-f0-9]{64}", str(self.accepted_result_digest)):
                 raise ValueError("accepted result digest must be a lowercase SHA-256")
             if not re.fullmatch(r"[a-f0-9]{64}", str(self.accepted_policy_digest)):
@@ -603,9 +586,7 @@ def safe_exception_diagnostic(error: BaseException) -> dict[str, Any]:
     trace, _ = redact_text(raw_trace)
     trace, _ = redact_secret_candidates(trace)
     normalized_frames = [
-        line.strip()
-        for line in trace.splitlines()
-        if line.lstrip().startswith('File "')
+        line.strip() for line in trace.splitlines() if line.lstrip().startswith('File "')
     ]
     return {
         "exception_type": type(error).__name__,
@@ -782,7 +763,10 @@ class AutonomyStore:
         if status not in {"AVAILABLE", "MISSING_EXTERNAL", "DENIED_POLICY", "EXPIRED"}:
             raise ValueError("capability grant status is invalid")
         selected_epoch_id = grant_epoch_id or self.state.grant_epoch_id
-        identifier = grant_id or f"grant-{sha256_text(stable_json([product_id, task_id, capability, provider, scope, selected_epoch_id]))[:20]}"
+        identifier = (
+            grant_id
+            or f"grant-{sha256_text(stable_json([product_id, task_id, capability, provider, scope, selected_epoch_id]))[:20]}"
+        )
         with self.lock, self.connection:
             self.connection.execute(
                 """INSERT OR REPLACE INTO capability_grants
@@ -918,9 +902,7 @@ class AutonomyStore:
         execution_roles: set[str] = set()
         for node_index, node in enumerate(nodes):
             if not isinstance(node, dict):
-                raise TypeError(
-                    f"BacklogPlan nodes[{node_index}] must be an object"
-                )
+                raise TypeError(f"BacklogPlan nodes[{node_index}] must be an object")
             node_id = str(node.get("node_id", ""))
             contract = node.get("task_contract")
             if not node_id or not isinstance(contract, dict):
@@ -928,9 +910,7 @@ class AutonomyStore:
                     f"BacklogPlan nodes[{node_index}] requires node_id and task_contract"
                 )
             if node_id in node_ids:
-                raise ValueError(
-                    f"BacklogPlan nodes[{node_index}].node_id is duplicated"
-                )
+                raise ValueError(f"BacklogPlan nodes[{node_index}].node_id is duplicated")
             node_ids.append(node_id)
             task_id = str(contract.get("task_id", ""))
             if task_id in task_ids:
@@ -938,9 +918,7 @@ class AutonomyStore:
                     f"BacklogPlan nodes[{node_index}].task_contract.task_id is duplicated"
                 )
             task_ids.add(task_id)
-            normalized_role = (
-                str(contract.get("role", "")).strip().lower().replace("_", "-")
-            )
+            normalized_role = str(contract.get("role", "")).strip().lower().replace("_", "-")
             execution_roles.add(normalized_role)
             output_schema = str(contract.get("output_schema", ""))
             if (
@@ -954,9 +932,7 @@ class AutonomyStore:
                     f"nodes[{node_index}].task_contract.output_schema "
                     f"is not registered: {output_schema or '<missing>'}"
                 )
-            canonical_output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS.get(
-                normalized_role
-            )
+            canonical_output_schema = CANONICAL_ROLE_OUTPUT_SCHEMAS.get(normalized_role)
             if canonical_output_schema is None:
                 raise ValueError(
                     "BacklogPlan "
@@ -973,9 +949,7 @@ class AutonomyStore:
             quality_gates = contract.get("quality_gates", [])
             if not isinstance(quality_gates, list):
                 raise TypeError(
-                    "BacklogPlan "
-                    f"nodes[{node_index}].task_contract.quality_gates "
-                    "must be an array"
+                    f"BacklogPlan nodes[{node_index}].task_contract.quality_gates must be an array"
                 )
             for gate_index, gate_id_value in enumerate(quality_gates):
                 gate_id = str(gate_id_value)
@@ -989,8 +963,7 @@ class AutonomyStore:
             idempotency_key = str(contract.get("idempotency_key", ""))
             if idempotency_key in idempotency_keys:
                 raise ValueError(
-                    "BacklogPlan "
-                    f"nodes[{node_index}].task_contract.idempotency_key is duplicated"
+                    f"BacklogPlan nodes[{node_index}].task_contract.idempotency_key is duplicated"
                 )
             idempotency_keys.add(idempotency_key)
             for criterion in contract.get("acceptance", []):
@@ -1006,40 +979,27 @@ class AutonomyStore:
                 )
             validate_task_capability_contract(
                 role=str(contract.get("role", "")),
-                stage_key=str(
-                    contract.get("stage_key")
-                    or contract.get("plan_node_id")
-                    or node_id
-                ),
+                stage_key=str(contract.get("stage_key") or contract.get("plan_node_id") or node_id),
                 capability_profile=profile,
                 required_capabilities=[str(value) for value in required],
                 require_canonical_stage=True,
                 coordinate=f"nodes[{node_index}].task_contract",
             )
         if execution_roles.issubset(PLANNING_ONLY_ROLES):
-            raise ValueError(
-                "BacklogPlan nodes must include a non-planning execution task"
-            )
+            raise ValueError("BacklogPlan nodes must include a non-planning execution task")
         for goal in plan.get("goals", []):
             if not isinstance(goal, dict):
                 raise TypeError("BacklogPlan goal must be an object")
-            required_acceptance = {
-                str(value) for value in goal.get("acceptance_ids", [])
-            }
+            required_acceptance = {str(value) for value in goal.get("acceptance_ids", [])}
             if bool(goal.get("mandatory", True)) and (
-                not required_acceptance
-                or not required_acceptance.issubset(acceptance_ids)
+                not required_acceptance or not required_acceptance.issubset(acceptance_ids)
             ):
-                raise ValueError(
-                    "mandatory goal is not traceable to task acceptance"
-                )
+                raise ValueError("mandatory goal is not traceable to task acceptance")
         adjacency: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
         indegree = {node_id: 0 for node_id in node_ids}
         for edge_index, edge in enumerate(edges):
             if not isinstance(edge, dict):
-                raise TypeError(
-                    f"BacklogPlan edges[{edge_index}] must be an object"
-                )
+                raise TypeError(f"BacklogPlan edges[{edge_index}] must be an object")
             source = str(edge.get("from", ""))
             target = str(edge.get("to", ""))
             if source not in adjacency or target not in adjacency:
@@ -1050,9 +1010,7 @@ class AutonomyStore:
                     if source not in adjacency
                     else "to"
                 )
-                raise ValueError(
-                    f"BacklogPlan edges[{edge_index}].{missing} endpoint is missing"
-                )
+                raise ValueError(f"BacklogPlan edges[{edge_index}].{missing} endpoint is missing")
             adjacency[source].append(target)
             indegree[target] += 1
         frontier = [node for node, degree in indegree.items() if degree == 0]
@@ -1084,8 +1042,7 @@ class AutonomyStore:
                 candidate_digest = sha256_text(stable_json(plan))
                 if str(existing_plan["plan_digest"]) != candidate_digest:
                     raise ValueError(
-                        "BacklogPlan plan_id already exists with a different "
-                        "immutable digest"
+                        "BacklogPlan plan_id already exists with a different immutable digest"
                     )
                 return
             for node_index, node in enumerate(plan["nodes"]):
@@ -1098,8 +1055,7 @@ class AutonomyStore:
                 ).fetchone()
                 if existing_task is not None:
                     raise ValueError(
-                        "BacklogPlan "
-                        f"nodes[{node_index}].task_contract.task_id already exists"
+                        f"BacklogPlan nodes[{node_index}].task_contract.task_id already exists"
                     )
                 existing_key = self.connection.execute(
                     "SELECT 1 FROM tasks WHERE idempotency_key=?",
@@ -1164,9 +1120,7 @@ class AutonomyStore:
         ).fetchone()
         if current_plan is None:
             raise KeyError(product_id)
-        current_plan_id = (
-            str(current_plan[0]) if current_plan[0] is not None else None
-        )
+        current_plan_id = str(current_plan[0]) if current_plan[0] is not None else None
         current_revision = int(current_plan[1] or 0)
         if revision != current_revision + 1:
             raise ValueError("plan revision must increment the active revision")
@@ -1242,11 +1196,7 @@ class AutonomyStore:
                  FROM tasks WHERE task_id=?""",
             (created_by_task_id,),
         ).fetchone()
-        root_task_id = (
-            str(creator[0])
-            if creator is not None and creator[0]
-            else created_by_task_id
-        )
+        root_task_id = str(creator[0]) if creator is not None and creator[0] else created_by_task_id
         creator_root_problem_signature = (
             str(creator["root_problem_signature"])
             if creator is not None and creator["root_problem_signature"]
@@ -1304,12 +1254,8 @@ class AutonomyStore:
                     initial_graph_status = "ACCEPTED"
                     initial_legacy_status = "DONE"
                     reused_result_ref = str(superseded["result_ref"] or "") or None
-                    reused_result_digest = (
-                        str(superseded["result_digest"] or "") or None
-                    )
-                    reused_binding_id = (
-                        str(superseded["result_binding_id"] or "") or None
-                    )
+                    reused_result_digest = str(superseded["result_digest"] or "") or None
+                    reused_binding_id = str(superseded["result_binding_id"] or "") or None
             semantic_contract_digest = task_contract_digest(contract)
             semantic_identity = semantic_node_id(contract, semantic_contract_digest)
             if not reused_binding_id:
@@ -1420,10 +1366,7 @@ class AutonomyStore:
                     creator_root_problem_signature,
                 ),
             )
-            if (
-                creator_root_problem_signature
-                and execution_slot_cost(contract) == 1
-            ):
+            if creator_root_problem_signature and execution_slot_cost(contract) == 1:
                 recovery_execution_task_ids.append(task_id)
             else:
                 governor.register_execution_membership(task_id)
@@ -1449,9 +1392,7 @@ class AutonomyStore:
                     (dependency_id,),
                 ).fetchone()
                 if dependency is None or str(dependency[0]) != product_id:
-                    raise ValueError(
-                        "compiled task external dependency is outside this product"
-                    )
+                    raise ValueError("compiled task external dependency is outside this product")
                 incoming[node_id].append(dependency_id)
                 connection.execute(
                     """INSERT OR IGNORE INTO task_edges
@@ -1524,9 +1465,7 @@ class AutonomyStore:
         )
         return tuple(node_to_task.values())
 
-    def _recompute_frontier(
-        self, connection: sqlite3.Connection, product_id: str
-    ) -> None:
+    def _recompute_frontier(self, connection: sqlite3.Connection, product_id: str) -> None:
         product = connection.execute(
             "SELECT active_plan_id FROM products WHERE product_id=?", (product_id,)
         ).fetchone()
@@ -1567,7 +1506,8 @@ class AutonomyStore:
                 (
                     str(dependency[2] or "")
                     for dependency in incoming
-                    if int(dependency[1]) and str(dependency[0]) not in TERMINAL_SUCCESS
+                    if int(dependency[1])
+                    and str(dependency[0]) not in TERMINAL_SUCCESS
                     and str(dependency[0])
                     in {
                         "FAILED_TRANSIENT",
@@ -1688,9 +1628,7 @@ class AutonomyStore:
                 **successor,
                 "product_id": str(predecessor["product_id"]),
             }
-            if source is None or not supersession_is_compatible(
-                dict(source), replacement
-            ):
+            if source is None or not supersession_is_compatible(dict(source), replacement):
                 raise PlanContractViolation(
                     "cross-role supersession is incompatible with the source task contract",
                     reason_code="cross_role_supersession_invalid",
@@ -1794,9 +1732,7 @@ class AutonomyStore:
                 "failed_gate_ids": failed_gate_ids,
             }
         )
-        contract_digest = str(task["contract_digest"] or "") or task_contract_digest(
-            dict(task)
-        )
+        contract_digest = str(task["contract_digest"] or "") or task_contract_digest(dict(task))
         candidate_digest_row = connection.execute(
             """SELECT snapshot_digest FROM candidate_snapshots
                  WHERE snapshot_id=?""",
@@ -1817,7 +1753,9 @@ class AutonomyStore:
             (task["product_id"],),
         ).fetchone()
         controller_digest = (
-            str(epoch[0]) if epoch is not None and epoch[0] else self.state.controller_release_digest
+            str(epoch[0])
+            if epoch is not None and epoch[0]
+            else self.state.controller_release_digest
         )
         policy_digest_value = (
             str(epoch[1])
@@ -2011,9 +1949,7 @@ class AutonomyStore:
                 str(ancestor["role"] or "") in _REVIEW_PROFILE_ROLES
                 and str(ancestor["capability_profile"] or "") == "reviewer_readonly"
             )
-            repair_ancestor = (
-                str(ancestor["stage_key"] or "") == "repair" and not reviewer_ancestor
-            )
+            repair_ancestor = str(ancestor["stage_key"] or "") == "repair" and not reviewer_ancestor
             if transitive_repair and ancestor["plan_id"] != plan_id:
                 if chain or repair_ancestor:
                     raise ValueError("supersession chain crosses plan boundary")
@@ -2067,9 +2003,15 @@ class AutonomyStore:
                 ).fetchone()
                 if task is None:
                     raise KeyError(outcome.task_id)
-                if str(task["status"]) != "CLAIMED" or str(task["lease_owner"]) != outcome.worker_id:
+                if (
+                    str(task["status"]) != "CLAIMED"
+                    or str(task["lease_owner"]) != outcome.worker_id
+                ):
                     raise ValueError("Task lease is missing or owned by another worker")
-                if outcome.lease_token is not None and str(task["lease_token"] or "") != outcome.lease_token:
+                if (
+                    outcome.lease_token is not None
+                    and str(task["lease_token"] or "") != outcome.lease_token
+                ):
                     raise ValueError("Task lease token changed")
                 if int(task["task_revision"] or 1) != outcome.expected_task_revision:
                     raise ValueError("Task revision changed")
@@ -2151,18 +2093,18 @@ class AutonomyStore:
                         accepted_at=now,
                     )
                     if retired_architecture_binding is not None:
+                        inject("after_architecture_result_bind")
                         governor.advance_reviewed_architecture_evidence_for_correction(
                             outcome.task_id,
                             retired_architecture_binding,
                         )
+                        inject("after_architecture_evidence_edge_update")
                     result_binding_id = accepted_binding.binding_id
                 inject("after_result_binding_write")
                 failure_id: str | None = None
                 hypothesis_id: str | None = None
                 if outcome.failure is not None:
-                    failure_id = self._upsert_failure(
-                        self.connection, task, outcome.failure
-                    )
+                    failure_id = self._upsert_failure(self.connection, task, outcome.failure)
                     self.connection.execute(
                         """UPDATE tasks SET failure_id=?, terminal_reason=?,
                                terminal_detail=?, failure_kind=?
@@ -2183,9 +2125,7 @@ class AutonomyStore:
                     if outcome.hypothesis is not None:
                         if not 1 <= outcome.hypothesis.semantic_budget <= 3:
                             raise ValueError("semantic hypothesis budget is invalid")
-                        hypothesis_id = (
-                            f"hypothesis-{sha256_text(stable_json([task['product_id'], outcome.hypothesis.signature, failure_id]))[:20]}"
-                        )
+                        hypothesis_id = f"hypothesis-{sha256_text(stable_json([task['product_id'], outcome.hypothesis.signature, failure_id]))[:20]}"
                         self.connection.execute(
                             """INSERT OR IGNORE INTO hypotheses
                                (hypothesis_id, product_id, failure_id,
@@ -2225,9 +2165,7 @@ class AutonomyStore:
                 inject("after_failure_write")
                 successor_ids: list[str] = []
                 for successor in outcome.successors:
-                    successor_ids.append(
-                        self._insert_successor(self.connection, task, successor)
-                    )
+                    successor_ids.append(self._insert_successor(self.connection, task, successor))
                 for edge in outcome.edges:
                     self.connection.execute(
                         """INSERT OR IGNORE INTO task_edges
@@ -2248,35 +2186,23 @@ class AutonomyStore:
                         self._ingest_plan(
                             self.connection,
                             outcome.plan,
-                            plan_artifact_ref=str(
-                                outcome.plan["plan_artifact_ref"]
-                            ),
+                            plan_artifact_ref=str(outcome.plan["plan_artifact_ref"]),
                             plan_digest=str(outcome.plan["plan_digest"]),
                             created_by_task_id=outcome.task_id,
                         )
                     )
                 for downstream_binding in outcome.downstream_bindings:
-                    lifecycle_stage = str(
-                        downstream_binding.get("lifecycle_stage") or ""
-                    )
-                    digest = str(
-                        downstream_binding.get("required_predecessor_digest") or ""
-                    )
-                    available_at = str(
-                        downstream_binding.get("available_at") or ""
-                    )
+                    lifecycle_stage = str(downstream_binding.get("lifecycle_stage") or "")
+                    digest = str(downstream_binding.get("required_predecessor_digest") or "")
+                    available_at = str(downstream_binding.get("available_at") or "")
                     if lifecycle_stage != "observation":
                         raise ValueError(
                             "only observation may receive a downstream release binding"
                         )
                     if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
-                        raise ValueError(
-                            "downstream release binding requires an immutable digest"
-                        )
+                        raise ValueError("downstream release binding requires an immutable digest")
                     if not available_at:
-                        raise ValueError(
-                            "downstream observation binding requires available_at"
-                        )
+                        raise ValueError("downstream observation binding requires available_at")
                     target = self.connection.execute(
                         """SELECT task_id FROM tasks
                            WHERE product_id=? AND plan_id=?
@@ -2289,9 +2215,7 @@ class AutonomyStore:
                         ),
                     ).fetchall()
                     if len(target) != 1:
-                        raise ValueError(
-                            "compiled plan must have one active observation target"
-                        )
+                        raise ValueError("compiled plan must have one active observation target")
                     self.connection.execute(
                         """UPDATE tasks
                            SET required_predecessor_digest=?, available_at=?,
@@ -2304,13 +2228,10 @@ class AutonomyStore:
                 if outcome.status in TERMINAL_SUCCESS and failure_id is None:
                     prior_failure_id = str(task["failure_id"] or "")
                     architecture_correction = bool(
-                        str(task["role"] or "").replace("_", "-")
-                        == "solution-architect"
+                        str(task["role"] or "").replace("_", "-") == "solution-architect"
                         and str(task["stage_key"] or "") == "repair"
-                        and str(task["capability_profile"] or "")
-                        == "planning_readonly"
-                        and str(task["output_schema"] or "")
-                        == "architecture-package.schema.json"
+                        and str(task["capability_profile"] or "") == "planning_readonly"
+                        and str(task["output_schema"] or "") == "architecture-package.schema.json"
                     )
                     if prior_failure_id and not architecture_correction:
                         self._resolve_failure_chain(
@@ -2325,32 +2246,24 @@ class AutonomyStore:
                             task,
                         )
                         chain_task_ids = [
-                            str(ancestor["task_id"])
-                            for ancestor in supersession_chain
+                            str(ancestor["task_id"]) for ancestor in supersession_chain
                         ]
                         reviewer_task = (
                             supersession_chain[-1]
                             if supersession_chain
                             and str(task["role"] or "") == "builder"
                             and str(task["stage_key"] or "") == "repair"
-                            and str(supersession_chain[-1]["role"] or "")
-                            in _REVIEW_PROFILE_ROLES
-                            and str(
-                                supersession_chain[-1]["capability_profile"] or ""
-                            )
+                            and str(supersession_chain[-1]["role"] or "") in _REVIEW_PROFILE_ROLES
+                            and str(supersession_chain[-1]["capability_profile"] or "")
                             == "reviewer_readonly"
                             else None
                         )
                         reviewer_revalidation = reviewer_task is not None
                         reviewer_task_id = (
-                            str(reviewer_task["task_id"])
-                            if reviewer_task is not None
-                            else None
+                            str(reviewer_task["task_id"]) if reviewer_task is not None else None
                         )
                         superseded_task_ids = [
-                            task_id
-                            for task_id in chain_task_ids
-                            if task_id != reviewer_task_id
+                            task_id for task_id in chain_task_ids if task_id != reviewer_task_id
                         ]
                         resolved_sibling_ids: set[str] = set()
                         for ancestor_task_id in chain_task_ids:
@@ -2409,9 +2322,7 @@ class AutonomyStore:
                                 ):
                                     redundant_repair_ids.append(redundant_task_id)
                         if redundant_repair_ids:
-                            placeholders = ",".join(
-                                "?" for _ in redundant_repair_ids
-                            )
+                            placeholders = ",".join("?" for _ in redundant_repair_ids)
                             self.connection.execute(
                                 f"""UPDATE tasks
                                     SET graph_status='SUPERSEDED', status='DONE',
@@ -2434,9 +2345,7 @@ class AutonomyStore:
                         if not reviewer_revalidation:
                             transitive_superseded_ids = superseded_task_ids[1:]
                         if transitive_superseded_ids:
-                            placeholders = ",".join(
-                                "?" for _ in transitive_superseded_ids
-                            )
+                            placeholders = ",".join("?" for _ in transitive_superseded_ids)
                             self.connection.execute(
                                 f"""UPDATE tasks
                                    SET graph_status='SUPERSEDED', status='DONE',
@@ -2535,11 +2444,7 @@ class AutonomyStore:
                                     now,
                                 ),
                             )
-                        if (
-                            resolved_sibling_ids
-                            or redundant_repair_ids
-                            or len(chain_task_ids) > 1
-                        ):
+                        if resolved_sibling_ids or redundant_repair_ids or len(chain_task_ids) > 1:
                             self.state._record_event(
                                 str(task["product_id"]),
                                 outcome.task_id,
@@ -2548,18 +2453,12 @@ class AutonomyStore:
                                     "superseded_task_id": supersedes_task_id,
                                     "superseded_task_ids": superseded_task_ids,
                                     "accepted_replacement_task_id": outcome.task_id,
-                                    "resolved_failure_ids": sorted(
-                                        resolved_sibling_ids
-                                    ),
+                                    "resolved_failure_ids": sorted(resolved_sibling_ids),
                                     "suppressed_task_ids": redundant_repair_ids,
-                                    "reviewer_revalidation_task_id": (
-                                        reviewer_task_id
-                                    ),
+                                    "reviewer_revalidation_task_id": (reviewer_task_id),
                                 },
                             )
-                self._recompute_frontier(
-                    self.connection, str(task["product_id"])
-                )
+                self._recompute_frontier(self.connection, str(task["product_id"]))
                 inject("after_frontier_recompute")
                 suppressed_product_transition: dict[str, str] | None = None
                 if outcome.product_status is not None:
@@ -2571,8 +2470,7 @@ class AutonomyStore:
                         raise KeyError(str(task["product_id"]))
                     current_product_status = str(current_product["status"])
                     if (
-                        current_product_status
-                        in OUTCOME_PROTECTED_PRODUCT_STATUSES
+                        current_product_status in OUTCOME_PROTECTED_PRODUCT_STATUSES
                         and current_product_status != outcome.product_status
                     ):
                         suppressed_product_transition = {
@@ -2616,13 +2514,9 @@ class AutonomyStore:
                                 "terminal_evidence": terminal_evidence_ref or outcome.result_ref,
                             }
                             preferred_event = {
-                                ("IDEA_RECEIVED", "RISK_CLASSIFIED"): (
-                                    "CONTRACT_AND_RISK_PROVEN"
-                                ),
+                                ("IDEA_RECEIVED", "RISK_CLASSIFIED"): ("CONTRACT_AND_RISK_PROVEN"),
                                 ("ARCHITECTED", "IMPLEMENTING"): "BACKLOG_COMPILED",
-                                ("STAGING_DEPLOYED", "RELEASE_READY"): (
-                                    "ACCEPTANCE_COMPLETE"
-                                ),
+                                ("STAGING_DEPLOYED", "RELEASE_READY"): ("ACCEPTANCE_COMPLETE"),
                                 ("RELEASE_READY", "OBSERVATION"): (
                                     "PRODUCTION_OBSERVATION_SCHEDULED"
                                 ),
@@ -2690,9 +2584,7 @@ class AutonomyStore:
                         event_type,
                         payload,
                     )
-                    outbox_key = sha256_text(
-                        f"{outcome.idempotency_key}:{event_type}:{index}"
-                    )
+                    outbox_key = sha256_text(f"{outcome.idempotency_key}:{event_type}:{index}")
                     self.connection.execute(
                         """INSERT OR IGNORE INTO outbox
                            (outbox_id, idempotency_key, event_type, payload_json,
@@ -2815,10 +2707,7 @@ class AutonomyStore:
                              AND graph_status NOT IN ('ACCEPTED','SUPERSEDED')""",
                         (plan_id,),
                     ).fetchall()
-                    unmet.extend(
-                        f"mandatory_node:{row[0]}:{row[1]}"
-                        for row in mandatory_open
-                    )
+                    unmet.extend(f"mandatory_node:{row[0]}:{row[1]}" for row in mandatory_open)
                     node_rows = self.connection.execute(
                         """SELECT task_id, result_ref FROM tasks
                            WHERE plan_id=? AND mandatory=1
@@ -2826,9 +2715,7 @@ class AutonomyStore:
                         (plan_id,),
                     ).fetchall()
                     node_evidence = [
-                        str(row["result_ref"])
-                        for row in node_rows
-                        if row["result_ref"]
+                        str(row["result_ref"]) for row in node_rows if row["result_ref"]
                     ]
                     if len(node_evidence) != len(node_rows):
                         unmet.append("mandatory_node_evidence_missing")
@@ -2843,8 +2730,7 @@ class AutonomyStore:
                         (plan_id,),
                     ).fetchall()
                     unmet.extend(
-                        f"superseded_without_replacement:{row[0]}"
-                        for row in invalid_superseded
+                        f"superseded_without_replacement:{row[0]}" for row in invalid_superseded
                     )
                 open_failures = self.connection.execute(
                     "SELECT failure_id FROM failures WHERE product_id=? "
@@ -2860,19 +2746,12 @@ class AutonomyStore:
                     """,
                     (product_id,),
                 ).fetchall()
-                unmet.extend(
-                    f"open_controller_incident:{row[0]}"
-                    for row in open_incidents
-                )
+                unmet.extend(f"open_controller_incident:{row[0]}" for row in open_incidents)
                 try:
                     plan_goals_row = self.connection.execute(
                         "SELECT goals_json FROM plans WHERE plan_id=?", (plan_id,)
                     ).fetchone()
-                    goals = (
-                        json.loads(str(plan_goals_row[0]))
-                        if plan_goals_row is not None
-                        else []
-                    )
+                    goals = json.loads(str(plan_goals_row[0])) if plan_goals_row is not None else []
                 except json.JSONDecodeError:
                     goals = []
                 goal_evidence_refs: list[str] = []
@@ -2893,9 +2772,10 @@ class AutonomyStore:
                 selected_profile = delivery_profile(
                     str(product["delivery_profile"] or "DEPLOYED_SERVICE")
                 )
-                required_delivery_evidence = set(
-                    selected_profile.completion_obligations
-                ) - {"goal_evidence", "completion"}
+                required_delivery_evidence = set(selected_profile.completion_obligations) - {
+                    "goal_evidence",
+                    "completion",
+                }
                 release_rows = {
                     str(row[0]): (
                         str(row[1]),
@@ -2924,10 +2804,7 @@ class AutonomyStore:
                 if unmet:
                     self.connection.commit()
                     return CompletionDecision(False, tuple(sorted(unmet)), None)
-                completed_at = max(
-                    [value[3] for value in release_rows.values()]
-                    or [utc_now()]
-                )
+                completed_at = max([value[3] for value in release_rows.values()] or [utc_now()])
                 tail_evidence_priority = (
                     "production",
                     "signed_publish",
@@ -2989,9 +2866,7 @@ class AutonomyStore:
                     },
                 }
                 digest = sha256_text(stable_json(completion_artifact))
-                completion_ref = (
-                    f"evidence/completion-{product_id}-{digest[:12]}.json"
-                )
+                completion_ref = f"evidence/completion-{product_id}-{digest[:12]}.json"
                 if artifacts is not None:
                     completion_path = artifacts.write(
                         "completion-evidence.schema.json",
@@ -3006,9 +2881,7 @@ class AutonomyStore:
                          FROM tasks WHERE plan_id=? ORDER BY semantic_node_id,task_id""",
                     (plan_id,),
                 ).fetchall()
-                semantic_graph_digest = sha256_text(
-                    stable_json([tuple(row) for row in graph_rows])
-                )
+                semantic_graph_digest = sha256_text(stable_json([tuple(row) for row in graph_rows]))
                 candidate = self.connection.execute(
                     """SELECT snapshot_digest FROM candidate_snapshots
                          WHERE product_id=? AND plan_id=?
@@ -3030,20 +2903,14 @@ class AutonomyStore:
                 product_contract_digest = (
                     str(product_contract[0])
                     if product_contract is not None and product_contract[0]
-                    else sha256_text(
-                        stable_json(
-                            [product["goal_text"], product["root_goal_ref"]]
-                        )
-                    )
+                    else sha256_text(stable_json([product["goal_text"], product["root_goal_ref"]]))
                 )
                 active_plan = self.connection.execute(
                     "SELECT plan_digest FROM plans WHERE plan_id=?",
                     (plan_id,),
                 ).fetchone()
                 active_plan_digest = (
-                    str(active_plan[0])
-                    if active_plan is not None
-                    else sha256_text(plan_id)
+                    str(active_plan[0]) if active_plan is not None else sha256_text(plan_id)
                 )
                 epoch = self.connection.execute(
                     """SELECT controller_release_digest,policy_digest
@@ -3051,16 +2918,12 @@ class AutonomyStore:
                     (product["controller_release_epoch_id"],),
                 ).fetchone()
                 controller_release_digest = (
-                    str(epoch[0])
-                    if epoch is not None
-                    else self.state.controller_release_digest
+                    str(epoch[0]) if epoch is not None else self.state.controller_release_digest
                 )
                 completion_policy_digest = (
                     str(epoch[1])
                     if epoch is not None
-                    else sha256_text(
-                        stable_json([active_plan_digest, selected_profile.digest])
-                    )
+                    else sha256_text(stable_json([active_plan_digest, selected_profile.digest]))
                 )
 
                 not_applicable_proofs: list[dict[str, Any]] = []
@@ -3202,8 +3065,7 @@ class AutonomyStore:
             return [
                 dict(row)
                 for row in self.connection.execute(
-                    "SELECT * FROM task_edges WHERE plan_id=? "
-                    "ORDER BY from_task_id, to_task_id",
+                    "SELECT * FROM task_edges WHERE plan_id=? ORDER BY from_task_id, to_task_id",
                     (plan_id,),
                 ).fetchall()
             ]

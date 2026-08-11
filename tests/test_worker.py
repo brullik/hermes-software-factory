@@ -271,7 +271,9 @@ def test_solution_architect_gets_trusted_capacity_evidence() -> None:
         with patch("factory.worker._host_capacity_snapshot", return_value=snapshot):
             spec = worker.default_spec(task)
 
-        capacity = next(item for item in spec.evidence if item["type"] == "controller-host-capacity")
+        capacity = next(
+            item for item in spec.evidence if item["type"] == "controller-host-capacity"
+        )
         payload = stable_json(snapshot)
         assert payload in capacity["summary"]
         assert capacity["artifact_ref"] == "controller://host-capacity/" + sha256_text(payload)
@@ -287,7 +289,14 @@ def test_delivery_profile_obligations_enter_architecture_prompt() -> None:
     expected_profile_ids = {
         "CLI_PACKAGE": {"CLI-CANON-001", "CLI-INSTALL-001"},
         "DEPLOYED_SERVICE": {"HTTP-HEAD-001", "DEPLOY-ROLLBACK-001"},
-        "TELEGRAM_BOT": {"TG-RETRY-001", "TG-AUTH-001", "TG-DB-ROLLBACK-001"},
+        "TELEGRAM_BOT": {
+            "TG-RETRY-001",
+            "TG-AUTH-001",
+            "TG-DB-ROLLBACK-001",
+            "TG-TRANSPORT-001",
+            "TG-FIXTURE-TOKEN-001",
+            "TG-CONCURRENCY-001",
+        },
         "OFFLINE_BATCH": {"BATCH-PATH-001", "BATCH-LIMIT-001"},
         "GITHUB_AUTOMATION": {"GH-IDEMPOTENCY-001", "GH-RESUME-001"},
         "LIBRARY_PACKAGE": {"LIB-CONSUMER-001", "LIB-SIGN-001"},
@@ -392,13 +401,16 @@ def test_same_obligations_enter_independent_review() -> None:
             task_id = str(json.loads(task_path.read_text(encoding="utf-8"))["task_id"])
             task = state.get_task(task_id)
             assert task is not None
-            with patch(
-                "factory.worker._host_capacity_snapshot",
-                return_value={"schema_version": "1.0", "status": "AVAILABLE"},
-            ), patch.object(
-                worker,
-                "_completed_review_evidence",
-                return_value=[],
+            with (
+                patch(
+                    "factory.worker._host_capacity_snapshot",
+                    return_value={"schema_version": "1.0", "status": "AVAILABLE"},
+                ),
+                patch.object(
+                    worker,
+                    "_completed_review_evidence",
+                    return_value=[],
+                ),
             ):
                 spec = worker.default_spec(task)
             item = next(
@@ -406,9 +418,7 @@ def test_same_obligations_enter_independent_review() -> None:
                 for evidence in spec.evidence
                 if evidence["type"] == "controller-delivery-profile-obligations"
             )
-            payload = json.loads(
-                item["summary"].removeprefix("TRUSTED_CONTROLLER_EVIDENCE: ")
-            )
+            payload = json.loads(item["summary"].removeprefix("TRUSTED_CONTROLLER_EVIDENCE: "))
             prompt, _, _ = worker._context_and_prompt(spec)
             return payload, prompt
 
@@ -420,8 +430,7 @@ def test_same_obligations_enter_independent_review() -> None:
             assert reviewer["obligation_set_digest"] in reviewer_prompt
             assert "FAULT-TIMEOUT-001" in reviewer["obligation_ids"]
             assert all(
-                obligation_id in reviewer_prompt
-                for obligation_id in reviewer["obligation_ids"]
+                obligation_id in reviewer_prompt for obligation_id in reviewer["obligation_ids"]
             )
         finally:
             state.close()
@@ -436,12 +445,16 @@ def test_external_planning_roles_and_builder_get_binding_python_contract() -> No
     payload = json.loads(evidence[0]["summary"].removeprefix("TRUSTED_CONTROLLER_EVIDENCE: "))
     assert payload["language"] == "python"
     assert [item["command"] for item in payload["commands"]] == [
-        "python3 -m pytest -q", "python3 -m compileall -q src tests",
+        "python3 -m pytest -q",
+        "python3 -m compileall -q src tests",
         "python3 -m ruff check src tests",
     ]
     assert payload["required_implementation_scope"] == ["src/**", "tests/**"]
     assert payload["admitted_capabilities"] == [
-        "toolchain.python", "toolchain.scanners", "toolchain.container_builder", "toolchain.make",
+        "toolchain.python",
+        "toolchain.scanners",
+        "toolchain.container_builder",
+        "toolchain.make",
     ]
     assert evidence[0]["artifact_ref"].startswith("controller://target-execution-contract/")
 
@@ -449,21 +462,30 @@ def test_external_planning_roles_and_builder_get_binding_python_contract() -> No
 def test_replanner_context_exposes_exact_remaining_execution_slots() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        config = make_config(root, selected_registry(root / "registry.yaml", selected="gpt-5.6-luna"))
+        config = make_config(
+            root, selected_registry(root / "registry.yaml", selected="gpt-5.6-luna")
+        )
         state = StateStore(config.database_path)
         product_id, task_id = "P-REPLANNER-BUDGET", "T-REPLANNER-BUDGET"
         signature = "c" * 64
         state.create_product(
-            product_id=product_id, owner_id="owner", source="test",
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
             idea="https://github.com/example/service",
             idempotency_key="replanner-budget-context",
         )
         contract = replanner_task_contract(config, product_id, task_id)
         contract_path = ArtifactStore(config).write(
-            "task-contract-v2.schema.json", contract, filename=f"task-{task_id}.json",
+            "task-contract-v2.schema.json",
+            contract,
+            filename=f"task-{task_id}.json",
         )
         state.add_task(
-            task_id=task_id, product_id=product_id, title=str(contract["title"]), role="replanner",
+            task_id=task_id,
+            product_id=product_id,
+            title=str(contract["title"]),
+            role="replanner",
             output_schema=str(contract["output_schema"]),
             contract_ref=f"evidence/{contract_path.name}",
             capability_profile="planning_readonly",
@@ -472,13 +494,16 @@ def test_replanner_context_exposes_exact_remaining_execution_slots() -> None:
         )
         governor = PathGovernor(state._connection, policy_digest=policy_digest(config))
         with state._connection:
-            assert governor.consume_budget(
-                product_id=product_id,
-                root_problem_signature=signature,
-                action_kind="arbiter",
-                progress=governor.progress_vector(product_id),
-                evidence_digest="d" * 64,
-            ) == "CONTINUE"
+            assert (
+                governor.consume_budget(
+                    product_id=product_id,
+                    root_problem_signature=signature,
+                    action_kind="arbiter",
+                    progress=governor.progress_vector(product_id),
+                    evidence_digest="d" * 64,
+                )
+                == "CONTINUE"
+            )
         worker = AgentWorker(config, state, runner=FakeRunner("{}"), repository_root=ROOT)
         task = state.get_task(task_id)
         assert task is not None
@@ -486,10 +511,13 @@ def test_replanner_context_exposes_exact_remaining_execution_slots() -> None:
         _, _, context_path = worker._context_and_prompt(spec)
         context = json.loads(context_path.read_text(encoding="utf-8"))
         assert context["plan_summary"]["path_governor_execution_budget"] == {
-            "root_problem_signature": signature, "execution_slot_limit": 2,
-            "execution_attempts_used": 0, "raw_remaining_execution_slots": 2,
+            "root_problem_signature": signature,
+            "execution_slot_limit": 2,
+            "execution_attempts_used": 0,
+            "raw_remaining_execution_slots": 2,
             "reviewer_correction_slots_reserved": 0,
-            "remaining_execution_slots": 2, "status": "ACTIVE",
+            "remaining_execution_slots": 2,
+            "status": "ACTIVE",
         }
         assert any("remaining_execution_slots" in decision for decision in spec.decisions)
         assert any(item["type"] == "controller-target-execution-contract" for item in spec.evidence)
@@ -582,9 +610,7 @@ def test_replanner_receives_controller_mandatory_goals() -> None:
         context = json.loads(context_path.read_text(encoding="utf-8"))
 
         try:
-            assert context["plan_summary"]["uncovered_mandatory_goal_ids"] == [
-                "goal-runtime"
-            ]
+            assert context["plan_summary"]["uncovered_mandatory_goal_ids"] == ["goal-runtime"]
         finally:
             state.close()
 
@@ -1423,8 +1449,7 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                finding["code"]
-                == "CONTROLLER_UNIQUE_TEST_SOURCE_OUTSIDE_ALLOWED_PATHS"
+                finding["code"] == "CONTROLLER_UNIQUE_TEST_SOURCE_OUTSIDE_ALLOWED_PATHS"
                 for finding in failure.actual["provider_scope_findings"]
             )
         )
@@ -1919,8 +1944,7 @@ class WorkerTests(unittest.TestCase):
                 root_task_id=str(accepted_repair["root_task_id"]),
                 root_context_ref=str(accepted_repair["root_context_ref"]),
                 semantic_node_key=str(
-                    accepted_repair["semantic_node_key"]
-                    or accepted_repair["semantic_node_id"]
+                    accepted_repair["semantic_node_key"] or accepted_repair["semantic_node_id"]
                 ),
                 graph_status="SUPERSEDED",
             )
@@ -1972,9 +1996,7 @@ class WorkerTests(unittest.TestCase):
             )
             # Once the controller materialises a direct binding, later audit
             # lineage branches cannot make runtime result lookup ambiguous.
-            stable_path, stable_output, stable_attempt = worker._accepted_task_artifacts(
-                failed_id
-            )
+            stable_path, stable_output, stable_attempt = worker._accepted_task_artifacts(failed_id)
             self.assertEqual(stable_path, output_path)
             self.assertEqual(stable_output, output)
             self.assertEqual(stable_attempt, attempt)
@@ -3477,9 +3499,7 @@ class WorkerTests(unittest.TestCase):
                 for item in state.list_tasks(intake_result.product_id)
                 if item["role"] == "product-director"
             )
-            _, controller_output, _ = worker._accepted_task_artifacts(
-                str(director_task["task_id"])
-            )
+            _, controller_output, _ = worker._accepted_task_artifacts(str(director_task["task_id"]))
             self.assertIn(str(controller_output["artifact_id"]), runner.prompts[1])
             self.assertNotIn("product-contract-worker-test", runner.prompts[1])
             self.assertIn(

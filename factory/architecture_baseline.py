@@ -46,6 +46,14 @@ class ArchitectureBaselineToolchainMismatch(RuntimeError):
     """Live Candidate toolchain differs from the immutable pinned baseline."""
 
 
+class ArchitectureBaselineDrift(RuntimeError):
+    """A model-authored architecture conflicts with controller-owned facts."""
+
+
+class ControllerArchitectureBaselineInvalid(RuntimeError):
+    """The controller baseline is missing, incomplete, or digest-invalid."""
+
+
 @dataclass(frozen=True)
 class DistributionAttestation:
     name: str
@@ -93,9 +101,7 @@ class ArchitectureBaseline:
             },
             "requirements_lock_sha256": self.requirements_lock_sha256,
             "distributions": [item.as_dict() for item in self.distributions],
-            "commands": {
-                name: list(argv) for name, argv in self.commands
-            },
+            "commands": {name: list(argv) for name, argv in self.commands},
             "pyproject": {
                 "build_system": {
                     "requires": list(self.build_system_requires),
@@ -111,12 +117,8 @@ class ArchitectureBaseline:
                 "content_sha256": self.license_content_sha256,
             },
             "readme_checklist": list(self.readme_checklist),
-            "profile_protocol_blueprint": json.loads(
-                self.profile_protocol_blueprint_json
-            ),
-            "fault_lifecycle_blueprint": json.loads(
-                self.fault_lifecycle_blueprint_json
-            ),
+            "profile_protocol_blueprint": json.loads(self.profile_protocol_blueprint_json),
+            "fault_lifecycle_blueprint": json.loads(self.fault_lifecycle_blueprint_json),
             "obligation_set_digest": self.obligation_set_digest,
             "toolchain_manifest_digest": self.toolchain_manifest_digest,
             "baseline_digest": self.baseline_digest,
@@ -131,6 +133,188 @@ class ArchitectureBaseline:
         }
 
 
+def _baseline_integrity_body(baseline: ArchitectureBaseline) -> dict[str, Any]:
+    toolchain_payload: dict[str, Any] = {
+        "interpreter_path": baseline.interpreter_path,
+        "interpreter_version": baseline.interpreter_version,
+        "interpreter_binary_sha256": baseline.interpreter_binary_sha256,
+        "requirements_lock_sha256": baseline.requirements_lock_sha256,
+        "distributions": [item.as_dict() for item in baseline.distributions],
+        "commands": {name: list(argv) for name, argv in baseline.commands},
+    }
+    return {
+        **toolchain_payload,
+        "build_system_requires": list(baseline.build_system_requires),
+        "build_backend": baseline.build_backend,
+        "project_dependencies": list(baseline.project_dependencies),
+        "license_expression": baseline.license_expression,
+        "license_file": baseline.license_file,
+        "license_content_sha256": baseline.license_content_sha256,
+        "readme_checklist": list(baseline.readme_checklist),
+        "profile_protocol_blueprint": json.loads(baseline.profile_protocol_blueprint_json),
+        "fault_lifecycle_blueprint": json.loads(baseline.fault_lifecycle_blueprint_json),
+        "obligation_set_digest": baseline.obligation_set_digest,
+        "toolchain_manifest_digest": baseline.toolchain_manifest_digest,
+    }
+
+
+def _validate_controller_baseline(baseline: ArchitectureBaseline) -> None:
+    body = _baseline_integrity_body(baseline)
+    toolchain = {
+        key: body[key]
+        for key in (
+            "interpreter_path",
+            "interpreter_version",
+            "interpreter_binary_sha256",
+            "requirements_lock_sha256",
+            "distributions",
+            "commands",
+        )
+    }
+    if (
+        baseline.build_system_requires != (_EXACT_BUILD_REQUIREMENT,)
+        or baseline.build_backend != "setuptools.build_meta"
+        or baseline.project_dependencies != ()
+        or baseline.license_expression != "LicenseRef-Hermes-Private-Qualification"
+        or baseline.license_file != "LICENSE"
+        or baseline.license_content != _PRIVATE_LICENSE
+        or baseline.license_content_sha256 != sha256_text(_PRIVATE_LICENSE)
+        or baseline.readme_checklist != _README_CHECKLIST
+        or not re.fullmatch(r"[a-f0-9]{64}", baseline.obligation_set_digest)
+        or sha256_text(stable_json(toolchain)) != baseline.toolchain_manifest_digest
+        or sha256_text(stable_json(body)) != baseline.baseline_digest
+    ):
+        raise ControllerArchitectureBaselineInvalid("controller_architecture_baseline_invalid")
+
+
+def _architecture_baseline_adr(baseline: ArchitectureBaseline) -> dict[str, Any]:
+    projection = {
+        "baseline_digest": baseline.baseline_digest,
+        "toolchain_manifest_digest": baseline.toolchain_manifest_digest,
+        "interpreter": {
+            "path": baseline.interpreter_path,
+            "version": baseline.interpreter_version,
+            "binary_sha256": baseline.interpreter_binary_sha256,
+        },
+        "commands": {name: list(argv) for name, argv in baseline.commands},
+        "build_system": {
+            "requires": list(baseline.build_system_requires),
+            "build_backend": baseline.build_backend,
+        },
+        "project_dependencies": list(baseline.project_dependencies),
+        "license": {
+            "expression": baseline.license_expression,
+            "file": baseline.license_file,
+            "content_sha256": baseline.license_content_sha256,
+        },
+        "readme_checklist": list(baseline.readme_checklist),
+        "signing": json.loads(baseline.profile_protocol_blueprint_json).get("signing"),
+        "profile_protocol_blueprint": json.loads(baseline.profile_protocol_blueprint_json),
+        "fault_lifecycle_blueprint": json.loads(baseline.fault_lifecycle_blueprint_json),
+        "obligation_set_digest": baseline.obligation_set_digest,
+    }
+    return {
+        "id": "ADR-900",
+        "decision": stable_json(projection),
+        "status": "accepted",
+        "rationale": "Immutable controller-owned architecture baseline.",
+        "consequences": [
+            "The model cannot alter toolchain, packaging, license, signing or obligations.",
+            f"Baseline digest: {baseline.baseline_digest}",
+        ],
+    }
+
+
+def normalize_architecture_package_to_baseline(
+    architecture_package: Mapping[str, Any],
+    baseline: ArchitectureBaseline,
+) -> dict[str, Any]:
+    """Attach immutable controller facts after JSON parse and before schema validation."""
+
+    _validate_controller_baseline(baseline)
+    normalized = {str(key): value for key, value in architecture_package.items()}
+    adrs_value = normalized.get("adrs", [])
+    if not isinstance(adrs_value, list):
+        raise ArchitectureBaselineDrift("architecture_baseline_drift")
+    expected_adr = _architecture_baseline_adr(baseline)
+    retained: list[Any] = []
+    for raw in adrs_value:
+        if not isinstance(raw, Mapping):
+            retained.append(raw)
+            continue
+        item = {str(key): value for key, value in raw.items()}
+        if str(item.get("id") or "") == "ADR-900":
+            if item != expected_adr:
+                raise ArchitectureBaselineDrift("architecture_baseline_drift")
+            continue
+        retained.append(raw)
+
+    # Refuse explicit alternative controller choices. Omissions are filled by
+    # the ADR below; product-semantic prose remains model-owned.
+    model_choices = stable_json(
+        {
+            "adrs": retained,
+            "component_technologies": [
+                item.get("technology")
+                for item in normalized.get("components", [])
+                if isinstance(item, Mapping)
+            ],
+        }
+    ).casefold()
+    forbidden_claims = (
+        "hatchling.build",
+        "use hatchling",
+        "select hatchling",
+        "poetry.core",
+        "flit_core",
+        "pdm.backend",
+        "openpgp",
+        "use gpg",
+        "rsa signing",
+        "ecdsa signing",
+        "license = mit",
+        "mit license",
+        "apache-2.0",
+        "gpl-",
+        "python3.11",
+        "python 3.11",
+        "python3.13",
+        "python 3.13",
+    )
+    if any(value in model_choices for value in forbidden_claims):
+        raise ArchitectureBaselineDrift("architecture_baseline_drift")
+    normalized["adrs"] = [*retained, expected_adr]
+    refs = normalized.get("evidence_refs", [])
+    if not isinstance(refs, list):
+        raise ArchitectureBaselineDrift("architecture_baseline_drift")
+    baseline_ref = f"controller://architecture-baseline/{baseline.baseline_digest}"
+    normalized["evidence_refs"] = list(
+        dict.fromkeys([str(value) for value in refs if str(value)] + [baseline_ref])
+    )
+    return normalized
+
+
+def validate_architecture_package_against_baseline(
+    architecture_package: Mapping[str, Any],
+    baseline: ArchitectureBaseline,
+) -> None:
+    """Fail closed if normalized architecture no longer carries the baseline."""
+
+    _validate_controller_baseline(baseline)
+    adrs = architecture_package.get("adrs")
+    refs = architecture_package.get("evidence_refs")
+    expected_adr = _architecture_baseline_adr(baseline)
+    baseline_ref = f"controller://architecture-baseline/{baseline.baseline_digest}"
+    if (
+        not isinstance(adrs, list)
+        or sum(1 for item in adrs if isinstance(item, Mapping) and item.get("id") == "ADR-900") != 1
+        or expected_adr not in adrs
+        or not isinstance(refs, list)
+        or refs.count(baseline_ref) != 1
+    ):
+        raise ControllerArchitectureBaselineInvalid("controller_architecture_baseline_invalid")
+
+
 def _locked_versions(requirements_lock: Path) -> dict[str, str]:
     versions: dict[str, str] = {}
     for raw_line in requirements_lock.read_text(encoding="utf-8").splitlines():
@@ -139,9 +323,7 @@ def _locked_versions(requirements_lock: Path) -> dict[str, str]:
             continue
         match = _PIN.fullmatch(line)
         if match is not None:
-            versions[match.group("name").casefold().replace("_", "-")] = match.group(
-                "version"
-            )
+            versions[match.group("name").casefold().replace("_", "-")] = match.group("version")
     return versions
 
 
@@ -162,8 +344,7 @@ def _distribution_attestation(
     version = str(distribution.version)
     if expected_version is not None and version != expected_version:
         raise ArchitectureBaselineToolchainMismatch(
-            "architecture_baseline_toolchain_mismatch: "
-            f"{name} {version} != lock {expected_version}"
+            f"architecture_baseline_toolchain_mismatch: {name} {version} != lock {expected_version}"
         )
     files: list[tuple[str, str]] = []
     for item in sorted(distribution.files or (), key=str):
@@ -175,8 +356,7 @@ def _distribution_attestation(
             files.append((relative, sha256_file(candidate)))
     if not files:
         raise ArchitectureBaselineToolchainMismatch(
-            "architecture_baseline_toolchain_mismatch: "
-            f"{name} has no attestable installed files"
+            f"architecture_baseline_toolchain_mismatch: {name} has no attestable installed files"
         )
     return DistributionAttestation(
         name=name,
@@ -193,6 +373,12 @@ def _profile_protocol_blueprint(obligations: DeliveryObligationSet) -> dict[str,
             "import_name": "deterministic_cli",
             "console_script": "deterministic-cli",
             "command_shape": ["deterministic-cli", "run", "TEXT"],
+            "json_command_shape": [
+                "deterministic-cli",
+                "canonicalize-json",
+                "JSON",
+            ],
+            "raw_text_protocol": "strict_utf8_in_exactly_one_text_argument",
             "exact_positional_count": 1,
             "usage_exit": 2,
             "usage_stderr": "E_USAGE: expected exactly one TEXT argument\n",
@@ -213,6 +399,9 @@ def _profile_protocol_blueprint(obligations: DeliveryObligationSet) -> dict[str,
             "healthz_body": "deterministic_json_bytes",
             "http_head_body_bytes": 0,
             "http_head_statuses": ["success", "error", 405],
+            "lifecycle_cas": "lifecycle_id_plus_prior_receipt_digest",
+            "receipt_order": "strict_monotonic_previous_receipt_digest",
+            "crash_recovery": "resume_from_last_durable_receipt",
             "lifecycle_receipt_fields": [
                 "schema_version",
                 "transition_id",
@@ -237,6 +426,12 @@ def _profile_protocol_blueprint(obligations: DeliveryObligationSet) -> dict[str,
             ],
             "retry_only": "FAILED_BEFORE_SEND",
             "ambiguous_terminal": True,
+            "sent_terminal": True,
+            "fixture_token_required": True,
+            "fixture_token_default": None,
+            "transport": "fixed_httpconnection_or_httpsconnection_no_redirect",
+            "transport_timeout_bounded": True,
+            "transport_response_bytes_bounded": True,
             "crash_after_possible_send": "AMBIGUOUS",
             "transitions": [
                 "NEW->CLAIMED",
@@ -275,6 +470,9 @@ def _profile_protocol_blueprint(obligations: DeliveryObligationSet) -> dict[str,
             ],
             "limit_failure_opens_inputs": False,
             "limit_failure_creates_outputs": False,
+            "actual_byte_accounting": True,
+            "path_open_strategy": "dirfd_component_walk_with_O_NOFOLLOW",
+            "toctou_safe": True,
         },
         "GITHUB_AUTOMATION": {
             "authority": "github_git_refs",
@@ -285,6 +483,8 @@ def _profile_protocol_blueprint(obligations: DeliveryObligationSet) -> dict[str,
             "correlation_pattern": "^[a-f0-9]{64}$",
             "probe_none": "INVALID",
             "concurrent_create_successes": 1,
+            "claim_before_effect": True,
+            "completion_after_effect": True,
             "transition_force": False,
             "sibling_stale_update": "reject",
             "fencing_token": "monotonic_integer",
@@ -333,6 +533,8 @@ def _profile_protocol_blueprint(obligations: DeliveryObligationSet) -> dict[str,
             "clean_consumer_offline": True,
             "clean_consumer_install_args": ["--no-index", "--no-deps"],
             "clean_consumer_smoke": ["import_package", "public_api"],
+            "stale_policy": "reject_if_subject_or_revocation_digest_differs",
+            "offline_build_artifacts": ["wheel", "sdist"],
         },
     }
     selected = dict(profiles.get(obligations.delivery_profile, {}))
@@ -407,6 +609,7 @@ def _fault_lifecycle_blueprint(obligations: DeliveryObligationSet) -> dict[str, 
                 "rollback_count": 1,
                 "repair_ref_requires_distinct_candidate_digest": True,
                 "repaired_redeploy_required": True,
+                "lifecycle_cas": True,
                 "final_receipt": "healthy_production_semantic_target",
                 "production_server_rejects_staging_control": True,
             }

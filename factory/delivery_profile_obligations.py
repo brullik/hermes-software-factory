@@ -106,6 +106,21 @@ _PROFILE: Final[dict[str, tuple[DeliveryObligation, ...]]] = {
             "SQLite migration compatibility and backup/restore or down-migration rollback "
             "are deterministic.",
         ),
+        DeliveryObligation(
+            "TG-TRANSPORT-001",
+            "Use a fixed exact HTTP(S) endpoint with no redirects, bounded timeout and "
+            "bounded response bytes.",
+        ),
+        DeliveryObligation(
+            "TG-FIXTURE-TOKEN-001",
+            "The isolated fixture token is mandatory configuration, has no default and "
+            "never appears in logs or evidence.",
+        ),
+        DeliveryObligation(
+            "TG-CONCURRENCY-001",
+            "Concurrent delivery claims use a pre-migrated durable store, bounded waits "
+            "and exactly one successful claimant.",
+        ),
     ),
     "OFFLINE_BATCH": (
         DeliveryObligation(

@@ -31,7 +31,7 @@ from factory.pre_q8_seal import (
     sign_seal,
     verify_seal,
 )
-from scripts.pre_q8_fixture import GitHubAPIError, GitHubClient, archive, provision
+from scripts.pre_q8_fixture import GitHubAPIError, GitHubClient, delete, provision
 
 RUN_ID = "run-20260810-a1"
 CANDIDATE = "a" * 64
@@ -194,9 +194,7 @@ def test_convergence_store_persists_complete_canonical_sweep(tmp_path: Path) -> 
         for scenario_id in PRE_Q8_SCENARIOS:
             assert store.record(RUN_ID, _result(scenario_id))
         assert store.finalize(RUN_ID) == "CONVERGENCE_10_OF_10"
-        assert tuple(result.scenario_id for result in store.results(RUN_ID)) == (
-            PRE_Q8_SCENARIOS
-        )
+        assert tuple(result.scenario_id for result in store.results(RUN_ID)) == (PRE_Q8_SCENARIOS)
         store.mark_sealed(RUN_ID)
         store.mark_sealed(RUN_ID)
     finally:
@@ -264,9 +262,7 @@ def test_generated_convergence_and_official_configs_have_same_semantics(
 ) -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/bootstrap/build-canary-configs.py"))
     builder = cast(Callable[..., dict[str, Any]], namespace["build_configs"])
-    base = yaml.safe_load(
-        (ROOT / "config/factory-config.example.yaml").read_text(encoding="utf-8")
-    )
+    base = yaml.safe_load((ROOT / "config/factory-config.example.yaml").read_text(encoding="utf-8"))
     assert isinstance(base, dict)
     attestation = (tmp_path / "attestation.json").resolve()
     attestation.write_text("{}\n", encoding="utf-8")
@@ -337,14 +333,10 @@ def test_generated_convergence_and_official_configs_have_same_semantics(
     assert q8["schema_version"] == "1.0"
     assert all("seal_config_digest" not in entry for entry in q8["scenarios"])
     convergence_config = yaml.safe_load(
-        (tmp_path / "convergence-config" / "zero-dependency-cli.yaml").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "convergence-config" / "zero-dependency-cli.yaml").read_text(encoding="utf-8")
     )
     official_config = yaml.safe_load(
-        (tmp_path / "official-config" / "zero-dependency-cli.yaml").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "official-config" / "zero-dependency-cli.yaml").read_text(encoding="utf-8")
     )
     assert convergence_config["paths"]["schemas"] == official_config["paths"]["schemas"]
     schema_root = Path(convergence_config["paths"]["schemas"])
@@ -355,9 +347,7 @@ def test_generated_convergence_and_official_configs_have_same_semantics(
 
     assert task_schema["properties"]["lifecycle_stage"]["enum"] == list(STAGES)
     registry_manifest = json.loads(
-        (schema_root.parent / f"{schema_root.name}.manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (schema_root.parent / f"{schema_root.name}.manifest.json").read_text(encoding="utf-8")
     )
     assert registry_manifest["layout_version"] == "2.0"
     assert registry_manifest["registry_digest"] == schema_root.name
@@ -381,11 +371,11 @@ def test_schema_registry_rejects_unexpected_runtime_files(tmp_path: Path) -> Non
         builder(registry_root)
 
 
-def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:
+def test_fixture_delete_is_verified_and_idempotent(tmp_path: Path) -> None:
     class FakeGitHubClient(GitHubClient):
         def __init__(self) -> None:
-            self.archived = False
-            self.patch_count = 0
+            self.exists = True
+            self.delete_count = 0
 
         def request(
             self,
@@ -393,19 +383,22 @@ def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:
             path: str,
             payload: Mapping[str, Any] | None = None,
         ) -> dict[str, Any]:
-            if method == "PATCH":
-                assert payload == {"archived": True}
-                self.patch_count += 1
-                self.archived = True
+            if method == "DELETE":
+                self.delete_count += 1
+                self.exists = False
+                return {}
+            if (
+                method == "GET"
+                and path.endswith("/hermes-canary-preq8-run-fixture")
+                and not self.exists
+            ):
+                raise GitHubAPIError(404)
             if path.endswith("/git/ref/heads/main"):
                 return {"object": {"sha": "1" * 40}}
             if "/git/commits/" in path:
                 return {
                     "sha": "1" * 40,
-                    "message": (
-                        "Hermes fixture "
-                        + str(fixture_manifest()["fixture_seed_digest"])
-                    ),
+                    "message": ("Hermes fixture " + str(fixture_manifest()["fixture_seed_digest"])),
                     "tree": {"sha": "2" * 40},
                 }
             if "/git/trees/" in path:
@@ -428,7 +421,7 @@ def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:
                 "name": "hermes-canary-preq8-run-fixture",
                 "private": True,
                 "visibility": "private",
-                "archived": self.archived,
+                "archived": False,
                 "default_branch": "main",
             }
 
@@ -441,9 +434,7 @@ def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:
         "scenario_id": "existing-repository-repair",
         "fixture_seed_digest": fixture_manifest()["fixture_seed_digest"],
         "repository_name": "hermes-canary-preq8-run-fixture",
-        "repository_url": (
-            "https://github.com/brullik/hermes-canary-preq8-run-fixture"
-        ),
+        "repository_url": ("https://github.com/brullik/hermes-canary-preq8-run-fixture"),
         "repository_id": 42,
         "visibility": "private",
         "default_branch": "main",
@@ -460,16 +451,16 @@ def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    output = tmp_path / "fixture-archive.json"
+    output = tmp_path / "fixture-delete.json"
     client = FakeGitHubClient()
 
-    first = archive(
+    first = delete(
         client=client,
         owner="brullik",
         receipt_path=receipt,
         output=output,
     )
-    second = archive(
+    second = delete(
         client=client,
         owner="brullik",
         receipt_path=receipt,
@@ -477,7 +468,7 @@ def test_fixture_archive_is_verified_and_idempotent(tmp_path: Path) -> None:
     )
 
     assert first["receipt_digest"] == second["receipt_digest"]
-    assert client.patch_count == 1
+    assert client.delete_count == 1
 
 
 def test_fixture_provision_initializes_empty_repository_and_resumes(
@@ -550,10 +541,7 @@ def test_fixture_provision_initializes_empty_repository_and_resumes(
                 return {"sha": digest}
             if method == "POST" and path.endswith("/git/trees"):
                 assert payload is not None
-                self.blobs = {
-                    str(item["path"]): str(item["sha"])
-                    for item in payload["tree"]
-                }
+                self.blobs = {str(item["path"]): str(item["sha"]) for item in payload["tree"]}
                 return {"sha": self.tree_sha}
             if method == "POST" and path.endswith("/git/commits"):
                 self.final_commit = "c" * 40
@@ -561,10 +549,7 @@ def test_fixture_provision_initializes_empty_repository_and_resumes(
             if method == "GET" and "/git/commits/" in path:
                 return {
                     "sha": self.final_commit,
-                    "message": (
-                        "Hermes fixture "
-                        + str(fixture_manifest()["fixture_seed_digest"])
-                    ),
+                    "message": ("Hermes fixture " + str(fixture_manifest()["fixture_seed_digest"])),
                     "tree": {"sha": self.tree_sha},
                 }
             if method == "GET" and "/git/trees/" in path:
