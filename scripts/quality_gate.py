@@ -1366,11 +1366,36 @@ def run_gate(
     temporary_root: Path | None = None,
 ) -> dict[str, Any]:
     workspace = cwd.resolve(strict=True)
-    controller_temp_root = (
-        temporary_root
-        if temporary_root is not None
-        else workspace.parent / ".hermes-controller-tmp"
-    ).resolve()
+    if temporary_root is not None:
+        return _run_gate_with_controller_temp(
+            gate,
+            workspace,
+            subject_sha,
+            python_executable=python_executable,
+            controller_temp_root=temporary_root,
+        )
+    with tempfile.TemporaryDirectory(
+        prefix=".hermes-controller-tmp-",
+        dir=workspace.parent,
+    ) as directory:
+        return _run_gate_with_controller_temp(
+            gate,
+            workspace,
+            subject_sha,
+            python_executable=python_executable,
+            controller_temp_root=Path(directory),
+        )
+
+
+def _run_gate_with_controller_temp(
+    gate: dict[str, Any],
+    workspace: Path,
+    subject_sha: str,
+    *,
+    python_executable: str | None,
+    controller_temp_root: Path,
+) -> dict[str, Any]:
+    controller_temp_root = controller_temp_root.resolve()
     try:
         controller_temp_root.relative_to(workspace)
     except ValueError:
@@ -1380,23 +1405,23 @@ def run_gate(
     controller_temp_root.mkdir(parents=True, exist_ok=True)
     adapter = gate.get("adapter")
     if adapter == _TARGET_SECRET_ADAPTER:
-        return _changed_file_secret_scan(gate, cwd, subject_sha)
+        return _changed_file_secret_scan(gate, workspace, subject_sha)
     if adapter == _TARGET_SAST_ADAPTER:
-        return _changed_file_sast(gate, cwd, subject_sha, python_executable)
+        return _changed_file_sast(gate, workspace, subject_sha, python_executable)
     if adapter == _TARGET_DEPENDENCY_ADAPTER:
         return _dependency_audit(
             gate,
-            cwd,
+            workspace,
             subject_sha,
             python_executable,
             controller_temp_root,
         )
     if adapter == _TARGET_LICENSE_ADAPTER:
-        return _license_check(gate, cwd, subject_sha, python_executable)
+        return _license_check(gate, workspace, subject_sha, python_executable)
     if adapter == _TARGET_CONTAINER_IMAGE_ADAPTER:
         return _container_image_scan(
             gate,
-            cwd,
+            workspace,
             subject_sha,
             python_executable,
             controller_temp_root,
@@ -1450,21 +1475,21 @@ def run_gate(
                     )
                 )
                 if python_gate:
-                    before_fingerprint = _gate_workspace_fingerprint(cwd)
+                    before_fingerprint = _gate_workspace_fingerprint(workspace)
                     bounded = _run_bounded_python_gate(
                         argv,
-                        cwd=cwd,
+                        cwd=workspace,
                         environment=gate_environment,
                         timeout=timeout,
                     )
                     retry_count = 0
                     if bounded.timed_out:
-                        after_fingerprint = _gate_workspace_fingerprint(cwd)
+                        after_fingerprint = _gate_workspace_fingerprint(workspace)
                         if after_fingerprint == before_fingerprint:
                             retry_count = 1
                             bounded = _run_bounded_python_gate(
                                 argv,
-                                cwd=cwd,
+                                cwd=workspace,
                                 environment=gate_environment,
                                 timeout=timeout,
                             )
@@ -1498,7 +1523,7 @@ def run_gate(
                 else:
                     regular = subprocess.run(
                         argv,
-                        cwd=cwd,
+                        cwd=workspace,
                         env=gate_environment,
                         text=True,
                         capture_output=True,

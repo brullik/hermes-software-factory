@@ -878,15 +878,15 @@ class SubprocessHermesRunner:
         environment = {key: value for key, value in os.environ.items() if key in allowed}
         existing_path = environment.get("PATH", "")
         interpreter_directory = str(Path(sys.executable).resolve().parent)
-        path_entries = existing_path.split(os.pathsep) if existing_path else []
-        if os.path.normcase(interpreter_directory) not in {
-            os.path.normcase(entry) for entry in path_entries if entry
-        }:
-            environment["PATH"] = (
-                interpreter_directory
-                if not existing_path
-                else interpreter_directory + os.pathsep + existing_path
-            )
+        path_entries = [
+            entry
+            for entry in existing_path.split(os.pathsep)
+            if entry
+            and os.path.normcase(entry) != os.path.normcase(interpreter_directory)
+        ]
+        environment["PATH"] = os.pathsep.join(
+            [interpreter_directory, *path_entries]
+        )
         if cwd is not None:
             venv = cwd.parent / "venv"
             binary_directory = venv / ("Scripts" if os.name == "nt" else "bin")
