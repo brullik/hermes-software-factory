@@ -176,6 +176,34 @@ def proposal(config, *, product_id: str = "product-semantic") -> dict[str, Any]:
     }
 
 
+def add_accepted_architecture_source(
+    state: StateStore,
+    product_id: str,
+    task_id: str,
+) -> str:
+    state.add_task(
+        task_id=task_id,
+        product_id=product_id,
+        title="Create the accepted architecture package",
+        role="solution-architect",
+        output_schema="architecture-package.schema.json",
+        contract_ref=f"evidence/task-{task_id}.json",
+        stage_key="solution-architect",
+        graph_status="ACCEPTED",
+    )
+    with state._lock, state._connection:
+        state._connection.execute(
+            """UPDATE tasks SET status='DONE', result_ref=?, result_digest=?
+                 WHERE task_id=?""",
+            (
+                f"internal://accepted-architecture-package/{task_id}",
+                sha256_text(f"accepted-architecture-package:{task_id}"),
+                task_id,
+            ),
+        )
+    return task_id
+
+
 def compiled_plan(tmp_path: Path) -> dict[str, Any]:
     config = configured(tmp_path)
     semantic = proposal(config)
@@ -502,6 +530,11 @@ def test_LOOP_P0_013_compiled_plan_validation_failure_is_controller_owned(
         idempotency_key=sha256_text(f"intake:{product_id}"),
         rate_limit=None,
     )
+    add_accepted_architecture_source(
+        state,
+        product_id,
+        "T-ARCHITECTURE-CONTROLLER-BOUNDARY",
+    )
     creator_id = "T-TASKSPECIFIER-CONTROLLER-BOUNDARY"
     state.add_task(
         task_id=creator_id,
@@ -535,7 +568,7 @@ def test_LOOP_P0_013_compiled_plan_validation_failure_is_controller_owned(
         match="controller coordinate",
     ):
         pipeline.prepare_after(creator, semantic, semantic_path)
-    assert len(state.list_tasks(product_id)) == 1
+    assert len(state.list_tasks(product_id)) == 2
     assert state.get_product(product_id)["active_plan_revision"] == 0
     state.close()
 
@@ -872,6 +905,11 @@ def test_AUT_P0_039_compilation_is_read_only_until_atomic_plan_ingestion(
         idempotency_key=sha256_text(f"intake:{product_id}"),
         rate_limit=None,
     )
+    architecture_source_id = add_accepted_architecture_source(
+        state,
+        product_id,
+        "T-ARCHITECTURE001",
+    )
     creator_id = "T-TASKSPECIFIER001"
     state.add_task(
         task_id=creator_id,
@@ -897,7 +935,7 @@ def test_AUT_P0_039_compilation_is_read_only_until_atomic_plan_ingestion(
         semantic_path,
     )
     assert prepared.plan is not None
-    assert len(state.list_tasks(product_id)) == 1
+    assert len(state.list_tasks(product_id)) == 2
     assert state.get_product(product_id)["active_plan_revision"] == 0
 
     task_ids = state.ingest_plan(
@@ -914,7 +952,7 @@ def test_AUT_P0_039_compilation_is_read_only_until_atomic_plan_ingestion(
         if task.get("lifecycle_stage") == "architecture-review"
     )
     assert architecture["graph_status"] == "READY"
-    assert architecture["dependencies_json"] == f'["{creator_id}"]'
+    assert architecture["dependencies_json"] == f'["{architecture_source_id}"]'
     state.close()
 
 
@@ -1225,6 +1263,11 @@ def test_AUT_P0_034_missing_make_and_container_block_builder_without_llm(
         owner_defaults_ref=None,
         idempotency_key=sha256_text(f"intake:{product_id}"),
         rate_limit=None,
+    )
+    add_accepted_architecture_source(
+        state,
+        product_id,
+        "T-ARCHITECTURE-BUILD-TOOLS",
     )
     creator_id = "T-TASKSPECIFIER001"
     state.add_task(

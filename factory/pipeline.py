@@ -1088,7 +1088,18 @@ class PipelineCoordinator:
         accepted_nodes: dict[str, str] = {}
         uncovered_goal_ids: tuple[str, ...] = ()
         architecture_source: str | None = None
-        if expected_kind == "replan_delta" and parent_plan_id is not None:
+        if expected_kind == "initial":
+            architecture_source = architecture_source_task_id(
+                self.state,
+                product_id,
+                str(task.get("plan_id") or ""),
+            )
+            if architecture_source is None:
+                raise PlanContractViolation(
+                    "initial plan has no accepted architecture_package producer",
+                    reason_code="missing_declared_predecessor",
+                )
+        elif parent_plan_id is not None:
             lineage_nodes = implementation_lineage(
                 self.state,
                 self.config.evidence_dir,
