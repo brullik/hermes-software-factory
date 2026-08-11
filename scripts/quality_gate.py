@@ -45,6 +45,9 @@ _TARGET_CONTAINER_IMAGE_COMMAND = "controller:target-container-image-scan"
 _CONTROLLER_IMAGE_SECURITY_VERIFIER_SHA256 = (
     "247cc0b6f8f55e081c2188ec1f5f50a45cf358923c02117a8a15a6d3e9760f8f"
 )
+_CREATE_NEW_PROCESS_GROUP = int(
+    subprocess.__dict__.get("CREATE_NEW_PROCESS_GROUP", 0)
+)
 _OS_KILL_PROCESS_GROUP = os.__dict__.get("killpg")
 _SIGKILL = signal.__dict__.get("SIGKILL", signal.SIGTERM)
 _TARGET_SECRET_PATTERN = re.compile(
@@ -163,7 +166,7 @@ def _run_bounded_python_gate(
 
     kwargs: dict[str, Any] = {}
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = _CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
     process = subprocess.Popen(
