@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 import pytest
 import yaml
 
+from factory.architecture_baseline import ArchitectureBaselineDrift
 from factory.artifacts import ArtifactStore, artifact_metadata
 from factory.attempts import IdenticalAttemptError
 from factory.autonomy import CAPABILITY_PROFILES, FailureData
@@ -283,6 +284,82 @@ def test_solution_architect_gets_trusted_capacity_evidence() -> None:
             for decision in spec.decisions
         )
         state.close()
+
+
+def test_architecture_baseline_drift_enters_bounded_schema_repair() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = make_config(
+            root,
+            selected_registry(root / "registry.yaml", selected="gpt-5.6-terra"),
+        )
+        state = StateStore(config.database_path)
+        product_id = "P-ARCHITECTURE-BASELINE-DRIFT"
+        state.create_product(
+            product_id=product_id,
+            owner_id="owner",
+            source="test",
+            idea="Design without changing the immutable architecture baseline",
+            idempotency_key="architecture-baseline-drift",
+        )
+        task_path = PipelineCoordinator(config, state, ArtifactStore(config)).create_task(
+            product_id,
+            "solution-architect",
+        )
+        task_id = str(json.loads(task_path.read_text(encoding="utf-8"))["task_id"])
+        worker = AgentWorker(
+            config,
+            state,
+            runner=FakeRunner(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "summary": "Proposed architecture",
+                        "components": [],
+                        "adrs": [],
+                        "evidence_refs": [],
+                    }
+                )
+            ),
+            health_probe=lambda _: True,
+            repository_root=ROOT,
+        )
+
+        try:
+            with patch(
+                "factory.worker.normalize_architecture_package_to_baseline",
+                side_effect=ArchitectureBaselineDrift("architecture_baseline_drift"),
+            ):
+                result = worker.run_once()
+
+            assert result is not None
+            assert result.status == "repair_scheduled"
+            assert result.reason_code == "schema_validation"
+            assert result.detail == "architecture_baseline_drift"
+            attempts = state.attempts_for_task(task_id)
+            assert len(attempts) == 1
+            assert attempts[0]["status"] == "failed"
+            failures = state.list_failures(product_id)
+            assert failures[-1]["failure_class"] == "semantic"
+            assert failures[-1]["reason_code"] == "schema_validation"
+            assert json.loads(failures[-1]["failed_gate_ids_json"]) == [
+                "ARCHITECTURE_BASELINE_DRIFT"
+            ]
+            assert (
+                state._connection.execute(
+                    "SELECT COUNT(*) FROM controller_incidents"
+                ).fetchone()[0]
+                == 0
+            )
+            repair = json.loads(
+                next(config.evidence_dir.glob(f"repair-brief-{task_id}-*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert repair["failed_gate_ids"] == ["ARCHITECTURE_BASELINE_DRIFT"]
+            assert "controller-owned ADR-900" in repair["required_fixes"][0]
+        finally:
+            state.close()
 
 
 def test_delivery_profile_obligations_enter_architecture_prompt() -> None:

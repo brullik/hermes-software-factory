@@ -4940,56 +4940,71 @@ class AgentWorker:
                 attempt=attempt,
                 selection=selection,
             )
-            if (
-                spec.role.replace("_", "-") == "solution-architect"
-                and spec.output_schema == "architecture-package.schema.json"
-            ):
-                product = self.state.get_product(str(spec.task_contract["product_id"]))
-                if product is None:
-                    raise ControllerArchitectureBaselineInvalid(
-                        "controller_architecture_baseline_invalid"
-                    )
-                qualification = self.config.raw.get("qualification", {})
-                declared_faults = (
-                    qualification.get("faults", []) if isinstance(qualification, Mapping) else []
-                )
-                obligations = delivery_profile_obligations(
-                    str(product.get("delivery_profile") or "DEPLOYED_SERVICE"),
-                    str(product.get("delivery_mode") or "new_repository"),
-                    declared_faults if isinstance(declared_faults, list) else (),
-                )
-                baseline = build_architecture_baseline(
-                    self.config,
-                    product,
-                    spec.task_contract,
-                    obligations,
-                )
-                output = normalize_architecture_package_to_baseline(
-                    output,
-                    baseline,
-                )
-                validate_architecture_package_against_baseline(output, baseline)
             try:
+                if (
+                    spec.role.replace("_", "-") == "solution-architect"
+                    and spec.output_schema == "architecture-package.schema.json"
+                ):
+                    product = self.state.get_product(str(spec.task_contract["product_id"]))
+                    if product is None:
+                        raise ControllerArchitectureBaselineInvalid(
+                            "controller_architecture_baseline_invalid"
+                        )
+                    qualification = self.config.raw.get("qualification", {})
+                    declared_faults = (
+                        qualification.get("faults", [])
+                        if isinstance(qualification, Mapping)
+                        else []
+                    )
+                    obligations = delivery_profile_obligations(
+                        str(product.get("delivery_profile") or "DEPLOYED_SERVICE"),
+                        str(product.get("delivery_mode") or "new_repository"),
+                        declared_faults if isinstance(declared_faults, list) else (),
+                    )
+                    baseline = build_architecture_baseline(
+                        self.config,
+                        product,
+                        spec.task_contract,
+                        obligations,
+                    )
+                    output = normalize_architecture_package_to_baseline(
+                        output,
+                        baseline,
+                    )
+                    validate_architecture_package_against_baseline(output, baseline)
                 validation_output = (
                     release_proposal_validation_view(output)
                     if spec.role == "release-operator"
                     else output
                 )
                 self.schemas.validate(spec.output_schema, validation_output)
-            except (TypeError, ValueError) as error:
+            except (ArchitectureBaselineDrift, TypeError, ValueError) as error:
                 parser_diagnostic = safe_exception_diagnostic(error)
                 safe_message = str(parser_diagnostic["safe_message"])
+                architecture_drift = isinstance(error, ArchitectureBaselineDrift)
                 repair_diagnostic_output = {
                     "status": "repair_required",
                     "summary": safe_message,
                     "findings": [
                         {
-                            "id": "OUTPUT_SCHEMA_VALIDATION",
+                            "id": (
+                                "ARCHITECTURE_BASELINE_DRIFT"
+                                if architecture_drift
+                                else "OUTPUT_SCHEMA_VALIDATION"
+                            ),
                             "severity": "high",
                             "description": safe_message,
                             "required_fix": (
-                                "Correct the provider output at the validator "
-                                "location reported in the safe diagnostic."
+                                (
+                                    "Preserve the controller-owned ADR-900 and immutable "
+                                    "toolchain, packaging, license, signing, and obligation "
+                                    "baseline; revise only product-semantic architecture fields."
+                                )
+                                if architecture_drift
+                                else (
+                                    "Correct the provider output at the validator "
+                                    "location reported in the safe diagnostic."
+                                )
                             ),
                         }
                     ],
