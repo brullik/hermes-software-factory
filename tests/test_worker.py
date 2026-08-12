@@ -572,12 +572,28 @@ def test_product_contract_roles_receive_binding_profile_protocol() -> None:
             state.close()
 
 
-def test_external_planning_roles_and_builder_get_binding_python_contract() -> None:
+def test_external_roles_get_binding_python_contract() -> None:
     product = {"repository_url": "https://github.com/example/service"}
-    for role in ("solution-architect", "task-specifier", "replanner", "builder"):
+    for role in (
+        "solution-architect",
+        "task-specifier",
+        "replanner",
+        "builder",
+        "test-engineer",
+    ):
         evidence, decisions = _external_target_execution_context(product, role)
         assert len(evidence) == 1
         assert any("Do not select Go" in decision for decision in decisions)
+        if role == "test-engineer":
+            assert any(
+                "Ad-hoc checks may supplement those canonical commands but cannot replace them"
+                in decision
+                for decision in decisions
+            )
+            assert any(
+                "controller reruns every Task Contract quality gate" in decision
+                for decision in decisions
+            )
     payload = json.loads(evidence[0]["summary"].removeprefix("TRUSTED_CONTROLLER_EVIDENCE: "))
     assert payload["language"] == "python"
     assert [item["command"] for item in payload["commands"]] == [

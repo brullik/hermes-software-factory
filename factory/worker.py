@@ -1208,7 +1208,13 @@ def _external_target_execution_context(
     product: Mapping[str, Any],
     role: str,
 ) -> tuple[list[dict[str, str]], list[str]]:
-    if role not in {"solution-architect", "task-specifier", "replanner", "builder"}:
+    if role not in {
+        "solution-architect",
+        "task-specifier",
+        "replanner",
+        "builder",
+        "test-engineer",
+    }:
         return [], []
     repository = public_github_repository_url(str(product.get("repository_url") or ""))
     repository = repository or public_github_repository_url(str(product.get("idea") or ""))
@@ -1216,13 +1222,14 @@ def _external_target_execution_context(
         return [], []
     contract = external_target_execution_contract()
     payload = stable_json(contract)
-    return [
+    evidence = [
         {
             "type": "controller-target-execution-contract",
             "summary": "TRUSTED_CONTROLLER_EVIDENCE: " + payload,
             "artifact_ref": "controller://target-execution-contract/" + sha256_text(payload),
         }
-    ], [
+    ]
+    decisions = [
         (
             "The controller-owned external target contract is binding: select Python and "
             "the admitted capabilities only; preserve the exact pytest, compileall, and Ruff "
@@ -1230,6 +1237,16 @@ def _external_target_execution_context(
             "unadmitted language/toolchain."
         )
     ]
+    if role == "test-engineer":
+        decisions.append(
+            "Execute the exact controller-owned pytest, compileall, and Ruff commands from "
+            "the target execution contract before reporting test completion. Ad-hoc checks "
+            "may supplement those canonical commands but cannot replace them. Return "
+            "completed when the canonical commands and task acceptance pass; use "
+            "failed_safe only for a specific observed defect. The controller reruns every "
+            "Task Contract quality gate after output and rejects any mandatory failure."
+        )
+    return evidence, decisions
 
 
 def ensure_initial_product_task(
